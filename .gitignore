@@ -7,3 +7,6 @@ review/
 # scratch harnesses agents leave behind
 atmo-check.*
 scripts/.probe.mjs
+
+# git worktrees created by Claude Code sessions
+.claude/worktrees/
