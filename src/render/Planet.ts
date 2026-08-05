@@ -215,9 +215,21 @@ float os_detailFade(float wavelength, float pixelKm) {
 }
 `;
 
+// The engine runs with logarithmicDepthBuffer, which is not free: every
+// ShaderMaterial has to opt in via three's logdepthbuf chunks or it writes
+// LINEAR depth while the rest of the scene writes logarithmic depth, and the
+// comparison between them is meaningless. The planet is the game's principal
+// occluder, so getting this wrong meant rings, clouds and hulls were never
+// hidden behind it — reported as "the far half of the ring does not go behind
+// the planet".
 function surfaceVertexShader(terrain: string): string {
   return /* glsl */ `
 precision highp float;
+// three's logdepthbuf_vertex chunk calls isPerspectiveMatrix(), which lives in
+// its <common> chunk. Pulling all of <common> in would collide with names this
+// file already defines, so declare just the one function it needs.
+bool isPerspectiveMatrix(mat4 m) { return m[2][3] == -1.0; }
+#include <logdepthbuf_pars_vertex>
 
 #include <onespace_noise>
 ${terrain}
@@ -243,6 +255,7 @@ void main() {
   // skirt vertices already carry their inward offset, so one add serves both.
   vec3 p = position + d * h;
   gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+  #include <logdepthbuf_vertex>
 
   vec3 local = d * (uRadius + h);
   vec3 toCam = uCamLocal - local;
@@ -266,6 +279,7 @@ void main() {
 function surfaceFragmentShader(terrain: string): string {
   return /* glsl */ `
 precision highp float;
+#include <logdepthbuf_pars_fragment>
 
 #include <onespace_noise>
 #include <onespace_color>
@@ -327,6 +341,7 @@ float os_microHeight(vec3 p, vec3 k) {
 }
 
 void main() {
+  #include <logdepthbuf_fragment>
   vec3  up   = normalize(vDir);
   vec3  N    = normalize(vNrm);
   vec3  V    = normalize(vView);
@@ -687,6 +702,11 @@ void main() {
 
 const OCEAN_VERT = /* glsl */ `
 precision highp float;
+// three's logdepthbuf_vertex chunk calls isPerspectiveMatrix(), which lives in
+// its <common> chunk. Pulling all of <common> in would collide with names this
+// file already defines, so declare just the one function it needs.
+bool isPerspectiveMatrix(mat4 m) { return m[2][3] == -1.0; }
+#include <logdepthbuf_pars_vertex>
 
 uniform vec3  uCamLocal;
 
@@ -703,12 +723,14 @@ void main() {
   vDist = length(toCam);
   vView = toCam / max(vDist, 1e-6);
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  #include <logdepthbuf_vertex>
 }
 `;
 
 function oceanFragmentShader(terrain: string): string {
   return /* glsl */ `
 precision highp float;
+#include <logdepthbuf_pars_fragment>
 
 #include <onespace_noise>
 #include <onespace_color>
@@ -741,6 +763,7 @@ float os_waveHeight(vec3 p, float t, vec2 k) {
 }
 
 void main() {
+  #include <logdepthbuf_fragment>
   vec3  d     = normalize(vDir);
   vec3  V     = normalize(vView);
   float pxKm  = vDist * uPixelAngle;
@@ -875,6 +898,11 @@ void main() {
 
 const GAS_VERT = /* glsl */ `
 precision highp float;
+// three's logdepthbuf_vertex chunk calls isPerspectiveMatrix(), which lives in
+// its <common> chunk. Pulling all of <common> in would collide with names this
+// file already defines, so declare just the one function it needs.
+bool isPerspectiveMatrix(mat4 m) { return m[2][3] == -1.0; }
+#include <logdepthbuf_pars_vertex>
 
 uniform vec3 uCamLocal;
 
@@ -888,6 +916,7 @@ void main() {
   vDist = length(toCam);
   vView = toCam / max(vDist, 1e-6);
   gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  #include <logdepthbuf_vertex>
 }
 `;
 
@@ -903,6 +932,7 @@ const MAX_STORMS = 6;
  */
 const GAS_FRAG = /* glsl */ `
 precision highp float;
+#include <logdepthbuf_pars_fragment>
 
 #include <onespace_noise>
 #include <onespace_color>
@@ -993,6 +1023,7 @@ vec3 os_palette(float t) {
 }
 
 void main() {
+  #include <logdepthbuf_fragment>
   vec3  d      = normalize(vDir);
   vec3  V      = normalize(vView);
   // Angular size of a pixel on the surface, in radians — the LOD metric for
