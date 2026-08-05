@@ -3,3 +3,7 @@ dist/
 review/
 .DS_Store
 *.log
+
+# scratch harnesses agents leave behind
+atmo-check.*
+scripts/.probe.mjs
