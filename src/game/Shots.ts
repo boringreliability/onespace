@@ -17,6 +17,15 @@ export interface Shot {
   /** What a reviewer should be looking at. Shown in the review report. */
   readonly description: string;
   /**
+   * Set when the shot wants the *running game* rather than an isolated fixture.
+   *
+   * By default a shot OWNS the scene: the universe stops placing bodies, the
+   * pilot stops flying, and the HUD stands down, so the shot's own camera and
+   * fixtures survive the frame. Without that, the simulation would overwrite
+   * every transform the shot just set and the subject would never be in frame.
+   */
+  readonly live?: boolean;
+  /**
    * Position the camera and configure the world. May be async (e.g. to await
    * terrain streaming). Called once when the shot is selected.
    */
@@ -52,6 +61,18 @@ export async function setShot(name: string, ctx: EngineContext): Promise<void> {
 
 export function activeShot(): Shot | null {
   return active;
+}
+
+export function activeShotName(): string | null {
+  return active?.name ?? null;
+}
+
+/**
+ * True when a review shot has taken the scene over. Simulation modules must
+ * check this and leave every transform alone — see the `live` note above.
+ */
+export function shotOwnsScene(): boolean {
+  return active !== null && active.live !== true;
 }
 
 export function updateActiveShot(dt: number, ctx: EngineContext): void {

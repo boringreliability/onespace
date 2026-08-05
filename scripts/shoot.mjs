@@ -25,9 +25,14 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 // Args
 // ---------------------------------------------------------------------------
 const argv = process.argv.slice(2);
+/** Indices consumed as flag values, so they are not mistaken for shot names. */
+const consumed = new Set();
 function flag(name, fallback) {
   const i = argv.indexOf(`--${name}`);
-  return i >= 0 ? argv[i + 1] : fallback;
+  if (i < 0) return fallback;
+  consumed.add(i);
+  consumed.add(i + 1);
+  return argv[i + 1];
 }
 const OUT = resolve(ROOT, flag('out', 'review/latest'));
 const WIDTH = Number(flag('width', 1920));
@@ -36,7 +41,7 @@ const PORT = Number(flag('port', 4173));
 /** Seconds of in-game time to let each shot settle (LOD, damping, warm-up). */
 const SETTLE = Number(flag('settle', 6));
 const KEEP = argv.includes('--keep');
-const named = argv.filter((a) => !a.startsWith('--') && !/^\d+$/.test(a));
+const named = argv.filter((a, i) => !a.startsWith('--') && !consumed.has(i));
 
 // ---------------------------------------------------------------------------
 // Server
