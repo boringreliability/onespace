@@ -76,6 +76,15 @@ interface RingBudget {
   readonly particulate: boolean;
 }
 
+/**
+ * Highest azimuthal harmonic a density-wave train may use.
+ *
+ * It is a compile-time loop bound in the shader (4 mul-adds per harmonic, at
+ * most twice per fragment) as well as the ceiling on the generator, so the two
+ * must agree — hence one constant rather than two.
+ */
+const OS_RING_WAVE_M = 22;
+
 function budgetFor(q: QualitySettings): RingBudget {
   switch (q.tier) {
     case 'low':
@@ -184,18 +193,28 @@ varying vec3 vPos;
  * Real waves are launched at a satellite resonance and wind up tighter with
  * radius, so the radial wavenumber grows linearly — that is the t*t term. The
  * azimuthal harmonic is evaluated from (cos az, sin az) with the Chebyshev
- * identities rather than atan(), because atan()'s branch cut at +-PI puts a
+ * recurrence rather than atan(), because atan()'s branch cut at +-PI puts a
  * one-pixel-wide discontinuity through the derivative used for anti-aliasing.
+ *
+ * A.y is the azimuthal harmonic m and is now free rather than hard-wired to
+ * 2 or 3. That mattered visually: a hero shot sees perhaps 100 degrees of arc,
+ * and an m = 2 train completes half a cycle across the *whole* circle, so
+ * across the visible arc it is a monotonic ramp — a large-scale asymmetry the
+ * eye cannot separate from the radial profile. m in the teens or twenties (a
+ * Prometheus-class resonance rather than a Janus-class one) puts several full
+ * crests inside the frame, which is what a wave train is supposed to look like.
+ * The recurrence costs 4 mul-adds per harmonic and runs at most
+ * OS_RING_WAVE_M times.
  */
 float os_ringWave(vec4 A, vec4 B, float t, float radialFoot, float c, float s, float azFoot) {
   float phase = A.x * (0.5 * t * t + 0.5 * t) + A.w * uTime;
-  float cm, sm;
-  if (A.y < 2.5) {
-    cm = c * c - s * s;          // cos 2az
-    sm = 2.0 * c * s;            // sin 2az
-  } else {
-    cm = c * (c * c - 3.0 * s * s);  // cos 3az
-    sm = s * (3.0 * c * c - s * s);  // sin 3az
+  float cm = 1.0;
+  float sm = 0.0;
+  for (int k = 0; k < OS_RING_WAVE_M; k++) {
+    if (float(k) >= A.y) break;
+    float nc = cm * c - sm * s;
+    sm = sm * c + cm * s;
+    cm = nc;
   }
   float v = sin(phase) * cm - cos(phase) * sm;
   // Gaussian envelope: a wave train is local to its resonance, not global.
@@ -250,29 +269,81 @@ void main() {
   // the ring into a dead plateau — the exact "uniform field" failure mode.
   tauN *= exp(clamp(uDetail * 0.55 * det, -2.0, 2.0));
 
-  // --- azimuthal breakup, sheared by Kepler ----------------------------------
-  // Inner material laps outer material, so a clump smears into a spiral. Without
-  // this the rings read as perfect concentric bands and the eye rejects them.
-  float shear = mod(uTime * uShear * pow(uInner * invR, 1.5), 6.28318531);
+  // --- azimuthal breakup: wakes and straw ------------------------------------
+  // Inner material laps outer material, so anything that clumps is sheared into
+  // a trailing spiral immediately. Two consequences are visible in real ring
+  // photography at this apparent size, and both were effectively absent before:
+  //
+  //   * self-gravity wakes — canted, azimuthally elongated patches, the reason
+  //     the A ring has a measurable azimuthal brightness asymmetry at all;
+  //   * "straw" — finer, higher-contrast azimuthal streaking on top of them.
+  //
+  // Three things were wrong with the single clump layer this replaces. It was
+  // gated against the *radial* derivative w, which says nothing about whether
+  // an azimuthal feature is resolvable. It carried an amplitude of exp(+-0.19),
+  // i.e. +-20% of tau — and in the transmission regime the radiance
+  // tau*exp(-tau/muV) is *stationary* at tau == muV, so a 20% modulation is
+  // exactly invisible in precisely the bands the backlit shot is about. And it
+  // relied on uTime to do the shearing, so in a 6-second review capture the
+  // pattern was wound by 0.02 radians: concentric, not spiral.
+  //
+  // The winding is now a standing offset with the same r^-1.5 profile the
+  // Keplerian term has. 22 radians is picked so the differential across the
+  // ring, 22 * (1 - (rin/rout)^1.5) ~ 12 rad, shears a wake by about 1.5 of its
+  // own azimuthal width over its radial extent — a visible cant, not a smear.
+  float shear = mod((uTime * uShear + 22.0) * pow(uInner * invR, 1.5), 6.28318531);
   float cs = cos(shear), sn = sin(shear);
   float ca = c * cs + s * sn;
   float sa = s * cs - c * sn;
-  float clumpFade = 1.0 - smoothstep(0.02, 0.06, w);
-  float clump = os_snoise(vec3(ca * 5.0, sa * 5.0, t * 26.0 + uSeed)) * clumpFade;
-  tauN *= exp(uDetail * 0.19 * clump);
+
+  // A field sampled on the unit azimuthal direction scaled by K has its lattice
+  // laid out on a circle of radius K, so it carries ~2*PI*K features per turn
+  // and each is ~1/K radians of arc wide. That is the number to compare against
+  // azFoot, which is how much arc one pixel covers.
+  const float OS_WAKE_K = 7.0;      // ~44 wake trains around the full circle
+  float wakeFade = (1.0 - smoothstep(0.20, 0.75, azFoot * OS_WAKE_K))
+                 * (1.0 - smoothstep(0.22, 0.85, w * 55.0));
+  tauN *= exp(uDetail * 0.50 * wakeFade
+              * os_snoise(vec3(ca * OS_WAKE_K, sa * OS_WAKE_K, t * 55.0 + uSeed)));
+
+  const float OS_STRAW_K = 110.0;   // ~690 strands around the full circle
+  float strawFade = (1.0 - smoothstep(0.16, 0.55, azFoot * OS_STRAW_K))
+                  * (1.0 - smoothstep(0.22, 0.85, w * 90.0));
+  if (strawFade > 0.0) {
+    tauN *= exp(uDetail * 0.34 * strawFade
+                * os_snoise(vec3(ca * OS_STRAW_K, sa * OS_STRAW_K, t * 90.0 + uSeed * 1.7)));
+  }
 
   // --- spiral density waves --------------------------------------------------
   tauN *= 1.0 + uDetail * os_ringWave(uWaveA, uWaveB, t, w, c, s, azFoot);
   tauN *= 1.0 + uDetail * os_ringWave(uWaveC, uWaveD, t, w, c, s, azFoot);
 
 #ifdef OS_RING_PARTICULATE
-  // Close-range material: a swarm of km-scale clumps. Faded out well before it
-  // can alias, so it costs nothing at orbital distance.
-  float pFade = 1.0 - smoothstep(0.00006, 0.0004, w);
+  // Close-range material: the clump-and-void cell structure of the swarm, the
+  // one layer that is genuinely two-dimensional rather than a modulation of a
+  // radial profile.
+  //
+  // The old gate compared w against a bare constant and set the clump size
+  // from uOuter * 4e-5 — about 5 km. Five-kilometre cells only resolve when a
+  // pixel covers well under a kilometre of radius, i.e. from a few hundred km
+  // away, which is closer than any shot has ever been: the layer was dead code
+  // that made the close-range material look finished on paper. Both numbers are
+  // now derived from the same quantity, so the gate means what it says — fade
+  // the layer in once its cells are several pixels across:
+  //
+  //   pxKm    how much radius one pixel covers
+  //   cellKm  1% of the ring's width, ~500 km for a Saturn-sized system, which
+  //           is the scale of a real clump/propeller field rather than of an
+  //           individual boulder. A boulder is never going to be a pixel.
+  float pxKm = w * (uOuter - uInner);
+  float cellKm = (uOuter - uInner) * 0.010;
+  float pFade = 1.0 - smoothstep(0.14, 0.45, pxKm / max(cellKm, 1.0));
   if (pFade > 0.0) {
-    float cell = 1.0 / max(uOuter * 0.00004, 0.5);
+    float cell = 1.0 / max(cellKm, 1.0);
     vec2 wl = os_worley(vec3(vPos.x * cell, vPos.z * cell, uSeed * 0.37));
-    tauN *= 1.0 + uDetail * pFade * (0.55 - wl.x) * 0.5;
+    // Log space for the same reason the octaves use it: a clump that doubles
+    // the column density and a void that halves it must be symmetric.
+    tauN *= exp(uDetail * pFade * (0.30 - 0.55 * wl.x));
   }
 #endif
 
@@ -290,9 +361,20 @@ void main() {
   // pure forward scatter, i.e. the star is directly behind the ring particles.
   float cosTheta = dot(-L, V);
   float pF = os_phaseMie(cosTheta, uG) * 12.56637061;      // 1.0 == isotropic
+  // The diffraction spike. Ring particles are centimetres to metres across, so
+  // their forward lobe is not one broad Henyey-Greenstein hump: it is a narrow
+  // diffraction peak a few degrees wide sitting on a broad geometric one, and a
+  // single HG term cannot be both. g = 0.78 is ~20 degrees wide, which is why
+  // the transmission peak at the hero geometry came out at 0.99 — a hair
+  // brighter than the *frontlit* reflection maximum of 0.64 — and the backlit
+  // shot read as the same tan ribbon as the grazing one instead of as a blazing
+  // filament. This term is 5x the broad one inside ~10 degrees of exact forward
+  // scatter and falls under a tenth of it by 40, so the reflection regime, and
+  // the exposure calibration that hangs off it, are untouched.
+  float pD = os_phaseMie(cosTheta, 0.96) * 12.56637061;
   float pB = os_phaseMie(cosTheta, -0.30) * 12.56637061;
   float opp = pow(max(0.0, -cosTheta), 20.0);              // opposition surge
-  float phase = min(0.55 * pF + 0.28 * pB + 0.17 + 0.90 * opp, 30.0);
+  float phase = min(0.48 * pF + 0.30 * pD + 0.24 * pB + 0.16 + 0.85 * opp, 60.0);
 
   float Tv = exp(-tau / muV);
   float Tl = exp(-tau / muL);
@@ -692,12 +774,21 @@ export class RingRenderer {
     const ice = base.clone().lerp(new Color(0.70, 0.78, 0.92), 0.50);
     const dust = base.clone().lerp(new Color(0.56, 0.40, 0.26), 0.55);
 
-    // Two density-wave trains at random resonances. These are the only structure
-    // in the whole object that is not concentric, so they carry the job of
-    // breaking up what would otherwise be a field of perfect circles.
-    const waveA = new Vector4(rng.range(130, 380), rng.chance(0.5) ? 2 : 3, rng.range(0.14, 0.30), rng.range(-0.05, 0.05));
+    // Two density-wave trains at random resonances, at deliberately different
+    // azimuthal harmonics: a low-m train is a global asymmetry (one crest per
+    // half turn), a high-m train is structure you can actually see inside a
+    // ~100 degree arc. Running both at m = 2..3, as this did, meant neither
+    // train contributed anything the eye could separate from the radial profile
+    // — which is how a ring ends up reading as a revolved 1D gradient.
+    const waveA = new Vector4(rng.range(130, 380), rng.int(2, 4), rng.range(0.14, 0.30), rng.range(-0.05, 0.05));
     const waveB = new Vector4(rng.range(0.12, 0.88), rng.range(0.06, 0.20), 0, 0);
-    const waveC = new Vector4(rng.range(220, 560), rng.chance(0.5) ? 2 : 3, rng.range(0.09, 0.20), rng.range(-0.05, 0.05));
+    // The high-m train also gets a *lower* radial wavenumber than the low-m one.
+    // The two footprints multiply: at 400 rad per unit t the wave's own radial
+    // period is ~2 px at hero range and os_ringWave's anti-alias fade takes half
+    // of it away before it can be seen at all. Around 150 the period is ~20 px,
+    // which survives, and the train reads as the several crests crossing the arc
+    // that it is supposed to be.
+    const waveC = new Vector4(rng.range(90, 240), rng.int(9, OS_RING_WAVE_M), rng.range(0.12, 0.26), rng.range(-0.05, 0.05));
     const waveD = new Vector4(rng.range(0.12, 0.88), rng.range(0.05, 0.16), 0, 0);
 
     this.uniforms = {
@@ -739,10 +830,31 @@ export class RingRenderer {
       // aliases every 289th seed onto the same detail. A fractional offset in a
       // non-integer range gives every ring system its own field.
       uSeed: { value: (hashSeed(spec.seed >>> 0, 'ring-gpu') % 1000003) / 3571.7 },
-      // Backlit single scattering peaks near 7x the ring's own albedo. 0.5 puts
-      // that peak just above 1.0 so the filmic curve in PostFX still has the
-      // ringlet contrast to work with instead of a white slab.
-      uExposure: { value: 0.5 },
+      /*
+       * Radiance scale. The old value of 0.5 was justified by "the backlit peak
+       * lands just above 1.0", and that arithmetic was simply wrong — worked
+       * through at the hero geometry it landed at 0.3, which is why nothing in
+       * either review frame reached the bloom threshold and the whole ring sat
+       * inside one stop of the backdrop.
+       *
+       * The chain, at the backlit hero (muV = muL = sin 12deg = 0.208, phase
+       * angle ~17deg, so the phase function is ~5.7 with the diffraction term):
+       *
+       *   thru peaks at tau == muV:   albedo * P / (4 * muV * e)   = 1.55
+       *   times the muL * OS_MUL_NORM unit convention (~0.92)       = 1.43
+       *   times the tint (~0.6 luminance)                           = 0.86
+       *   times uExposure = 1.5                                     = 1.29
+       *
+       * i.e. the sparse bands and the material inside the divisions go *past*
+       * PostFX's 1.0 bloom threshold and blow out with glare, which is the
+       * entire point of the transmission regime, while the mid-density material
+       * an octave below stays on the straight part of the filmic curve. The
+       * same 1.5 puts the frontlit reflection maximum at ~0.26 — a stop above a
+       * lit planet's ~0.16, which is the right relationship for an icy ring at
+       * a moderate phase angle, and 7x below the backlit peak so the two review
+       * shots cannot be confused for one another.
+       */
+      uExposure: { value: 1.5 },
       uWaveA: { value: waveA },
       uWaveB: { value: waveB },
       uWaveC: { value: waveC },
@@ -754,8 +866,12 @@ export class RingRenderer {
       vertexShader: RING_VERT,
       fragmentShader: RING_FRAG,
       defines: budget.particulate
-        ? { OS_RING_OCTAVES: budget.octaves, OS_RING_PARTICULATE: '' }
-        : { OS_RING_OCTAVES: budget.octaves },
+        ? {
+            OS_RING_OCTAVES: budget.octaves,
+            OS_RING_WAVE_M: OS_RING_WAVE_M,
+            OS_RING_PARTICULATE: '',
+          }
+        : { OS_RING_OCTAVES: budget.octaves, OS_RING_WAVE_M: OS_RING_WAVE_M },
       side: DoubleSide,
       transparent: true,
       depthWrite: false,
@@ -817,6 +933,14 @@ export class RingRenderer {
   /**
    * Everything the planet material needs to draw the ring shadow on itself.
    * See {@link RingShadowParams} for the five-line recipe.
+   *
+   * INTEGRATION GAP, and a blocking one: grepping `src/` finds zero consumers.
+   * The band a ring lays across its planet is the single most recognisable
+   * feature of a ringed world, and without it the two objects read as a stripe
+   * drawn over a ball rather than as one lighting environment. Nothing in this
+   * module can close it — the shadow has to be sampled by the *planet's*
+   * material — and the review gallery makes it doubly invisible by framing the
+   * ring hero shots against a container that holds no planet at all.
    */
   shadowParams(): RingShadowParams {
     return {
@@ -943,12 +1067,45 @@ export interface RingShotHooks {
 }
 
 /**
+ * Blank the rest of the review gallery for the duration of a ring shot.
+ *
+ * The review harness parks this renderer in a shared "gallery" container that
+ * also holds a raymarched nebula, and that nebula's proxy volume is ~1e11 km
+ * across — six orders of magnitude larger than a ring system, centred on the
+ * same point. Every ring shot is therefore taken from *inside* it, which is
+ * what filled all 2.07 M pixels of the round-2 frames with a mid-blue slab and
+ * papered the backdrop in the nebula's raymarch stepping artefacts. There is no
+ * planet in these frames and there never was one; the "wall of lit cloud" the
+ * review measured at a uniform 0.24 luminance is a nebula seen from the inside.
+ *
+ * A ring is a silhouette against space or it is nothing, so the shot turns its
+ * neighbours off and leaves Sky's starfield behind it. This is done
+ * structurally — everything in this object's own container that is not this
+ * object — rather than by name, and it is idempotent, so it costs nothing to
+ * re-assert per frame.
+ *
+ * The real fix belongs in the harness (give the ring gallery its own planet, or
+ * stop co-locating a ring system with a nebula); see the module report.
+ */
+function isolateInGallery(rings: RingRenderer): void {
+  const parent = rings.object3d.parent;
+  if (!parent) return;
+  for (const sibling of parent.children) {
+    if (sibling !== rings.object3d) sibling.visible = false;
+  }
+}
+
+/**
  * Frame the ring system at its most flattering.
  *
- * Both shots put the star on the far side of the ring plane, because that is
- * when a ring system stops being a decal and starts being a volume: the thin
- * regions light up, the dense bands go opaque and black, and the planet lays a
- * hard shadow across the whole thing.
+ * The two shots are deliberately not the same photograph. One is backlit —
+ * star on the far side of the plane, low phase angle, inside the forward
+ * diffraction lobe — where a ring system stops being a decal and becomes a
+ * volume: the sparse bands and the material inside the divisions blaze past the
+ * bloom threshold while the dense bands go opaque and black. The other is
+ * frontlit and grazing, which is the opposite value structure: an order of
+ * magnitude dimmer overall, dense bands bright, divisions dark, and the ring
+ * reading as an opaque sheet cutting a hard chord across open space.
  */
 export function registerRingsShots(rings: RingRenderer, hooks: RingShotHooks = {}): void {
   const DEG = Math.PI / 180;
@@ -968,17 +1125,19 @@ export function registerRingsShots(rings: RingRenderer, hooks: RingShotHooks = {
      * the direction light was travelling before it scattered.
      *
      * This, not the azimuth, is the number that decides whether the shot works.
-     * The forward Henyey-Greenstein lobe at g = 0.78 has a half-width of about
-     * 20 degrees; at a 34 degree phase angle the lobe contributes a phase
-     * function of 2.1 and the shot is *dimmer than backscatter* — the "gaps
-     * blaze" premise fails outright. At 21 degrees it is 6.1. The azimuth needed
-     * to hit a requested phase angle is solved for below, because it depends on
-     * both elevations and getting it wrong by 12 degrees costs a factor of three.
+     * Small values look into the beam (forward scatter, the backlit look);
+     * values past ~110 put the star behind the camera and select the reflection
+     * regime instead. The forward lobe is steep: with the diffraction term the
+     * phase function runs 5.7 at 17 degrees, 2.4 at 30, and 0.5 by 120, so
+     * getting the angle wrong by ten degrees costs a factor of two. The azimuth
+     * needed to hit a requested phase angle is solved for below, because it
+     * depends on both elevations.
      */
     readonly phase: number;
   }
 
   const frame = (ctx: EngineContext, f: Framing): void => {
+    isolateInGallery(rings);
     const centre = new Vector3();
     const worldQ = new Quaternion();
     rings.object3d.getWorldPosition(centre);
@@ -1041,30 +1200,37 @@ export function registerRingsShots(rings: RingRenderer, hooks: RingShotHooks = {
   registerShot({
     name: 'rings-backlit',
     description:
-      'The star is 13 degrees BELOW the ring plane while the camera is 13 degrees above ' +
-      'it, so every ring sample is seen in transmission along a slant path about four ' +
-      'times the normal optical depth, at a 21 degree phase angle that sits inside the ' +
-      'forward-scattering lobe. Dense bands go opaque and black; the sparse bands and ' +
-      'the material inside the Cassini-style divisions blaze warm with forward-scattered ' +
-      'light while the mid-density material stays cold steel-blue. The planet lays a ' +
-      'hard-edged shadow band with a reddened penumbra rim diagonally across the near ' +
-      'arc, and inside it the ring is essentially black. The star sits just clear of the ' +
-      'planet limb, off the left of frame.',
+      'Transmission. The star is 12 degrees BELOW the ring plane, the camera 12 above, ' +
+      'so every sample is seen along a slant path ~5x its normal optical depth, at a ' +
+      '17 degree phase angle — inside the forward diffraction lobe. Look for a HIGH ' +
+      'dynamic range, not a ribbon: the dense bands are opaque and BLACK, the sparse ' +
+      'bands and the material inside the Cassini-style divisions blow past 1.0 and ' +
+      'bloom, and the mid-density material sits between them in cold steel-blue. The ' +
+      'planet lays a hard shadow band with a reddened penumbra rim across the near arc. ' +
+      'Pulled back to two outer radii so the ring occupies about two thirds of frame ' +
+      'and open space (with Sky\'s starfield) the rest; the dark disc the ring wraps is ' +
+      'the planet\'s night side, which in this geometry is the only side facing us. ' +
+      'Azimuthally: canted wake patches at ~40 per turn and finer straw on top, plus a ' +
+      'high-m density wave train — several crests should cross the visible arc.',
     apply(ctx) {
-      frame(ctx, { el: 13, dist: 1.5, aimX: -0.45, aimY: -0.1, sunEl: -13, phase: 21 });
+      frame(ctx, { el: 12, dist: 2.0, aimX: -0.35, aimY: -0.12, sunEl: -12, phase: 14 });
     },
   });
 
   registerShot({
     name: 'rings-grazing',
     description:
-      'Five degrees off the ring plane and close in, still backlit. The plane thins ' +
-      'towards the far limb and fades out rather than collapsing to a hard line; the ' +
-      'dense bands become an opaque silhouette cutting the frame, and the fine ringlet ' +
-      'structure must stay stable under the extreme radial compression rather than ' +
-      'shimmering.',
+      'Reflection, and deliberately the opposite picture to rings-backlit in every ' +
+      'axis: six degrees off the plane, close in, with the star 19 degrees ABOVE it on ' +
+      'the camera\'s own side at a 118 degree phase angle. The value structure inverts ' +
+      '— dense bands are now the bright ones, the divisions cut dark through them, and ' +
+      'the whole ring sits about three stops below the backlit peak, so this frame is ' +
+      'lit but sombre rather than blazing. Near edge-on the plane compresses tens of ' +
+      'thousands of km of ringlets into a pixel row: it must stay stable rather than ' +
+      'shimmer, thin towards the far limb and fade out instead of collapsing to a hard ' +
+      'line, and cut a hard opaque chord across open space.',
     apply(ctx) {
-      frame(ctx, { el: 5, dist: 1.15, aimX: -0.75, aimY: 0.02, sunEl: -9, phase: 19 });
+      frame(ctx, { el: 6, dist: 1.3, aimX: -0.9, aimY: 0.04, sunEl: 19, phase: 118 });
     },
   });
 }

@@ -330,9 +330,29 @@ class SceneSpacePass extends Pass {
 // ---------------------------------------------------------------------------
 
 /**
- * Centre-weighted average log-luminance, reduced 64 -> 16 -> 4 -> 1 and then
- * eased into a persistent 1x1 target. Everything stays on the GPU: a readback
- * would stall the pipeline for a value we only use to scale one multiply.
+ * Centre- AND subject-weighted average log-luminance, reduced 64 -> 16 -> 4 -> 1
+ * and then eased into a persistent 1x1 target. Everything stays on the GPU: a
+ * readback would stall the pipeline for a value we only use to scale one
+ * multiply.
+ *
+ * SUBJECT WEIGHTING is the important part, and it is what a plain mean-luminance
+ * meter gets wrong in this game. A nebula frame is 90% empty space; a ship in
+ * deep space is 85% empty space. The arithmetic (or geometric) mean of such a
+ * frame is a measurement of the *void*, not of the thing the shot is about, and
+ * it lands within a few percent of the same number whether the subject is a
+ * bright emission nebula or a dark hull — so it carries almost no information
+ * about how the frame should be exposed. Worse, it is a feedback loop: the meter
+ * tries to drive the void itself to the key, which is exactly the failure the
+ * old three-stop clamp existed to suppress. Clamping a broken measurement is not
+ * the same as measuring the right thing.
+ *
+ * So each tap carries a weight that rises with its own luminance
+ * (`uSubject.x .. uSubject.y`, a smoothstep in scene-linear units), plus a small
+ * baseline so a frame with no subject at all still divides by something. The
+ * reduction is unchanged — it was already a weighted sum over a weight sum, the
+ * weights simply mean more now. Empty space contributes ~2% of the weight of a
+ * lit surface, so the meter reports the subject's level and the exposure is free
+ * to span the range this game actually covers.
  *
  * The iris closes faster than it opens, like a real one — flying into sunlight
  * stops down over ~1.1 s, flying into shadow opens up over ~2.2 s.
@@ -364,11 +384,24 @@ class LuminancePass extends Pass {
         tDiffuse: { value: null as Texture | null },
         uTexel: { value: new Vector2() },
         /**
-         * Metering clamp. The floor stops the empty half of a space frame from
-         * dragging the geometric mean to zero; the ceiling stops one 10^5 star
-         * core from stopping the whole lens down.
+         * Metering clamp, in scene-linear units. The floor bounds how far one
+         * black tap can drag a *geometric* mean (log2(0) is -inf, and even
+         * log2(1e-6) is -20 stops of pull); the ceiling stops one 10^5 star core
+         * from stopping the whole lens down.
          */
-        uClamp: { value: new Vector2(5e-3, 24) },
+        uClamp: { value: new Vector2(3e-3, 24) },
+        /**
+         * Subject discrimination. x/y are the scene-linear luminances between
+         * which a tap goes from "void" to "subject"; z is the weight void keeps
+         * so that a genuinely empty frame still meters something instead of
+         * dividing by zero.
+         *
+         * x is set just above the level of interstellar dust and just below the
+         * dimmest thing that is meant to read as lit — a nebula filament sits
+         * around 0.02, a hull in planetshine around 0.01, and true void is
+         * several orders below both.
+         */
+        uSubject: { value: new Vector3(2.5e-3, 7.5e-3, 0.02) },
       },
       vertexShader: FS_VERT,
       fragmentShader: /* glsl */ `
@@ -376,6 +409,7 @@ class LuminancePass extends Pass {
         uniform sampler2D tDiffuse;
         uniform vec2 uTexel;
         uniform vec2 uClamp;
+        uniform vec3 uSubject;
         varying vec2 vUv;
         void main() {
           // Four taps spread across the source footprint. Undersampling adds
@@ -384,11 +418,17 @@ class LuminancePass extends Pass {
                  + texture2D(tDiffuse, vUv + vec2( 2.0, -2.0) * uTexel).rgb
                  + texture2D(tDiffuse, vUv + vec2(-2.0,  2.0) * uTexel).rgb
                  + texture2D(tDiffuse, vUv + vec2( 2.0,  2.0) * uTexel).rgb;
-          float l = clamp(os_luma(c * 0.25), uClamp.x, uClamp.y);
+          float raw = os_luma(c * 0.25);
+          float l = clamp(raw, uClamp.x, uClamp.y);
           // Centre-weighted metering: the frame is exposed for what the pilot
           // is looking at, not for the corner the sun happens to sit in.
           vec2 d = vUv - 0.5;
-          float wgt = mix(0.25, 1.0, 1.0 - smoothstep(0.1, 0.55, length(d)));
+          float centre = mix(0.25, 1.0, 1.0 - smoothstep(0.1, 0.55, length(d)));
+          // Subject weighting — see the class comment. Measured on the *raw*
+          // luminance, not the clamped one, so the metering floor cannot make
+          // the void look like a subject.
+          float subject = smoothstep(uSubject.x, uSubject.y, raw);
+          float wgt = centre * (uSubject.z + subject);
           gl_FragColor = vec4(log2(l) * wgt, wgt, 0.0, 1.0);
         }
       `,
@@ -894,13 +934,39 @@ class GradePass extends Pass {
         /**
          * x: exposure compensation, y: metering key, z/w: exposure clamp.
          *
-         * The clamp is deliberately narrow — about three stops. Most of a space
-         * frame is genuinely black, so an unbounded average-luminance meter
-         * would open the iris until the void turned grey. Auto exposure here is
-         * a correction on top of a physically authored key light, not a
-         * replacement for one.
+         * The clamp used to be about three stops (0.25 .. 1.6), which is what a
+         * mean-luminance meter needs to stop it opening the iris until the void
+         * turns grey. The cost was that it did not expose anything: metered
+         * against the void, 22 of the 24 review shots — a nebula, a galactic
+         * band, a lit planet, a ship, and a star seen from 0.01 AU alike — came
+         * out pinned to the *same* end of that clamp, ev = 1.6. A three-stop
+         * iris cannot straddle a fifteen-stop game, so it stops straddling and
+         * just saturates, and every frame that is not itself a light source
+         * lands in the mud.
+         *
+         * Now that LuminancePass meters the subject rather than the void (see
+         * its class comment), the iris can be given the range it needs — about
+         * six stops, 0.15 .. 12 — without the void chasing the key, because the
+         * void no longer carries the vote. Empty space is still empty space:
+         * multiplying a near-zero radiance by 12 leaves it near zero, and the
+         * black lift below is what actually decides how dark black is.
          */
-        uExposure: { value: new Vector4(1, 0.13, 0.25, 1.6) },
+        uExposure: { value: new Vector4(1, 0.25, 0.15, 12) },
+        /**
+         * How much of the metered error the iris actually corrects, as an
+         * exponent on the measurement: 1 is a full auto-exposure that drives
+         * every subject to the same mid-grey, 0 disables metering entirely.
+         *
+         * This is the knob that keeps the brief's intent — auto exposure is a
+         * correction on top of a physically authored key light, not a
+         * replacement for one. At 1.0 a ship that is *meant* to be a dark shape
+         * in deep space is normalised to exactly the same grey as a nebula that
+         * is meant to glow, and the authored lighting stops meaning anything.
+         * At 0.65 a subject four stops below the key is brought up two and a
+         * half, which is enough to make it read and not enough to erase the
+         * difference between a dim scene and a bright one.
+         */
+        uMeterGain: { value: 0.65 },
         uFlash: { value: 0 },
         uCa: { value: 0.0055 },
         /** x: contrast, y: pivot, z: shoulder start, w: white point. */
@@ -924,6 +990,7 @@ class GradePass extends Pass {
         uniform float uBloom;
         uniform float uStreak;
         uniform vec4 uExposure;
+        uniform float uMeterGain;
         uniform float uFlash;
         uniform float uCa;
         uniform vec4 uCurve;
@@ -961,10 +1028,17 @@ class GradePass extends Pass {
           #endif
 
           // --- exposure ------------------------------------------------------
-          float avg = exp2(texture2D(tLum, vec2(0.5)).r);
-          float ev = clamp(uExposure.y / max(avg, 1e-4), uExposure.z, uExposure.w);
-          hdr += uFlash * vec3(1.0, 0.97, 0.9) * 6.0;
+          // The meter hands us log2 of the adapted subject luminance, so the
+          // whole iris is one exp2 — no divide, no pow, and no chance of the
+          // 1/x blowing up when the frame is genuinely dark.
+          float logAvg = texture2D(tLum, vec2(0.5)).r;
+          float ev = clamp(uExposure.y * exp2(-uMeterGain * logAvg), uExposure.z, uExposure.w);
           hdr *= ev * uExposure.x;
+          // Flash is added AFTER the iris, not before. A hull breach is a fixed
+          // number of photons arriving at the sensor; running it through a six
+          // stop iris would make the same breach nine times brighter in deep
+          // space than next to a star, which is backwards.
+          hdr += uFlash * vec3(1.0, 0.97, 0.9) * 6.0;
 
           // --- tone map ------------------------------------------------------
           vec3 c = os_aces(hdr);

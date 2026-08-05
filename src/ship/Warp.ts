@@ -34,6 +34,8 @@ import {
   CylinderGeometry,
   Group,
   Mesh,
+  NormalBlending,
+  Object3D,
   PlaneGeometry,
   Quaternion,
   ShaderMaterial,
@@ -122,6 +124,25 @@ const DEST_Z = -55;
 /** How far ahead of the camera the charge ring forms, km. */
 const RING_Z = -0.18;
 const RING_SPAN = 0.2;
+
+/**
+ * The corridor is aligned with the *ship's heading*, not with the camera's look
+ * axis. A chase camera sits above and outboard of the hull and pitches down onto
+ * it, so the vanishing point belongs above and to one side of frame centre —
+ * never on the exact pixel the frame is symmetric about. Radians.
+ */
+const CORRIDOR_PITCH = 0.075;
+const CORRIDOR_YAW = 0.048;
+
+/**
+ * How far off the corridor's axis the ship flies, km, against a shell radius of
+ * ~1.79 km at the camera plane. Rotating the corridor alone moves the vanishing
+ * point but leaves the walls perfectly symmetric *about* it; this makes one
+ * flank genuinely nearer than the other. The far end shifts by 0.3 km over
+ * 60 km — a third of a degree — so the vanishing point does not move with it.
+ */
+const CORRIDOR_OFF_X = 0.30;
+const CORRIDOR_OFF_Y = -0.22;
 
 // ---------------------------------------------------------------------------
 // Curve helpers — pure, allocation-free
@@ -218,6 +239,7 @@ uniform float uLength;
 uniform float uAlpha;
 uniform float uEnergy;
 uniform float uStreak;
+uniform float uSplit;
 uniform vec3  uAccent;
 
 varying vec3 vLocal;
@@ -229,43 +251,81 @@ void main() {
   float d01 = clamp(ahead / uLength, 0.0, 1.0);
   float ang = atan(vLocal.y, vLocal.x);
 
+  // Speed does not chop the pattern into copies, it *stretches* it. Compressing
+  // the travel axis of the noise domain is what turns blobs into filaments, so
+  // driving that compression with speed is the elongation itself: continuous,
+  // free, and with none of the ghosting a handful of discrete taps produces.
+  // Both terms are divided, so features still stream past at the travel rate —
+  // they are simply longer.
+  float stretch = 1.0 + uStreak * 5.0;
+
   // Drive the noise with a point on a circle, never with the angle itself —
   // atan wraps at ±pi and a seam down the corridor would be unmissable.
-  // Compressing the z term is what turns blobs into filaments.
-  vec3 p = vec3(cos(ang) * 2.3, sin(ang) * 2.3, ahead * 0.30 - uFlow);
+  vec3 p = vec3(cos(ang) * 2.3, sin(ang) * 2.3, (ahead * 0.30 - uFlow) / stretch);
   p = os_warp(p * 0.55, 0.45) * 1.8;
 
-  // Poor-man's motion blur: average a few taps smeared along the travel axis.
-  // Cheaper and better behaved than a velocity buffer for a 2.5 s effect.
+  // Poor-man's motion blur on top of the stretch, softening the leading edge.
+  // A smear is the *union* of where the filament has been, never its average:
+  // averaging pulls every fragment towards the noise mean and the threshold
+  // below then eats the entire wall.
   float fil = 0.0;
   for (int i = 0; i < WARP_TAPS; i++) {
     vec3 q = p;
-    q.z -= float(i) * uStreak * 0.55;
-    fil += os_ridged(q, WARP_OCTAVES, 2.15, 0.55) * 0.5 + 0.5;
+    q.z -= float(i) * uStreak * 0.28;
+    float tap = os_ridged(q, WARP_OCTAVES, 2.15, 0.55) * 0.5 + 0.5;
+    fil = max(fil, tap * (1.0 - 0.14 * float(i)));   // the tail fades
   }
-  fil /= float(WARP_TAPS);
-  fil = smoothstep(0.42, 0.94, fil);
+  // Ridged noise sits around 0.31 once mapped to 0..1; a threshold starting at
+  // 0.42 was above almost the whole distribution.
+  fil = smoothstep(0.26, 0.72, fil);
 
   // A second, finer, harder-streaked layer stops the walls reading as one
   // uniform material.
-  vec3 p2 = vec3(cos(ang) * 6.1, sin(ang) * 6.1, ahead * 0.11 - uFlow * 1.35);
+  vec3 p2 = vec3(cos(ang) * 6.1, sin(ang) * 6.1,
+                 (ahead * 0.11 - uFlow * 1.35) / (1.0 + uStreak * 8.0));
   float fine = os_ridged(p2, 3, 2.4, 0.5) * 0.5 + 0.5;
-  fine = smoothstep(0.55, 1.0, fine);
+  fine = smoothstep(0.34, 0.86, fine);
 
   float e = fil * (0.45 + 0.75 * fine) * uEnergy;
 
-  // Lit from ahead: the destination is the only light source in here, so the
-  // near walls are essentially black and the far end carries all the value.
-  float lit = pow(d01, 2.2);
+  // How much of the sight line runs *through* the emissive skin. The near wall
+  // is seen almost edge-on, which is a long path; staring down the corridor is
+  // a short one. This is the silver lining, and it is what keeps the 96% of the
+  // frame that is near wall from being black.
+  float graze = pow(1.0 - d01, 1.6);
+  // How much the destination — the only actual lamp in here — reaches a wall.
+  float lit = pow(d01, 1.5);
+
+  // Lateral chromatic aberration, frame edges only (§6). First order: shift the
+  // filament field along the screen radius by a fraction of a pixel per channel.
+  // d01 falls off outward from the vanishing point, so its screen gradient *is*
+  // the radial direction — no resolution uniform and no extra noise taps.
+  vec2 gd = vec2(dFdx(d01), dFdy(d01));
+  vec2 sdir = -gd * inversesqrt(max(dot(gd, gd), 1e-12));
+  float shift = (1.2 + 18.0 * uSplit) * graze * uStreak;
+  float dl = clamp(dot(vec2(dFdx(e), dFdy(e)), sdir) * shift, -0.3, 0.3);
+  vec3 ec = max(vec3(e + dl, e, e - dl), 0.0);
 
   vec3 steel = vec3(0.30, 0.37, 0.46);
-  vec3 c = steel * e * 0.85;
-  c += uAccent * pow(e, 2.6) * 2.2;          // cyan only in the hot cores
-  c *= mix(0.04, 1.0, lit);
-  c += uAccent * 0.10 * pow(d01, 7.0) * uEnergy;  // glow bleeding back at us
+  // The filaments are the drive's own energy: emissive, not a surface being lit.
+  // Multiplying them by distance-from-the-lamp (the old mix(0.04, 1.0, lit)) was
+  // the wrong model and it deleted the corridor.
+  vec3 c = steel * ec * (0.30 + 0.70 * graze);
+  c += steel * ec * 1.15 * lit;                            // key light from ahead
+  c += uAccent * pow(ec, vec3(2.6)) * (0.55 + 1.5 * lit);  // accent in hot cores
+
+  // Rim on the flank of every filament, so the walls have edges instead of
+  // reading as flat emissive noise.
+  float rim = smoothstep(0.04, 0.50, fil) * (1.0 - fil);
+  c += uAccent * rim * (0.22 + 0.85 * lit) * uEnergy * 0.55;
+
+  // Forward-scattered haze in the volume itself: filaments near the far end
+  // glow through the ones in front of them and the empty corridor is not empty,
+  // which is the only way a one-ended light source reads as directional.
+  c += uAccent * (0.09 + 0.45 * fil) * pow(d01, 1.6) * 0.55 * uEnergy;
 
   // The mouth of the corridor, where the destination light spills onto the walls.
-  float endGlow = smoothstep(0.72, 1.0, d01);
+  float endGlow = smoothstep(0.58, 1.0, d01);
   c += uAccent * endGlow * endGlow * 1.9 * uEnergy;
 
   // Opaque throughout: the corridor is what hides the system we are leaving.
@@ -284,6 +344,7 @@ void main() {
 
 const DEST_FRAG = /* glsl */ `
 #include <common>
+#include <onespace_noise>
 #include <onespace_color>
 
 uniform float uIntensity;
@@ -293,28 +354,81 @@ uniform vec3  uAccent;
 
 varying vec2 vUv;
 
+/**
+ * One flare filament: thin across, long along, and aimed at an arbitrary angle.
+ * Six of these at unrelated angles and widths read as a lens; two at 0 and 90
+ * degrees read as a Photoshop brush.
+ */
+float destFlare(vec2 p, float a, float thin, float fall) {
+  vec2 d = vec2(cos(a), sin(a));
+  float across = abs(p.x * -d.y + p.y * d.x);
+  float along  = abs(dot(p, d));
+  return exp(-across * thin) * exp(-along * fall);
+}
+
 void main() {
   vec2 p = (vUv - 0.5) * 2.0;
   float r = length(p);
 
-  float core = exp(-r * 22.0);
-  float halo = 1.0 / (1.0 + r * r * 38.0);
-  // Anamorphic bar plus a vertical spike — a real lens, not a round dot.
-  float bar   = exp(-abs(p.y) * 70.0) * exp(-abs(p.x) * 2.4);
-  float spike = exp(-abs(p.x) * 110.0) * exp(-abs(p.y) * 3.2);
+  // Nothing may survive to the quad boundary. A light source with an edge you
+  // can measure with a ruler is a decal, not light — so the whole field is
+  // windowed to exactly zero inside the billboard, and every term below is
+  // sized to be negligible long before the window starts to bite.
+  float win = 1.0 - smoothstep(0.52, 0.98, r);
+  win *= win;
+
+  // Zero-based: the halo is exactly 0 at r = 1 instead of 1/39 of its peak,
+  // which at arrival intensity was half a stop of visible teal on all four
+  // straight edges of the polygon.
+  float core = exp(-r * 26.0);
+  float h    = 1.0 / (1.0 + r * r * 60.0);
+  float halo = max(0.0, h - 1.0 / 61.0) * (61.0 / 60.0);
+
+  // Granulation at two scales. A star blown through a real lens is not a
+  // mathematical ramp, and dither cannot substitute for structure.
+  float gran = 0.72 + 0.52 * os_fbm(vec3(p * 7.0, uTime * 0.30), 3, 2.2, 0.55);
+  float grit = 0.85 + 0.30 * os_fbm(vec3(p * 23.0, uTime * 0.90), 2, 2.4, 0.50);
 
   // Deterministic scintillation; uTime is sequence time, never wall clock.
   float flick = 0.92 + 0.08 * sin(uTime * 23.0) * sin(uTime * 7.3);
 
-  float i = (core * 2.6 + halo * 0.85 + (bar * 0.55 + spike * 0.3) * uSpikes) * flick;
-  vec3 c = mix(uAccent, vec3(1.0), clamp(core * 2.2, 0.0, 1.0));
+  float fl = destFlare(p,  0.021, 130.0, 2.4) * 0.62   // the dominant anamorphic
+           + destFlare(p,  1.634, 165.0, 3.3) * 0.31
+           + destFlare(p,  0.713, 270.0, 5.1) * 0.17
+           + destFlare(p,  2.242, 330.0, 6.4) * 0.12
+           + destFlare(p, -0.938, 215.0, 4.3) * 0.15
+           + destFlare(p, -2.507, 390.0, 7.2) * 0.09;
+  fl *= uSpikes * (0.86 + 0.14 * sin(uTime * 11.0 + p.x * 3.0));
 
-  gl_FragColor = vec4(os_dither(c * i * uIntensity, gl_FragCoord.xy), 1.0);
+  float i = (core * 3.2 + halo * 1.05 * gran * grit + fl * 0.9) * flick * win;
+  float lin = i * uIntensity;
+
+  // White is what a filmic curve does to a blown value, not a colour to author.
+  // Gating on the linear value rather than on the normalised shape keeps cyan as
+  // the single accent and stops cream owning large low-intensity regions.
+  vec3 c = mix(uAccent, vec3(1.0), smoothstep(2.2, 8.0, lin));
+
+  gl_FragColor = vec4(os_dither(c * lin, gl_FragCoord.xy), 1.0);
+}
+`;
+
+const RING_VERT = /* glsl */ `
+#include <common>
+#include <logdepthbuf_pars_vertex>
+
+varying vec2 vUv;
+
+void main() {
+  vUv = uv;
+  vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  gl_Position = projectionMatrix * mv;
+  #include <logdepthbuf_vertex>
 }
 `;
 
 const RING_FRAG = /* glsl */ `
 #include <common>
+#include <logdepthbuf_pars_fragment>
 #include <onespace_noise>
 #include <onespace_color>
 
@@ -327,23 +441,43 @@ uniform vec3  uAccent;
 varying vec2 vUv;
 
 void main() {
+  #include <logdepthbuf_fragment>
+
   vec2 p = (vUv - 0.5) * 2.0;
   float r = length(p);
-  float ang = atan(p.y, p.x);
+  vec2 dir = p / max(r, 1e-4);
 
-  // Wobbling the radius is what sells "space is bending" instead of "decal".
-  float wob = os_fbm(vec3(cos(ang) * 1.6, sin(ang) * 1.6, uTime * 0.55), 3, 2.0, 0.5);
-  float rr = r + wob * 0.09 * uAmount;
+  // The ring is not a circle. Its radius is a low-frequency function of angle,
+  // so no two sides of it match and it can never read as a stamped ellipse.
+  // Sampling a *circle* in the noise domain, not the angle, keeps it seamless.
+  float lobe = os_fbm(vec3(dir * 1.2, uTime * 0.21), RING_OCT, 2.0, 0.55);
+  float wob  = os_fbm(vec3(dir * 3.6, uTime * 0.55), RING_OCT, 2.0, 0.50);
+  float rad  = uRadius * (1.0 + 0.17 * lobe * uAmount) + wob * 0.06 * uAmount;
 
-  float band = exp(-pow(abs(rr - uRadius) / uWidth, 1.7));
-  float spokes = 0.62 + 0.38 * sin(ang * 11.0 - uTime * 2.6);
-  float fill = smoothstep(uRadius, uRadius - 0.45, rr) * 0.05;
+  float band = exp(-pow(abs(r - rad) / uWidth, 1.7));
 
-  vec3 c = uAccent * band * spokes;
-  c += vec3(0.82, 0.95, 1.0) * pow(band, 5.0) * 0.9;   // white-hot filament
-  c += uAccent * fill;
+  // Azimuthal structure from noise at two frequencies. A raw sin(ang * 11) is a
+  // periodic sawtooth rosette — the single loudest procedural tell there is —
+  // and it is exactly what a lens-flare brush looks like.
+  float e = 0.0;
+  if (band > 0.0025) {
+    float s1 = os_fbm(vec3(dir * 4.0, uTime * 0.40), RING_OCT, 2.1, 0.55) * 0.5 + 0.5;
+    float s2 = os_ridged(vec3(dir * 17.0, uTime * 0.90), 2, 2.3, 0.50) * 0.5 + 0.5;
+    e = band * clamp(0.22 + 1.15 * s1 + 0.55 * s2 * s2, 0.0, 2.4);
+  }
 
-  gl_FragColor = vec4(os_dither(c * uAmount * 1.5, gl_FragCoord.xy), 1.0);
+  float lin = e * uAmount * 2.3;
+  // Cyan is the accent; white is what the tone mapper does to a blown value.
+  vec3 c = mix(uAccent, vec3(1.0), smoothstep(3.2, 9.0, lin)) * lin;
+
+  // The ring bends light *away* from us. Premultiplied output: alpha subtracts
+  // the background while the colour adds the ring's own emission, so the
+  // starfield inside the ring is dimmed and displaced rather than shining
+  // through an additive sticker completely undisturbed.
+  float lens = 1.0 - smoothstep(rad - 0.55, rad, r);
+  float occl = clamp((lens * 0.62 + band * 0.30) * uAmount, 0.0, 1.0);
+
+  gl_FragColor = vec4(os_dither(c, gl_FragCoord.xy), occl);
 }
 `;
 
@@ -368,7 +502,7 @@ uniform vec3  uAccent;
 
 varying vec2 vUv;
 
-float burst(float r) { return exp(-r * r * 2.1); }
+float burst(float r) { return exp(-r * r * 1.15); }
 
 void main() {
   vec2 p = (vUv - 0.5) * vec2(uAspect, 1.0) * 2.0;
@@ -384,7 +518,11 @@ void main() {
   float fb = burst(r * (1.0 + uSplit));
   float peak = max(max(fr, fg), fb);
   vec3  fc = vec3(fr, fg, fb) / max(peak, 1e-4);
-  float fa = clamp(uFlash * peak, 0.0, 1.0);
+  // A lens flooded by a point source does not go black at the edges: the
+  // whiteout is a wash with a hot centre, not a blob. This is the term that
+  // owns the arrival blowout, so the destination billboard does not have to
+  // grow to 150 km of world-space quad to do a screen-space job.
+  float fa = clamp(uFlash * (0.34 + 0.66 * peak), 0.0, 1.0);
 
   // Black-over then white-over, folded into one normal-blended draw.
   float a = clamp(va + fa, 0.0, 1.0);
@@ -438,6 +576,10 @@ export class Warp implements GameModule {
   };
   private readonly camPos = new Vector3();
   private readonly camQuat = new Quaternion();
+  /** Corridor heading relative to the camera's look axis. Built once. */
+  private readonly heading = new Quaternion()
+    .setFromAxisAngle(new Vector3(1, 0, 0), CORRIDOR_PITCH)
+    .multiply(new Quaternion().setFromAxisAngle(new Vector3(0, 1, 0), CORRIDOR_YAW));
 
   constructor(private hooks: WarpHooks = {}) {}
 
@@ -471,6 +613,7 @@ export class Warp implements GameModule {
         uAlpha: { value: 0 },
         uEnergy: { value: 0 },
         uStreak: { value: 0 },
+        uSplit: { value: 0 },
         uWarpAmp: { value: 0.22 },
         uAccent: { value: new Vector3(0.16, 0.86, 1.0) },
       },
@@ -507,8 +650,9 @@ export class Warp implements GameModule {
     this.dest.visible = false;
 
     const ringMat = new ShaderMaterial({
-      vertexShader: BILLBOARD_VERT,
+      vertexShader: RING_VERT,
       fragmentShader: RING_FRAG,
+      defines: { RING_OCT: q.tier === 'low' ? 2 : 3 },
       uniforms: {
         uTime: { value: 0 },
         uAmount: { value: 0 },
@@ -517,8 +661,14 @@ export class Warp implements GameModule {
         uAccent: { value: new Vector3(0.20, 0.78, 1.0) },
       },
       transparent: true,
-      blending: AdditiveBlending,
-      depthTest: false,
+      // Premultiplied normal blending, not additive: the ring has to be able to
+      // take light away as well as add it, or it can only ever be a decal over
+      // an undisturbed background.
+      blending: NormalBlending,
+      premultipliedAlpha: true,
+      // Depth-tested: the ring forms 180 m ahead of the ship, so the hull is in
+      // front of it and must occlude it.
+      depthTest: true,
       depthWrite: false,
     });
     this.ring = new Mesh(new PlaneGeometry(1, 1), ringMat);
@@ -740,7 +890,11 @@ export class Warp implements GameModule {
     ctx.camera.getWorldPosition(this.camPos);
     ctx.camera.getWorldQuaternion(this.camQuat);
     this.group.position.copy(this.camPos);
-    this.group.quaternion.copy(this.camQuat);
+    // Aligned with the ship's heading, which a chase camera looks *down at* —
+    // so the vanishing point sits off the exact pixel centre of the frame and
+    // the camera is off the corridor's axis, giving the walls an asymmetric
+    // silhouette instead of a perfect radial gradient.
+    this.group.quaternion.copy(this.camQuat).multiply(this.heading);
   }
 
   // -- internals ------------------------------------------------------------
@@ -868,7 +1022,7 @@ export class Warp implements GameModule {
       tunnelEnergy = mix(0.45, 1.15, ease(body * 1.4));
       streak = mix(0.25, 1.0, ease(body * 1.2));
 
-      destSize = mix(0.55, 4.2, Math.pow(body, 2.3));
+      destSize = mix(0.9, 7.0, Math.pow(body, 2.3));
       destIntensity = mix(0.5, 2.6, ease(body));
       destSpikes = ease(body * 1.5);
     } else if (t < T_DONE) {
@@ -881,8 +1035,15 @@ export class Warp implements GameModule {
       tunnelEnergy = mix(1.15, 2.2, ease(v * 1.6)) * (1 - ease(span(v, 0.5, 1.0)));
       streak = 1 - ease(v); // deceleration: the smear shortens
 
-      destSize = mix(4.2, 150, Math.pow(v, 2.6));
-      destIntensity = mix(2.6, 9.0, ease(v * 1.3)) * (1 - ease(span(tail, 0.0, 0.45)));
+      // Capped. Past about 30 km the billboard is a world-space quad doing a
+      // screen-space job, and its boundary becomes the whiteout's silhouette.
+      // `flash` in OVERLAY_FRAG is full-screen and resolution-independent and
+      // owns the rest of the blowout.
+      destSize = mix(7.0, 30, Math.pow(v, 2.2));
+      // Raised to hold the same total flux now the quad is a fifth of the area:
+      // the core has to reach a genuinely blown linear value for the tone mapper
+      // to produce the white, because the white is no longer authored.
+      destIntensity = mix(2.6, 14.0, ease(v * 1.3)) * (1 - ease(span(tail, 0.0, 0.45)));
       destSpikes = 1;
 
       // The blowout, then the iris closing over 1.5 s.
@@ -925,11 +1086,15 @@ export class Warp implements GameModule {
     tu.uAlpha!.value = tunnelAlpha;
     tu.uEnergy!.value = tunnelEnergy;
     tu.uStreak!.value = streak;
+    tu.uSplit!.value = split;
     // The corridor breathes harder the faster we go, and stiffens as we slow.
     tu.uWarpAmp!.value = 0.12 + 0.22 * streak;
 
     const s = 1 - 0.94 * collapse;
     this.tunnel.scale.set(s, s, 1 - 0.68 * collapse);
+    // Offset shrinks with the shell so the camera keeps the same proportional
+    // place inside it and never ends up outside the corridor as it collapses.
+    this.tunnel.position.set(CORRIDOR_OFF_X * s, CORRIDOR_OFF_Y * s, 0);
     // A slow roll inside the corridor — the only cue that the ship is a body
     // moving through a place rather than a camera watching a screensaver.
     this.tunnel.rotation.z = 0.22 * Math.sin(t * 0.73) + t * 0.11;
@@ -945,7 +1110,9 @@ export class Warp implements GameModule {
     ru.uAmount!.value = ringAmount;
     ru.uRadius!.value = ringRadius;
     ru.uWidth!.value = ringWidth;
-    this.ring.rotation.z = t * 0.35;
+    // Slow: the ring's own noise animates now, so spinning it as fast as the old
+    // sawtooth needed would read as a wheel.
+    this.ring.rotation.z = t * 0.13;
 
     const ou = this.overlay.material.uniforms;
     ou.uVignette!.value = vignette;
@@ -978,11 +1145,27 @@ export class Warp implements GameModule {
  * Three fixed points in the sequence. Each freezes the timeline, so the settle
  * window produces identical frames however many of them it renders.
  */
-export function registerWarpShots(warp: Warp): void {
+export function registerWarpShots(warp: Warp, hull?: Object3D): void {
   const frame = (ctx: EngineContext): void => {
-    ctx.camera.position.set(0, 0, 0);
-    ctx.camera.rotation.set(0, 0, 0);
-    ctx.camera.quaternion.identity();
+    // The old pose parked the camera at the origin with identity rotation, which
+    // is *inside* the ship: the hull never appeared, nothing occluded, and a
+    // corridor with no ship in it has no size reference at all. This is the
+    // chase pose — 48 m astern, 4.5 m up, 10 m to starboard, aimed above the
+    // hull so the dorsal spine and one nacelle cut into the lower third.
+    if (hull) {
+      hull.position.set(0, 0, 0);
+      hull.rotation.set(0.012, 0.05, -0.03);
+      hull.visible = true;
+    }
+    // Set explicitly: shots run in one page load and `ship-hero` leaves the
+    // camera on a 26-degree telephoto, which would reframe all three of these.
+    // 62 is the game's own field of view — a warp shot has to be what the pilot
+    // actually sees.
+    ctx.camera.fov = 62;
+    ctx.camera.updateProjectionMatrix();
+    ctx.camera.up.set(0, 1, 0);
+    ctx.camera.position.set(0.0100, 0.0045, 0.0480);
+    ctx.camera.lookAt(0.0005, 0.0180, -1.0);
   };
 
   registerShot({

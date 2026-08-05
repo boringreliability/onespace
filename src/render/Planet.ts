@@ -275,6 +275,7 @@ ${DETAIL_GLSL}
 uniform float uRadius;
 uniform float uPixelAngle;
 uniform float uTime;
+uniform vec3  uCamLocal;
 uniform vec3  uSunDir;
 uniform vec3  uSunColor;
 uniform vec3  uAtmosTint;
@@ -351,7 +352,16 @@ void main() {
   // blending in a dark cliff colour wherever a micro-normal tips over turns a
   // snowfield into pepper. The detail normal is for light only.
   float steep  = 1.0 - clamp(dot(N, up), 0.0, 1.0);
+  // The *terrain* normal, kept before the micro-relief below tilts it. Anything
+  // that picks a material or a climate has to read this one: a mask driven by
+  // pebble-scale bumps is pepper, not geography.
+  vec3  Ng     = N;
   float ndlGeo = dot(up, uSunDir);
+  // Camera altitude decides which of the two atmosphere models below applies.
+  // Outside the shell the air is a limb ring you look *at*; inside it is haze
+  // you look *through*. Running both at once double-counts the same photons
+  // and blows the horizon out.
+  float above  = smoothstep(uRadius * 0.02, uRadius * 0.10, length(uCamLocal) - uRadius);
   // Ease the detail off only as the sun actually reaches the horizon. The old
   // floor of 0.30 threw away two thirds of the micro-relief under a nine-degree
   // sun — i.e. in precisely the raking light that exists to reveal it.
@@ -381,6 +391,14 @@ void main() {
   float lat = abs(up.y);
   float sea = uTerrainSeaLevel;
 
+  // Close-range material breakup at 2.3 km and 340 m. Hoisted above the palette
+  // because the masks below need it: every band is chosen by elevation, slope or
+  // latitude, and all three are effectively constant across a low-altitude
+  // frame, so a mask edge with no breakup in this band comes out as a drawn
+  // contour line.
+  float grit = k2 * os_snoise(P * (1.0 / (OS_W2 * 0.42)) + so.yxz) * 0.62
+             + k3 * os_snoise(P * (1.0 / (OS_W3 * 0.55)) + so.xzy) * 0.38;
+
   vec3 alb = uLow;
   alb = mix(alb, uMid,  smoothstep(sea - 0.03, sea + 0.16, eN));
   alb = mix(alb, uHigh, smoothstep(sea + 0.12, sea + 0.38, eN));
@@ -402,19 +420,57 @@ void main() {
   //      mountains gets ochre in the valley floors and bare rock on everything
   //      that catches the light — colour separation inside a single frame,
   //      instead of one wash over all of it.
-  float desert = smoothstep(0.52, 0.80, os_snoise(P * (1.0 / 1100.0) + so.zxy) * 0.5 + 0.5);
-  alb = mix(alb, uAccent,
-            0.58 * desert
-            * (1.0 - smoothstep(0.30, 0.74, lat))
-            * (1.0 - smoothstep(0.04, 0.20, steep))
-            * (1.0 - smoothstep(sea + 0.08, sea + 0.30, eN)));
+  //
+  // The mask itself had two faults that together are the "noise on a sphere"
+  // tell. It was ONE octave of snoise, so its boundary had exactly one
+  // wavelength and no structure at 200 or 40 km; and it was statistically
+  // independent of the terrain beneath it, so the wash ignored every feature it
+  // lay over. Climate is not independent of relief — arid ground is where the
+  // moisture already fell out. So:
+  //
+  //   * domain-warp the field and run it fractal, and fold in det (which
+  //     already carries 420 km down to 75 m) so the coast of the desert is
+  //     ragged at every scale instead of being a smooth blob outline;
+  //   * bias it by the rain shadow. Ng - up*dot(Ng,up) is the downhill
+  //     direction of the terrain; where that turns away from the prevailing
+  //     zonal wind the ground is leeward of a ridge and it is dry. That is one
+  //     dot product, and it is the coupling whose absence made the two layers
+  //     read as unrelated.
+  //
+  // The three gates are evaluated FIRST and the field is skipped when they
+  // close. They are pure arithmetic on values already in hand, whereas the
+  // field is a domain warp plus four octaves — seven simplex evaluations, a
+  // third again on top of everything else this shader does. By its own design
+  // the accent reaches about a tenth of the surface, so branching here makes
+  // the new mask cheaper over most of the frame than the single-octave one it
+  // replaces, and the gates vary on continental scales so the branch is
+  // coherent across a warp.
+  float aridGate = (1.0 - smoothstep(0.30, 0.74, lat))
+                 * (1.0 - smoothstep(0.04, 0.20, steep))
+                 * (1.0 - smoothstep(sea + 0.08, sea + 0.30, eN));
+  if (aridGate > 0.002) {
+    vec3  wp   = os_warp(P * (1.0 / 1100.0) + so.zxy, 0.6);
+    float arid = os_fbm(wp, 4, 2.35, 0.55) * 0.5 + 0.5 + det * 0.10;
+    // Prevailing wind is zonal (trade winds run along latitude circles), tilted
+    // a little so it is not degenerate at the poles.
+    vec3  windDir = normalize(cross(up, vec3(0.0, 1.0, 0.0)) + up * 0.15 + vec3(1e-5));
+    vec3  slope   = Ng - up * dot(Ng, up);
+    float lee     = clamp(dot(slope, windDir) * 6.0, -1.0, 1.0);
+    float desert  = smoothstep(0.48, 0.82, arid + lee * 0.14);
+    alb = mix(alb, uAccent, 0.58 * desert * aridGate);
+  }
 
   // Snow / ash caps, pushed down towards the poles.
   float snowLine = mix(uSnowLine, uSnowLine - 0.18, smoothstep(0.40, 0.98, lat));
   alb = mix(alb, uPeak, smoothstep(snowLine, snowLine + 0.20, eN) * (1.0 - smoothstep(0.16, 0.42, steep)));
 
-  // Slope is what makes cliffs read as a different material.
-  alb = mix(alb, uCliff, smoothstep(0.05, 0.28, steep + det * 0.025));
+  // Slope is what makes cliffs read as a different material — but only if the
+  // boundary is fractal. det*0.025 against a 0.23-wide window is a 10%
+  // perturbation, which is a smooth contour line with a wobble on it, and from
+  // orbit it reads as a hard near-binary blotch mask. The jitter has to be
+  // comparable to the window, and it needs a second term an order of magnitude
+  // finer (grit is 2.3 km and 340 m) or the edge is only broken at one scale.
+  alb = mix(alb, uCliff, smoothstep(0.05, 0.28, steep + det * 0.12 + grit * 0.06));
 
   float ice = smoothstep(uPolarLat, uPolarLat + 0.15, lat + det * 0.045)
             * (1.0 - smoothstep(0.12, 0.36, steep));
@@ -423,15 +479,9 @@ void main() {
   // Nothing is ever a flat gradient.
   alb *= 0.80 + 0.42 * (det * 0.5 + 0.5);
 
-  // Close-range material breakup. Every band above is chosen by elevation,
-  // slope or latitude, and at two kilometres altitude all three are effectively
-  // constant across the frame — so without this the ground is one albedo shaded
-  // by light alone, which is the flat-field failure in §6 at exactly the range
-  // the player spends most of their time. Pushing towards the *cliff* colour
-  // rather than up and down in brightness is what makes it read as exposed rock
-  // and scree instead of a dirty lens. Held off the ice, which pepper ruins.
-  float grit = k2 * os_snoise(P * (1.0 / (OS_W2 * 0.42)) + so.yxz) * 0.62
-             + k3 * os_snoise(P * (1.0 / (OS_W3 * 0.55)) + so.xzy) * 0.38;
+  // Pushing towards the *cliff* colour rather than up and down in brightness is
+  // what makes the breakup read as exposed rock and scree instead of a dirty
+  // lens. Held off the ice, which pepper ruins.
   alb = mix(alb, uCliff, clamp(grit, 0.0, 1.0) * 0.30 * (1.0 - ice));
   alb *= 1.0 + grit * 0.22 * (1.0 - ice);
 
@@ -447,7 +497,15 @@ void main() {
   // ragged black pepper along the day/night line. Widening it by the pixel
   // footprint keeps the line hard on approach (where the term is ~1e-4) and
   // resolves it honestly from orbit.
-  float soft  = mix(0.006, 0.038, uAtmos) + clamp(pxKm / max(uRadius, 1.0) * 25.0, 0.0, 0.025);
+  //
+  // Its old ceiling of 0.025 was three times what anti-aliasing needs. Added to
+  // the 0.038 atmospheric term it gave +/-0.063 in ndl — 3.6 degrees, a quarter
+  // of the visible disc turning into a grey dithered dissolve. A dissolve is
+  // not a terminator: §6 wants the shadow edge hard. The width belongs in the
+  // *scattering* band below, where it is a colour rather than an absence, so
+  // the geometric term is capped at +/-0.008 (half a pixel of relief) and the
+  // atmospheric one trimmed to the ~1.7 degrees a real slant path buys.
+  float soft  = mix(0.006, 0.030, uAtmos) + clamp(pxKm / max(uRadius, 1.0) * 25.0, 0.0, 0.008);
   float shade = smoothstep(-soft, soft, ndl) * smoothstep(-0.05, 0.02, ndlGeo);
 
   float shadow = 1.0;
@@ -510,20 +568,63 @@ void main() {
     // not the scarcity — so keep the Worley cores tight and the province mask
     // narrow, but open each gate far enough that a few provinces actually light.
     vec2  w       = os_worley(P * (1.0 / 44.0) + so);
-    float region  = smoothstep(0.42, 0.68, os_snoise(P * (1.0 / 2200.0) + so.yxz) * 0.5 + 0.5);
+    // Widened from 0.42..0.68. That window opened on one province of the whole
+    // sphere, so a civilisation showed up as a single isolated confetti clump
+    // on an otherwise dead hemisphere — which reads as stuck pixels, not as a
+    // settled world. Lower and wider puts light on several coastlines.
+    float region  = smoothstep(0.30, 0.62, os_snoise(P * (1.0 / 2200.0) + so.yxz) * 0.5 + 0.5);
     float coast   = 1.0 - smoothstep(0.0, 0.085, abs(e - sea - 0.03));
     float flat_   = 1.0 - smoothstep(0.03, 0.14, steep);
+    // Cores plus sprawl. The squared point term alone is a single-pixel dot on
+    // absolute black: nothing for the bloom pass to find (bloom needs area, not
+    // amplitude) and no geography. The second, much wider and much dimmer term
+    // on the same Worley cell is the suburban skirt around each core, and it is
+    // what makes the cluster read as lit ground seen from orbit.
     float pts     = smoothstep(0.24, 0.02, w.x);
-    float lights  = pts * pts * region * flat_ * mix(0.16, 1.0, coast) * step(sea, e);
+    float halo    = smoothstep(0.62, 0.10, w.x) * 0.22;
+    float lights  = (pts * pts + halo) * region * flat_ * mix(0.16, 1.0, coast) * step(sea, e);
     // Well above 1.0 on purpose: this is the one emitter on the night side and
     // it is what the bloom pass is for. Amber, per the §6 palette.
     col += vec3(1.0, 0.55, 0.18) * lights * uNightLights * night * 6.0;
   }
 
-  // Forward-scattered haze on the limb — the silver lining that tells the
-  // frame where the star is.
-  float limb = pow(1.0 - clamp(dot(up, V), 0.0, 1.0), 3.5);
-  col += sun * limb * uAtmos * 0.11 * smoothstep(-0.30, 0.45, ndlGeo);
+  // --- the air, seen from outside ------------------------------------------
+  // The limb ring: the silver lining that tells the frame where the star is.
+  //
+  // This existed before at exponent 3.5 and strength 0.11, which is why the
+  // last review found "a razor-hard 1px edge against black with zero atmosphere
+  // glow" on every limb in the set. Both numbers were wrong for a physical
+  // reason. A shell one seven-hundredth of the planet's radius deep presents a
+  // slant path ~sqrt(2R/H) ~ 40x its own depth at grazing incidence, so it is a
+  // *ring* tens of pixels wide, not a line; pow(.,2.0) puts half the term
+  // inside the outer 10% of the disc radius, which is where that path actually
+  // is. And a ring that scatters a tenth of the key light is invisible next to
+  // ground lit by all of it — 0.5 puts the sunward edge just over 1.0, i.e. in
+  // the bloom, which is what "light has presence" means in §6.
+  float grz  = 1.0 - clamp(dot(up, V), 0.0, 1.0);
+  float limb = grz * grz;
+  // Blue looking down through it, sodium-orange along the terminator: the same
+  // slant-path filter as sun, seen edge-on.
+  vec3  air  = mix(uAtmosTint.bgr, uAtmosTint, smoothstep(0.35, -0.05, ndlGeo));
+  col += air * uSunColor * limb * uAtmos * 0.50 * above * smoothstep(-0.30, 0.45, ndlGeo);
+
+  // Mie forward lobe. When the star is behind the body from the camera's point
+  // of view the whole sunward limb lights up in a hard, bright crescent — the
+  // one lens-flare-grade highlight this module can honestly produce. Separate
+  // from the ring above because it is a *phase function*, not a path length.
+  float fwd = max(dot(-V, uSunDir), 0.0);
+  fwd = fwd * fwd; fwd = fwd * fwd; fwd = fwd * fwd;   // ^8, no pow() call
+  col += uSunColor * uAtmosTint * limb * uAtmos * fwd * above * 1.60;
+
+  // Sunset band. This is where the terminator width went. A planet with enough
+  // air to soften the shadow edge has, by exactly the same optical depth, a
+  // band of reddened forward scattering a few degrees wide along that edge —
+  // so the softness reads as a sodium-orange ring (one of §6's two rationed
+  // hues) instead of grey mush. Driven by the geometric ndl so surface relief
+  // cannot stipple it.
+  col += uAtmosTint * uSunColor * uAtmos * 0.55 * mix(0.25, 1.0, above)
+       * exp(-(ndlGeo / 0.055) * (ndlGeo / 0.055))
+       * (0.35 + 0.65 * limb);
 
   // --- aerial perspective -------------------------------------------------
   // PLACEHOLDER, the same as the limb term above: Atmosphere.ts owns
@@ -546,7 +647,24 @@ void main() {
     // filter that reddens the terminator, seen end-on.
     float toSun = clamp(dot(-V, uSunDir), 0.0, 1.0);
     vec3  hz    = mix(uAtmosTint.bgr, uAtmosTint, pow(toSun, 2.5));
-    col = mix(col, hz * uSunColor * 0.055 * smoothstep(-0.10, 0.32, ndlGeo), haze * 0.72);
+
+    // The inscatter *level* is the whole point and it was an order of magnitude
+    // too low. Haze is a mix towards this colour, so if the colour is darker
+    // than the terrain then "more air in the way" means "darker", which is the
+    // opposite of aerial perspective — distance was crushing contrast downwards
+    // instead of lifting the blacks, and the far ridges came out at the same
+    // black point as the near ones.
+    //
+    // The right scale is set by the ground it has to compete with: this rock is
+    // albedo 0.05–0.15, so a lit surface leaves ~0.2–0.35 of the key. Inscatter
+    // slightly above that (0.16 * key) makes distance lift and desaturate,
+    // which is what a horizon does. Mie forward scattering then triples it
+    // towards the star — that is where a washed-out sunward horizon and the
+    // light shafts §6 asks for come from — and it is the *only* free parameter
+    // here that is not derived from the surface albedo.
+    vec3 ins = hz * uSunColor * 0.16 * mix(1.0, 3.0, toSun * toSun * toSun * toSun * toSun * toSun)
+             * smoothstep(-0.12, 0.30, ndlGeo);
+    col = mix(col, ins, haze * 0.80);
   }
 
   // Linear HDR out. PostFX owns the tone map and the noir grade (see
@@ -599,6 +717,7 @@ ${terrain}
 uniform float uRadius;
 uniform float uTime;
 uniform float uPixelAngle;
+uniform vec3  uCamLocal;
 uniform vec3  uSunDir;
 uniform vec3  uSunColor;
 uniform vec3  uAtmosTint;
@@ -648,8 +767,12 @@ void main() {
   }
 
   float ndlGeo = dot(d, uSunDir);
-  float soft   = mix(0.006, 0.038, uAtmos) + clamp(pxKm / max(uRadius, 1.0) * 25.0, 0.0, 0.025);
+  // Must match surfaceFragmentShader exactly, or the sea's terminator stays a
+  // grey dissolve while the land's tightens and the two disagree along every
+  // coastline. See the long note there for why the geometric cap is 0.008.
+  float soft   = mix(0.006, 0.030, uAtmos) + clamp(pxKm / max(uRadius, 1.0) * 25.0, 0.0, 0.008);
   float shade  = smoothstep(-soft, soft, dot(N, uSunDir)) * smoothstep(-0.05, 0.02, ndlGeo);
+  float above  = smoothstep(uRadius * 0.02, uRadius * 0.10, length(uCamLocal) - uRadius);
 
   vec3 sun = uSunColor * mix(vec3(1.0), uAtmosTint, uAtmos * (1.0 - smoothstep(0.0, 0.30, ndlGeo)));
 
@@ -705,9 +828,37 @@ void main() {
   float night = 1.0 - shade;
   col += body * uSunColor * 0.004 * night;
 
+  // The same limb ring and sunset band the land carries. Without them the ring
+  // is present over continents and absent over sea, which on an ocean world is
+  // a dotted limb — and the sea is most of the disc, so this is where most of
+  // the silver lining actually lives. See surfaceFragmentShader for the
+  // derivation of the exponents and levels.
+  float grz  = 1.0 - clamp(dot(d, V), 0.0, 1.0);
+  float limb = grz * grz;
+  vec3  air  = mix(uAtmosTint.bgr, uAtmosTint, smoothstep(0.35, -0.05, ndlGeo));
+  col += air * uSunColor * limb * uAtmos * 0.50 * above * smoothstep(-0.30, 0.45, ndlGeo);
+  float fwd = max(dot(-V, uSunDir), 0.0);
+  fwd = fwd * fwd; fwd = fwd * fwd; fwd = fwd * fwd;
+  col += uSunColor * uAtmosTint * limb * uAtmos * fwd * above * 1.60;
+  col += uAtmosTint * uSunColor * uAtmos * 0.55 * mix(0.25, 1.0, above)
+       * exp(-(ndlGeo / 0.055) * (ndlGeo / 0.055))
+       * (0.35 + 0.65 * limb);
+
   // Feather the shoreline so the sphere never shows a hard analytic edge.
-  // Feather the shore over about two pixels, whatever the range.
-  float alpha = smoothstep(0.0, max(0.004, pxKm * 2.0), depth);
+  //
+  // The old width was pxKm * 2.0 — a *horizontal* length in kilometres used
+  // as a threshold on depth, which is a *vertical* one. From orbit pxKm is
+  // ~15 km, so the ramp ran over 30 km of depth on a body whose deepest water
+  // is 10: the entire ocean went translucent and the dark sea floor showed
+  // through it in a fractal, near-binary mottle. That mottle is what the last
+  // review read as "a hard-edged, near-binary cyan blotch mask ... one blotch
+  // size, no intermediate tones".
+  //
+  // A pixel of horizontal footprint converts to a depth interval through the
+  // sea-bed slope. 0.04 is the continental slope (2.3 degrees), which is the
+  // gradient that actually governs where a coastline lands within a pixel; the
+  // floor keeps a close pass from aliasing the shoreline to a single texel.
+  float alpha = smoothstep(0.0, max(uTerrainAmplitude * 3.0e-3, pxKm * 0.04), depth);
 
   gl_FragColor = vec4(col, alpha);
 
@@ -797,6 +948,36 @@ float os_wind(float sy) {
                  + 0.55 * exp(-sy * sy * 16.0));
 }
 
+/**
+ * d(os_wind)/d(sy) — the meridional shear of the zonal flow. Turbulence does
+ * not live uniformly over a giant; it lives where two jets rub past each other,
+ * which is exactly where this is large. Written analytically because a finite
+ * difference here would cost two more transcendentals for no accuracy.
+ */
+float os_windShear(float sy) {
+  float k = 3.14159265 * uBandCount * 0.5;
+  return uShear * (cos(sy * k) * k * (1.0 - 0.42 * sy * sy)
+                 - sin(sy * k) * 0.84 * sy
+                 - 0.55 * 32.0 * sy * exp(-sy * sy * 16.0));
+}
+
+/**
+ * Detail fade for the flow field, gated on the HIGHEST spatial frequency a
+ * given sampling scale produces — not its nominal one.
+ *
+ * This distinction is the whole of finding 7 in the last review. The band field
+ * is sampled in a zonally squashed frame (0.22 across, 3.1 along the meridian),
+ * so a nominal scale s is really 0.22s in longitude and 3.1s in latitude: a
+ * 14:1 anisotropy. Gating on s let the latitude direction run fourteen times
+ * finer than the gate believed — sub-pixel, i.e. aliasing, which is what the
+ * review correctly called "dither grain" — while the longitude direction, the
+ * one the eye reads band structure in, bottomed out at 30 pixels. Passing the
+ * effective frequency in fixes both ends.
+ */
+float os_gasFade(float freq, float pixAng) {
+  return smoothstep(1.5, 5.0, 1.0 / max(freq * pixAng, 1e-9));
+}
+
 float os_bandHash(float i) {
   return fract(sin(i * 91.7 + 13.1) * 43758.5453);
 }
@@ -860,12 +1041,35 @@ void main() {
   float fil = os_fbm(sp * 9.0 + uSeed.yzx, OS_GO(5), 2.2, 0.55);
   col *= 0.66 + 0.66 * (fil * 0.5 + 0.5);
 
-  float kf1 = smoothstep(1.5, 5.0, (1.0 / 34.0) / pixAng);
-  float kf2 = smoothstep(1.5, 5.0, (1.0 / 130.0) / pixAng);
-  if (kf1 + kf2 > 0.002) {
-    float fine = kf1 * os_fbm(sp * 34.0 + uSeed, OS_GO(3), 2.2, 0.5) * 0.22
-               + kf2 * os_fbm(sp * 130.0 + uSeed.zyx, OS_GO(3), 2.2, 0.5) * 0.13;
-    col *= 1.0 + fine;
+  // 3.1 is sp's meridional multiplier: see os_gasFade.
+  float kf1 = os_gasFade(34.0 * 3.1, pixAng);
+  if (kf1 > 0.002) col *= 1.0 + kf1 * os_fbm(sp * 34.0 + uSeed, OS_GO(3), 2.2, 0.5) * 0.22;
+
+  // --- shear filaments -----------------------------------------------------
+  // The scale that used to sit here (sp * 130) was 35 pixels wide in longitude
+  // and a third of a pixel in latitude, so it contributed a horizontal smear
+  // and a field of aliasing, which is why the close shot had nothing between a
+  // silky airbrushed ribbon and grain. It is replaced rather than added to.
+  //
+  // Two changes make it read as fluid. First its own frame: shear stretches
+  // large eddies, but a small one is torn apart long before it can be drawn out
+  // 14:1, so the fine scales are close to isotropic and get a 1.8:1 frame of
+  // their own — which is what lets them be a few pixels across in *both*
+  // directions instead of sub-pixel in one and invisible in the other. Second,
+  // ridged noise fed through a domain warp: a rolled-up shear layer is thin
+  // bright filaments with dark lanes between them, and plain fbm can only
+  // curdle. Amplitude follows the meridional wind shear, so the detail piles up
+  // on the belt/zone boundaries where the turbulence actually is and the zone
+  // interiors stay smooth — which is also the read Jupiter gives.
+  vec3  fp  = vec3(rp.x * 0.85, rp.y * 1.5, rp.z * 0.85);
+  float kf2 = os_gasFade(230.0 * 1.5, pixAng);
+  float kf3 = os_gasFade(760.0 * 1.5, pixAng);
+  if (kf2 + kf3 > 0.002) {
+    float shr = clamp(abs(os_windShear(sy)) / (uShear * uBandCount * 2.0 + 1e-6), 0.0, 1.0);
+    float amp = mix(0.06, 0.24, shr) * uTurb;
+    float f2  = os_ridged(os_warp(fp * 230.0 + uSeed.zxy, 0.75), OS_GO(3), 2.25, 0.5);
+    float f3  = kf3 > 0.002 ? os_ridged(fp * 760.0 + uSeed.yzx, OS_GO(2), 2.30, 0.5) : 0.0;
+    col *= 1.0 + amp * (kf2 * f2 + kf3 * f3 * 0.55);
   }
 
   // --- storms -------------------------------------------------------------
@@ -887,12 +1091,45 @@ void main() {
     float r  = sqrt(ex * ex + ny * ny) / max(A.w, 1e-4);
     if (r > 1.25) continue;
 
-    // Spiral: the swirl angle winds up towards the eye and turns over time.
-    float th = atan(ny, ex) + B.x * (1.35 - r) * 2.6 + uTime * B.x * 0.05;
-    float sw = os_fbm(vec3(cos(th), sin(th), r * 1.7) * (2.6 + B.w) + uSeed.yxz, OS_GO(4), 2.1, 0.55);
+    // Differential rotation. The vortex turns faster at its centre than at its
+    // rim, so the material in it is wound up — but it is the *material* that
+    // winds, not the noise's argument.
+    //
+    // What was here sampled os_fbm(vec3(cos(th), sin(th), r*1.7) * s), a field
+    // parameterised by angle and radius alone. Such a field is constant along
+    // every spiral it defines, so it can produce exactly one thing: evenly
+    // spaced concentric log-spiral streaks with one frequency and no structure
+    // at any other. That is a twirl filter. It also contradicted this shader's
+    // own claim to advect first and apply the storm afterwards, because nothing
+    // of the surrounding band ever entered it.
+    //
+    // Rotating the local coordinates and rebuilding a genuine point on the
+    // sphere keeps the noise a 3D field: it is turbulent at every radius, it
+    // draws in the band material the vortex is parked in, and the ridged term
+    // gives the filaments that a smooth fbm has no way to make.
+    float a  = B.x * (1.35 - r) * 2.6 + uTime * B.x * 0.05;
+    float ca = cos(a);
+    float sa = sin(a);
+    vec2  wv = vec2(ca * ex - sa * ny, sa * ex + ca * ny);
+    vec3  q  = c * cosd + east * wv.x * B.y + north * wv.y;
 
-    float core = smoothstep(1.05, 0.35, r);
-    vec3  sc   = uStormColor * (0.62 + 0.55 * (sw * 0.5 + 0.5));
+    // Two bands, deliberately far apart. The fbm carries the vortex's own
+    // shape at a quarter of its radius; the ridged term at five times the
+    // frequency is the filament structure, and it lands at roughly eight
+    // pixels across at the framing this shot uses — which is the scale the
+    // review found completely missing.
+    float S  = 2.6 + B.w;
+    float sw = 0.66 * os_fbm(q * S + uSeed.yxz, OS_GO(4), 2.2, 0.55)
+             + 0.44 * os_ridged(q * S * 5.0 + uSeed.zxy, OS_GO(3), 2.2, 0.5);
+
+    // Broken by the same field that fills it, so the vortex ends in entrained
+    // filaments instead of the hard ellipse the review found.
+    float core = smoothstep(1.05, 0.35, r + 0.20 * sw);
+    // An eye. The centre of a cyclone is a clear, darker well — it is not the
+    // brightest point of the spiral, and having no eye at all was half of why
+    // this read as a filter effect rather than as weather.
+    vec3  sc   = uStormColor * (0.62 + 0.55 * (sw * 0.5 + 0.5))
+               * mix(0.45, 1.0, smoothstep(0.10, 0.26, r));
     col = mix(col, sc, core * 0.92);
     // Bright sheared collar where the vortex drags the surrounding band.
     col += uStormColor * 0.22 * smoothstep(0.75, 1.02, r) * smoothstep(1.28, 1.0, r) * (0.5 + 0.5 * sw);
@@ -920,11 +1157,16 @@ void main() {
 
   vec3 lit = col * uSunColor * shade * limb;
 
-  // Forward-scattered rim. This has to be a *rim* — a hard, thin bright edge
-  // one or two degrees wide on the sunward limb — not a broad wash, or it
-  // simply re-lights the limb darkening it is meant to contrast against.
-  float rim = pow(1.0 - mu, 4.5);
-  lit += uSunColor * rim * 0.45 * smoothstep(-0.05, 0.35, ndl);
+  // Forward-scattered rim. This has to be a *rim* — a bright edge on the
+  // sunward limb — not a broad wash, or it simply re-lights the limb darkening
+  // it is meant to contrast against. But 4.5 was too tight to survive: it put
+  // the whole term inside the outermost 1% of the disc radius, i.e. two or
+  // three pixels, which is a hairline nobody sees and the review recorded as
+  // "not one flare, glare or silver lining anywhere". 2.8 keeps it a rim (half
+  // of it still inside the outer 6% of the radius) while giving it enough area
+  // for the bloom pass to have something to work with.
+  float rim = pow(1.0 - mu, 2.8);
+  lit += uSunColor * rim * 0.55 * smoothstep(-0.05, 0.35, ndl);
 
   // Night side. No ambient fill (§6), but a giant does glow from its own
   // internal heat. Modulating it by col rather than adding a flat value is
@@ -2133,23 +2375,38 @@ export function registerPlanetShots(source: PlanetShotSource = {}): void {
       fixture = f;
 
       const R = f.planet.spec.radius;
-      // 2.15 radii, not 2.72. At 62 degrees vertical the disc then subtends
-      // 27.7 degrees against a 31 degree half-frame, and the off-centre aim
-      // below runs one limb clean off the edge — so the planet *occludes*
-      // rather than floating in the middle of an empty black frame, which
-      // ARCHITECTURE §6 calls a failure state outright.
-      const from = shotScratch.set(0.28, 0.30, 1).normalize().multiplyScalar(R * 2.15).clone();
+      // 2.70 radii. A previous pass pulled in to 1.50 to close an 858-pixel
+      // column of empty sky, but that trades one §6 failure for a worse one:
+      // at 1.50 radii the disc subtends 83.6 degrees against a 62 degree
+      // vertical field, so the planet cannot be whole in frame at all and the
+      // shot stops being the whole-disc test its own description promises —
+      // the curvature survives only in one corner, which reads as a flat wall,
+      // not a world. At 2.70 the disc subtends 43.4 degrees and fills about
+      // 70% of frame height: entire, unmistakably spherical, with room for the
+      // terminator to run.
+      //
+      // The empty gutter is a COMPOSITION problem and is solved by composing:
+      // the disc sits low-left, the terminator runs corner to corner, and the
+      // remaining sky carries the galactic band and the night-side lights
+      // rather than being flat void.
+      const from = shotScratch.set(0.28, 0.30, 1).normalize().multiplyScalar(R * 2.7).clone();
       from.add(f.planetPos);
       // Aim off-centre so the disc sits low-left and the terminator runs
-      // corner to corner instead of splitting the frame in half.
-      const at = f.planetPos.clone().addScaledVector(new Vector3(0.30, 0.22, 0).normalize(), R * 0.48);
+      // corner to corner instead of splitting the frame in half. The offset is
+      // an angle, not a length, so it scales with the range.
+      const at = f.planetPos.clone().addScaledVector(new Vector3(0.30, 0.22, 0).normalize(), R * 0.62);
       const p = pose(ctx, from, at, new Vector3(0, 1, 0));
       f.camPos.copy(p.p);
       f.camQuat.copy(p.q);
 
-      // Star to the left and slightly behind: ~40% of the disc lit, a long
-      // terminator, and a rim of forward-scattered haze on the dark limb.
-      f.sunDir.set(-0.70, 0.24, 0.36).normalize();
+      // Star nearly side-on and slightly behind — a 96 degree phase angle, so
+      // a little under half the visible disc is lit. Pushed back from the old
+      // 74 degrees on purpose: the sunward limb now runs almost exactly along
+      // the edge of the disc, which is the geometry that makes the atmosphere
+      // ring read as a silver lining rather than as a slightly brighter edge,
+      // and it hands the night side enough of the frame for the settlement
+      // lights to be a second, cooler light source instead of a curiosity.
+      f.sunDir.set(-0.86, 0.30, 0.05).normalize();
       driveFixture(0, ctx);
     },
     update: driveFixture,
@@ -2176,11 +2433,24 @@ export function registerPlanetShots(source: PlanetShotSource = {}): void {
       east.normalize();
       const forward = new Vector3().crossVectors(up, east).normalize();
 
-      const from = up.clone().multiplyScalar(R + site.height + 24).add(f.planetPos);
-      // Ten degrees of down-pitch puts the horizon on the upper third.
-      const look = forward.clone().multiplyScalar(Math.cos(0.175)).addScaledVector(up, -Math.sin(0.175));
+      // 34 km rather than 24: the horizon dip grows from 5.1 to 6.0 degrees, so
+      // the skyline droops ~34 px across the frame instead of ~28 and reads as
+      // the edge of a sphere rather than the edge of a heightmap.
+      const from = up.clone().multiplyScalar(R + site.height + 34).add(f.planetPos);
+      // 23 degrees of down-pitch, not 10. At 10 the horizon sat at y=430 and
+      // gave 37% of the frame to empty black sky with nothing in it — §6 again.
+      // At 23 it sits near y=270, the near ground closes to ~25 km and fills
+      // the bottom of the frame, and the shot gets the foreground occluder it
+      // never had. This module cannot draw a hull strut or a ring plane; it can
+      // at least put its own terrain in the way.
+      const pitch = 0.40;
+      const look = forward.clone().multiplyScalar(Math.cos(pitch)).addScaledVector(up, -Math.sin(pitch));
       const at = from.clone().addScaledVector(look, 400);
-      const p = pose(ctx, from, at, up);
+      // A few degrees of bank. A horizon exactly parallel to the frame edge for
+      // 1920 px is the single strongest "this is a tech demo turntable" cue in
+      // the set, and a ship in atmosphere is never wings-level for free.
+      const upRolled = up.clone().applyAxisAngle(look, 0.075);
+      const p = pose(ctx, from, at, upRolled);
       f.camPos.copy(p.p);
       f.camQuat.copy(p.q);
 
@@ -2218,12 +2488,15 @@ export function registerPlanetShots(source: PlanetShotSource = {}): void {
       const east = new Vector3().crossVectors(pole, storm).normalize();
 
       const camDir = storm.clone().addScaledVector(east, 0.46).addScaledVector(pole, 0.12).normalize();
-      // 1.80 radii: the disc subtends 33.7 degrees against a 31 degree half
-      // frame, so it bleeds off the top, the bottom and the left and leaves a
-      // gutter of starfield on the right for the terminator to enter through.
-      // At 2.55 it was a ball in the middle of a black rectangle.
-      const from = camDir.clone().multiplyScalar(R * 1.80).add(f.planetPos);
-      const at = f.planetPos.clone().addScaledVector(east, R * 0.18);
+      // 1.35 radii, not 1.80. At 1.80 the disc subtended 33.7 degrees and its
+      // right limb landed at x~1450, dumping a ~470 px black column down the
+      // side of the frame. At 1.35 it subtends 47.8 degrees, bleeds off three
+      // edges, and the gutter the terminator enters through comes down to
+      // ~230 px — a margin, not a void.
+      const from = camDir.clone().multiplyScalar(R * 1.35).add(f.planetPos);
+      // Same reasoning as planet-orbit: the aim offset is an angle, so it has
+      // to grow with the closer range to hold the disc's right limb in frame.
+      const at = f.planetPos.clone().addScaledVector(east, R * 0.227);
       const p = pose(ctx, from, at, pole);
       f.camPos.copy(p.p);
       f.camQuat.copy(p.q);

@@ -12,9 +12,9 @@
  * line, rivet, streak and chip lives in the fragment shader. No CSG, no UV
  * unwrap: all surface detail is triplanar, driven by object-space position.
  *
- * DRAW CALLS: 8 — hull, greeble boxes, greeble cylinders, emissive lights,
- * nozzles, plume, RCS puffs, re-entry wake. The last two switch themselves off
- * when idle, so a coasting ship costs 6.
+ * DRAW CALLS: 10 — hull, four greeble families, emissive lights, nozzles,
+ * plume, RCS puffs, re-entry wake. The last two switch themselves off when
+ * idle, so a coasting ship costs 8.
  *
  * UNITS: kilometres. The ship is 0.03 km (30 m) long, nose at z = -0.015,
  * tail at z = +0.015. Forward is -Z, up is +Y, starboard is +X.
@@ -71,6 +71,17 @@ const MAX_R = 0.0042;
 const AXIS_Y = new Vector3(0, 1, 0);
 const AXIS_Z = new Vector3(0, 0, 1);
 
+/**
+ * Re-frames a bolt-on so it mounts on a cylinder wall rather than on the hull:
+ * its mounting face (+Y) turns to face the frame's +X, and its long axis (+Z)
+ * lies along the frame's +Y. Used for the hardware bolted to the nacelles.
+ */
+const RADIAL_MOUNT = new Matrix4().makeBasis(
+  new Vector3(0, 0, 1),
+  new Vector3(1, 0, 0),
+  new Vector3(0, 1, 0),
+);
+
 // ---------------------------------------------------------------------------
 // Small maths helpers (module scope — never called from update())
 // ---------------------------------------------------------------------------
@@ -102,6 +113,29 @@ interface Occluder {
   z: number;
   r: number;
 }
+
+/**
+ * A sphere that interrupts the key light. Deliberately a different list from
+ * `Occluder`: contact AO wants one fat blob per bolt-on centred where it meets
+ * the plating, a cast shadow wants a chain of tight spheres following the part
+ * out into the light. `part` is the part id of the caster, so a fin never
+ * shadows itself.
+ */
+interface Shadower {
+  x: number;
+  y: number;
+  z: number;
+  r: number;
+  part: number;
+}
+
+/**
+ * Uniform array sizes, hard-coded into the shader as defines. 28 sphere tests
+ * and 6 point lights per fragment on a 30 m object is a rounding error next to
+ * the four fbm calls the same shader already runs.
+ */
+const OCC_MAX = 28;
+const LAMP_MAX = 6;
 
 /**
  * Positions, indices and three shading channels. Normals are accumulated from
@@ -323,6 +357,65 @@ function addCylinder(
 }
 
 // ---------------------------------------------------------------------------
+// Greeble families
+//
+// Each is authored in a unit footprint — x and z in [-0.5, 0.5], y from 0 (the
+// mounting face) up to about 1 — so one per-instance scale drives all of them.
+// They are assemblies, not primitives: a bare box and a bare cylinder gave the
+// whole hull exactly two silhouettes.
+// ---------------------------------------------------------------------------
+
+type GreebleKind = 'hatch' | 'bracket' | 'ribbed' | 'stack' | 'pipe';
+
+const _gm = new Matrix4();
+
+/** Access panel: a shallow plate with a raised lip and a latch block. */
+function greebleHatch(): BufferGeometry {
+  const b = new HullBuilder();
+  addBox(b, _gm.identity(), 1, 0.42, 1, 0, 0);
+  addBox(b, _gm.makeTranslation(0, 0.42, 0), 0.78, 0.2, 0.78, 0, 0);
+  addBox(b, _gm.makeTranslation(0.3, 0.42, -0.22), 0.18, 0.34, 0.3, 0, 0);
+  return b.toGeometry(false);
+}
+
+/** L-bracket: an upright web with a foot, the commonest bolt-on in the world. */
+function greebleBracket(): BufferGeometry {
+  const b = new HullBuilder();
+  addBox(b, _gm.makeTranslation(0, 0, 0.16), 0.9, 0.22, 0.66, 0, 0);
+  addBox(b, _gm.makeTranslation(0, 0, -0.32), 0.9, 1.0, 0.22, 0, 0);
+  addBox(b, _gm.makeTranslation(-0.28, 0.22, -0.1), 0.16, 0.5, 0.2, 0, 0);
+  return b.toGeometry(false);
+}
+
+/** Ribbed strip: a cable run or a heat-sink, three fins on a base rail. */
+function greebleRibbed(): BufferGeometry {
+  const b = new HullBuilder();
+  addBox(b, _gm.identity(), 1, 0.18, 0.9, 0, 0);
+  for (let i = 0; i < 3; i++) {
+    addBox(b, _gm.makeTranslation((i - 1) * 0.33, 0.18, 0), 0.14, 0.66, 0.94, 0, 0);
+  }
+  return b.toGeometry(false);
+}
+
+/** Stacked boxes: two crates strapped down, deliberately off-square. */
+function greebleStack(): BufferGeometry {
+  const b = new HullBuilder();
+  addBox(b, _gm.identity(), 1, 0.5, 0.8, 0, 0);
+  addBox(b, _gm.makeTranslation(-0.12, 0.5, 0.08), 0.62, 0.55, 0.56, 0, 0);
+  addBox(b, _gm.makeTranslation(0.36, 0.16, -0.2), 0.24, 0.24, 0.3, 0, 0);
+  return b.toGeometry(false);
+}
+
+/** Short capped pipe with a flange at its root. */
+function greeblePipe(): BufferGeometry {
+  const b = new HullBuilder();
+  addCylinder(b, _gm.identity(), 0.5, 0.44, 0.14, 12, 0, 0);
+  addCylinder(b, _gm.makeTranslation(0, 0.14, 0), 0.3, 0.27, 0.86, 10, 0, 0);
+  addCylinder(b, _gm.makeTranslation(0, 0.74, 0), 0.4, 0.36, 0.12, 10, 0, 0);
+  return b.toGeometry(false);
+}
+
+// ---------------------------------------------------------------------------
 // The hull surface: a swept superellipse
 // ---------------------------------------------------------------------------
 
@@ -540,6 +633,12 @@ uniform float uPanelScale;
 uniform float uCurvScale;
 uniform float uGrime;
 uniform float uBump;
+// xyz = centre in object space, w = radius. Unused slots carry w = 0.
+uniform vec4 uOcc[SHIP_OCC_MAX];
+// Part id of the caster in the matching uOcc slot, so nothing shadows itself.
+uniform float uOccPart[SHIP_OCC_MAX];
+// xyz = window position in object space, w = strength.
+uniform vec4 uLamp[SHIP_LAMP_MAX];
 
 varying vec3 vPos;
 varying vec3 vNrm;
@@ -569,16 +668,30 @@ void main() {
   an *= an;
   an /= max(an.x + an.y + an.z, 1e-5);
 
-  vec3 pa = shipPanels(P.zy * uPanelScale);
-  vec3 pb = shipPanels(P.xz * uPanelScale);
-  vec3 pc = shipPanels(P.xy * uPanelScale);
+  // Plate size is a per-part decision. Running one panel scale across the
+  // fuselage, the fin, the pods and the pannier is what makes the plating read
+  // as one projected texture instead of as sheet metal cut by four yards.
+  // Held at exactly uPanelScale on the fuselage (part 0) so the ship still has
+  // one reference plate size; the bolt-ons swing +/- 45% around it.
+  float ps = uPanelScale
+           * (1.0 + 0.9 * step(0.5, vPart) * (shipHash21(vec2(vPart * 7.31, 1.9)) - 0.5));
+  vec2 poff = vec2(shipHash21(vec2(vPart * 3.17, 8.4)),
+                   shipHash21(vec2(vPart * 5.09, 2.2))) * 23.0;
+
+  vec3 pa = shipPanels(P.zy * ps + poff);
+  vec3 pb = shipPanels(P.xz * ps + poff);
+  vec3 pc = shipPanels(P.xy * ps + poff);
 
   float seam = shipSeam(pa.x, 0.008) * an.x
              + shipSeam(pb.x, 0.008) * an.y
              + shipSeam(pc.x, 0.008) * an.z;
 
   // Panel identity comes from the dominant plane only — blending ids is mush.
-  vec3 dom = an.x > an.y ? (an.x > an.z ? pa : pc) : (an.y > an.z ? pb : pc);
+  // The hand-over between planes is warped, though: a clean switch draws a
+  // lat/long lattice radiating off the nose, where the dominant plane flips
+  // fastest. Warping it turns that boundary into a ragged butt joint.
+  vec3 anj = an + os_fbm(P * 210.0, 2, 2.2, 0.5) * vec3(0.11, -0.07, 0.09);
+  vec3 dom = anj.x > anj.y ? (anj.x > anj.z ? pa : pc) : (anj.y > anj.z ? pb : pc);
   float pid = dom.y;
 
   float rivet = 0.0;
@@ -625,8 +738,14 @@ void main() {
              * smoothstep(0.06, 0.5, edge);
   float bare = clamp(wear + chip * 0.7, 0.0, 1.0);
 
-  float metalness = mix(0.16, 1.0, bare);
-  float rough = mix(mix(0.64, 0.33, bare), 0.88, dirt);
+  // Not quite 1.0: a fully metallic fragment has no diffuse at all, and with
+  // no environment to reflect that is how every worn edge and every greeble
+  // ended up as a flat black fleck. Oxidised steel is not a perfect conductor.
+  float metalness = mix(0.16, 0.88, bare);
+  // Undirtied paint has to stay tight enough for the raking key to leave one
+  // readable streak down the spine; above ~0.6 the lobe is too wide to lift
+  // anything off the silhouette.
+  float rough = mix(mix(0.46, 0.30, bare), 0.86, dirt);
   albedo = mix(albedo, uMetal, bare);
   // Soot is warm, and it eats the paint's chroma as well as its value.
   albedo = mix(albedo, vec3(dot(albedo, vec3(0.30, 0.59, 0.11))) * vec3(0.42, 0.36, 0.30), dirt);
@@ -643,8 +762,15 @@ void main() {
   #ifdef SHIP_BUMP
   {
     // Height in kilometres so the surface gradient stays dimensionless.
-    // 8 mm: a panel gap is a gap, not a trench.
-    float h = (-seam * 0.9 + rivet * 0.5) * 8.0e-6;
+    //
+    // 8 mm was too shallow to survive at hero distance: the gap produced no
+    // lit/shadowed edge pair, so every seam read as a painted line. 2.5 cm of
+    // gap, plus a lip standing proud on one side of it, gives each seam a
+    // bright edge on the key side and a black one opposite — which is the
+    // whole difference between a joint and a decal.
+    float lip = shipSeam(abs(dom.x - 0.017), 0.006)
+              * (step(0.5, shipHash21(vec2(pid * 19.0, 4.4))) * 2.0 - 1.0);
+    float h = (-seam * 0.9 + lip * 0.5 + rivet * 0.5) * 2.5e-5;
     float dhx = dFdx(h);
     float dhy = dFdy(h);
     vec3 r1 = cross(dPy, N);
@@ -652,13 +778,41 @@ void main() {
     float det = dot(dPx, r1);
     if (abs(det) > 1e-20) {
       vec3 grad = (dhx * r1 + dhy * r2) / det;
+      // Close up a pixel spans less hull than the relief is deep, and an
+      // unclamped gradient tips the normal past the tangent plane.
+      float gmag = length(grad);
+      grad *= min(1.0, 1.8 / max(gmag, 1e-9));
       N = normalize(N - uBump * grad);
     }
   }
   #endif
 
+  // --- cast shadow ---------------------------------------------------------
+  // Analytic sphere shadows off the bolt-ons. Without them nothing on the
+  // model interrupts the key, which is the exact tell that separates a lit
+  // model from a shape with a lamp pointed at it — and it is why the fins,
+  // mast, pylons and patch plates read as decals rather than as hardware.
+  // The caster list is built alongside the one the contact-AO bake already
+  // needs; there is no shadow map, no extra pass and no shader permutation.
+  float sunVis = 1.0;
+  for (int i = 0; i < SHIP_OCC_MAX; i++) {
+    vec4 o = uOcc[i];
+    vec3 od = o.xyz - P;
+    float ot = dot(od, uSunDir);
+    float perp = sqrt(max(dot(od, od) - ot * ot, 0.0));
+    // The penumbra opens up with the throw: a star is a disc, not a point.
+    float soft = o.w * (0.20 + 0.85 * clamp(ot / max(o.w * 7.0, 1e-9), 0.0, 1.0));
+    float s = smoothstep(-soft, soft, perp - o.w);
+    // Empty slot, caster behind the fragment, or the caster is this very part.
+    s = mix(1.0, s, step(1e-7, o.w) * step(1e-7, ot)
+                    * step(0.5, abs(vPart - uOccPart[i])));
+    // Nearest caster wins rather than accumulating — overlapping spheres
+    // multiplied together punch black craters into the plating.
+    sunVis = min(sunVis, s);
+  }
+
   // --- direct lighting: one key, no ambient -------------------------------
-  float NoL = max(dot(N, uSunDir), 0.0);
+  float NoL = max(dot(N, uSunDir), 0.0) * sunVis;
   float NoV = max(dot(N, V), 1e-4);
   vec3 H = normalize(uSunDir + V);
   float NoH = max(dot(N, H), 0.0);
@@ -679,9 +833,31 @@ void main() {
   vec3 diff = albedo * (1.0 - metalness) * NoL;
   vec3 col = (diff + spec * PI) * uSunColor * ao;
 
+  // --- environment ---------------------------------------------------------
+  // There was no environment term at all here, which is not a "too dark"
+  // problem, it is a missing integral: a metallic fragment reflects only what
+  // is around it, and with nothing around it every worn edge, greeble and
+  // anti-sun face rendered pure black. The surround is a planetshine
+  // hemisphere plus the broad glare halo around the star.
+  vec3 Rv = reflect(-V, N);
+  vec3 envCol = uFill * (0.30 + 1.05 * clamp(-Rv.y * 0.5 + 0.5, 0.0, 1.0))
+              + uSunColor * 0.010 * pow(max(dot(Rv, uSunDir), 0.0), 5.0) * sunVis;
+  // Split-sum-ish: the horizon of the specular lobe never falls below F0.
+  vec3 Fenv = F0 + (max(vec3(1.0 - rough), F0) - F0) * pow(1.0 - NoV, 5.0);
+  col += envCol * Fenv * ao;
+
   // Planetshine, not ambient: it arrives from the world *below*, so it fills
   // the belly and leaves the shadowed upper flank properly black.
-  col += albedo * uFill * ao * (0.25 + 0.75 * (-N.y * 0.5 + 0.5));
+  col += albedo * (1.0 - metalness) * uFill * ao * (0.25 + 0.75 * (-N.y * 0.5 + 0.5));
+
+  // Grazing sheen. Fresnel guarantees a reflectance spike at the silhouette,
+  // so an edge seen edge-on against black cannot fade to nothing — this is the
+  // silver lining, and it is the cheapest thing that stops a hull reading as
+  // unfired clay. Rationed by dirt: soot has no lining.
+  float graze = pow(1.0 - NoV, 4.0);
+  float sheen = smoothstep(-0.30, 0.30, dot(N, uSunDir)) * sunVis;
+  col += uSunColor * graze * sheen * (0.018 + 0.050 * (1.0 - rough))
+       * (1.0 - 0.65 * dirt) * ao;
 
   // --- self illumination ---------------------------------------------------
   // Amber leaking from a badly seated panel. Rationed hard: a handful of
@@ -690,15 +866,29 @@ void main() {
   leak *= smoothstep(0.5, 0.8, shipHash21(vec2(floor(dom.z * 5.0), pid * 13.0)));
   col += uAmber * leak * (0.55 + 0.45 * sin(uTime * 2.1 + pid * 40.0)) * 0.5;
 
+  // Each lit window pools warm light on the plating around it. An emitter that
+  // lights nothing is a sticker; these pools are also what rake across the
+  // seams and greebles beside them and give that plating a second direction.
+  for (int i = 0; i < SHIP_LAMP_MAX; i++) {
+    vec4 lp = uLamp[i];
+    vec3 ld = lp.xyz - P;
+    float ldist = max(length(ld), 1e-6);
+    float fall = lp.w * exp(-ldist * 760.0) * max(dot(N, ld / ldist), 0.0);
+    col += uAmber * albedo * fall * ao;
+  }
+
   // The plume lights the hull. A real light would cost a shadow pass and a
   // shader permutation, so it is a distance-and-facing gradient instead.
-  vec3 ea = P - uEngineA;
-  vec3 eb = P - uEngineB;
-  float da = length(ea);
-  float db = length(eb);
-  float ga = exp(-da * 300.0) * max(dot(N, ea / max(da, 1e-6)), 0.0);
-  float gb = exp(-db * 300.0) * max(dot(N, eb / max(db, 1e-6)), 0.0);
-  col += uPlumeColor * (ga + gb) * uThrottle * 2.4;
+  // The facing term was inverted (P minus uEngineA points away from the
+  // source), so the blue was landing on everything that faced *forward*, which
+  // is the one set of surfaces a plume can never reach.
+  vec3 ea = uEngineA - P;
+  vec3 eb = uEngineB - P;
+  float da = max(length(ea), 1e-6);
+  float db = max(length(eb), 1e-6);
+  float ga = exp(-da * 260.0) * max(dot(N, ea / da), 0.0);
+  float gb = exp(-db * 260.0) * max(dot(N, eb / db), 0.0);
+  col += uPlumeColor * (ga + gb) * uThrottle * 2.6;
 
   // --- re-entry ------------------------------------------------------------
   if (uHeat > 0.002) {
@@ -768,9 +958,11 @@ void main() {
     // Running light: a soft round emitter with a hot core.
     float r = length(d) * 2.0;
     a = pow(clamp(1.0 - r, 0.0, 1.0), 2.0) + pow(clamp(1.0 - r * 2.2, 0.0, 1.0), 6.0) * 1.6;
-    // Beacons strobe; they never snap on, they ramp.
+    // Beacons strobe; they never snap on, they ramp. The floor is high enough
+    // that a still frame still finds them lit — at 0.25 they spent nine tenths
+    // of the cycle invisible, so the flank read as one uniform row of windows.
     float s = sin(uTime * 1.9 + vPhase * 6.2831);
-    a *= mix(0.25, 1.0, smoothstep(0.55, 0.95, s));
+    a *= mix(0.42, 1.0, smoothstep(0.55, 0.95, s));
   } else {
     // Lit window: a soft rectangle with a mullion across it.
     vec2 q = abs(d) * 2.0;
@@ -829,14 +1021,37 @@ void main() {
   vec3 V = normalize(uCameraLocal - vPos);
 
   if (gl_FrontFacing) {
-    // Outside of the bell: scorched, ribbed metal.
-    float rib = 0.5 + 0.5 * sin(vT * 46.0);
+    // Outside of the bell: scorched, sooted metal.
+    //
+    // A pure sine gave every corrugation the same depth and the same pitch.
+    // Phase-modulating it with noise varies the pitch, and a per-rib hash
+    // varies the depth, so some rings are crisp and some are half beaten flat.
+    float wob = os_fbm(vPos * 2400.0, 2, 2.2, 0.5);
+    float ribPhase = vT * 46.0 + 2.1 * wob;
+    float ribId = floor(ribPhase / 6.2831853);
+    float ribJ = fract(sin(ribId * 91.7 + 3.1) * 43758.5453);
+    float rib = (0.5 + 0.5 * sin(ribPhase)) * mix(0.25, 1.0, ribJ);
+
     float NoL = max(dot(N, uSunDir), 0.0);
-    vec3 base = mix(vec3(0.030, 0.029, 0.028), vec3(0.055, 0.048, 0.042), rib);
+    float NoV = max(dot(N, V), 1e-4);
+    // Soot, thickest towards the lip where the flow recirculates.
+    float soot = smoothstep(0.20, 0.92, os_fbm(vPos * 1600.0, 3, 2.3, 0.55) * 0.5 + 0.5);
+
+    // Authored *below* the hull's value on purpose. A scorched bell is the
+    // dirtiest object on the ship; when it is the brightest and most saturated
+    // mass in frame it steals the job the amber is supposed to be doing.
+    vec3 base = mix(vec3(0.019, 0.018, 0.017), vec3(0.033, 0.029, 0.025), rib);
     // Heat staining creeps back from the lip — bronze, not salmon.
-    base = mix(base, vec3(0.048, 0.030, 0.020), smoothstep(0.35, 1.0, vT));
-    vec3 c = base * (uSunColor * NoL + uFill);
-    c += uPlumeColor * uThrottle * 0.35 * smoothstep(0.55, 1.0, vT);
+    base = mix(base, vec3(0.030, 0.022, 0.015), smoothstep(0.40, 1.0, vT));
+    base *= 1.0 - 0.55 * soot * smoothstep(0.15, 1.0, vT);
+
+    // The groove between two corrugations sees less of the sky than the crest.
+    float ao = 0.5 + 0.5 * rib;
+    vec3 c = base * (uSunColor * NoL + uFill * 1.3) * ao;
+    // Same grazing Fresnel as the hull, so the lip keeps a lining.
+    c += uSunColor * pow(1.0 - NoV, 4.0)
+       * smoothstep(-0.3, 0.3, dot(N, uSunDir)) * 0.018 * (1.0 - 0.7 * soot);
+    c += uPlumeColor * uThrottle * 0.45 * smoothstep(0.5, 1.0, vT);
     gl_FragColor = vec4(c, 1.0);
   } else {
     // Inside: the glow climbs deeper into the throat as throttle comes up.
@@ -1099,8 +1314,7 @@ export class Ship {
   private readonly group = this.object3d as Group;
 
   private hullGeo: BufferGeometry;
-  private greebleBoxGeo: BufferGeometry;
-  private greebleCylGeo: BufferGeometry;
+  private greebleGeos: BufferGeometry[] = [];
   private lightGeo: BufferGeometry;
   private nozzleGeo: BufferGeometry;
   private plumeGeo: BufferGeometry;
@@ -1115,8 +1329,7 @@ export class Ship {
   private wakeMat: ShaderMaterial;
   private rcsMat: ShaderMaterial;
 
-  private greebleBoxes: InstancedMesh;
-  private greebleCyls: InstancedMesh;
+  private greebleMeshes: InstancedMesh[] = [];
   private rcsMesh: InstancedMesh;
   private plumeMesh: Mesh;
   private wakeMesh: Mesh;
@@ -1152,11 +1365,12 @@ export class Ship {
     const rng = new Rng(hashSeed(seed, 'ship'));
     const shape = new HullShape(rng.fork('hull'), ringCount);
     const occluders: Occluder[] = [];
+    const shadowers: Shadower[] = [];
 
     // ---- hull + bolt-ons, one buffer -------------------------------------
     const hb = new HullBuilder();
     const hullVerts = this.buildFuselage(hb, shape, ringCount, radial);
-    this.buildParts(hb, shape, rng.fork('parts'), occluders);
+    this.buildParts(hb, shape, rng.fork('parts'), occluders, shadowers);
     this.applyContactAO(hb, hullVerts, occluders);
     this.hullGeo = hb.toGeometry(true);
 
@@ -1203,10 +1417,32 @@ export class Ship {
       uCurvScale: { value: 1 / 2600 },
       uGrime: { value: pRng.range(0.55, 0.95) },
       uBump: { value: 0.45 },
+      // Cast-shadow spheres and window lamps. Flat arrays rather than
+      // Vector4[]: three flattens them either way and this allocates once.
+      uOcc: { value: new Float32Array(OCC_MAX * 4) },
+      uOccPart: { value: new Float32Array(OCC_MAX) },
+      uLamp: { value: new Float32Array(LAMP_MAX * 4) },
     };
+
+    // Casters, nearest first — the list is capped, so the biggest masses have
+    // to be at the front or a whip antenna could evict the cargo pannier.
+    shadowers.sort((a, b) => b.r - a.r);
+    const occArr = hullUniforms.uOcc.value;
+    const occPart = hullUniforms.uOccPart.value;
+    for (let i = 0; i < Math.min(shadowers.length, OCC_MAX); i++) {
+      const s = shadowers[i];
+      occArr[i * 4] = s.x;
+      occArr[i * 4 + 1] = s.y;
+      occArr[i * 4 + 2] = s.z;
+      occArr[i * 4 + 3] = s.r;
+      occPart[i] = s.part;
+    }
+    // Unused slots keep radius 0; the shader multiplies them out.
 
     const hullDefines: Record<string, string> = {
       SHIP_GRIME_OCTAVES: tier === 'low' ? '2' : '4',
+      SHIP_OCC_MAX: String(OCC_MAX),
+      SHIP_LAMP_MAX: String(LAMP_MAX),
     };
     if (tier !== 'low') {
       hullDefines.SHIP_RIVETS = '1';
@@ -1233,35 +1469,43 @@ export class Ship {
     this.group.add(hullMesh);
 
     // ---- greebles ---------------------------------------------------------
-    const gb = new HullBuilder();
-    addBox(gb, new Matrix4(), 1, 1, 1, 0, 0);
-    this.greebleBoxGeo = gb.toGeometry(false);
-    const gc = new HullBuilder();
-    addCylinder(gc, new Matrix4(), 0.5, 0.5, 1, 8, 0, 0);
-    this.greebleCylGeo = gc.toGeometry(false);
-
-    const boxCount = Math.round(greebleBudget * 0.72);
-    const cylCount = greebleBudget - boxCount;
-    this.greebleBoxes = this.scatterGreebles(
-      this.greebleBoxGeo,
-      shape,
-      rng.fork('greeble-box'),
-      boxCount,
-      occluders,
-      false,
-    );
-    this.greebleCyls = this.scatterGreebles(
-      this.greebleCylGeo,
-      shape,
-      rng.fork('greeble-cyl'),
-      cylCount,
-      occluders,
-      true,
-    );
-    this.group.add(this.greebleBoxes, this.greebleCyls);
+    // Two primitives over 200+ instances is why the same crescent silhouette
+    // kept appearing across the hull — the greeble equivalent of visible
+    // tiling. Five families, each a small assembly rather than a bare
+    // primitive, and each with its own aspect-ratio envelope. Cost is three
+    // extra draw calls against a 400-call budget.
+    const families: Array<{ geo: BufferGeometry; share: number; kind: GreebleKind }> = [
+      { geo: greebleHatch(), share: 0.26, kind: 'hatch' },
+      { geo: greebleBracket(), share: 0.2, kind: 'bracket' },
+      { geo: greebleRibbed(), share: 0.2, kind: 'ribbed' },
+      { geo: greebleStack(), share: 0.16, kind: 'stack' },
+      { geo: greeblePipe(), share: 0.18, kind: 'pipe' },
+    ];
+    let placed = 0;
+    const seats: Array<{ p: Vector3; r: number }> = [];
+    for (let f = 0; f < families.length; f++) {
+      const fam = families[f];
+      const n =
+        f === families.length - 1
+          ? greebleBudget - placed
+          : Math.round(greebleBudget * fam.share);
+      placed += n;
+      this.greebleGeos.push(fam.geo);
+      const mesh = this.scatterGreebles(
+        fam.geo,
+        shape,
+        rng.fork(`greeble-${fam.kind}`),
+        n,
+        occluders,
+        fam.kind,
+        seats,
+      );
+      this.greebleMeshes.push(mesh);
+      this.group.add(mesh);
+    }
 
     // ---- emissive lights --------------------------------------------------
-    this.lightGeo = this.buildLights(shape, rng.fork('lights'));
+    this.lightGeo = this.buildLights(shape, rng.fork('lights'), hullUniforms.uLamp.value);
     this.lightMat = new ShaderMaterial({
       uniforms: { uTime: { value: 0 }, uIntensity: { value: 5.0 } },
       vertexShader: LIGHTS_VERT,
@@ -1435,17 +1679,20 @@ export class Ship {
       }
     }
     // Blunt nose: a flat plate, deliberately off-centre and slightly low.
+    // Part id 0, same as the fuselage: the cap fan shares its rim vertices with
+    // the hull, so a different id would interpolate across every cap triangle
+    // and smear the paint batch and the plate scale into the nose.
     const noseC = b.vertex(
       shape.rings[0].cx * 0.5 - MAX_R * 0.08,
       shape.rings[0].cy - MAX_R * 0.06,
       -HALF - MAX_R * 0.12,
       1,
-      1,
+      0,
       1,
     );
     for (let s = 0; s < radial; s++) b.tri(noseC, grid[0][s + 1], grid[0][s]);
     const last = shape.rings[rings - 1];
-    const tailC = b.vertex(last.cx, last.cy, last.z + MAX_R * 0.05, 0.8, 1, 0.75);
+    const tailC = b.vertex(last.cx, last.cy, last.z + MAX_R * 0.05, 0.8, 0, 0.75);
     for (let s = 0; s < radial; s++) b.tri(tailC, grid[rings - 1][s], grid[rings - 1][s + 1]);
     return b.vertexCount;
   }
@@ -1483,8 +1730,35 @@ export class Ship {
     occ.push({ x: p.x, y: p.y, z: p.z, r });
   }
 
+  /**
+   * Lay a chain of shadow spheres along a bolt-on's own +Z, lifted `up` off its
+   * mounting face. A slab needs several: one fat sphere at the root casts a
+   * blob, and a fin's shadow is a stripe.
+   */
+  private cast(
+    sh: Shadower[],
+    m: Matrix4,
+    up: number,
+    span: number,
+    r: number,
+    part: number,
+    n: number,
+  ): void {
+    for (let i = 0; i < n; i++) {
+      const f = n === 1 ? 0 : (i / (n - 1) - 0.5) * span;
+      const p = new Vector3(0, up, f).applyMatrix4(m);
+      sh.push({ x: p.x, y: p.y, z: p.z, r, part });
+    }
+  }
+
   /** Bolt-ons. Deliberately hand-composed, seed-jittered: a silhouette is not a random walk. */
-  private buildParts(b: HullBuilder, shape: HullShape, rng: Rng, occ: Occluder[]): void {
+  private buildParts(
+    b: HullBuilder,
+    shape: HullShape,
+    rng: Rng,
+    occ: Occluder[],
+    sh: Shadower[],
+  ): void {
     const m = new Matrix4();
     const TOP = Math.PI * 0.5;
     const BOT = -Math.PI * 0.5;
@@ -1496,6 +1770,7 @@ export class Ship {
     this.place(shape, 0.58, TOP, MAX_R * 0.25, 0, m);
     addBox(b, m, MAX_R * 0.5, MAX_R * 0.34, SHIP_LENGTH_KM * 0.42, 0.55, 2);
     this.mark(occ, m, MAX_R * 0.6);
+    this.cast(sh, m, MAX_R * 0.17, SHIP_LENGTH_KM * 0.34, MAX_R * 0.3, 2, 3);
     for (let i = 0; i < 3; i++) {
       const t = 0.42 + i * 0.14;
       this.place(shape, t, TOP + (i % 2 === 0 ? 0.26 : -0.26), MAX_R * 0.1, 0, m);
@@ -1515,12 +1790,24 @@ export class Ship {
         4,
       );
       this.mark(occ, m, MAX_R * 0.35);
+      // A slab standing in the key is the single most valuable caster on the
+      // ship: it lays a hard stripe across the plating downlight of it.
+      this.cast(
+        sh,
+        m,
+        MAX_R * (s > 0 ? 0.42 : 0.33),
+        SHIP_LENGTH_KM * (s > 0 ? 0.12 : 0.1),
+        MAX_R * (s > 0 ? 0.3 : 0.25),
+        4,
+        3,
+      );
     }
 
     // Cargo pannier: the big one-sided mass.
     this.place(shape, 0.52, side, MAX_R * 0.35, 0, m);
     addBox(b, m, MAX_R * 0.75, MAX_R * 0.95, SHIP_LENGTH_KM * 0.34, 0.5, 5);
     this.mark(occ, m, MAX_R * 1.1);
+    this.cast(sh, m, MAX_R * 0.48, SHIP_LENGTH_KM * 0.26, MAX_R * 0.5, 5, 3);
     this.place(shape, 0.42, side + 0.24, MAX_R * 0.3, 0.1, m);
     addBox(b, m, MAX_R * 0.5, MAX_R * 0.55, SHIP_LENGTH_KM * 0.16, 0.85, 6);
     for (let i = 0; i < 3; i++) {
@@ -1531,8 +1818,9 @@ export class Ship {
     // Cockpit blister, offset to the far side from the pannier.
     const cockpitTheta = TOP + (side === 0 ? 0.55 : -0.55);
     this.place(shape, 0.19, cockpitTheta, MAX_R * 0.2, 0, m);
-    addCylinder(b, m, MAX_R * 0.46, MAX_R * 0.3, MAX_R * 0.34, 8, 0.35, 8);
+    addCylinder(b, m, MAX_R * 0.46, MAX_R * 0.3, MAX_R * 0.34, 14, 0.35, 8);
     this.mark(occ, m, MAX_R * 0.55);
+    this.cast(sh, m, MAX_R * 0.17, 0, MAX_R * 0.38, 8, 1);
 
     // Engine pylons and nacelles. One runs long — nobody matched them.
     for (let s = -1; s <= 1; s += 2) {
@@ -1541,6 +1829,7 @@ export class Ship {
       this.place(shape, 0.84, theta, MAX_R * 0.3, 0, m);
       addBox(b, m, MAX_R * 0.42, MAX_R * 0.55, SHIP_LENGTH_KM * 0.16 * long, 0.6, 9);
       this.mark(occ, m, MAX_R * 0.7);
+      this.cast(sh, m, MAX_R * 0.28, SHIP_LENGTH_KM * 0.1, MAX_R * 0.34, 9, 2);
 
       const nac = new Vector3();
       const nacN = new Vector3();
@@ -1555,10 +1844,40 @@ export class Ship {
       // Nacelle body: built along its own +Y then laid onto the thrust axis.
       const bm = new Matrix4().makeBasis(right, dir, new Vector3().copy(up).negate());
       bm.setPosition(nac.x, nac.y, nac.z);
-      addCylinder(b, bm, MAX_R * 0.42, MAX_R * 0.36, SHIP_LENGTH_KM * 0.16 * long, 12, 0.7, 10);
+      // 20 segments, not 8: at hero distance the octagon's facets were
+      // countable along the silhouette.
+      const nacLen = SHIP_LENGTH_KM * 0.16 * long;
+      addCylinder(b, bm, MAX_R * 0.42, MAX_R * 0.36, nacLen, 20, 0.7, 10);
       this.mark(occ, bm, MAX_R * 0.6);
+      this.cast(sh, bm, nacLen * 0.5, 0, MAX_R * 0.44, 10, 1);
 
-      const mouth = new Vector3().copy(nac).addScaledVector(dir, SHIP_LENGTH_KM * 0.16 * long);
+      // Hardware on the nacelle. The scatter can never reach it — it rejects
+      // anything inside an occluder sphere and the nacelle is one big sphere —
+      // so it was the only surface on the ship with no detail at all. Hand
+      // placement beats a second scatter pass here: these are real parts.
+      const ringPart = 33 + (s > 0 ? 0 : 1);
+      for (let i = 0; i < 3; i++) {
+        const at = nacLen * (0.18 + i * 0.28);
+        const rm = new Matrix4().copy(bm).multiply(new Matrix4().makeTranslation(0, at, 0));
+        // Girth band, slightly proud of the skin.
+        addCylinder(b, rm, MAX_R * 0.44, MAX_R * 0.44, nacLen * 0.035, 20, 0.85, ringPart);
+        // A junction box hung off the band's outboard face.
+        const jm = new Matrix4()
+          .copy(rm)
+          .multiply(new Matrix4().makeRotationY(0.9 + i * 2.1))
+          .multiply(new Matrix4().makeTranslation(MAX_R * 0.4, nacLen * 0.02, 0))
+          .multiply(RADIAL_MOUNT);
+        addBox(b, jm, MAX_R * 0.16, MAX_R * 0.09, nacLen * (0.1 + 0.05 * i), 0.95, ringPart);
+      }
+      // A conduit running the length of the can, top outboard.
+      const cm = new Matrix4()
+        .copy(bm)
+        .multiply(new Matrix4().makeRotationY(2.2))
+        .multiply(new Matrix4().makeTranslation(MAX_R * 0.38, nacLen * 0.5, 0))
+        .multiply(RADIAL_MOUNT);
+      addBox(b, cm, MAX_R * 0.1, MAX_R * 0.07, nacLen * 0.72, 0.9, ringPart);
+
+      const mouth = new Vector3().copy(nac).addScaledVector(dir, nacLen);
       this.enginePos.push(mouth);
       this.engineDir.push(dir);
     }
@@ -1568,10 +1887,12 @@ export class Ship {
       this.place(shape, 0.72, BOT + s * 0.34, MAX_R * 0.15, 0, m);
       addBox(b, m, MAX_R * 0.34, MAX_R * 0.3, SHIP_LENGTH_KM * 0.09, 0.8, 11);
       this.mark(occ, m, MAX_R * 0.4);
+      this.cast(sh, m, MAX_R * 0.15, SHIP_LENGTH_KM * 0.06, MAX_R * 0.28, 11, 1);
     }
     this.place(shape, 0.26, BOT, MAX_R * 0.15, 0, m);
     addBox(b, m, MAX_R * 0.45, MAX_R * 0.26, SHIP_LENGTH_KM * 0.08, 0.85, 11);
     this.mark(occ, m, MAX_R * 0.4);
+    this.cast(sh, m, MAX_R * 0.13, SHIP_LENGTH_KM * 0.05, MAX_R * 0.3, 11, 1);
 
     // Ventral intake scoop under the nose — also the re-entry leading edge.
     this.place(shape, 0.13, BOT + 0.15, MAX_R * 0.1, 0, m);
@@ -1586,8 +1907,11 @@ export class Ship {
       .copy(m)
       .multiply(new Matrix4().makeTranslation(0, MAX_R * 0.85, 0))
       .multiply(new Matrix4().makeRotationX(0.35));
-    addCylinder(b, dish, MAX_R * 0.34, MAX_R * 0.06, MAX_R * 0.16, 10, 0.95, 13);
+    addCylinder(b, dish, MAX_R * 0.34, MAX_R * 0.06, MAX_R * 0.16, 14, 0.95, 13);
     this.mark(occ, m, MAX_R * 0.25);
+    // Mast and dish: a thin pole throws a thin shadow, the dish a round one.
+    this.cast(sh, m, MAX_R * 0.45, 0, MAX_R * 0.08, 13, 1);
+    this.cast(sh, m, MAX_R * 0.9, 0, MAX_R * 0.2, 13, 1);
 
     // Whip antennae.
     for (let i = 0; i < 2; i++) {
@@ -1599,6 +1923,7 @@ export class Ship {
     this.place(shape, 0.93, TOP, MAX_R * 0.15, 0, m);
     addBox(b, m, MAX_R * 0.1, MAX_R * 0.85, SHIP_LENGTH_KM * 0.09, 0.7, 15);
     this.mark(occ, m, MAX_R * 0.4);
+    this.cast(sh, m, MAX_R * 0.45, SHIP_LENGTH_KM * 0.07, MAX_R * 0.26, 15, 3);
 
     // Patch plates: welded on later, over damage nobody logged.
     const patches = rng.int(4, 6);
@@ -1651,19 +1976,32 @@ export class Ship {
     rng: Rng,
     count: number,
     occ: Occluder[],
-    cylinders: boolean,
+    kind: GreebleKind,
+    seats: Array<{ p: Vector3; r: number }>,
   ): InstancedMesh {
-    const accepted: Vector3[] = [];
+    // Per-family footprint envelope. A pipe is square in plan and stands up; a
+    // ribbed strip is long and low. Widening these ranges is half of what
+    // stops the scatter reading as one repeated silhouette.
+    const env =
+      kind === 'pipe'
+        ? { w: 0.085, lo: 1.0, hi: 1.0, h: 0.16, hlo: 0.5, hhi: 1.6 }
+        : kind === 'ribbed'
+          ? { w: 0.13, lo: 0.5, hi: 3.4, h: 0.06, hlo: 0.5, hhi: 1.4 }
+          : kind === 'bracket'
+            ? { w: 0.12, lo: 0.6, hi: 2.2, h: 0.1, hlo: 0.6, hhi: 1.8 }
+            : kind === 'stack'
+              ? { w: 0.14, lo: 0.6, hi: 1.7, h: 0.09, hlo: 0.7, hhi: 1.7 }
+              : { w: 0.17, lo: 0.55, hi: 2.6, h: 0.05, hlo: 0.5, hhi: 1.5 };
     const mats: Matrix4[] = [];
     const wear: number[] = [];
     const part: number[] = [];
-    const minDist = 0.0011;
     const p = new Vector3();
     const m = new Matrix4();
     const scaleM = new Matrix4();
 
     let attempts = 0;
-    while (accepted.length < count && attempts < count * 40) {
+    let taken = 0;
+    while (taken < count && attempts < count * 40) {
       attempts++;
       const t = rng.range(0.08, 0.97);
       // Biased away from straight down: nobody bolts equipment where the
@@ -1673,9 +2011,26 @@ export class Ship {
         : rng.range(Math.PI + 0.75, Math.PI * 2 - 0.75);
       shape.sample(t, theta, p);
 
+      // Size is drawn before the rejection test, because spacing has to know
+      // how big the thing is. A fixed 1.1 m minimum let a 1.8 m wide part sit
+      // on top of its neighbour, which is why greebles were intersecting.
+      const s = rng.power(0.3, 1.0, -1.6);
+      // Greebles hug the hull: tall boxes read as debris, not as hardware.
+      const ratio = rng.range(env.lo, env.hi);
+      const sx = MAX_R * env.w * s * (kind === 'ribbed' ? 1 : ratio);
+      const sz = MAX_R * env.w * s * (kind === 'ribbed' ? ratio : rng.range(0.7, 1.6));
+      const sy = MAX_R * env.h * s * rng.range(env.hlo, env.hhi);
+      const yaw = rng.range(0, Math.PI * 2);
+      const rad = Math.max(sx, kind === 'pipe' ? sx : sz) * 0.5;
+
       let ok = true;
-      for (const a of accepted) {
-        if (a.distanceToSquared(p) < minDist * minDist) {
+      // `seats` is shared across every greeble family: rejecting only against
+      // your own family lets five scatters land on top of each other.
+      for (const a of seats) {
+        // Size-aware, but with a fixed floor: hardware that touches its
+        // neighbour reads as a pile, not as a fitted-out hull.
+        const gap = (rad + a.r) * 0.95 + 0.0005;
+        if (a.p.distanceToSquared(p) < gap * gap) {
           ok = false;
           break;
         }
@@ -1691,17 +2046,20 @@ export class Ship {
       }
       if (!ok) continue;
 
-      accepted.push(p.clone());
-      this.place(shape, t, theta, 0.00006, rng.range(0, Math.PI * 2), m);
-      const s = rng.power(0.35, 1.0, -1.6);
-      // Greebles hug the hull: tall boxes read as debris, not as hardware.
-      const sx = MAX_R * (cylinders ? 0.09 : 0.15) * s * rng.range(0.7, 1.5);
-      const sy = MAX_R * 0.075 * s * rng.range(0.4, 1.5);
-      const sz = MAX_R * (cylinders ? 0.09 : 0.15) * s * rng.range(0.7, 2.4);
-      scaleM.makeScale(sx, sy, cylinders ? sx : sz);
+      seats.push({ p: p.clone(), r: rad });
+      taken++;
+      // Seat them *into* the shell rather than floating them above it. The
+      // mounting face is flat and the hull is not, so a part that only kisses
+      // the plating shows daylight under its corners; sinking a fifth of its
+      // own height buries that gap and gives the base a contact line.
+      this.place(shape, t, theta, sy * 0.22, yaw, m);
+      scaleM.makeScale(sx, sy, kind === 'pipe' ? sx : sz);
       mats.push(new Matrix4().multiplyMatrices(m, scaleM));
       wear.push(rng.range(0.4, 1.0));
-      part.push(20 + rng.int(0, 11));
+      // 40+: patch plates run to 21 and the nacelle hardware to 34, and part id
+      // now picks the plate scale as well as the paint batch, so they must not
+      // collide.
+      part.push(40 + rng.int(0, 11));
     }
 
     const n = mats.length;
@@ -1715,14 +2073,24 @@ export class Ship {
       wearArr[i] = wear[i];
       partArr[i] = part[i];
     }
-    mesh.count = Math.max(n, 1);
+    // A starved family must draw nothing: the instance buffer is allocated with
+    // at least one slot and an unwritten slot is the identity matrix, which
+    // would put a one-kilometre greeble through the middle of the ship.
+    mesh.count = n;
+    mesh.visible = n > 0;
     mesh.instanceMatrix.needsUpdate = true;
     geo.setAttribute('aWear', new InstancedBufferAttribute(wearArr, 1));
     geo.setAttribute('aPart', new InstancedBufferAttribute(partArr, 1));
     return mesh;
   }
 
-  private buildLights(shape: HullShape, rng: Rng): BufferGeometry {
+  /**
+   * @param lamps Filled with (x, y, z, strength) for the strongest emitters, in
+   *        object space, so the hull shader can pool their light on the plating
+   *        around them. An emitter that lights nothing reads as a sticker.
+   */
+  private buildLights(shape: HullShape, rng: Rng, lamps: Float32Array): BufferGeometry {
+    let lampCount = 0;
     const pos: number[] = [];
     const nrm: number[] = [];
     const uv: number[] = [];
@@ -1745,10 +2113,20 @@ export class Ship {
       g: number,
       bl: number,
       k: number,
+      lamp = 0,
     ): void => {
       shape.sample(t, theta, p);
       shape.normal(t, theta, n);
       p.addScaledVector(n, 0.00018);
+      if (lamp > 0 && lampCount < LAMP_MAX) {
+        // Sits 40 cm proud of the plating so the pool has a real solid angle:
+        // a source flush with the surface only ever grazes it.
+        lamps[lampCount * 4] = p.x + n.x * 0.0004;
+        lamps[lampCount * 4 + 1] = p.y + n.y * 0.0004;
+        lamps[lampCount * 4 + 2] = p.z + n.z * 0.0004;
+        lamps[lampCount * 4 + 3] = lamp;
+        lampCount++;
+      }
       // Long axis of a window runs along the hull, like every porthole ever.
       right.copy(AXIS_Z).addScaledVector(n, -AXIS_Z.dot(n));
       if (right.lengthSq() < 1e-8) right.set(0, 1, 0).addScaledVector(n, -n.y);
@@ -1775,21 +2153,50 @@ export class Ship {
 
     const TOP = Math.PI * 0.5;
     // Cockpit glass: the one warm rectangle you can read the ship's scale by.
-    quad(0.17, TOP + 0.55, 0.0018, 0.0009, 1.0, 0.58, 0.2, 1);
+    quad(0.17, TOP + 0.55, 0.0018, 0.0009, 1.0, 0.58, 0.2, 1, 5.0);
     quad(0.2, TOP + 0.9, 0.0011, 0.0007, 1.0, 0.55, 0.18, 1);
-    // Crew windows along the flanks.
-    for (let i = 0; i < 4; i++) {
-      quad(0.4 + i * 0.09, 0.35, 0.0009, 0.0006, 1.0, 0.6, 0.24, 1);
+    // Crew windows along the starboard flank. Evenly spaced, identically sized
+    // windows read as a bus: the spacing is grouped into a two-and-three with a
+    // gap where the frame bulkhead is, the sizes step, and one port in the run
+    // is a small round scuttle rather than a window.
+    const starboard: Array<[number, number, number, number]> = [
+      [0.39, 0.0011, 0.0007, 1],
+      [0.435, 0.0008, 0.0006, 1],
+      [0.53, 0.0009, 0.0006, 1],
+      [0.565, 0.00055, 0.00055, 0],
+      [0.6, 0.0012, 0.00065, 1],
+    ];
+    for (let i = 0; i < starboard.length; i++) {
+      const [t, w, h, k] = starboard[i];
+      quad(
+        t,
+        0.35 + (i % 2 === 0 ? 0.0 : 0.12),
+        w,
+        h,
+        1.0,
+        0.6,
+        0.24,
+        k,
+        i === 0 ? 3.2 : i === 2 ? 3.6 : i === 4 ? 3.4 : 0,
+      );
     }
-    for (let i = 0; i < 3; i++) {
-      quad(0.45 + i * 0.1, Math.PI - 0.4, 0.0009, 0.0006, 1.0, 0.6, 0.24, 1);
-    }
+    // Port flank: fewer, and staggered off the starboard run so a three-quarter
+    // view never sees two matching rows.
+    quad(0.44, Math.PI - 0.42, 0.001, 0.00065, 1.0, 0.6, 0.24, 1, 3.2);
+    quad(0.485, Math.PI - 0.3, 0.0006, 0.0006, 1.0, 0.6, 0.24, 0);
+    quad(0.58, Math.PI - 0.45, 0.0013, 0.0006, 1.0, 0.6, 0.24, 1);
     // Running lights and beacons — one cold accent, the rest amber.
     quad(0.86, 0.16, 0.0007, 0.0007, 1.0, 0.35, 0.1, 0);
     quad(0.86, Math.PI - 0.16, 0.0007, 0.0007, 0.3, 0.75, 1.0, 0);
     quad(0.06, TOP, 0.0005, 0.0005, 1.0, 0.45, 0.12, 0);
     quad(0.95, TOP, 0.0006, 0.0006, 1.0, 0.4, 0.12, 0);
     quad(0.55, -TOP, 0.0006, 0.0006, 1.0, 0.3, 0.08, 0);
+    // Floodlight over the cargo pannier's hatch: the only cold light on the
+    // hull, and the reason the pannier is not just a black slab at night. Not
+    // registered as a lamp: the hull's pooling term is authored in uAmber, and
+    // one cold pool among five warm ones would need a second colour uniform for
+    // a light that covers two square metres.
+    quad(0.52, TOP - 1.15, 0.0008, 0.0005, 0.6, 0.78, 1.0, 0);
 
     const g = new BufferGeometry();
     g.setAttribute('position', new BufferAttribute(new Float32Array(pos), 3));
@@ -2024,10 +2431,12 @@ export class Ship {
     pu.uDiamonds.value = smoothstep(0.5, 0.92, th) * (0.5 + 0.5 * boost);
     pu.uThrottle.value = th;
     this.plumeMesh.visible = th > 0.01 || boost > 0.01;
-    // The hull's fake plume light must track the plume's colour.
+    // The hull's fake plume light must track the plume's colour. Weighted the
+    // same way the plume itself is: throttle alone must not wash the blue out,
+    // or the one cold accent on the ship goes white at cruise.
     (hu.uPlumeColor.value as Color)
       .setRGB(0.16, 0.36, 1.0)
-      .lerp(PLUME_HOT, clamp01(th * 0.7 + boost * 0.95));
+      .lerp(PLUME_HOT, clamp01(th * 0.28 + boost * 0.85));
 
     // RCS -------------------------------------------------------------------
     const cmd = state.rcs;
@@ -2066,8 +2475,7 @@ export class Ship {
 
   dispose(): void {
     this.hullGeo.dispose();
-    this.greebleBoxGeo.dispose();
-    this.greebleCylGeo.dispose();
+    for (const g of this.greebleGeos) g.dispose();
     this.lightGeo.dispose();
     this.nozzleGeo.dispose();
     this.plumeGeo.dispose();
@@ -2082,8 +2490,7 @@ export class Ship {
     this.wakeMat.dispose();
     this.rcsMat.dispose();
 
-    this.greebleBoxes.dispose();
-    this.greebleCyls.dispose();
+    for (const m of this.greebleMeshes) m.dispose();
     this.rcsMesh.dispose();
 
     // The integrator added object3d to the scene; removing it is their call.
@@ -2096,13 +2503,28 @@ export class Ship {
 // ---------------------------------------------------------------------------
 
 const HERO_STATE: ShipState = {
-  throttle: 0.62,
-  boost: 0.18,
+  throttle: 0.68,
+  // Light on the boost: it is what shifts the plume white, and the plume is the
+  // only cold accent on the ship.
+  boost: 0.12,
   heating: 0,
   // Mostly a down-translation, so the dorsal nozzles fire broadside to the
   // hero camera. A thruster firing straight at the lens is not a detail.
   rcs: new Vector3(-0.24, -0.7, 0),
 };
+
+/** Camera direction in SHIP-LOCAL space, and how far back it sits, in km. */
+const HERO_CAM_DIR = new Vector3(0.714, 0.333, 0.616).normalize();
+const HERO_CAM_DIST = 0.078;
+/**
+ * Roll applied to the ship about the view axis. The axis runs through the ship
+ * and the camera, so this rotates the composition on screen without moving the
+ * camera relative to the hull: it buys the diagonal for free.
+ */
+const HERO_ROLL = 0.34;
+/** Where the ship's centre lands, in NDC. Dead centre is a turntable render. */
+const HERO_OFFSET_X = 0.16;
+const HERO_OFFSET_Y = 0.12;
 
 /**
  * Register the ship's hero frame.
@@ -2112,12 +2534,21 @@ const HERO_STATE: ShipState = {
  */
 export function registerShipShots(existing?: Ship): void {
   let owned: Ship | null = null;
+  let resolved: Ship | null = null;
+
+  const camPos = new Vector3();
+  const target = new Vector3();
+  const axisX = new Vector3();
+  const axisY = new Vector3();
+  const axisZ = new Vector3();
+  const worldUp = new Vector3(0, 1, 0);
 
   registerShot({
     name: 'ship-hero',
     description:
-      'Three-quarter view of the ship, key light raking across the hull so panel lines, ' +
-      'rivets and edge wear read. Engines lit at cruise, RCS puffing, dark background.',
+      'Rear three-quarter of the ship under a raking key, engines lit at cruise with both ' +
+      'bell throats and the plume in frame, RCS puffing, plating and edge wear reading ' +
+      'across the flank. Composed on the diagonal with the plume exiting frame.',
     apply(ctx) {
       let ship = existing;
       if (!ship) {
@@ -2125,30 +2556,79 @@ export function registerShipShots(existing?: Ship): void {
         ship = owned;
         if (!ship.object3d.parent) ctx.scene.add(ship.object3d);
       }
-      ship.object3d.position.set(0, 0, 0);
-      // Banked slightly: a level ship reads as an orthographic diagram.
-      ship.object3d.rotation.set(0.04, 0.34, -0.16);
+      resolved = ship;
 
-      // Key roughly 60 degrees off the camera and high: the top plating reads
+      ship.object3d.position.set(0, 0, 0);
+      ship.object3d.rotation.set(0.10, 0.34, -0.13);
+      ship.object3d.updateMatrixWorld(true);
+
+      // The camera is placed in SHIP-LOCAL space and then rotated into the
+      // world, because what matters is the angle onto the hull, not a world
+      // coordinate. Previously it sat forward of both bell mouths, so even with
+      // the drive lit you could only ever see the outside of the nozzles.
+      // 52 degrees off the thrust axis puts both throats and the plume in
+      // frame while the starboard flank is still nearly side-on.
+      camPos.copy(HERO_CAM_DIR).multiplyScalar(HERO_CAM_DIST);
+      camPos.applyQuaternion(ship.object3d.quaternion);
+
+      // Roll the hull about the view axis: pure screen-space rotation, so the
+      // lighting on the hull is untouched and the ship runs on a 35 degree
+      // diagonal instead of lying flat across the middle of the frame.
+      ship.object3d.rotateOnWorldAxis(_v.copy(camPos).normalize(), HERO_ROLL);
+      ship.object3d.updateMatrixWorld(true);
+
+      // Key roughly 80 degrees off the camera and high: the top plating reads
       // fully lit, the near flank is grazed, and a hard terminator runs down
-      // the hull where the panel gaps cast into themselves.
-      ship.sunDirection.set(0.30, 0.80, -0.52).normalize();
+      // the hull where the fins and pylons now cast across the plating.
+      ship.sunDirection.set(0.40, 0.74, -0.54).normalize();
       ship.sunColor.setRGB(1.0, 0.93, 0.82).multiplyScalar(3.0);
       // Cold planetshine off a world just out of frame — the only thing
-      // separating the shadow side from the background.
+      // separating the shadow side from the background, and now also the
+      // environment the hull's metals reflect.
       ship.fillColor.setRGB(0.11, 0.14, 0.22);
 
       // 0.05 km near plane: the camera cannot come closer than 50 m, so the
       // hero framing is a telephoto rather than a wide.
-      ctx.camera.fov = 26;
+      ctx.camera.fov = 22;
       ctx.camera.updateProjectionMatrix();
-      ctx.camera.position.set(0.052, 0.020, -0.058);
-      ctx.camera.lookAt(0, 0.0012, -0.001);
+      ctx.camera.position.copy(camPos);
+
+      // Push the subject off centre by aiming past it. Half-extents of the
+      // frame at the subject's distance, so the offsets read directly in NDC.
+      axisZ.copy(camPos).normalize();
+      axisX.crossVectors(worldUp, axisZ).normalize();
+      axisY.crossVectors(axisZ, axisX);
+      const hy = HERO_CAM_DIST * Math.tan((ctx.camera.fov * Math.PI) / 360);
+      const hx = hy * Math.max(ctx.camera.aspect, 1e-3);
+      target
+        .set(0, 0, 0)
+        .addScaledVector(axisX, -HERO_OFFSET_X * hx)
+        .addScaledVector(axisY, -HERO_OFFSET_Y * hy);
+      ctx.camera.lookAt(target);
+      ctx.camera.updateMatrixWorld(true);
+
+      // On the in-frame light source that section 6 asks for: the key itself
+      // cannot be in shot. A star inside a 38 degree frame sits within 20
+      // degrees of the view axis, which is a silhouette, not a raking key —
+      // and this shot exists to show plating. The emitter carrying that job is
+      // the drive: with the engines actually lit, both bell throats and the
+      // plume core sit well above PostFX's bright-pass threshold, in the lower
+      // left third, and the plume runs out of frame. A separate key-star
+      // sprite would have to live in the shared scene, and `Shot` has no
+      // teardown hook to take it down again for the next shot.
+
+      // Spool the drive before the first frame is captured. Every visible value
+      // on this ship is critically damped towards its command, so a shot that
+      // starts from rest photographs a powered-down hull no matter what state
+      // it asked for — which is exactly what the last review caught.
+      for (let i = 0; i < 12; i++) ship.update(0.25, ctx, HERO_STATE);
     },
     update(dt, ctx) {
-      // Only drive it when we own it — double-updating would run the RCS
-      // valves at twice the rate the integrator intended.
-      if (owned) owned.update(dt, ctx, HERO_STATE);
+      // Drive whichever ship the shot resolved. When the integrator supplies
+      // one, Pilot has already stood down for the duration of the shot, so
+      // this is the only update the hull gets — without it the throttle,
+      // plume, nozzle glow and RCS all stay at their constructor zero.
+      if (resolved) resolved.update(dt, ctx, HERO_STATE);
     },
   });
 }

@@ -50,6 +50,7 @@ import {
   ClampToEdgeWrapping,
   Color,
   FrontSide,
+  Group,
   HalfFloatType,
   LinearFilter,
   Matrix3,
@@ -77,9 +78,9 @@ import type { EngineContext } from '@/core/Engine';
 import type { QualitySettings } from '@/core/Config';
 import type { CloudSpec, PlanetSpec } from '@/gen/types';
 import { Rng } from '@/math/rng';
-import { registerShot } from '@/game/Shots';
+import { activeShotName, registerShot } from '@/game/Shots';
 import { registerShaderChunks } from '@/shaders/chunks';
-import type { ViewState } from '@/render/ViewState';
+import { MutableViewState, type ViewState } from '@/render/ViewState';
 
 const TAU = Math.PI * 2;
 
@@ -362,6 +363,23 @@ void cl_march(
   // budget over that smears the near field into fog, so there we keep the near
   // step tight and let the geometric growth reach the horizon instead.
   float stepLen = mix(max(uStepLen, len / float(uMaxSteps)), uStepLen, uInside);
+  // Geometric growth with no ceiling is how a raymarcher quietly stops sampling
+  // the medium it is marching. At uStepGrowth = 1.12 the fortieth step is 93x
+  // the first; on a deck only forty kilometres thick that is more than two layer
+  // thicknesses of *path* per step, and the far half of the ray walks straight
+  // over the cloud.
+  //
+  // The quantity that must stay bounded is not the step, though — it is how far
+  // the step climbs through the deck. A ray running along the layer can take a
+  // 500 km step without missing anything; a ray crossing it cannot take 50. So
+  // cap the step at three quarters of a layer of *vertical* travel, which is
+  // the same number divided by the ray's obliquity where it enters. Radial
+  // obliquity is largest at the ends of a chord and zero at closest approach,
+  // so the entry value is the conservative one to size from. Floored on the
+  // initial step, which leaves the uniform path — where the step is already cut
+  // to its own segment — behaving exactly as before.
+  float graze = abs(dot(rd, normalize(ro + rd * tStart)));
+  float stepCap = max(stepLen, (uRTop - uRBase) * 0.75 / max(graze, 0.04));
   float t = tStart + stepLen * jitter;
   vec3 lastLit = vec3(0.0);
 
@@ -375,7 +393,7 @@ void cl_march(
     // grown one silently inflates every optical depth by the growth factor.
     float ds = stepLen;
     t += stepLen;
-    stepLen *= uStepGrowth;
+    stepLen = min(stepLen * uStepGrowth, stepCap);
     if (h <= 0.0 || h >= 1.0) continue;
 
     // Erosion and self-shadowing are only paid for on the visible front
@@ -675,6 +693,8 @@ export class CloudRenderer {
   private readonly rPlanet: number;
   private readonly rBase: number;
   private readonly rTop: number;
+  /** Radius of the hull the shell is actually drawn on — see `geometry`. */
+  private readonly rHull: number;
   private readonly layer: number;
   private readonly featureKm: number;
   private readonly detailKm: number;
@@ -738,6 +758,7 @@ export class CloudRenderer {
     // a little above the surface so the vacuum gap can be skipped analytically.
     this.rBase = planet.radius + c.altitude * 0.3;
     this.rTop = planet.radius + c.altitude * 2;
+    this.rHull = this.rTop * 1.004;
     this.layer = this.rTop - this.rBase;
 
     // Feature scale tracks the body: a 2000 km moon should not get Earth-sized
@@ -864,7 +885,7 @@ export class CloudRenderer {
     // --- shell meshes ------------------------------------------------------
     // The hull is inflated so a 64x32 tessellation never clips inside the
     // analytic sphere the shader actually intersects.
-    this.geometry = new SphereGeometry(this.rTop * 1.004, 64, 32);
+    this.geometry = new SphereGeometry(this.rHull, 64, 32);
 
     this.marchMaterial = new ShaderMaterial({
       uniforms: this.u,
@@ -1046,12 +1067,26 @@ export class CloudRenderer {
     u.uSigmaE.value = (7.5 / this.layer) * this.opticalDepthScale;
     u.uSigmaL.value = (u.uSigmaE.value as number) * 0.4;
 
-    const inside = view.distance < this.rTop * 1.002;
+    // Measured against the *hull*, not against rTop: the hull is what carries
+    // the shader, so the moment the camera crosses it the front faces are
+    // behind the viewer and a FrontSide shell draws nothing at all. The old
+    // rTop * 1.002 sat below the hull's rTop * 1.004 and left a band a few
+    // kilometres deep where the deck simply vanished. Erring outwards is free —
+    // both faces of the hull lie on the same view ray, so the march is
+    // identical either way; only a gap is fatal.
+    const inside = view.distance < this.rHull * 1.01;
     // Close to the deck the ray runs hundreds of kilometres almost tangentially.
     // Spreading a fixed budget over that distance turns the near field — the
     // only part with any resolvable detail — into flat fog, so from here on in
     // we keep the near step tight and let geometric growth reach the horizon.
-    const closeIn = view.distance < this.rTop * 1.12;
+    //
+    // "Close" has to be measured in layer thicknesses, not as a fraction of
+    // rTop. The old rTop * 1.12 is 12% of the *planet* radius: on an Earth-sized
+    // body it fired 760 km above a 40 km deck, in a framing where the segment
+    // clipping already sizes the uniform step correctly, and switched the
+    // growth on for nothing. Eight layers of standoff is where the near field
+    // stops out-resolving the horizon.
+    const closeIn = view.distance - this.rTop < this.layer * 8;
     u.uStepGrowth.value = closeIn ? 1.12 : 1;
     u.uInside.value = closeIn ? 1 : 0;
     // Outside: front faces, depth-tested, so nearer geometry occludes us
@@ -1157,11 +1192,222 @@ const shotDir = new Vector3();
 const shotAim = new Vector3();
 
 /**
+ * Stand-in body for the hero shots.
+ *
+ * A cloud deck is not a self-supporting image. Every one of its readable
+ * features — the shadow a tower throws on the deck below it, the hole a clear
+ * lane punches through to the ground, the silhouette of the limb — needs a
+ * surface underneath. Marched over empty space the deck reads as smoke, and
+ * `getShadowTexture()`, which is half of what this module produces, has nothing
+ * to fall on at all.
+ *
+ * This is a shot fixture, not a planet renderer: one sphere, one fBm elevation
+ * field driving the spec's own palette, a hard terminator, and the cloud shadow
+ * map sampled through this module's own published helper. `render/Planet.ts`
+ * owns the real thing and this must never grow towards it.
+ */
+const GROUND_VS = /* glsl */ `
+#include <common>
+#include <logdepthbuf_pars_vertex>
+varying vec3 vLocal;
+void main() {
+  vLocal = position;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  #include <logdepthbuf_vertex>
+}
+`;
+
+const GROUND_FS = /* glsl */ `
+#include <common>
+#include <onespace_noise>
+#include <onespace_color>
+#include <logdepthbuf_pars_fragment>
+${CLOUD_SHADOW_SAMPLE_GLSL}
+uniform vec3      uSunDir;
+uniform vec3      uSunColor;
+uniform vec3      uLow;
+uniform vec3      uMid;
+uniform vec3      uHigh;
+uniform vec3      uPolar;
+uniform vec3      uSeed;
+uniform sampler2D uCloudShadow;
+uniform float     uHasShadow;
+varying vec3 vLocal;
+
+void main() {
+  #include <logdepthbuf_fragment>
+  vec3 n = normalize(vLocal);
+
+  // Three bands, decades apart, because a smooth ground under a detailed deck
+  // reads as a paper cut-out and takes the deck down with it. The coarse band
+  // is continents (~600 km lobes on an Earth-sized body), the middle one is
+  // relief, the fine one is grain at roughly a dozen kilometres — a few pixels
+  // at the closer of the two framings, which is where ARCHITECTURE section 6's
+  // "no flat gradients" bites.
+  float e = os_fbm(n * 3.1 + uSeed, 5, 2.13, 0.52) * 0.5 + 0.5;
+  e += os_fbm(n * 30.0 + uSeed, 3, 2.4, 0.5) * 0.5 * 0.14;
+  e += os_fbm(n * 260.0 + uSeed, 2, 2.5, 0.5) * 0.5 * 0.06;
+  e = clamp(e, 0.0, 1.0);
+
+  vec3 albedo = mix(uLow, uMid, smoothstep(0.34, 0.53, e));
+  albedo = mix(albedo, uHigh, smoothstep(0.56, 0.80, e));
+  albedo = mix(albedo, uPolar, smoothstep(0.74, 0.96, abs(n.y)));
+
+  float ndl = dot(n, uSunDir);
+  // No ambient fill in space. The penumbra is one degree of geometric softening
+  // and nothing more; past it the ground is black and the deck above it is the
+  // only thing still carrying light.
+  float day = smoothstep(-0.012, 0.05, ndl);
+  // Sampled unconditionally and selected afterwards: a texture fetch inside
+  // divergent control flow has undefined derivatives, and the fetch is one tap.
+  float shadow = mix(1.0, os_cloudShadowSample(uCloudShadow, n).r, step(0.5, uHasShadow));
+
+  vec3 c = albedo * uSunColor * max(ndl, 0.0) * day * shadow;
+  // Planetshine only, and barely: enough that the night limb has an edge
+  // against space rather than a hard cut.
+  c += albedo * vec3(0.010, 0.015, 0.028) * (1.0 - day);
+
+  gl_FragColor = vec4(c, 1.0);
+  #include <colorspace_fragment>
+  gl_FragColor.rgb = os_dither(gl_FragColor.rgb, gl_FragCoord.xy);
+}
+`;
+
+/** The two shots this file owns. Nothing else may see the stage. */
+const CLOUD_SHOT_NAMES = ['clouds-orbit', 'clouds-full-disc'];
+
+/**
+ * Holder for the stage, which has to vanish the instant the camera moves on.
+ *
+ * The stage lives in the review gallery, and the gallery is switched on for
+ * every subsystem whose subject is a fixture — rings, nebula, atmosphere. Park
+ * a planet-sized sphere at its origin and leave it there and the ring hero
+ * comes back with a wall through it. `Shots` has no "deactivated" callback to
+ * hang the teardown on, so the group settles its own visibility during the
+ * scene-graph walk the renderer makes at the top of every frame — the last
+ * thing that happens before culling, and the only hook that runs whether this
+ * module's shot is active or not.
+ */
+class StageGroup extends Group {
+  override updateMatrixWorld(force?: boolean): void {
+    this.visible = CLOUD_SHOT_NAMES.includes(activeShotName() ?? '');
+    super.updateMatrixWorld(force);
+  }
+}
+
+/**
+ * The subject of the two hero shots: a cloud deck, and something for it to sit
+ * on and cast shadows across.
+ *
+ * The review gallery is a bare group — it holds a nebula and a ring plane and
+ * nothing else — so a shot that only moves the camera photographs empty space.
+ * Building the subject here keeps the whole of "what the clouds hero shot is"
+ * inside this file, which is also what makes the shot reviewable: nothing about
+ * these frames depends on how another module happens to be wired this week.
+ */
+class CloudShotStage {
+  readonly clouds: CloudRenderer;
+
+  private readonly group = new StageGroup();
+  private readonly ground: Mesh;
+  private readonly groundGeometry: SphereGeometry;
+  private readonly groundMaterial: ShaderMaterial;
+  private readonly view = new MutableViewState();
+  private readonly host: Object3D;
+  private readonly sunDir: Vector3;
+  /** Matches the key light `registry.ts` gives the rest of the gallery. */
+  private readonly sunColor = new Color(1, 0.94, 0.86);
+  // Preallocated: update() runs every frame and ARCHITECTURE section 5 forbids
+  // allocating there.
+  private readonly hostPos = new Vector3();
+  private readonly camLocal = new Vector3();
+
+  constructor(planet: PlanetSpec, host: Object3D, sun: Vector3, quality: QualitySettings) {
+    registerShaderChunks();
+    this.host = host;
+    this.sunDir = sun.clone().normalize();
+    this.clouds = new CloudRenderer(planet, quality);
+
+    const p = planet.palette;
+    this.groundMaterial = new ShaderMaterial({
+      uniforms: {
+        uSunDir: { value: this.sunDir },
+        uSunColor: { value: this.sunColor },
+        uLow: { value: new Color().setRGB(p.low[0], p.low[1], p.low[2]) },
+        uMid: { value: new Color().setRGB(p.mid[0], p.mid[1], p.mid[2]) },
+        uHigh: { value: new Color().setRGB(p.high[0], p.high[1], p.high[2]) },
+        uPolar: { value: new Color().setRGB(p.polar[0], p.polar[1], p.polar[2]) },
+        uSeed: { value: seedOffset(planet.seed) },
+        uCloudShadow: { value: null as Texture | null },
+        uHasShadow: { value: 0 },
+      },
+      vertexShader: GROUND_VS,
+      fragmentShader: GROUND_FS,
+      toneMapped: false,
+    });
+
+    // The march clips against an *analytic* sphere of exactly planet.radius, so
+    // a mesh inscribed in that radius leaves a hairline of space showing at the
+    // limb where the deck has been clipped and the ground has not yet started.
+    // Circumscribing the tessellation closes it.
+    this.groundGeometry = new SphereGeometry(planet.radius * 1.0002, 256, 128);
+    this.ground = new Mesh(this.groundGeometry, this.groundMaterial);
+    this.ground.name = `clouds:stage-body:${planet.id}`;
+
+    this.group.name = 'clouds:stage';
+    this.group.add(this.ground);
+    this.group.add(this.clouds.object3d);
+    host.add(this.group);
+  }
+
+  update(dt: number, ctx: EngineContext): void {
+    // The host is a plain unrotated group, so local space differs from render
+    // space by a translation only — but take the translation rather than
+    // assuming the origin, since nothing here guarantees where it is parked.
+    this.host.updateWorldMatrix(true, false);
+    this.host.getWorldPosition(this.hostPos);
+    this.camLocal.copy(ctx.camera.position).sub(this.hostPos);
+    this.view.set(
+      this.camLocal,
+      this.sunDir,
+      this.sunColor,
+      ctx.elapsed,
+      (ctx.camera.fov * Math.PI) / 180,
+      ctx.height,
+    );
+    this.clouds.update(dt, ctx, this.view);
+
+    const shadow = this.clouds.getShadowTexture();
+    this.groundMaterial.uniforms.uCloudShadow!.value = shadow;
+    this.groundMaterial.uniforms.uHasShadow!.value = shadow ? 1 : 0;
+  }
+
+  dispose(): void {
+    this.group.removeFromParent();
+    this.group.clear();
+    this.clouds.dispose();
+    this.groundGeometry.dispose();
+    this.groundMaterial.dispose();
+  }
+}
+
+/** Deterministic per-planet offset into the fixture's noise field. */
+function seedOffset(seed: number): Vector3 {
+  const rng = new Rng(seed ^ 0x5a9e);
+  return new Vector3(rng.range(-90, 90), rng.range(-90, 90), rng.range(-90, 90));
+}
+
+/** One stage, built the first time a cloud shot is selected and reused after. */
+let stage: CloudShotStage | null = null;
+
+/**
  * Hero shots for the cloud deck.
  *
  * @param planet   the spec the renderer was built from.
- * @param body     the object whose world position is the planet centre — pass
- *                 `cloudRenderer.object3d`, or the node it is parented to.
+ * @param body     the node the shot may hang its subject off — pass the review
+ *                 gallery's root, or any node parked at the world origin. The
+ *                 shots build their own deck under it (see {@link
+ *                 CloudShotStage}) unless one is already there.
  * @param sunLocal unit vector from the planet towards its star, in the space
  *                 `ViewState.sunDirection` uses. Defaults to a three-quarter
  *                 key if the integrator has not placed a star yet.
@@ -1174,6 +1420,36 @@ export function registerCloudShots(
   const sun = (sunLocal ? shotSun.copy(sunLocal) : shotSun.set(1, 0.16, 0.34))
     .normalize()
     .clone();
+
+  // Re-registration replaces the stage rather than leaking the old one; the
+  // gallery has no dispose hook that reaches in here.
+  stage?.dispose();
+  stage = null;
+
+  /**
+   * Build the subject on first use. Deferred, because the render targets are
+   * real GPU memory and a session that never runs a review shot should not pay
+   * for them.
+   *
+   * If the host already carries a cloud deck — an integrator wiring a real
+   * CloudRenderer into the gallery — stand down and photograph that one
+   * instead. Two decks in the same shell is worse than none.
+   */
+  const ensureStage = (ctx: EngineContext): void => {
+    if (stage) return;
+    let existing = false;
+    body.traverse((o) => {
+      if (o.name.startsWith('clouds:') && !o.name.startsWith('clouds:stage')) {
+        existing = true;
+      }
+    });
+    if (existing) return;
+    stage = new CloudShotStage(planet, body, sun, ctx.quality);
+  };
+
+  const drive = (dt: number, ctx: EngineContext): void => {
+    stage?.update(dt, ctx);
+  };
 
   const frame = (
     ctx: EngineContext,
@@ -1214,18 +1490,33 @@ export function registerCloudShots(
   registerShot({
     name: 'clouds-orbit',
     description:
-      'The terminator seen from low orbit, running corner to corner: cloud tops ' +
-      'catching the last sodium-orange light, undersides in shadow, the day limb ' +
-      'blowing to silver along the bottom, and the night side black.',
+      'The terminator seen from low orbit, running corner to corner: the sunward ' +
+      'limb blown to silver by the forward-scattering lobe, a sodium band along the ' +
+      'terminator where the light has come the long way through the air, cloud ' +
+      'shadows raking the deck and the ground below it, and the night side black.',
     apply(ctx) {
-      // 0.1 radii of standoff (~640 km over Earth) is the altitude at which the
+      ensureStage(ctx);
+      // 0.13 radii of standoff (~830 km over Earth) is the altitude at which the
       // deck stops being a texture and starts being terrain: cloud tops throw
       // shadows across their neighbours and the layer has visible thickness.
-      // 98 degrees off the sun axis puts the camera just past the terminator, so
-      // it is looking back into the light — the only geometry in which the
-      // forward-scattering lobe and the powder-darkened backs both show at once.
-      frame(ctx, planet.radius * 1.1, 98, 0.2, 0.55, -0.42, -15);
+      //
+      // The angles are not free parameters — they were solved for, because the
+      // two things this shot has to show pull in opposite directions. The
+      // forward-scattering lobe only fires where the view ray points back up the
+      // sunbeam (cos(rd, sun) near 1), which needs the camera *past* the
+      // terminator; lit cloud needs it in front. Past 100 degrees the frame is
+      // 80 percent night and the deck has nothing to model; short of 90 the
+      // phase function never leaves its isotropic floor and the light has no
+      // presence at all. 98 degrees, aimed hard across the limb, is where a
+      // sweep of the whole space puts the peak: an eighth of the frame in full
+      // sun, a quarter in the terminator's penumbra, half in night, and a band
+      // covering three percent of it where the phase function runs at eight
+      // times its isotropic value — the silver. The star lands 63 degrees off
+      // axis: outside a 62 degree frame, so it rakes the limb without ever
+      // showing its own disc.
+      frame(ctx, planet.radius * 1.13, 98, 0.5, 0.8, 0.32, -18);
     },
+    update: drive,
   });
 
   registerShot({
@@ -1235,9 +1526,16 @@ export function registerCloudShots(
       'the deck reading as a thin skin at the limb, and the eroded cauliflower ' +
       'edges holding up at planetary scale.',
     apply(ctx) {
-      // 1.72 radii out puts the disc a little wider than a 62 degree fov, so the
-      // limb arcs out of frame and the deck fills two thirds of it.
-      frame(ctx, planet.radius * 1.72, 92, 0.18, 0.3, -0.16, -32);
+      ensureStage(ctx);
+      // 1.62 radii, and 84 degrees off the sun axis rather than 92. This shot's
+      // job is the *weather* — the bands, the fronts, the cyclonic warp — and
+      // weather is only readable where it is lit. At 92 degrees two thirds of
+      // the disc was night and the coverage field had nowhere to show itself.
+      // 84 puts about 40 percent of the frame in full sun with the terminator
+      // still inside the disc, and leaves a third of the frame as space so the
+      // limb has an edge to cut across.
+      frame(ctx, planet.radius * 1.62, 84, 0.3, -0.35, -0.3, -32);
     },
+    update: drive,
   });
 }

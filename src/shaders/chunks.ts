@@ -21,10 +21,24 @@ vec3 os_hash33(vec3 p) {
   return fract(sin(p) * 43758.5453123) * 2.0 - 1.0;
 }
 
+/**
+ * Scalar hash of a 3D coordinate.
+ *
+ * The obvious formulation — fract(p.x*p.y*p.z*(p.x+p.y+p.z)) over
+ * fract(p * 0.3183099) — is a trap, and it shipped here once. It is a PRODUCT,
+ * so any one component landing near zero collapses the whole result; and
+ * 0.3183099 is 1/pi, whose third convergent is 355/113. The degenerate
+ * coordinates therefore recur on a 355-unit lattice, which in screen space is
+ * a visible grid of seams every 355 pixels in every frame of the game.
+ *
+ * This is Hoskins' hash13: the middle step is ADDITIVE, so no single component
+ * can annihilate the output, and 0.1031 is not a rational approximation of
+ * anything the inputs are likely to be commensurate with.
+ */
 float os_hash13(vec3 p) {
-  p = fract(p * 0.3183099 + 0.1);
-  p *= 17.0;
-  return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+  vec3 q = fract(p * 0.1031);
+  q += dot(q, q.yzx + 33.33);
+  return fract((q.x + q.y) * q.z);
 }
 
 // ---------------------------------------------------------------------------

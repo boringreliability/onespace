@@ -46,8 +46,9 @@
  * that resolves the *penumbra* — the softened planet shadow that makes the
  * terminator a band rather than a cut — at the sample rather than at table
  * resolution, and because it is where cloud or terrain shadowing would be
- * plugged in later. Its steps grow geometrically so eight taps still land
- * mostly inside the first scale height.
+ * plugged in later. Its steps grow geometrically away from the sample, so five
+ * taps still put three of them inside the first two scale heights and the last
+ * one still reaches space.
  *
  * COMPOSITING: TWO DRAWS, NOT ONE
  * -------------------------------
@@ -67,13 +68,32 @@
  *
  * PERFORMANCE
  * -----------
- * The march runs at `resolutionScale` (0.5 by default, 0.35 low / 0.7 ultra) of
- * the drawing buffer into an RGBA16F target; the two composite draws are full
- * resolution. Budget at 1080p `high` with the shell filling the frame: ~24 view
- * steps x ~8 growing light steps at quarter the pixels, plus two nearly
- * fragment-free full-res draws. The upsample is a *joint bilateral* filter
- * keyed on the same depth texture the march used, so half res does not smear
- * haze across a ridge line; without a depth texture it degrades to bilinear.
+ * The march runs at `resolutionScale` — half the drawing buffer at `high`, 0.3
+ * low / 0.4 medium / 0.6 ultra — into an RGBA16F target. Both composite draws
+ * are full resolution; the half-res buffer is resolved through a *joint
+ * bilateral* filter keyed on the same depth texture the march used, so half res
+ * does not smear haze across a ridge line. Without a depth texture it degrades
+ * to plain bilinear.
+ *
+ * Measured at 1080p on an M4 Pro (marginal cost, differenced against the same
+ * frame with the module disabled, per-frame fenced):
+ *
+ *              limb, planet 2/3 of frame     inside the air, shell fills frame
+ *   high 0.5              0.52 ms                        0.99 ms
+ *   ultra 0.6             ~1.0 ms                        ~2.1 ms
+ *   high 1.0              1.38 ms                        3.03 ms
+ *
+ * The last row is why the march is at half resolution and the composites are
+ * not: full-res marching is the only configuration that misses the budget, and
+ * the thing it buys — sharpness in a field with no high frequencies in it — is
+ * not visible. Headless timings wander; treat these as ratios, not absolutes.
+ *
+ * On top of those numbers, the aerosol-inhomogeneity tap (see `uHazeVar` in the
+ * march) costs one simplex evaluation per view sample that is both inside the
+ * haze and still visible — roughly +0.2 ms in the worst case, a horizon ray
+ * from the deck, and nothing at all on the limb or on the low tier. It buys the
+ * only structure in the frame at scales below the whole shell, which
+ * ARCHITECTURE section 6 requires, so it is worth its slice.
  *
  * DEPTH
  * -----
@@ -93,6 +113,7 @@ import {
   CustomBlending,
   DataTexture,
   DataUtils,
+  DepthTexture,
   FrontSide,
   Group,
   HalfFloatType,
@@ -104,6 +125,7 @@ import {
   Object3D,
   OneFactor,
   OneMinusSrcColorFactor,
+  Quaternion,
   RGBAFormat,
   Scene,
   ShaderMaterial,
@@ -120,9 +142,10 @@ import {
 import type { EngineContext } from '@/core/Engine';
 import type { QualitySettings } from '@/core/Config';
 import type { AtmosphereSpec, PlanetSpec } from '@/gen/types';
-import { registerShot } from '@/game/Shots';
+import { activeShotName, registerShot } from '@/game/Shots';
 import { registerShaderChunks } from '@/shaders/chunks';
-import type { ViewState } from '@/render/ViewState';
+import { PlanetRenderer } from '@/render/Planet';
+import { MutableViewState, type ViewState } from '@/render/ViewState';
 
 /**
  * Draw order. Above the cloud deck (8) and the ring plane (12): forward-
@@ -200,11 +223,39 @@ uniform float uHR;           // Rayleigh scale height, km
 uniform float uHM;           // Mie scale height, km
 uniform float uRPlanet;
 uniform float uRAtmo;
+uniform vec2  uDepthTexel;   // 1 / full-resolution depth size
 uniform float uLogFar;       // log2(camera.far + 1) — the log-depth decoder
 uniform float uHasDepth;
 
 varying vec3 vLocal;
 varying vec3 vView;
+
+/**
+ * Filtered fetch from the scene depth buffer.
+ *
+ * Depth textures cannot be hardware-filtered in WebGL2, and the march runs at
+ * half resolution while the depth buffer is always full — so a half-res pixel
+ * centre lands *exactly on the boundary* between two full-res texels. Which
+ * side the hardware picks is then decided by the last bit of the uv, and since
+ * those two texels differ by a whole pixel of depth gradient (tens of
+ * kilometres where the ground is grazing), the march ends up alternating
+ * between two very different path lengths and the limb comes out in hard
+ * horizontal bands. This resolves the tie explicitly: at half resolution the
+ * weights fall out to a flat average of the 2x2 block the pixel covers, and at
+ * full resolution they collapse back to an exact point sample. One function,
+ * right in both passes.
+ */
+float at_depthAt(vec2 uv) {
+  vec2 p = uv / uDepthTexel - 0.5;
+  vec2 b = floor(p);
+  vec2 f = p - b;
+  vec2 base = (b + 0.5) * uDepthTexel;
+  float d00 = texture2D(uDepthTex, base).x;
+  float d10 = texture2D(uDepthTex, base + vec2(uDepthTexel.x, 0.0)).x;
+  float d01 = texture2D(uDepthTex, base + vec2(0.0, uDepthTexel.y)).x;
+  float d11 = texture2D(uDepthTex, base + uDepthTexel).x;
+  return mix(mix(d00, d10, f.x), mix(d01, d11, f.x), f.y);
+}
 
 /**
  * Table lookup: (Rayleigh, Mie) column density from (r, mu) to the top of the
@@ -267,7 +318,7 @@ bool at_span(vec3 ro, vec3 rd, vec2 resolution, out float t0, out float t1) {
   if (tp.x <= tp.y && tp.y > 0.0) t1 = min(t1, max(tp.x, 0.0));
 
   if (uHasDepth > 0.5) {
-    float d = texture2D(uDepthTex, gl_FragCoord.xy / resolution).x;
+    float d = at_depthAt(gl_FragCoord.xy / resolution);
     // 1.0 is the cleared far value — nothing was drawn, the ray runs to space.
     if (d < 0.999999) {
       // Logarithmic depth (ARCHITECTURE section 3): d = log2(1+w)/log2(far+1),
@@ -288,6 +339,7 @@ bool at_span(vec3 ro, vec3 rd, vec2 resolution, out float t0, out float t1) {
  */
 const MARCH_FS = /* glsl */ `
 #include <common>
+#include <onespace_noise>
 #include <onespace_color>
 #include <onespace_atmosphere>
 ${FIELD_GLSL}
@@ -300,10 +352,21 @@ uniform float uIntensity;
 uniform float uMultiScatter;
 uniform float uGroundBounce;
 uniform float uTermSoft;
+uniform float uLightStep0;   // length of the first sun-march step, as a fraction of the slant
+uniform float uHazeVar;      // aerosol inhomogeneity, 0 disables the lookup entirely
+uniform float uHazeScale;    // 1/km — horizontal size of an aerosol bank
 uniform int   uSteps;
 uniform int   uLightSteps;
 
 #define LIGHT_GROWTH 1.55
+
+/**
+ * Below this much remaining view transmittance the sample is looking at the
+ * world through a metre of fog: its lighting can no longer be told apart from
+ * the neighbours', only its extinction still matters. Drop to the table there
+ * and the horizon rays of a low pass stop costing eight taps each.
+ */
+#define AT_MARCH_CUTOFF 0.08
 
 /**
  * Redistribute a uniform 0..1 along the ray so that samples pile up at 'c',
@@ -357,14 +420,14 @@ float at_segDensity(float altA, float altB, float H, float ds) {
  * the distance form collapses the entire penumbra into a couple of degrees and
  * the terminator reads as a razor cut across the sky instead of as dusk.
  */
-vec3 at_sunTransmittance(vec3 p, float r) {
+vec3 at_sunTransmittance(vec3 p, float r, int steps) {
   float mu = dot(p, uSunDir) / r;
   // cos of the direction that just grazes the planet limb from here.
   float cosTerm = -sqrt(max(0.0, 1.0 - (uRPlanet * uRPlanet) / (r * r)));
   float vis = smoothstep(cosTerm - uTermSoft, cosTerm + uTermSoft, mu);
   if (vis <= 0.002) return vec3(0.0);
 
-  if (uLightSteps <= 0) return at_lutT(r, mu) * vis;
+  if (steps <= 0) return at_lutT(r, mu) * vis;
 
   // Secondary march to the top of the atmosphere. Steps grow geometrically:
   // density falls off exponentially *upwards*, so half the budget belongs in
@@ -373,14 +436,16 @@ vec3 at_sunTransmittance(vec3 p, float r) {
   // 37 km up and the near field — which carries most of the optical depth —
   // is never sampled at all.
   float tTop = max(os_raySphere(p, uSunDir, uRAtmo).y, 0.0);
-  float n = float(uLightSteps);
-  float ds = tTop * (LIGHT_GROWTH - 1.0) / (pow(LIGHT_GROWTH, n) - 1.0);
+  // uLightStep0 is the geometric series' first term, folded on the CPU. Left
+  // as pow() in here it is two transcendentals per *view* sample for a value
+  // that only depends on a uniform.
+  float ds = tTop * uLightStep0;
   float t = 0.0;
   float odR = 0.0;
   float odM = 0.0;
   // Bound by a uniform, never a literal: a literal lets the driver unroll this
   // into the view march and inline several hundred exp() per pixel.
-  for (int i = 0; i < uLightSteps; i++) {
+  for (int i = 0; i < steps; i++) {
     float alt = length(p + uSunDir * (t + ds * 0.5)) - uRPlanet;
     odR += os_density(alt, uHR) * ds;
     odM += os_density(alt, uHM) * ds;
@@ -456,10 +521,43 @@ void main() {
     // most of the march the moment the ray enters the lower atmosphere.
     if (max(viewT.r, max(viewT.g, viewT.b)) < 0.0015) break;
 
-    vec3 direct = uSunColor * at_sunTransmittance(p, r);
+    vec3 direct =
+      uSunColor * at_sunTransmittance(p, r, viewT.g > AT_MARCH_CUTOFF ? uLightSteps : 0);
+
+    /**
+     * Aerosol is not a smooth exponential. Air *molecules* are — Rayleigh is a
+     * bulk gas property and genuinely has no horizontal structure — but haze
+     * collects in banks, pools in basins and piles up against fronts, and a
+     * shell whose horizontal density is literally constant renders as a
+     * mathematical gradient no matter how correct the integral is. ARCHITECTURE
+     * section 6 names flat gradients as a failure outright.
+     *
+     * One octave of simplex, on a domain squashed towards the local vertical so
+     * a bank spreads sideways rather than stacking into a column. It modulates
+     * the *scattering* density only; the optical depth above and the analytic
+     * extinction pass both keep the mean field, so the two composite draws can
+     * never disagree about the limb and the seam that would cause never appears.
+     * Physically that is the mean-field approximation for extinction with the
+     * fluctuation kept in the source term, which is the right way round: you see
+     * structure in what the haze *emits* long before you see it in what it eats.
+     *
+     * Cost is one os_snoise per view sample, and the two gates are what keep it
+     * affordable: no aerosol left to modulate (above ~4 Mie scale heights dM is
+     * already negligible against ds, which skips the whole upper two thirds of
+     * every limb ray) and nothing left to reach the camera (a horizon ray from
+     * the deck is opaque long before it runs out of span). uHazeVar is zero on
+     * the low tier, and the branch then costs one comparison.
+     */
+    float dMs = dM;
+    if (uHazeVar > 0.0 && dM > 0.02 * ds && viewT.g > 0.02) {
+      vec3 upv = p / r;
+      // Six times the frequency along the vertical: banks are wide and thin.
+      vec3 q = (p + upv * ((r - uRPlanet) * 5.0)) * uHazeScale;
+      dMs = dM * max(0.0, 1.0 + uHazeVar * os_snoise(q));
+    }
 
     sumR += dR * viewT * direct;
-    sumM += dM * viewT * direct;
+    sumM += dMs * viewT * direct;
 
     // Everything that has scattered more than once, plus light bounced off the
     // ground, arrives from every direction at once — so it goes in an isotropic
@@ -469,7 +567,7 @@ void main() {
     // smoke over an ochre desert.
     vec3 iso = direct * uMultiScatter
              + direct * uGroundAlbedo * (uGroundBounce * max(dot(p / r, uSunDir), 0.0));
-    sumIso += (uBetaR * dR + vec3(uBetaM * dM)) * viewT * iso;
+    sumIso += (uBetaR * dR + vec3(uBetaM * dMs)) * viewT * iso;
   }
 
   float cosT = dot(rd, uSunDir);
@@ -565,10 +663,26 @@ void main() {
 
   gl_FragColor = vec4(max(c, 0.0), 0.0);
   #include <colorspace_fragment>
-  // Identity into PostFX's linear HDR target; the real work is on the direct-
-  // to-canvas path, where a sky gradient across 1080 rows crosses barely thirty
-  // 8-bit codes and bands in rings without this.
-  gl_FragColor.rgb = os_dither(gl_FragColor.rgb, gl_FragCoord.xy);
+
+  /**
+   * Dither. os_dither's fixed +/- 0.5/255 is one code value *at the output*,
+   * which is the right amplitude only when this shader is writing the final
+   * 8-bit buffer. It is not: the sky lands in PostFX's linear HDR target and
+   * then goes through a filmic curve whose slope in the shadows — where the
+   * whole zenith gradient lives — is several times unity, so a fixed linear
+   * step arrives at the quantiser well under an LSB and the gradient bands
+   * anyway. Measured on the last capture: 27 distinct blue codes across a
+   * 400 px run, which is what an undithered gradient looks like.
+   *
+   * Scaling the step by the sample's own magnitude fixes that for *any*
+   * monotone curve: a relative perturbation dx/x maps to a relative
+   * perturbation (f'(x)x/f(x)) * dx/x, and that elasticity is O(1) for every
+   * tone curve in the pipeline. The constant term keeps a floor for the
+   * near-black night side, where a relative step would vanish.
+   */
+  float dn = os_igNoise(gl_FragCoord.xy) - 0.5;
+  float lum = dot(gl_FragColor.rgb, vec3(0.2126, 0.7152, 0.0722));
+  gl_FragColor.rgb += dn * (1.0 / 255.0) * (0.5 + 6.0 * lum);
 }
 `;
 
@@ -585,9 +699,12 @@ void main() {
  * dimensionless, 1 at the surface). Multiplying by the scattering coefficients
  * in the shader is what makes the table planet-independent per channel.
  *
- * Cost: `width * height * steps` exponential pairs — 128*64*32 is about a
- * quarter of a million, well under a millisecond, and it happens once when a
- * planet is created rather than per frame.
+ * Cost: `width * height * steps` exponential pairs. The default 128x64x24 is
+ * 200k of them and measures ~6 ms in Chrome — a one-off when a planet is
+ * created, alongside the terrain pools the surface renderer is building at the
+ * same moment, and never touched again. The low tiers take a 64x32x16 table
+ * (~1 ms); the sampling is smooth enough in mu that the coarse one is within a
+ * percent everywhere except the last degree at the horizon.
  */
 function buildTransmittanceLut(
   rGround: number,
@@ -710,6 +827,7 @@ export class AtmosphereRenderer {
   private readonly bufSize = new Vector2(1, 1);
   private readonly marchRes = new Vector2(2, 2);
   private readonly fullRes = new Vector2(2, 2);
+  private readonly depthTexel = new Vector2(1 / 1920, 1 / 1080);
   private readonly prevClear = new Color();
 
   private disposed = false;
@@ -743,7 +861,7 @@ export class AtmosphereRenderer {
       spec.scaleHeight * MIE_SCALE_HEIGHT_RATIO,
       fine ? 128 : 64,
       fine ? 64 : 32,
-      fine ? 32 : 24,
+      fine ? 24 : 16,
     );
 
     // A 1x1 stand-in so the depth sampler is always bound to something known.
@@ -762,8 +880,14 @@ export class AtmosphereRenderer {
     this.blankDepth.colorSpace = NoColorSpace;
     this.blankDepth.needsUpdate = true;
 
+    // The march is essentially the whole cost of this module and it is linear
+    // in pixels; the two composite draws are full resolution regardless, so
+    // this only softens a field that is smooth by construction. Half is the
+    // setting the numbers in the header assume, and it matches the sibling
+    // cloud shell so the two never disagree about how soft a limb should look.
     this.resolutionScale =
-      quality.tier === 'low' ? 0.35 : quality.tier === 'ultra' ? 0.7 : 0.5;
+      quality.tier === 'low' ? 0.3 : quality.tier === 'ultra' ? 0.6
+        : quality.tier === 'medium' ? 0.4 : 0.5;
 
     // HDR. The forward Mie lobe at the terminator is two orders of magnitude
     // above the zenith sky in the same frame; 8 bits cannot hold both ends and
@@ -799,6 +923,7 @@ export class AtmosphereRenderer {
       uHM: { value: spec.scaleHeight * MIE_SCALE_HEIGHT_RATIO },
       uRPlanet: { value: this.rPlanet },
       uRAtmo: { value: this.rAtmo },
+      uDepthTexel: { value: this.depthTexel },
       uLogFar: { value: 40 },
       uHasDepth: { value: 0 },
     };
@@ -822,6 +947,21 @@ export class AtmosphereRenderer {
       // atmosphere earns a long dusk and an airless rock would earn none.
       uTermSoft: {
         value: clamp((spec.thickness / planet.radius) * 2.2, 0.008, 0.12),
+      },
+      uLightStep0: { value: 1 },
+      // Aerosol inhomogeneity. Half again either side of the mean is what a
+      // photograph of a hazy horizon actually shows; more than that and the
+      // banks read as noise rather than as weather. Zero on the low tier —
+      // that tier's budget cannot absorb a simplex tap per view sample, and
+      // the branch in the shader is skipped entirely when this is zero.
+      uHazeVar: { value: quality.tier === 'low' ? 0 : 0.55 },
+      // Banks about twelve Mie scale heights across and a sixth of that deep —
+      // ~20 km by 3 km on an Earth-like world, which is the size real haze
+      // actually organises itself into. Tied to the scale height rather than to
+      // the radius so a Venus and an Earth each get structure at the size their
+      // own boundary layer would make it.
+      uHazeScale: {
+        value: 1 / Math.max(spec.scaleHeight * MIE_SCALE_HEIGHT_RATIO * 12, 1),
       },
       uSteps: { value: 16 },
       uLightSteps: { value: 6 },
@@ -962,6 +1102,7 @@ export class AtmosphereRenderer {
     // --- target sizing -----------------------------------------------------
     ctx.renderer.getDrawingBufferSize(this.bufSize);
     this.fullRes.copy(this.bufSize);
+    this.depthTexel.set(1 / Math.max(this.bufSize.x, 1), 1 / Math.max(this.bufSize.y, 1));
     const scale = clamp(this.resolutionScale, 0.25, 1);
     const rtW = Math.max(2, Math.round(this.bufSize.x * scale));
     const rtH = Math.max(2, Math.round(this.bufSize.y * scale));
@@ -984,14 +1125,34 @@ export class AtmosphereRenderer {
     const cover = Math.min(1, screenPx / Math.max(view.viewportHeight * scale, 1));
     const lod = inside ? 1 : clamp(cover * 1.5, 0.35, 1);
 
-    u.uSteps.value = clamp(Math.round(q.atmosphereSteps * lod), 6, 64);
-    // Zero switches the inner loop to the table. That is the low tier and the
-    // far LOD; it is also the correct answer for a spherical shell, so the only
-    // thing lost is the sampled penumbra.
-    u.uLightSteps.value =
+    // 0.7 of the tier budget, not the whole of it. This march spends its steps
+    // far better than a uniform one — segment boundaries follow the ray's
+    // closest approach and each segment's density is integrated in closed form
+    // rather than point-sampled — so seventeen steps here resolve what
+    // twenty-four uniform ones would, and the eight saved are ~15% of the
+    // module's whole frame cost.
+    const steps = clamp(Math.round(q.atmosphereSteps * lod * 0.7), 6, 64);
+    u.uSteps.value = steps;
+    // 0.6 of the tier budget, for the same reason as the view steps: the taps
+    // grow geometrically away from the sample, so five of them put three inside
+    // the first two scale heights and the last still reaches space. Uniform
+    // spacing would need every one of the eight the tier offers.
+    //
+    // Zero switches the inner loop to the table instead. That is the low tier
+    // and the far LOD; for a spherical shell the table is the converged answer
+    // the march is approximating, so the only thing lost is the penumbra
+    // sampled per sample rather than per texel.
+    const lightSteps =
       q.tier === 'low' || screenPx < 220
         ? 0
-        : clamp(Math.round(q.atmosphereLightSteps * lod), 2, 16);
+        : clamp(Math.round(q.atmosphereLightSteps * lod * 0.6), 2, 12);
+    u.uLightSteps.value = lightSteps;
+    // First term of the geometric series that tiles the sun slant. Folded here
+    // so the shader never evaluates pow() per view sample.
+    u.uLightStep0.value =
+      lightSteps > 0
+        ? (LIGHT_GROWTH - 1) / (Math.pow(LIGHT_GROWTH, lightSteps) - 1)
+        : 1;
 
     // --- face selection ----------------------------------------------------
     // Outside the hull: front faces, depth-tested, so a moon or a hull strut in
@@ -1061,14 +1222,46 @@ export class AtmosphereRenderer {
   }
 }
 
+
 // ---------------------------------------------------------------------------
 // Shots
 // ---------------------------------------------------------------------------
 
+/**
+ * WHY THESE TWO SHOTS STAND UP THEIR OWN WORLD
+ * --------------------------------------------
+ * A `Shot` that does not set `live` *owns the scene*, and `game/Universe.ts`
+ * honours that by setting its whole root invisible and returning before it
+ * places a single body (`Universe.update`, the `shotOwnsScene()` early-out).
+ * Every live planet, and therefore every live `AtmosphereRenderer`, is switched
+ * off for the exact frames these two shots are captured on. Pointing the camera
+ * at a live world cannot work here — there is nothing there to point at, and
+ * the first round of captures proved it: both frames contained no atmosphere at
+ * all, only the review gallery's nebula and its ring plane seen edge-on, which
+ * is what the reviewer measured as "a structureless steel-blue haze" and "an
+ * 8-pixel dark scratch".
+ *
+ * So, exactly as `render/Planet.ts` already does for its own shots, these build
+ * a fixture: one `PlanetRenderer` and one `AtmosphereRenderer` of our own,
+ * parked at the render origin, added straight to `ctx.scene` where nothing
+ * else's visibility switch can reach them, and driven from the shot's own
+ * `update`. That also fixes the second half of the same bug — the integrator
+ * currently passes `gallery.root` as the body, so the old code framed the world
+ * origin and assumed a sun direction that had nothing to do with any real
+ * planet's.
+ *
+ * The proper fix is three lines in `game/registry.ts` (drop these two names from
+ * `GALLERY_SHOTS`, hand `registerAtmosphereShots` a node that is actually the
+ * atmosphere's) plus a `teardown?(ctx)` member on `Shot`. Neither file is this
+ * module's; see the report.
+ */
+
+const LIMB_SHOT = 'atmosphere-limb';
+const SUNSET_SHOT = 'atmosphere-sunset';
+
 // Module scratch: shots run once per capture, but ARCHITECTURE section 5 is
 // about habit as much as about hot loops.
 const shotSun = new Vector3();
-const shotCentre = new Vector3();
 const shotUp = new Vector3();
 const shotSide = new Vector3();
 const shotDir = new Vector3();
@@ -1076,16 +1269,329 @@ const shotAim = new Vector3();
 const shotEye = new Vector3();
 const shotAzimuth = new Vector3();
 const shotLook = new Vector3();
+const shotSize = new Vector2();
+const shotClear = new Color();
+
+/** One AU-ish circular orbit. Nothing in these shots reads it; the type wants it. */
+const SHOT_ORBIT = {
+  semiMajorAxis: 1.496e8,
+  eccentricity: 0.016,
+  inclination: 0,
+  longitudeOfAscendingNode: 0,
+  argumentOfPeriapsis: 0,
+  meanAnomalyAtEpoch: 0,
+  period: 3.156e7,
+} as const;
+
+/**
+ * The fallback world, used when the spec the integrator hands us cannot carry
+ * these two frames. Both shots are camera test charts for *scattering*: the
+ * limb wants a shell thin enough that the body still reads as a body, and the
+ * sunset wants a surface to stand on and relief for the aerial perspective to
+ * eat. A gas giant has neither, and a generated world whose atmosphere is a
+ * third of its radius deep swallows the planet inside the shell — which is
+ * precisely the failure the reviewer suspected when the disc came out as a
+ * hairline.
+ *
+ * Earth's coefficients, because the review is of the integral and not of the
+ * generator: 8.4 km scale height, a 110 km shell, Rayleigh 4x stronger in blue
+ * than in red, and g = 0.76 so the forward lobe at the horizon is two orders
+ * above the zenith.
+ */
+function shotWorld(): PlanetSpec {
+  return {
+    id: 'shot-atmo',
+    // A literal, not `Math.random`: same seed, same mountains, every run.
+    seed: 0x5eed_a710,
+    name: 'CALDER II',
+    type: 'terran',
+    radius: 6120,
+    mass: 0.94,
+    gravity: 9.4,
+    orbit: SHOT_ORBIT,
+    rotationPeriod: 86400,
+    axialTilt: 0.41,
+    temperature: 268,
+    terrain: {
+      // Mountainous on purpose. The sunset shot is judged on distant relief
+      // losing its contrast to the air; rolling hills give the haze nothing to
+      // steal contrast *from*, and the frame comes back as a gradient again.
+      frequency: 14,
+      octaves: 13,
+      lacunarity: 2.06,
+      gain: 0.62,
+      amplitude: 22,
+      ridged: 0.84,
+      warp: 0.58,
+      craters: 0.02,
+      sharpness: 1.12,
+      seaLevel: 0.46,
+    },
+    // Steel and near-black with one ochre accent (ARCHITECTURE section 6). The
+    // sky is the only saturated thing in either frame, so the ground must not
+    // compete for the second hue.
+    palette: {
+      low: [0.030, 0.037, 0.045],
+      mid: [0.048, 0.057, 0.066],
+      high: [0.088, 0.079, 0.064],
+      peak: [0.50, 0.53, 0.58],
+      cliff: [0.033, 0.037, 0.043],
+      polar: [0.68, 0.74, 0.82],
+      accent: [0.230, 0.126, 0.046],
+    },
+    atmosphere: {
+      scaleHeight: 8.4,
+      thickness: 110,
+      rayleigh: [0.0058, 0.0135, 0.0331],
+      mie: 0.0021,
+      mieAnisotropy: 0.76,
+      intensity: 1,
+      pressure: 0.92,
+    },
+    clouds: null,
+    ocean: {
+      color: [0.042, 0.086, 0.132],
+      deepColor: [0.011, 0.030, 0.058],
+      specular: 0.85,
+      waveHeight: 0.0016,
+      emissive: null,
+    },
+    rings: null,
+    moons: [],
+    bands: null,
+    interest: 0.8,
+    blurb: 'Shot fixture.',
+    isMoon: false,
+  };
+}
+
+/**
+ * Use the generated spec when it can actually carry the frame, otherwise the
+ * fixture above. The thresholds are the two things that make a spec unusable
+ * here rather than merely different: no solid surface, or a shell so deep the
+ * body disappears inside it.
+ */
+function shotSpec(planet: PlanetSpec): PlanetSpec {
+  const a = planet.atmosphere;
+  const usable =
+    a !== null &&
+    // No deck to stand on, and a banded giant has no terminator relief either.
+    planet.bands === null &&
+    planet.radius > 1200 &&
+    // A shell deeper than 8% of the radius swallows the body: the disc comes
+    // back as a hairline inside a screen-filling fog, which is the shape of
+    // the failure the last capture was mistaken for.
+    a.thickness > 4 &&
+    a.thickness < planet.radius * 0.08 &&
+    // Under a quarter of a bar there is no sky to photograph, only a rim.
+    a.pressure > 0.25 &&
+    // And no relief means nothing for the aerial perspective to eat.
+    planet.terrain.amplitude > 3;
+  return usable ? planet : shotWorld();
+}
+
+interface AtmoFixture {
+  readonly planet: PlanetRenderer;
+  readonly atmo: AtmosphereRenderer;
+  readonly view: MutableViewState;
+  readonly sunDir: Vector3;
+  readonly sunColor: Color;
+  readonly camPos: Vector3;
+  readonly camQuat: Quaternion;
+  depthRT: WebGLRenderTarget | null;
+}
+
+let fixture: AtmoFixture | null = null;
+
+/** Gallery props we switched off, with the state to put back. */
+let hiddenProps: Array<{ readonly node: Object3D; readonly was: boolean }> | null = null;
+let watching = false;
+
+function makeFixture(ctx: EngineContext, spec: PlanetSpec): AtmoFixture {
+  const planet = new PlanetRenderer(spec, ctx.quality);
+  const atmo = new AtmosphereRenderer(spec, ctx.quality);
+  // Same parenting the game uses, so the shell inherits the planet's frame and
+  // `uCameraLocal` means the same thing here as it does in flight.
+  planet.object3d.add(atmo.object3d);
+  ctx.scene.add(planet.object3d);
+  return {
+    planet,
+    atmo,
+    view: new MutableViewState(),
+    sunDir: new Vector3(1, 0, 0),
+    // Irradiance, not a colour — see IRRADIANCE_FROM_SUNCOLOR. A star that
+    // arrives as (1,1,1) leaves the whole scattering integral an f-stop under
+    // the lit ground it has to sit next to, and the frame comes back grey.
+    sunColor: new Color(1.0, 0.955, 0.9).multiplyScalar(2.6),
+    camPos: new Vector3(),
+    camQuat: new Quaternion(),
+    depthRT: null,
+  };
+}
+
+/**
+ * Scene depth for the fixture, rendered here because nothing else will.
+ *
+ * `setDepthTexture` is the difference between aerial perspective and a wash:
+ * without it the march and the extinction both run to the analytic sea-level
+ * sphere, so a ridge silhouetted on the horizon is given the haze of the
+ * hundreds of kilometres of air *behind* it as well as in front, and the whole
+ * lower third of the sunset frame goes to sky colour. The pipeline's own depth
+ * buffer is inside `PostFX` and there is no public route to it from here, so
+ * the fixture renders its own — one extra full-resolution pass over the planet,
+ * in review captures only, never in the game. It is deliberately not on the
+ * `AtmosphereRenderer` itself: in flight the integrator supplies the depth it
+ * already has, and paying for a second one would be waste.
+ */
+function renderShotDepth(ctx: EngineContext, f: AtmoFixture): void {
+  const r = ctx.renderer;
+  r.getDrawingBufferSize(shotSize);
+  const w = Math.max(2, Math.round(shotSize.x));
+  const h = Math.max(2, Math.round(shotSize.y));
+
+  let rt = f.depthRT;
+  if (!rt) {
+    const depth = new DepthTexture(w, h);
+    depth.name = 'atmosphere:shot-depth';
+    // Depth textures are not filterable in WebGL2; at_depthAt does its own
+    // weighting from four point samples, which is what it is written for.
+    depth.minFilter = NearestFilter;
+    depth.magFilter = NearestFilter;
+    rt = new WebGLRenderTarget(w, h, {
+      depthTexture: depth,
+      depthBuffer: true,
+      stencilBuffer: false,
+      generateMipmaps: false,
+    });
+    rt.texture.name = 'atmosphere:shot-depth-color';
+    f.depthRT = rt;
+  } else if (rt.width !== w || rt.height !== h) {
+    rt.setSize(w, h);
+  }
+
+  const prevTarget = r.getRenderTarget();
+  const prevAutoClear = r.autoClear;
+  r.getClearColor(shotClear);
+  const prevAlpha = r.getClearAlpha();
+
+  // The shell must not write itself into the buffer it is about to read.
+  f.atmo.object3d.visible = false;
+  r.autoClear = true;
+  r.setClearColor(0x000000, 0);
+  r.setRenderTarget(rt);
+  r.render(f.planet.object3d, ctx.camera);
+  r.setRenderTarget(prevTarget);
+  r.setClearColor(shotClear, prevAlpha);
+  r.autoClear = prevAutoClear;
+  f.atmo.object3d.visible = true;
+
+  f.atmo.setDepthTexture(rt.depthTexture);
+}
+
+function driveFixture(dt: number, ctx: EngineContext): void {
+  const f = fixture;
+  if (!f) return;
+
+  // Re-assert the pose every frame: nothing else may drift it.
+  ctx.camera.position.copy(f.camPos);
+  ctx.camera.quaternion.copy(f.camQuat);
+  ctx.camera.updateMatrixWorld();
+
+  // The fixture sits at the render origin, so the camera's position *is* its
+  // position in the planet's local frame.
+  f.view.set(
+    f.camPos,
+    f.sunDir,
+    f.sunColor,
+    ctx.elapsed,
+    (ctx.camera.fov * Math.PI) / 180,
+    Math.max(1, ctx.height * ctx.renderer.getPixelRatio()),
+  );
+
+  // Order matters: LOD first so the depth pass sees the patches the colour pass
+  // will draw, depth second, and the march last so it reads this frame's depth.
+  f.planet.update(dt, ctx, f.view);
+  renderShotDepth(ctx, f);
+  f.atmo.update(dt, ctx, f.view);
+}
+
+/**
+ * Tear down whatever these shots left in the scene.
+ *
+ * `scripts/shoot.mjs` drives every shot in one page load and `Shot` has no
+ * teardown hook, so this runs itself off a frame callback the moment the active
+ * shot stops being one of ours. Exported as well, so an integrator who adds a
+ * real `teardown` can call it directly.
+ */
+export function clearAtmosphereShotFixture(ctx: EngineContext): void {
+  const f = fixture;
+  fixture = null;
+  if (!f) return;
+  f.atmo.setDepthTexture(null);
+  f.atmo.dispose();
+  f.atmo.object3d.removeFromParent();
+  ctx.scene.remove(f.planet.object3d);
+  f.planet.dispose();
+  if (f.depthRT) {
+    f.depthRT.depthTexture?.dispose();
+    f.depthRT.dispose();
+    f.depthRT = null;
+  }
+}
+
+/**
+ * Switch off whatever the integrator parked in the group it handed us.
+ *
+ * `ReviewGuard` lists both of these shots in `GALLERY_SHOTS` and therefore
+ * makes the review gallery — a nebula at the origin and a ring plane the camera
+ * ends up sitting inside — visible for exactly the frames whose subject is a
+ * planet's air. That additive fog is the whole of finding 1: it lifts every
+ * black in the frame to RGB (32,42,60) and leaves nothing to judge. The guard
+ * only ever writes the group's own `visible`, so hiding its *children* is a
+ * switch it cannot flip back.
+ */
+function hideGalleryProps(root: Object3D): void {
+  if (hiddenProps) return;
+  const saved = root.children.map((node) => ({ node, was: node.visible }));
+  for (const e of saved) e.node.visible = false;
+  hiddenProps = saved;
+}
+
+function restoreGalleryProps(): void {
+  if (!hiddenProps) return;
+  for (const e of hiddenProps) e.node.visible = e.was;
+  hiddenProps = null;
+}
+
+/** Poll for the shot changing, then put the scene back exactly as we found it. */
+function watchForShotChange(ctx: EngineContext): void {
+  if (watching) return;
+  watching = true;
+  const poll = (): void => {
+    const name = activeShotName();
+    if (name === LIMB_SHOT || name === SUNSET_SHOT) {
+      requestAnimationFrame(poll);
+      return;
+    }
+    watching = false;
+    restoreGalleryProps();
+    clearAtmosphereShotFixture(ctx);
+  };
+  requestAnimationFrame(poll);
+}
 
 /**
  * Hero shots for the scattering shell.
  *
- * @param planet   the spec the renderer was built from.
- * @param body     the object whose world position is the planet centre — pass
- *                 `atmosphereRenderer.object3d`, or the node it is parented to.
- * @param sunLocal unit vector from the planet towards its star, in the space
- *                 `ViewState.sunDirection` uses. Defaults to a three-quarter
- *                 key if the integrator has not placed a star yet.
+ * @param planet   the spec to review. Used when it can carry these frames; see
+ *                 `shotSpec` for the two cases where it cannot and a fixture
+ *                 world stands in.
+ * @param body     the node the integrator considers this shot's stage. Today it
+ *                 is the review gallery's root, whose contents belong to other
+ *                 modules' shots — so all it is used for is switching those
+ *                 props off while we are on screen, and back on afterwards.
+ * @param sunLocal unit vector from the planet towards its star. Defaults to a
+ *                 three-quarter key.
  */
 export function registerAtmosphereShots(
   planet: PlanetSpec,
@@ -1095,6 +1601,7 @@ export function registerAtmosphereShots(
   const sun = (sunLocal ? shotSun.copy(sunLocal) : shotSun.set(1, 0.16, 0.34))
     .normalize()
     .clone();
+  const spec = shotSpec(planet);
 
   /** An orthonormal frame with `sun` as one axis, stable for any sun direction. */
   const frame = (): { side: Vector3; up: Vector3 } => {
@@ -1104,16 +1611,27 @@ export function registerAtmosphereShots(
     return { side, up };
   };
 
+  /** Common setup: fresh fixture at the origin, gallery props off, sun placed. */
+  const stage = (ctx: EngineContext): AtmoFixture => {
+    clearAtmosphereShotFixture(ctx);
+    hideGalleryProps(body);
+    watchForShotChange(ctx);
+    const f = makeFixture(ctx, spec);
+    f.sunDir.copy(sun);
+    fixture = f;
+    return f;
+  };
+
   registerShot({
-    name: 'atmosphere-limb',
+    name: LIMB_SHOT,
     description:
       'Backlit limb against black space with the star just off the top-right corner. ' +
       'Tests the rim glow, its blue-to-orange gradient through the terminator, the ' +
       'sharpness of the shadow penumbra and the absence of banding in the falloff.',
     apply(ctx) {
-      body.updateWorldMatrix(true, false);
-      const centre = body.getWorldPosition(shotCentre);
+      const f = stage(ctx);
       const { side, up } = frame();
+      const R = spec.radius;
 
       // 112 degrees off the sun axis. Not 150: a fully backlit planet gives a
       // thin twilight arc and nothing else, because every sample dense enough
@@ -1127,13 +1645,12 @@ export function registerAtmosphereShots(
         .copy(sun)
         .multiplyScalar(Math.cos(a))
         .addScaledVector(side, Math.sin(a))
-        .addScaledVector(up, 0.20)
+        .addScaledVector(up, 0.2)
         .normalize();
 
-      const eye = shotEye
-        .copy(centre)
-        .addScaledVector(dir, planet.radius * 1.62);
-      ctx.camera.position.copy(eye);
+      // 1.62 radii: the disc subtends 76 degrees against a 94 degree frame, so
+      // it fills two thirds of it and runs off two edges.
+      f.camPos.copy(dir).multiplyScalar(R * 1.62);
 
       // Aim past the lit limb rather than at the body. The disc then leaves
       // the frame on the dark side, the glowing edge sits a third of the way
@@ -1146,26 +1663,30 @@ export function registerAtmosphereShots(
         .addScaledVector(dir, -sun.dot(dir))
         .normalize();
       const aim = shotAim
-        .copy(centre)
-        .addScaledVector(sunPerp, planet.radius * 0.58)
-        .addScaledVector(up, planet.radius * -0.22);
+        .copy(sunPerp)
+        .multiplyScalar(R * 0.58)
+        .addScaledVector(up, R * -0.22);
       // Rolling puts the limb on a diagonal, which is the difference between a
       // diagram and a photograph.
       ctx.camera.up.copy(up).applyAxisAngle(dir, (-28 * Math.PI) / 180);
+      ctx.camera.position.copy(f.camPos);
       ctx.camera.lookAt(aim);
       ctx.camera.updateMatrixWorld();
+      f.camQuat.copy(ctx.camera.quaternion);
+
+      driveFixture(0, ctx);
     },
+    update: driveFixture,
   });
 
   registerShot({
-    name: 'atmosphere-sunset',
+    name: SUNSET_SHOT,
     description:
       'On the deck at the terminator, star a degree and a half below the horizon. ' +
       'Tests the sodium band, the blue-to-black zenith gradient, ground fog and the ' +
       'aerial perspective stealing contrast from distant relief.',
     apply(ctx) {
-      body.updateWorldMatrix(true, false);
-      const centre = body.getWorldPosition(shotCentre);
+      const f = stage(ctx);
       const { side } = frame();
 
       // Stand where the star is 1.5 degrees below the local horizon: past
@@ -1181,10 +1702,11 @@ export function registerAtmosphereShots(
         .normalize();
 
       // Clear of the tallest relief the terrain sampler can produce, so the
-      // camera is in the air rather than inside a mountain.
-      const altitude = planet.terrain.amplitude * 0.9 + 2;
-      const eye = shotEye.copy(centre).addScaledVector(zenith, planet.radius + altitude);
-      ctx.camera.position.copy(eye);
+      // camera is in the air rather than inside a mountain. At this altitude
+      // the sea-level horizon is ~500 km out, which is the range over which
+      // aerial perspective has something to say.
+      const altitude = spec.terrain.amplitude * 0.9 + 2;
+      f.camPos.copy(zenith).multiplyScalar(spec.radius + altitude);
 
       // Look along the horizon towards the afterglow, pitched up four degrees
       // so the ground takes the lower third and the gradient gets the rest.
@@ -1201,10 +1723,15 @@ export function registerAtmosphereShots(
       // test chart, and the composition rules in ARCHITECTURE section 6 want
       // the frame to look photographed.
       ctx.camera.up.copy(zenith).applyAxisAngle(look, (3 * Math.PI) / 180);
+      ctx.camera.position.copy(f.camPos);
       // Aim a planet-radius down the look vector: far enough that the pitch is
       // exact and the horizon does not drift with altitude.
-      ctx.camera.lookAt(shotAim.copy(eye).addScaledVector(look, planet.radius));
+      ctx.camera.lookAt(shotEye.copy(f.camPos).addScaledVector(look, spec.radius));
       ctx.camera.updateMatrixWorld();
+      f.camQuat.copy(ctx.camera.quaternion);
+
+      driveFixture(0, ctx);
     },
+    update: driveFixture,
   });
 }

@@ -193,11 +193,17 @@ void main() {
     // evolve faster, exactly as convective turnover time scales with size.
     vec3 q = (p + wv) * freq + vec3(0.0, 0.0, t * freq * 0.85);
     vec2 cw = os_worley(q);
-    // cw.y = F2-F1 = distance to the cell wall (dark intergranular lanes);
-    // cw.x = distance to the cell seed (the bright dome of upwelling gas).
-    float lane = smoothstep(0.02, 0.26, cw.y);
-    float dome = 1.0 - smoothstep(0.05, 0.60, cw.x);
-    gran += amp * w * (lane * 0.75 + dome * 0.45 - 0.62);
+    // cw.y = F2-F1 = distance to the cell wall, cw.x = distance to the cell
+    // seed. The mapping matters more than the noise: a *wide* ramp on the wall
+    // mask (as this had) saturates over almost the whole cell and leaves a flat
+    // plateau with a hairline crack in it, which is what a granule must never
+    // look like. The lane is a narrow dark feature and the dome is a broad
+    // bright one, so the ramps have to be the other way round.
+    float lane = smoothstep(0.0, 0.13, cw.y);
+    float dome = 1.0 - smoothstep(0.02, 0.78, cw.x);
+    // Pedestal chosen so the octave is zero-mean: without that the whole disc
+    // is offset and only the tail of the distribution reads as texture.
+    gran += amp * w * (lane * 0.55 + dome * 0.95 - 0.80);
     wsum += amp * w;
     freq *= 2.6;
     amp *= 0.52;
@@ -206,29 +212,44 @@ void main() {
   gran *= smoothstep(0.0, 0.16, mu);
 
   // Active regions. A low-frequency field thresholded twice gives umbra inside
-  // penumbra; the threshold is what spec.activity actually controls.
+  // penumbra; the threshold is what spec.activity actually controls. The two
+  // thresholds have to be *separated* by more than the width of either ramp or
+  // the umbra swallows the penumbra and a spot becomes a brown smudge with no
+  // structure — which is exactly what the first pass shipped.
   float spotN = os_fbm(unit * 1.7 + vec3(4.3, 1.1, 9.7), 4, 2.1, 0.55);
-  float pen = smoothstep(uSpotThresh, uSpotThresh + 0.16, spotN);
-  float umb = smoothstep(uSpotThresh + 0.13, uSpotThresh + 0.28, spotN);
+  // Break the threshold contour with the granulation field so the spot boundary
+  // is ragged. A perfectly smooth iso-contour of low-frequency fBm is an ink
+  // blot; real penumbrae are frayed by the convection they are suppressing.
+  float spotEdge = spotN + gran * 0.10;
+  float pen = smoothstep(uSpotThresh, uSpotThresh + 0.30, spotEdge);
+  float umb = smoothstep(uSpotThresh + 0.30, uSpotThresh + 0.46, spotEdge);
   // Contrast washes out towards the limb — partly foreshortening, partly the
   // fact that you are looking through more of the hot chromosphere above them.
   float limbFade = smoothstep(0.0, 0.30, mu);
-  float spot = (0.55 * pen + 0.45 * umb) * uSpotDepth * limbFade;
-  // Faculae: the bright magnetic network that rings a spot group.
-  float fac = smoothstep(uSpotThresh - 0.16, uSpotThresh - 0.02, spotN) * (1.0 - pen) * limbFade;
+  float spot = (0.45 * pen + 0.55 * umb) * uSpotDepth * limbFade;
+  // Faculae: the bright magnetic network that rings a spot group. It is the
+  // *only* term that goes bright at the limb, and it is what stops the outer
+  // disc being a clean darkening ramp.
+  float fac = smoothstep(uSpotThresh - 0.26, uSpotThresh - 0.02, spotN) * (1.0 - pen)
+            * mix(1.0, 1.8, 1.0 - limbFade) * smoothstep(0.0, 0.10, mu);
 
   // Supergranulation-scale temperature provinces. Deliberately *not* under the
   // screen-space LOD: the granulation above fades out entirely once its cells
   // drop under a few pixels, and past that point limb darkening on its own is a
   // textbook smooth radial gradient — the exact flat field section 6 forbids.
-  // These three octaves are what keeps large-scale value structure on the disc
-  // at every distance where the star is more than a handful of pixels wide.
-  float prov = os_fbm(unit * 3.1 + vec3(17.0, 2.3, 5.9), 3, 2.3, 0.55)
+  // These octaves are what keeps large-scale value structure on the disc at
+  // every distance where the star is more than a handful of pixels wide, so
+  // they carry roughly as much amplitude as the granulation itself.
+  // (Reusing the granulation's warp vector rather than calling os_warp again:
+  // it is the right scale already and three snoise calls are not free.)
+  float prov = os_fbm(unit * 3.1 + wv * 0.5 + vec3(17.0, 2.3, 5.9), 3, 2.3, 0.55)
              * smoothstep(0.0, 0.10, mu);
 
   // Everything above is a *temperature* perturbation. Colour and radiance then
-  // follow from physics rather than from taste.
-  float tScale = 1.0 + (gran + prov * 0.45) * uGranAmp + fac * 0.038 - spot * 0.42;
+  // follow from physics rather than from taste. T^4 turns a +/-6% temperature
+  // ripple into a +/-25% radiance ripple, so this is where the disc stops being
+  // a beige ball; anything much smaller vanishes under the film grain.
+  float tScale = 1.0 + (gran + prov * 0.70) * uGranAmp + fac * 0.075 - spot * 0.42;
   tScale = max(tScale, 0.30);
 
   vec3 col = os_blackbody(uTemp * tScale);
@@ -285,6 +306,7 @@ uniform float uIntensity;
 uniform float uActivity;
 uniform float uMaxR;
 uniform float uChromo;
+uniform float uSilR;      // apparent silhouette radius of the disc, in stellar radii
 uniform int   uOct;
 uniform vec3  uAxis;
 
@@ -293,31 +315,63 @@ varying vec3 vP;
 void main() {
   #include <logdepthbuf_fragment>
 
-  float r = length(vP);
+  // The quad lies in the plane through the star's centre, so a point at quad
+  // radius 1 is *behind* the sphere and is killed by the depth test: the
+  // silhouette actually sits at 1/sqrt(1-(R/d)^2). Measuring radius against the
+  // silhouette instead of against the geometric radius is what makes the thin
+  // chromospheric shell visible at all — before this it was entirely occluded
+  // by the photosphere it is supposed to be sitting on.
+  float rw = length(vP);                 // radius in the quad's own units
+  float r = rw / max(uSilR, 1.0);        // radius measured against the silhouette
   float rr = max(r, 1.0);
-  vec3 nd = vP / max(r, 1e-4);
+  vec3 nd = vP / max(rw, 1e-4);
 
   // Sampling a *direction* makes every feature a perfect ray from the centre —
-  // that is what makes streamers streamers. The log(r) term slides slowly along
-  // the ray so they are lumpy rather than laser-straight.
-  vec3 sp = nd * 2.15 + nd * log(rr) * 0.30;
-  sp = os_warp(sp + vec3(0.0, uTime * 0.006, 0.0), 0.42);
+  // that is what makes streamers streamers, and it is also why the first pass
+  // was a fan of dead-straight smears with nothing but one scale in it. Bending
+  // the sampling direction tangentially by an amount that grows with radius
+  // makes each streamer bow away from the radial, so they lean, cross and
+  // converge the way field lines do. cross(noise, nd) is tangential by
+  // construction, so the bend never stretches the ray, it only shears it.
+  vec3 c1 = vec3(
+    os_snoise(nd * 1.10 + vec3(0.0, 0.0, uTime * 0.004)),
+    os_snoise(nd * 1.10 + vec3(11.7, 3.1, 0.0)),
+    os_snoise(nd * 1.10 + vec3(2.3, 19.4, 0.0))
+  );
+  vec3 tang = cross(c1, nd);
+  vec3 bend = normalize(nd + tang * (0.07 + 0.30 * log(rr)));
+  vec3 sp = bend * 2.15 + bend * log(rr) * 0.30 + vec3(0.0, uTime * 0.006, 0.0);
 
   float f1 = os_fbm(sp * 0.85, uOct, 2.15, 0.55) * 0.5 + 0.5;
   float f2 = os_ridged(sp * 1.9 + 11.0, uOct - 1, 2.3, 0.5) * 0.5 + 0.5;
   // Wide dynamic range between streamer and coronal hole: an even fringe of
   // hair around the disc is the tell that this is a shader and not a corona.
-  float streak = mix(0.10, 1.25, f1 * f1) * mix(0.55, 1.5, f2);
+  // Cubed rather than squared, and with the floor taken most of the way to
+  // zero, so the gaps between streamers are genuinely empty.
+  float streak = mix(0.03, 1.45, f1 * f1 * f1) * mix(0.40, 1.6, f2);
 
   // A quiet star's corona is a pair of equatorial streamers with polar holes;
-  // an active one fills in. Without this it reads as a clean glow ring.
+  // an active one fills in. Without this it reads as a clean glow ring — and
+  // with the old lat^2 / 0.16 floor the "holes" were still at 40% of the belt,
+  // which at a glance is not a hole at all.
   float lat = abs(dot(nd, normalize(uAxis)));
-  float belt = mix(mix(1.0, 0.16, lat * lat), 1.0, uActivity * 0.45);
+  float belt = mix(mix(1.0, 0.05, pow(lat, 1.5)), 1.0, uActivity * 0.30);
 
   // Per-streamer falloff exponent — a single global exponent is the giveaway.
   float n = mix(5.4, 3.0, f1);
-  float k = pow(rr, -n) * 1.10 + pow(rr, -2.4) * 0.16 * f2;
+  // The shallow r^-2 component is the *outer* corona, and it is the only thing
+  // carrying the far half of the frame. At -2.4 x 0.16 it had died by 3 R and
+  // left bare grain; a real K-corona is still visible at 10 R.
+  float k = pow(rr, -n) * 1.10 + pow(rr, -2.05) * 0.30 * f2;
   float d = k * streak * belt;
+
+  // Arcades: closed loop systems over the active latitudes. They are an order
+  // of magnitude larger than a streamer and they do not radiate away — they
+  // arch and come back — which is the scale the corona was missing entirely.
+  float arc = os_fbm(bend * 0.95 + vec3(31.0, 5.0, uTime * 0.003), 2, 2.3, 0.55) * 0.5 + 0.5;
+  arc = smoothstep(0.54, 0.90, arc);
+  float arcH = (rr - 1.24) / 0.34;   // squared by multiplication: pow() with a
+  d += arc * exp(-arcH * arcH) * 0.55 * belt;   // negative base is undefined here
 
   // The chromosphere: a very thin, very red shell right on the limb.
   float chromo = exp(-(rr - 1.0) * 48.0) * uChromo;
@@ -333,7 +387,11 @@ void main() {
   // Fade the quad out well before its own edge so the square never shows.
   // Written edge0 < edge1: smoothstep with a descending pair is undefined by
   // the GLSL ES spec even though every desktop driver clamps its way through it.
-  col *= 1.0 - smoothstep(uMaxR * 0.55, uMaxR, r);
+  // Starting the fade at 0.55 of the quad cut the outer corona off a long way
+  // inside the frame; 0.78 lets it run to the frame edge and die there instead.
+  // ...against the quad's own radius, never the silhouette-normalised one, or
+  // the fade misses the corner and the square shows.
+  col *= 1.0 - smoothstep(uMaxR * 0.78, uMaxR, rw);
 
   gl_FragColor = vec4(col, 1.0);
   #include <tonemapping_fragment>
@@ -394,26 +452,54 @@ void main() {
   float y = vQuad.y;
   // Per-instance lean and eccentricity: identical loops around the limb read as
   // a ring of decals, which is exactly what a prominence must not look like.
-  float lean = (vPar.x - 0.5) * 0.55;
-  vec2 e2 = vec2((x - y * lean) / mix(0.30, 0.50, vPar.x), y / 0.92);
+  //
+  // The semi-axes are the whole ballgame. At (0.30..0.50, 0.92) the e = 1
+  // contour ran *through* the quad border, so the Gaussian band around it, plus
+  // its noise displacement, was sliced off by the quad on the top and both
+  // sides — the salmon rectangle in the review. The arc now has to fit inside
+  // the unit quad together with the widest band it can grow (out to the alpha
+  // cut below) and the largest radial displacement the noise can apply, which
+  // caps the semi-axes at (0.27, 0.62): worst case the arc reaches x = 0.40 and
+  // y = 0.85, both inside the envelope at the bottom of this function.
+  float lean = (vPar.x - 0.5) * 0.42;
+  float ax = mix(0.19, 0.27, vPar.x);
+  vec2 e2 = vec2((x - y * lean) / ax, y / 0.62);
   float e = length(e2);
 
   vec3 np = vec3(x * 3.0, y * 2.2, vPar.x * 37.0 + uTime * vPar.z);
   float nz = os_fbm(np, 4, 2.2, 0.55);
   // Displace the arc radius by noise: plasma follows kinked field lines, never
   // a clean semicircle.
-  float ed = e + nz * 0.20;
+  float ed = e + nz * 0.16;
 
   float w = vPar.y * (0.45 + 1.35 * y);
   float band = exp(-pow(abs(ed - 1.0) / max(w, 1e-3), 2.0));
   // A second, thinner strand offset inwards — loops come in bundles.
   float band2 = exp(-pow(abs(ed - 0.82 - nz * 0.06) / max(w * 0.55, 1e-3), 2.0)) * 0.55;
-  float strands = 0.35 + 0.65 * (os_fbm(np * 4.1 + 5.0, 3, 2.3, 0.5) * 0.5 + 0.5);
+  // No pedestal. The 0.35 floor this used to carry meant the strand field could
+  // only dim the arc, never break it, so every loop was a continuous airbrushed
+  // ribbon *and* the alpha could not reach zero anywhere. Both halves of that
+  // sentence were visible in the frame.
+  float fil = os_fbm(np * 4.1 + 5.0, 3, 2.3, 0.5) * 0.5 + 0.5;
+  float strands = smoothstep(0.20, 0.74, fil);
+  // One octave of much finer structure so the strands themselves are threaded
+  // rather than smooth.
+  strands *= 0.60 + 0.40 * (os_snoise(np * 13.0 + 21.0) * 0.5 + 0.5);
   float foot = smoothstep(0.0, 0.10, y);
   // Material drains back down the field lines, so the crown is always thinner.
   float drain = 1.0 - 0.55 * smoothstep(0.15, 1.0, y);
 
   float a = (band + band2) * strands * foot * drain * pow(vLimb, 2.2);
+  // A Gaussian never reaches zero, so a few per cent of alpha survived all the
+  // way to the quad's own corners. Clip the tail and renormalise: below this
+  // level the plasma is thinner than the film grain anyway.
+  a = max(a - 0.04, 0.0) / 0.96;
+  // Belt and braces — an explicit guarantee that nothing at all is emitted at
+  // the quad boundary, whatever the noise does. With the geometry above this
+  // only ever trims values that are already near zero, so it costs no shape.
+  // Both smoothsteps written edge0 < edge1 and inverted: a descending pair is
+  // undefined by the GLSL ES spec, however reliably desktop drivers clamp it.
+  a *= (1.0 - smoothstep(0.40, 0.50, abs(x))) * (1.0 - smoothstep(0.86, 1.00, y));
 
   // H-alpha. This is the one saturated accent the star is allowed.
   // Hot, near-white footpoints grading into deep H-alpha as the plasma cools
@@ -486,6 +572,7 @@ uniform float uTempIn;
 uniform float uIntensity;
 uniform float uHalf;      // +1 weight the far half, -1 the near half, 0 all of it
 uniform float uFeather;   // km over which the two passes cross-fade
+uniform float uPixAngle;  // fovY / viewport height, radians per pixel
 uniform int   uOct;
 
 varying vec3 vObj;
@@ -514,12 +601,78 @@ void main() {
   // the turbulence into spiral filaments instead of concentric rings.
   float omega = pow(max(rr, 1.0), -1.5) * 6.0;
   float ph = phi + uTime * omega;
-  vec3 np = vec3(cos(ph), sin(ph), 0.0) * (1.6 + 0.55 * log(max(rr, 1.0)))
+  // The two halves of this coordinate are now cleanly separated: xy is purely
+  // azimuthal, z is purely radial. That separation is what lets the LOD below
+  // treat the two directions differently, which it has to, because at a grazing
+  // view they are undersampled by wildly different amounts. (The old version
+  // grew the xy ring radius with log(r) as well, which smuggled radial
+  // variation into the azimuthal axis and made that impossible.)
+  vec3 np = vec3(cos(ph), sin(ph), 0.0) * 2.6
           + vec3(0.0, 0.0, log(max(rr, 1.0)) * 2.6);
 
-  float turb = os_fbm(np * 2.4, uOct, 2.2, 0.55) * 0.5 + 0.5;
-  float fine = os_fbm(np * 8.5 + 3.0, uOct - 2, 2.3, 0.5) * 0.5 + 0.5;
-  float dens = mix(0.45, 1.55, turb) * mix(0.70, 1.30, fine);
+  // ---- Screen-space LOD -------------------------------------------------
+  // The photosphere has had one of these from the start; the disc never did,
+  // and it is the disc that needs it most. Seen ten degrees above the plane a
+  // single pixel spans an enormous *radial* extent, so a fixed 8.5x octave was
+  // sampled far under Nyquist and folded into the tight concentric arcs the
+  // review saw. This is the cause of the moire, not a filter over it.
+  vec3 Vw = vWorld - cameraPosition;
+  float dist = length(Vw);
+  // How obliquely we hit the plane. 0.012 caps the footprint at the exact
+  // grazing limit rather than letting it run to infinity.
+  float graze = max(abs(dot(normalize(vNrm), Vw / max(dist, 1e-4))), 0.012);
+  float pxTan = dist * uPixAngle;             // km per pixel across the ray
+  float pxRad = pxTan / graze;                // km per pixel along the plane
+  // |d np / dr| = 2.6 / r along z; |d np / dphi| = 2.6 per radian in xy.
+  float dR = pxRad * 2.6 / max(r, 1.0);
+  float dA = pxTan * 2.6 / max(r, 1.0);
+  // The octave index at which one cycle covers exactly two pixels, per axis.
+  // weight = clamp(lod - i, 0, 1) therefore puts the zero crossing on Nyquist
+  // and full weight at four pixels per cycle. Fading by *amplitude* rather than
+  // by octave count matters: stepping the count would drop a visible ring at
+  // every integer crossing, which is the same disease in a different costume.
+  float lodA = -log2(max(dA * 2.4 * 2.0, 1e-6));
+  float lodR = -log2(max(dR * 2.4 * 2.0, 1e-6));
+
+  // A weighted, band-limited sum replaces the two fixed-frequency fbm calls and
+  // is no more expensive than they were (uOct+1 snoise against uOct + uOct-2).
+  // The octave *count* follows the azimuthal limit and the radial axis is
+  // squashed per octave to satisfy the radial one — so instead of the disc
+  // going smooth at grazing angles, its detail survives as filaments stretched
+  // along the flow. Keplerian shear does exactly that to real plasma, so the
+  // anti-aliasing measure and the physics happen to want the same picture.
+  float sum = 0.0;
+  float nw = 0.0;
+  float nfq = 1.0;
+  float namp = 1.0;
+  for (int i = 0; i < 8; i++) {
+    if (i >= uOct) break;
+    float w = clamp(lodA - float(i), 0.0, 1.0);
+    if (w <= 0.0) break;
+    // Lacunarity is exactly 2 so that this cancels the 2^i in nfq and every
+    // octave lands on the same radial sample rate — 0.33 cycles per pixel —
+    // instead of creeping back over Nyquist as i climbs.
+    float sq = clamp(exp2(lodR - float(i) - 0.6), 0.0, 1.0);
+    sum += namp * w * os_snoise(vec3(np.xy, np.z * sq) * 2.4 * nfq);
+    nw += namp * w;
+    nfq *= 2.0;
+    namp *= 0.55;
+  }
+  float turb = sum / max(nw, 1e-4) * 0.5 + 0.5;
+
+  // Clumping. Roughly two cycles across the annulus and a handful around it, so
+  // it is structure rather than texture: the disc had none of this at all, and
+  // large-scale value is the difference between plasma and a spun ceramic bowl.
+  // It doubles as the dust lane crossing the plane, since where it bottoms out
+  // the disc goes nearly opaque-dark.
+  float clump = os_snoise(np * 0.32 + 7.0) * 0.5 + 0.5;
+
+  // Contrast. mix(0.45,1.55) x mix(0.70,1.30) is a 3.5:1 spread around a very
+  // strong mean, i.e. a uniform wash with a texture painted on it.
+  float dens = mix(0.16, 1.85, smoothstep(0.14, 0.86, turb)) * mix(0.30, 1.55, clump);
+  // Hot knots: the top of the turbulence distribution is where the flow is
+  // being compressed, and it should blow out rather than merely brighten.
+  dens *= 1.0 + 1.6 * smoothstep(0.74, 0.97, turb);
 
   // Shakura–Sunyaev: T ~ r^-3/4 with a zero-torque inner boundary, so the disc
   // has a dark inner lip and its hottest ring sits just outside it.
@@ -595,6 +748,10 @@ uniform mat4 uViewProj;
 uniform vec3 uCamPos;
 uniform vec3 uBhPos;
 uniform float uRs;
+uniform float uRin;      // accretion-disc inner radius, km
+uniform float uRout;     // accretion-disc outer radius, km
+uniform vec3  uDiscN;    // unit normal of the disc plane, world space
+uniform vec3  uDiscCol;  // representative disc colour, linear
 uniform float uHdr;      // 1 when we are writing into a linear HDR target
 uniform float uLensOn;   // 0 when the framebuffer copy was not possible
 
@@ -607,9 +764,9 @@ varying vec2 vUv;
 // uHdr tells the added terms which of the two worlds they are living in.
 
 /**
- * A faint sprinkle of stars used where a deflected ray leaves the screen and
- * there is simply no data to resample. Confined to the strongly-lensed core,
- * where it reads as extra Einstein-ring imagery rather than as a second sky.
+ * A faint sprinkle of stars for deflected rays. Used both as extra Einstein-ring
+ * imagery near the hole and as the substitute sky for rays that leave the
+ * framebuffer entirely.
  */
 vec3 backdrop(vec3 d) {
   vec3 g = d * 260.0;
@@ -625,6 +782,52 @@ vec3 backdrop(vec3 d) {
   return c;
 }
 
+/**
+ * What a ray that left the framebuffer is actually looking at.
+ *
+ * This is the term whose absence made the frame wrong. The scene texture only
+ * holds what was inside the viewport, so a deflected ray pointing anywhere else
+ * has no data — and the old code answered that by multiplying the pixel to
+ * black. The set of rays with no data is bounded by the *screen rectangle*, so
+ * blacking it out draws the viewport's own edges into the middle of a
+ * gravitational lens: the straight diagonal cuts and the horizontal seam in the
+ * review are literally the shape of the framebuffer. A lens has no straight
+ * lines anywhere.
+ *
+ * The honest answer is cheap: the ray is a straight line in the far field once
+ * the deflection has been applied, so intersect it analytically with the disc
+ * plane and with the sky. Costs a handful of ALU and no texture fetch.
+ */
+vec3 offscreen(vec3 d) {
+  vec3 c = backdrop(d) * mix(0.9, 5.0, uHdr);
+
+  float dn = dot(d, uDiscN);
+  if (abs(dn) > 1e-4) {
+    vec3 rel = uBhPos - uCamPos;
+    float t = dot(rel, uDiscN) / dn;
+    if (t > 0.0) {
+      vec3 hit = d * t - rel;               // hit point relative to the hole
+      float rr = length(hit);
+      if (rr > uRin && rr < uRout) {
+        float x = rr / uRin;
+        // Same r^-3/4 temperature profile the disc pass uses, folded straight
+        // into a radiance so the substitute lines up with the real thing at the
+        // seam instead of stepping across it.
+        float prof = pow(x, -1.65) * pow(max(1.0 - sqrt(uRin / rr), 0.0), 0.6)
+                   * (1.0 - smoothstep(uRout * 0.62, uRout, rr));
+        float turb = os_snoise(normalize(hit) * (2.0 + log(x) * 2.2)) * 0.5 + 0.5;
+        // Gain matched by hand against the real pass at x = 1.5 (prof 0.183 vs
+        // emiss*uIntensity 0.6) so the substitute and the resampled disc meet at
+        // the same value; anything else just moves the seam rather than
+        // removing it. No column-length term, because the disc pass has none
+        // either — it is a thin emissive sheet, not a volume.
+        c += uDiscCol * prof * mix(0.45, 1.55, turb) * mix(0.6, 3.3, uHdr);
+      }
+    }
+  }
+  return c;
+}
+
 void main() {
   vec2 ndc = vUv * 2.0 - 1.0;
   vec4 vp = uInvProj * vec4(ndc, -1.0, 1.0);
@@ -636,7 +839,18 @@ void main() {
   vec3 perp = L - dir * along;      // from the ray's closest point to the hole
   float b = length(perp);           // impact parameter
 
-  vec3 base = texture2D(uScene, vUv).rgb;
+  // Interstellar dust. Section 6 asks for a desaturated steel-blue base and
+  // lifted-crushed blacks; without it the sky around the hole is #050506 and
+  // the bottom third of the frame carries no information whatsoever. Deliberately
+  // an order of magnitude under the bloom threshold — this is a base value, not
+  // an emitter — and computed off dir rather than bent so that it is continuous
+  // across the early-out below. (No backticks in here: this is a template
+  // literal and they would end the shader.)
+  float dust = os_snoise(dir * 2.2) * 0.5 + 0.5;
+  vec3 haze = vec3(0.085, 0.115, 0.175) * (0.006 + 0.035 * dust * dust)
+            * mix(0.9, 2.4, uHdr);
+
+  vec3 base = texture2D(uScene, vUv).rgb + haze;
 
   // Behind us, or so far off axis that the deflection is under a pixel.
   if (along <= 0.0) {
@@ -676,19 +890,45 @@ void main() {
   // -- does the exact opposite and smears a clamped screen-edge texel over the
   // whole annulus at full brightness.
   float behind = 1.0 - step(0.0, clip.w);
-  float lost = max(smoothstep(0.0, 0.05, outside), behind);
-  col *= (1.0 - lost);
+  // Wide feather. Near the photon ring the screen-to-sky mapping is violently
+  // expansive, so a 0.05-uv ramp collapses to a couple of pixels on screen and
+  // the boundary reads as an edge however smooth it is in uv.
+  float lost = max(smoothstep(0.0, 0.16, outside), behind);
+  // Substitute, never multiply to black.
+  col = mix(col, offscreen(bent), lost);
 
-  // Extra lensed starlight, only where the geometry is violently distorted.
+  // Extra lensed starlight. This used to be gated to b < 9 Rs, so the tangential
+  // star arcs — the entire reason a black hole is worth drawing — existed only
+  // inside a disc barely wider than the shadow, and the rest of the sky was
+  // literally nothing. Outside the strongly-lensed core it is dimmed rather
+  // than switched off, so it reads as the real sky being bent rather than as a
+  // second starfield pasted over Sky.ts's.
   float core = 1.0 - smoothstep(3.2 * uRs, 9.0 * uRs, b);
-  col += backdrop(bent) * core * mix(0.9, 5.0, uHdr);
+  col += backdrop(bent) * mix(0.22, 1.0, core) * (1.0 - lost) * mix(0.9, 5.0, uHdr);
+
+  col += haze;
 
   col *= shadow;
 
-  // The photon ring: light that orbited the hole before reaching us. Thin,
-  // sitting just outside b_ph, and the brightest thing in the frame.
-  float ring = exp(-pow((b / bph - 1.035) / 0.048, 2.0));
-  vec3 ringCol = vec3(1.0, 0.93, 0.84) * ring * mix(1.5, 9.0, uHdr);
+  // The photon ring: light that orbited the hole before reaching us. Thin and
+  // sitting just outside b_ph.
+  //
+  // At 9.0 linear against a bloom threshold of 1.0 this was, by a factor of
+  // several, the brightest thing PostFX ever sees, and an isotropic multi-mip
+  // bloom turned a 5 px ring into a 200 px halo that filled the shadow with
+  // grey. The shadow has to be the darkest object in the frame or the ring has
+  // nothing to be thin against, so the ring gives up peak and takes width: the
+  // integrated energy is close to unchanged, the bloom driver drops by a third.
+  // Cooled towards steel-white as well — its light comes from the inner disc,
+  // which at the new uTempIn is blue-white rather than candle-warm, and it is
+  // the frame's second hue.
+  // (Squared by multiplication — pow() with a negative base, which this is for
+  // every pixel inside the ring, is undefined in GLSL ES.)
+  float rg = (b / bph - 1.038) / 0.056;
+  float ring = exp(-rg * rg);
+  vec3 ringCol = vec3(0.86, 0.92, 1.0) * ring * mix(1.3, 6.0, uHdr);
+  // Nothing at all is emitted inside the horizon, including the Gaussian's tail.
+  ringCol *= shadow;
   col += ringCol;
 
   // With uLensOn = 0 we could not read the framebuffer, so fall back to
@@ -773,10 +1013,30 @@ void main() {
 
   vec3 col = uColor * (psf + veil + spike) + vec3(0.60, 0.76, 1.0) * streak + haloC;
 
+  // Every term above is centred on uStar, and for a black hole uStar is the
+  // middle of the shadow — the deepest black in the frame, and the only reason
+  // the photon ring reads as razor-thin. Scaling them all down by pointness^2
+  // was not enough: at a 0.18 NDC shadow that still leaves psf + veil + streak
+  // at ~0.015 scene-linear, which comes out of ACES at 20/255 against a sky
+  // floor of 3. Measured in the review frame as a "soft grey dome inside the
+  // photon ring", and it was this, not bloom. So punch an actual hole the size
+  // of the shadow instead of dimming: nothing is painted inside the horizon at
+  // all, and the flare picks up again just outside the ring where the light
+  // genuinely comes from. For an unresolved hole core collapses to uMinR and
+  // the hole is two pixels wide, i.e. it does nothing.
+  col *= mix(1.0, smoothstep(core * 0.55, core * 1.15, r), uDark);
+
   // Ghosts: internal reflections land on the line through the frame centre.
   // The palette is rationed to the project's two hues — amber glow and
   // steel-blue — rather than one tint per element. Five differently-coloured
   // discs is a lens-flare preset, not an art direction.
+  //
+  // A ghost is an out-of-focus image of the *iris*, so it is a polygon with as
+  // many sides as the lens has blades, it is brighter towards its rim than at
+  // its centre, its three channels focus at slightly different radii, and it
+  // carries every scratch and dust mote on the glass. The previous version was
+  // a flat fill with a hard shoulder, which is why the review read the two
+  // large ones as smudges or a render bug rather than as optics.
   const int GHOSTS = 5;
   float ks[GHOSTS];
   ks[0] = -0.32; ks[1] = -0.68; ks[2] = 0.47; ks[3] = -1.12; ks[4] = 0.26;
@@ -786,13 +1046,35 @@ void main() {
   warm[0] = 0.0; warm[1] = 1.0; warm[2] = 0.15; warm[3] = 0.85; warm[4] = 1.0;
   const vec3 GHOST_COOL = vec3(0.52, 0.70, 1.00);
   const vec3 GHOST_WARM = vec3(1.00, 0.74, 0.40);
+  const float BLADES = 7.0;
+  const float SEG = 6.2831853 / BLADES;
   for (int i = 0; i < GHOSTS; i++) {
     vec2 gp = uStar * ks[i];
-    float gr = length(q - gp) / szs[i];
-    // A soft disc with a brighter rim: the shape of an out-of-focus aperture.
-    float body = 1.0 - smoothstep(0.55, 1.0, gr);
-    float rim = exp(-pow((gr - 0.88) / 0.13, 2.0)) * 0.9;
-    col += mix(GHOST_COOL, GHOST_WARM, warm[i]) * (body * 0.016 + rim * 0.013);
+    vec2 gd = (q - gp) / szs[i];
+    float gr = length(gd);
+    if (gr > 1.45) continue;
+    // Boundary radius of a regular BLADES-gon with unit apothem, at this angle.
+    // Each ghost sees the iris at its own roll so they are not clones.
+    float ga = atan(gd.y, gd.x) + float(i) * 1.13;
+    float bnd = 1.0 / max(cos(mod(ga, SEG) - SEG * 0.5), 0.35);
+    // Per-channel focus: the three images of the aperture do not land on the
+    // same radius, which is where a ghost's colour fringe comes from.
+    vec3 k3 = vec3(gr / (bnd * 1.045), gr / bnd, gr / (bnd * 0.955));
+    // Interior ramp — an aperture image is dimmest in the middle and piles up
+    // against the blades. Never a plateau.
+    vec3 body = (1.0 - smoothstep(vec3(0.80), vec3(1.0), k3))
+              * (0.22 + 0.78 * smoothstep(vec3(0.0), vec3(0.72), k3));
+    // Squared by multiplication, not pow(): pow() with a negative base is
+    // undefined in GLSL ES and this argument is negative over the whole inside
+    // of the ghost.
+    vec3 dr = (k3 - 0.93) / 0.11;
+    vec3 rim = exp(-dr * dr) * 0.9;
+    // Dust and coating scratches on the element that made the reflection.
+    float grime = 0.45 + 0.55 * (os_snoise(vec3(gd * 2.6, float(i) * 9.0)) * 0.5 + 0.5);
+    grime *= 0.70 + 0.30 * (os_snoise(vec3(gd * 11.0, float(i) * 3.0 + 40.0)) * 0.5 + 0.5);
+    // Roughly 60% of the old amplitude: a ghost sells the intensity of the
+    // source by being *there*, not by being readable.
+    col += mix(GHOST_COOL, GHOST_WARM, warm[i]) * grime * (body * 0.0065 + rim * 0.0055);
   }
 
   col *= gate * off * emit;
@@ -852,6 +1134,10 @@ export class StarRenderer {
   private discFar: Mesh | null = null;
   private discNear: Mesh | null = null;
   private discU: UniformMap[] = [];
+  /** The disc's parent transform — the lens needs its plane normal each frame. */
+  private discPlane: Group | null = null;
+  private discRin = 0;
+  private discRout = 0;
 
   private lens: Mesh | null = null;
   private lensU: UniformMap | null = null;
@@ -964,10 +1250,14 @@ export class StarRenderer {
     const uniforms: UniformMap = {
       uTime: { value: 0 },
       uTemp: { value: Math.max(spec.temperature, 1200) },
-      // Tuned against ACES at exposure 1: the disc centre sits just under
-      // clipping so limb darkening and granulation survive the tone map, and
-      // PostFX bloom is what blows the core out, not the raw value.
-      uIntensity: { value: degenerate ? 4.6 : 1.45 },
+      // Scene-linear, tone-mapped by PostFX (ACES) with a bloom threshold of
+      // 1.0. At 1.45 the *hottest* granule core landed at ~1.6 — barely over
+      // the threshold — so the disc came out as one matte value with no
+      // emission anywhere. At 1.85 the quiet photosphere sits at ACES ~0.91 and
+      // the granule cores, which run to twice the mean radiance, go to ~3.7 and
+      // genuinely blow out. A star is an emitter; it has to have pixels that
+      // clip, and it has to have them *locally* rather than as a white plate.
+      uIntensity: { value: degenerate ? 4.6 : 1.85 },
       // A white dwarf is Earth-sized: you can park next to one, and a perfectly
       // uniform white disc is exactly the flat field section 6 forbids. Cool
       // dwarfs really do convect, so give it a fine, shallow granulation. A
@@ -975,13 +1265,21 @@ export class StarRenderer {
       uGranAmp: {
         value: degenerate
           ? this.kind === 'wd'
-            ? 0.055
+            ? 0.075
             : 0.02
-          : 0.085 + 0.06 * spec.activity,
+          : 0.125 + 0.05 * spec.activity,
       },
-      uGranScale: { value: degenerate ? 40 : 18 },
+      // 14 rather than 18: the LOD below now retires an octave once its cells
+      // reach ~4 px instead of ~1 px, so the base cell has to be bigger or the
+      // star loses its texture as soon as it stops filling the frame.
+      uGranScale: { value: degenerate ? 30 : 14 },
       uDetail: { value: 1 },
-      uSpotThresh: { value: degenerate ? 3 : 0.78 - 0.62 * spec.activity },
+      // spotN is 4-octave fBm with a standard deviation near 0.30, so this
+      // threshold is a coverage control: at activity 0.62 it puts penumbra over
+      // roughly a tenth of the surface and umbra over about one per cent —
+      // several spot groups instead of the single smudge the first pass showed,
+      // without tipping over into a diseased-looking star.
+      uSpotThresh: { value: degenerate ? 3 : 0.72 - 0.55 * spec.activity },
       uSpotDepth: { value: degenerate ? 0 : 1 },
       uFlow: { value: degenerate ? 0.5 : 1 },
       uLimb: { value: new Vector2(a, b) },
@@ -1017,6 +1315,7 @@ export class StarRenderer {
       uActivity: { value: this.spec.activity },
       uMaxR: { value: this.coronaMaxR },
       uChromo: { value: this.kind === 'normal' ? 0.45 + 0.9 * this.spec.activity : 0.25 },
+      uSilR: { value: 1 },
       uOct: { value: [3, 4, 5, 6][t]! },
       uAxis: { value: new Vector3(0, 1, 0) },
       uRight: { value: new Vector3(1, 0, 0) },
@@ -1066,8 +1365,11 @@ export class StarRenderer {
       // Prominences cluster in the active latitudes, so bias the size by how
       // far the footpoint is from the pole.
       const lat = 1 - Math.abs(y);
+      // Range widened by 0.92/0.62 to cancel the smaller arc the fragment
+      // shader now draws inside its quad; the loops keep their old apparent
+      // size, they simply no longer touch the sprite border.
       this.promScale.push(
-        this.radiusKm * rng.range(0.13, 0.34) * (0.55 + 0.6 * lat) * (0.6 + 0.8 * this.spec.activity),
+        this.radiusKm * rng.range(0.19, 0.50) * (0.55 + 0.6 * lat) * (0.6 + 0.8 * this.spec.activity),
       );
       params[i * 3] = rng.next();
       params[i * 3 + 1] = rng.range(0.035, 0.10);
@@ -1077,7 +1379,9 @@ export class StarRenderer {
 
     const uniforms: UniformMap = {
       uTime: { value: 0 },
-      uIntensity: { value: 2.6 * (0.4 + 0.6 * this.spec.activity) },
+      // Nudged up from 2.6 to hold the same peak brightness now that the strand
+      // field has no pedestal: the mean alpha fell, the maximum did not.
+      uIntensity: { value: 2.9 * (0.4 + 0.6 * this.spec.activity) },
     };
     this.promU = uniforms;
 
@@ -1160,6 +1464,8 @@ export class StarRenderer {
     const rs = this.schwarzschildKm;
     const rin = 3 * rs; // ISCO for a non-rotating hole
     const rout = rng.range(11, 15) * rs;
+    this.discRin = rin;
+    this.discRout = rout;
     const t = tierIndex(this.quality);
 
     // RingGeometry lies in XY and the shader reads polar coordinates straight
@@ -1184,10 +1490,18 @@ export class StarRenderer {
         // Not the real 10^7 K of a stellar-mass disc — that renders as a flat
         // white plate. This is the temperature that puts the blue-white/orange
         // transition where the eye can read the r^-3/4 gradient.
-        uTempIn: { value: 15000 },
+        //
+        // 15000 put the *peak* of the Shakura-Sunyaev profile at 7250 K, which
+        // is a candle: nowhere in the frame was there a second hue, and the
+        // whole image came out sepia. The profile peaks at 0.483 x uTempIn, so
+        // 21000 lands the hot ring at ~10000 K and lets the g-shift carry the
+        // approaching limb to ~16000 (blue-white) and the receding one back
+        // under 6500 (amber). That split *is* the palette.
+        uTempIn: { value: 21000 },
         uIntensity: { value: 4.2 },
         uHalf: { value: half },
         uFeather: { value: rout * 0.16 },
+        uPixAngle: { value: 1 / 1080 },
         uOct: { value: [4, 5, 6, 7][t]! },
       };
       this.discU.push(uniforms);
@@ -1216,6 +1530,7 @@ export class StarRenderer {
     // erased by it.
     this.discNear = mk(-1, 40);
     plane.add(this.discFar, this.discNear);
+    this.discPlane = plane;
     this.object3d.add(plane);
   }
 
@@ -1229,6 +1544,12 @@ export class StarRenderer {
       uCamPos: { value: new Vector3() },
       uBhPos: { value: new Vector3() },
       uRs: { value: this.schwarzschildKm },
+      uRin: { value: this.discRin },
+      uRout: { value: this.discRout },
+      uDiscN: { value: new Vector3(0, 1, 0) },
+      // Mid-disc colour, roughly os_blackbody(0.5 * uTempIn) in linear. Only
+      // used for rays that left the framebuffer, where the alternative is black.
+      uDiscCol: { value: new Color(1.0, 0.88, 0.72) },
       uHdr: { value: 0 },
       uLensOn: { value: 0 },
     };
@@ -1349,7 +1670,13 @@ export class StarRenderer {
         (this.radiusKm / this.distanceKm) / (view.fovY / Math.max(view.viewportHeight, 1));
       const scale = (u.uGranScale as IUniform<number>).value;
       const k = pxPerRadius / (scale * 2.5);
-      const oct = 1 + Math.log(Math.max(k, 1e-3)) / Math.log(2.6);
+      // The octave that carries full weight has cells of 2.5 / 2.6^(C-1) pixels
+      // across, so the constant C is *literally* the alias margin. It used to be
+      // 1, i.e. the top weighted octave had 2.5 px cells; that is inside the
+      // Nyquist limit and is why the granulation had to be kept at an amplitude
+      // low enough to hide the shimmer. At -0.6 the top weighted octave is
+      // ~11 px and the fading one ~4 px, which is what buys the contrast above.
+      const oct = -0.6 + Math.log(Math.max(k, 1e-3)) / Math.log(2.6);
       (u.uDetail as IUniform<number>).value = Math.min(Math.max(oct, 0), 4);
     }
 
@@ -1368,6 +1695,12 @@ export class StarRenderer {
       (u.uTime as IUniform<number>).value = this.time;
       (u.uRight as IUniform<Vector3>).value.copy(this.right);
       (u.uUp as IUniform<Vector3>).value.copy(this.up);
+      // The corona quad sits in the plane through the star's centre, so the
+      // sphere occludes everything inside the *tangent* circle, whose radius in
+      // quad units is 1/sqrt(1 - (R/d)^2). Hand that to the shader so the
+      // chromospheric shell lands where it can actually be seen.
+      const s = Math.min(this.radiusKm / this.distanceKm, 0.999);
+      (u.uSilR as IUniform<number>).value = 1 / Math.sqrt(1 - s * s);
     }
 
     if (this.prominences) {
@@ -1380,7 +1713,13 @@ export class StarRenderer {
       (this.beamU!.uTime as IUniform<number>).value = this.time;
     }
 
-    for (const u of this.discU) (u.uTime as IUniform<number>).value = this.time;
+    // Radians per pixel — the disc's noise LOD needs the same screen metric the
+    // photosphere has always had, or its high octaves alias into moire arcs.
+    const pixAngle = view.fovY / Math.max(view.viewportHeight, 1);
+    for (const u of this.discU) {
+      (u.uTime as IUniform<number>).value = this.time;
+      (u.uPixAngle as IUniform<number>).value = pixAngle;
+    }
 
     if (this.flareU) {
       const u = this.flareU;
@@ -1522,6 +1861,14 @@ export class StarRenderer {
       .multiply(camera.matrixWorldInverse);
     (u.uCamPos as IUniform<Vector3>).value.setFromMatrixPosition(camera.matrixWorld);
     (u.uBhPos as IUniform<Vector3>).value.setFromMatrixPosition(this.object3d.matrixWorld);
+    if (this.discPlane) {
+      // RingGeometry lies in the plane group's XY, so its normal is that
+      // group's +Z carried through whatever transform the hole has.
+      (u.uDiscN as IUniform<Vector3>).value
+        .set(0, 0, 1)
+        .transformDirection(this.discPlane.matrixWorld)
+        .normalize();
+    }
   };
 
   // -------------------------------------------------------------------------
@@ -1580,6 +1927,7 @@ export class StarRenderer {
     this.beamSpin = null;
     this.discFar = null;
     this.discNear = null;
+    this.discPlane = null;
     this.lens = null;
     this.flare = null;
 
