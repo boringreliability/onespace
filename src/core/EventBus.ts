@@ -41,6 +41,29 @@ export interface GameEvents {
   'quality:changed': { tier: string };
   'ui:toggle-map': void;
   'ui:toggle-codex': void;
+
+  /** The camera rig changed viewpoint. HUD dims/undims the cockpit chrome on this. */
+  'camera:mode': { mode: 'cockpit' | 'chase' | 'cinematic' | 'orbit' };
+  /**
+   * Request a camera shake. Anything that hits, explodes or drops out of warp
+   * emits this rather than importing the rig. `intensity` is 0..1, `duration`
+   * is the decay time in seconds.
+   */
+  'camera:shake': { intensity: number; duration: number };
+
+  /** Ship met the ground softly enough to survive. `vertical` is impact speed along the surface normal, km/s. */
+  'ship:touchdown': { speed: number; vertical: number; planetId: string | null };
+  /** Ship met the ground too fast. The hull is gone. */
+  'ship:crashed': { speed: number; planetId: string | null };
+
+  /** The star map's open transition started/ended. Flight input should stand down. */
+  'ui:map-opened': void;
+  'ui:map-closed': void;
+
+  /** A course was plotted (or cleared, when `systemId` is null) on the star map. */
+  'nav:route-set': { systemId: string | null; name: string | null; distanceLy: number };
+  /** The pilot confirmed the jump. The warp drive decides whether it happens. */
+  'nav:jump-requested': { systemId: string; name: string; distanceLy: number };
 }
 
 type Handler<T> = (payload: T) => void;
