@@ -32,6 +32,15 @@ export interface Shot {
   apply(ctx: EngineContext): void | Promise<void>;
   /** Optional: called every frame while this shot is active. */
   update?(dt: number, ctx: EngineContext): void;
+  /**
+   * Optional: called when this shot is replaced by another.
+   *
+   * The capture harness drives every shot in one page load, so a fixture built
+   * by one shot is still in the scene when the next runs. Without this, shots
+   * silently contaminate each other — and a borrowed fixture is worse than a
+   * missing one, because the frame looks plausible and is wrong.
+   */
+  teardown?(ctx: EngineContext): void;
 }
 
 const shots = new Map<string, Shot>();
@@ -55,6 +64,7 @@ export function shotList(): Array<{ name: string; description: string }> {
 export async function setShot(name: string, ctx: EngineContext): Promise<void> {
   const shot = shots.get(name);
   if (!shot) throw new Error(`unknown shot "${name}"`);
+  if (active && active !== shot) active.teardown?.(ctx);
   active = shot;
   await shot.apply(ctx);
 }

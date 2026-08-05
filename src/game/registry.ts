@@ -24,7 +24,7 @@ import { PostFX, registerPostFXShots } from '@/render/PostFX';
 import { NebulaRenderer, registerNebulaShots } from '@/render/Nebula';
 import { RingRenderer, registerRingsShots } from '@/render/Rings';
 import { registerStarShots } from '@/render/Star';
-import { registerPlanetShots } from '@/render/Planet';
+import { PlanetRenderer, clearPlanetShotFixture, registerPlanetShots } from '@/render/Planet';
 import { registerCloudShots } from '@/render/Clouds';
 import { registerAtmosphereShots } from '@/render/Atmosphere';
 
@@ -96,18 +96,42 @@ class SkyModule implements GameModule {
 class Gallery implements GameModule {
   readonly name = 'gallery';
   readonly root = new Group();
+  readonly planet: PlanetRenderer;
+  private readonly ringPivot = new Group();
   nebula: NebulaRenderer | null = null;
   rings: RingRenderer | null = null;
 
-  constructor(nebulaSpec: NebulaSpec | undefined, ringHost: PlanetSpec | null) {
+  /**
+   * The ring and cloud shots place a camera and aim a star, and assume the
+   * integrator has put a PLANET at the centre of what they are framing. Give
+   * them one. Without it the shots borrow whatever fixture the previous shot
+   * left behind, which produces a frame that looks plausible and is wrong: a
+   * ring annulus floating in front of an unrelated world at an unrelated
+   * scale, with no far half to the ellipse because there is nothing to pass
+   * behind.
+   */
+  constructor(nebulaSpec: NebulaSpec | undefined, readonly host: PlanetSpec) {
     // Hidden during play; a shot that needs it turns it on. See ReviewGuard.
     this.root.visible = false;
-    if (nebulaSpec) this.nebula = new NebulaRenderer(nebulaSpec, config.quality);
-    if (ringHost?.rings) {
-      this.rings = new RingRenderer(ringHost.rings, ringHost.radius, config.quality);
+
+    this.planet = new PlanetRenderer(host, config.quality);
+    this.root.add(this.planet.object3d);
+
+    if (host.rings) {
+      this.rings = new RingRenderer(host.rings, host.radius, config.quality);
+      // The rings get their OWN pivot rather than being parented to the planet.
+      // The ring shot isolates its subject by hiding every sibling of the ring
+      // object — sensible when the siblings are an unrelated nebula, fatal when
+      // the sibling is the planet the rings are supposed to encircle. The pivot
+      // shares the planet's centre, so the geometry is identical and the shot's
+      // isolation sweep has nothing to switch off.
+      this.ringPivot.add(this.rings.object3d);
+      this.root.add(this.ringPivot);
     }
-    if (this.nebula) this.root.add(this.nebula.object3d);
-    if (this.rings) this.root.add(this.rings.object3d);
+    if (nebulaSpec) {
+      this.nebula = new NebulaRenderer(nebulaSpec, config.quality);
+      this.root.add(this.nebula.object3d);
+    }
   }
 
   init(ctx: EngineContext): void {
@@ -133,11 +157,13 @@ class Gallery implements GameModule {
       (ctx.camera.fov * Math.PI) / 180,
       ctx.height,
     );
+    this.planet.update(dt, ctx, this.view);
     this.nebula?.update(dt, ctx, this.view);
     this.rings?.update(dt, ctx, this.view);
   }
 
   dispose(): void {
+    this.planet.dispose();
     this.nebula?.dispose();
     this.rings?.dispose();
     this.root.removeFromParent();
@@ -180,16 +206,27 @@ const GALLERY_SHOTS = new Set([
  */
 class ReviewGuard implements GameModule {
   readonly name = 'review-guard';
+  private lastShot: string | null = null;
+
   constructor(
     private readonly hud: Hud,
     private readonly gallery: Gallery,
   ) {}
 
-  lateUpdate(): void {
+  lateUpdate(_dt: number, ctx: EngineContext): void {
     const shot = activeShotName();
     const owned = shotOwnsScene();
     this.hud.setVisible(!owned || shot === 'hud-full');
     this.gallery.root.visible = shot !== null && GALLERY_SHOTS.has(shot);
+
+    // Planet shots build a fixture and only clear it for each other. Leaving
+    // one in the scene is how the ring shot ended up framing a borrowed world.
+    if (shot !== this.lastShot) {
+      if (this.lastShot?.startsWith('planet-') || this.lastShot === 'gas-giant') {
+        if (!shot?.startsWith('planet-') && shot !== 'gas-giant') clearPlanetShotFixture(ctx);
+      }
+      this.lastShot = shot;
+    }
   }
 }
 
@@ -224,12 +261,16 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   await engine.add(map);
 
   progress(0.88, 'assembling gallery');
-  const ringHost =
-    universe.system.planets.find((p) => p.rings !== null) ??
-    ({ ...universe.system.planets[0]!, rings: FALLBACK_RINGS } as PlanetSpec);
-  const cloudHost = universe.system.planets.find((p) => p.clouds !== null) ?? null;
-  const atmoHost = universe.system.planets.find((p) => p.atmosphere !== null) ?? null;
-  const gallery = new Gallery(universe.galaxy.nebulae[0], ringHost);
+  // One world carries every gallery shot, so rings, clouds and atmosphere are
+  // all seen on the same body rather than three unrelated ones. Prefer a planet
+  // that already has an atmosphere — that is the harder thing to fake — and
+  // give it rings if the seed did not.
+  const base =
+    universe.system.planets.find((p) => p.atmosphere !== null && p.clouds !== null) ??
+    universe.system.planets.find((p) => p.atmosphere !== null) ??
+    universe.system.planets[0]!;
+  const galleryHost: PlanetSpec = base.rings ? base : { ...base, rings: FALLBACK_RINGS };
+  const gallery = new Gallery(universe.galaxy.nebulae[0], galleryHost);
   await engine.add(gallery);
 
   progress(0.94, 'grading');
@@ -247,8 +288,10 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   registerShipShots(pilot.ship);
   if (gallery.nebula) registerNebulaShots(gallery.nebula);
   if (gallery.rings) registerRingsShots(gallery.rings);
-  if (cloudHost) registerCloudShots(cloudHost, gallery.root);
-  if (atmoHost) registerAtmosphereShots(atmoHost, gallery.root);
+  // Attached to the planet, not to the bare group, so the shells wrap the
+  // surface they are meant to belong to.
+  if (galleryHost.clouds) registerCloudShots(galleryHost, gallery.planet.object3d);
+  if (galleryHost.atmosphere) registerAtmosphereShots(galleryHost, gallery.planet.object3d);
 
   await engine.add(new ReviewGuard(hud, gallery));
 
