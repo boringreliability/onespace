@@ -16,7 +16,10 @@
  *   4. Publish what the HUD and audio need to know.
  */
 
-import { Color, Group, Object3D, Quaternion, Vector3 } from 'three';
+import { Color, Group, Matrix4, Object3D, Quaternion, Vector3 } from 'three';
+
+/** Reused zero vector for basis construction; never mutated. */
+const ZERO = new Vector3(0, 0, 0);
 
 import type { EngineContext, GameModule } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
@@ -261,10 +264,34 @@ export class Universe implements GameModule {
     this.tmpB.normalize().multiplyScalar(alt);
     this.tmpA.add(this.tmpB);
 
-    this.flight.teleport(this.tmpA);
+    // Point the nose at the world we just arrived at. Position alone is not
+    // enough: dropping in with a default orientation aims the camera at empty
+    // space, and the opening frame is the one frame that has to earn the next
+    // ten minutes.
+    this.arrivalLook.copy(target.world).sub(this.tmpA).normalize();
+    this.arrivalUp.copy(this.tmpA).normalize();
+    // Orthogonalise the up vector against the view direction, otherwise a
+    // near-radial approach degenerates the basis and the roll snaps.
+    this.arrivalUp.addScaledVector(this.arrivalLook, -this.arrivalLook.dot(this.arrivalUp));
+    if (this.arrivalUp.lengthSq() < 1e-6) this.arrivalUp.set(0, 1, 0);
+    this.arrivalUp.normalize();
+
+    this.arrivalMat.identity();
+    // Matrix4.lookAt(eye, target, up) already builds a basis whose -Z points
+    // from eye towards target, and -Z is the ship's nose. Negating the target
+    // as well flips the nose onto the star and puts the chase camera inside
+    // the hull.
+    this.arrivalMat.lookAt(ZERO, this.arrivalLook, this.arrivalUp);
+    this.arrivalQuat.setFromRotationMatrix(this.arrivalMat);
+
     this.flight.orbitalVelocityAt(this.tmpA, this.tmpB);
-    this.flight.velocity.copy(this.tmpB);
+    this.flight.teleport(this.tmpA, this.tmpB, this.arrivalQuat);
   }
+
+  private readonly arrivalLook = new Vector3();
+  private readonly arrivalUp = new Vector3();
+  private readonly arrivalQuat = new Quaternion();
+  private readonly arrivalMat = new Matrix4();
 
   private pickHeroBody(): Body | null {
     let best: Body | null = null;

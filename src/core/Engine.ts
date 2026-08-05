@@ -109,7 +109,13 @@ export class Engine {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, q.maxPixelRatio));
 
     // near/far are deliberately extreme; the logarithmic depth buffer copes.
-    this.camera = new PerspectiveCamera(62, 1, 0.05, 1e12);
+    //
+    // near is 0.5 m, not 50 m. Units are kilometres, and the ship is 0.03 —
+    // thirty metres. A near plane of 0.05 slices straight through the hull in
+    // chase and cockpit views, exposing the interior greebles, which reads as
+    // broken geometry rather than as clipping. A tiny near plane is exactly
+    // what the logarithmic depth buffer is for; not using it wastes it.
+    this.camera = new PerspectiveCamera(62, 1, 0.0005, 1e12);
     this.camera.position.set(0, 0, 0);
 
     this.input = new Input(canvas);
