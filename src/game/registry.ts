@@ -14,6 +14,7 @@ import { config } from '@/core/Config';
 
 import { Universe } from '@/game/Universe';
 import { Pilot } from '@/game/Pilot';
+import { MapMode } from '@/game/MapMode';
 import { activeShotName, registerShot, shotOwnsScene, updateActiveShot } from '@/game/Shots';
 import type { NebulaSpec, PlanetSpec, RingSpec } from '@/gen/types';
 
@@ -217,6 +218,10 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   const pilot = new Pilot({ universe, hud, audio });
   await engine.add(pilot);
   await engine.add(new ShotDriver());
+
+  progress(0.86, 'charting the galaxy');
+  const map = new MapMode({ universe, warp });
+  await engine.add(map);
 
   progress(0.88, 'assembling gallery');
   const ringHost =

@@ -114,6 +114,12 @@ export class Universe implements GameModule {
   /** Simulated orbital time in seconds. Advances at ORBIT_TIME_SCALE. */
   private orbitTime = 0;
 
+  /**
+   * Set while the galaxy chart is open. The system keeps existing — it simply
+   * stops advancing, so returning to flight does not teleport every moon.
+   */
+  paused = false;
+
   /** Nearest body, recomputed each frame — the HUD and audio both want it. */
   nearest: Body | null = null;
   nearestAltitudeKm: number | null = null;
@@ -297,6 +303,10 @@ export class Universe implements GameModule {
     // A review shot has placed its own fixtures and camera; touching the scene
     // now would undo all of it before the frame is captured.
     if (shotOwnsScene()) {
+      this.root.visible = false;
+      return;
+    }
+    if (this.paused) {
       this.root.visible = false;
       return;
     }

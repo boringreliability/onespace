@@ -82,6 +82,10 @@ export class Pilot implements GameModule {
       // leave the hull exactly where the shot put it.
       return;
     }
+    if (this.universe.paused) {
+      this.ship.object3d.visible = false;
+      return;
+    }
     this.ship.object3d.visible = true;
 
     const flight = this.universe.flight;
