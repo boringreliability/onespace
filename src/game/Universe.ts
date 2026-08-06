@@ -300,7 +300,10 @@ export class Universe implements GameModule {
       this.flight.teleport(new Vector3(0, 0, 6 * AU));
       return;
     }
-    const alt = target.spec.radius * 2.6;
+    // 1.6 radii, not 2.6. Arrival should put the world within a minute or two
+    // of thrust, not an hour: at 0.25 km/s^2 a 2.6-radius standoff is a
+    // four-minute burn each way before anything happens.
+    const alt = target.spec.radius * 1.6;
     this.tmpA.copy(target.world);
     // Offset towards the star so the terminator crosses the frame.
     this.tmpB.copy(target.world).normalize().multiplyScalar(-1);
@@ -356,6 +359,7 @@ export class Universe implements GameModule {
     return out;
   }
 
+  private readonly frameVel = new Vector3();
   private readonly arrivalVel = new Vector3();
   private readonly arrivalLook = new Vector3();
   private readonly arrivalUp = new Vector3();
@@ -655,6 +659,12 @@ export class Universe implements GameModule {
     }
 
     this.nearestAltitudeKm = best && bestGap < best.spec.radius * 40 ? bestGap : null;
+
+    // The frame the ship is flying in. Without this the thrust limiter, the
+    // camera and the HUD all measure against the star and get an answer
+    // dominated by the planet's own orbital motion.
+    if (best) this.flight.setReferenceVelocity(this.bodyVelocity(best, this.frameVel));
+    else this.flight.setReferenceVelocity(null);
 
     // Atmospheric density for drag and re-entry heating.
     if (best?.spec.atmosphere && this.nearestAltitudeKm !== null) {

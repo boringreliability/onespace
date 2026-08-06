@@ -46,7 +46,6 @@ export class Pilot implements GameModule {
   private readonly rcs = new Vector3();
   private readonly up = new Vector3(0, 1, 0);
   private readonly toBody = new Vector3();
-  private readonly relVel = new Vector3();
   private readonly shipState = {
     throttle: 0,
     boost: 0,
@@ -114,7 +113,9 @@ export class Pilot implements GameModule {
     this.ship.update(dt, ctx, this.shipState);
 
     // 4. Camera.
-    this.rig.update(dt, this.renderPos, flight.renderOrientation, flight.velocity, ctx);
+    // Relative velocity, not world: the rig eases its aim towards the velocity
+    // vector, and the world one points along the planet's orbit around its sun.
+    this.rig.update(dt, this.renderPos, flight.renderOrientation, flight.relativeVelocity, ctx);
 
     // 5. Instruments.
     this.publishVitals(flight);
@@ -126,19 +127,9 @@ export class Pilot implements GameModule {
     const v = this.vitals;
     v.throttle = flight.throttle;
 
-    // Speed RELATIVE TO THE NEAREST BODY, not to the star.
-    // flight.speed is |velocity| in world space, which for a ship parked in a
-    // stable orbit reads as the planet's speed around its sun — a large number
-    // that never changes and answers a question no pilot asked. What matters
-    // is closing speed on the thing you are next to.
-    const near = this.universe.nearest;
-    if (near) {
-      this.universe.bodyVelocity(near, this.relVel);
-      this.relVel.subVectors(flight.velocity, this.relVel);
-      v.speedKmS = this.relVel.length();
-    } else {
-      v.speedKmS = flight.speed;
-    }
+    // Speed within the local frame. The flight model already maintains it —
+    // see FlightModel.referenceVelocity for why world speed is the wrong number.
+    v.speedKmS = flight.relativeSpeed;
     v.altitudeKm = this.universe.nearestAltitudeKm;
     v.gLoad = flight.gForce;
 

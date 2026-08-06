@@ -139,7 +139,11 @@ export const DEFAULT_SHIP_CONFIG: ShipConfig = {
   // alpha = torque·1e-3 / I  →  2.0, 1.8 and 3.2 rad/s².
   rcsTorque: { pitch: 3.6e4, yaw: 3.24e4, roll: 2.24e4 },
   assistDampTime: 0.35,
-  topSpeed: 9,
+  // 60 km/s in the local frame. Orbital distances are enormous — 11,000 km to
+  // a planet you can see filling the screen — and at a physically honest few
+  // km/s you would never arrive. This is the one place the game is
+  // deliberately unphysical, and it is cheaper than a cruise mode.
+  topSpeed: 60,
   speedFalloffExponent: 3,
   throttleSpoolTime: 0.7,
   dragCoefficient: 0.16,
@@ -230,6 +234,20 @@ export class FlightModel {
   /** Gravitational acceleration acting on the ship, km/s². */
   readonly gravityAccel = new Vector3();
 
+  /**
+   * Velocity of the frame the ship is flying in — the body it is near, moving
+   * on its own orbit. Everything that asks "how fast are we going" must ask it
+   * about THIS, not about the world.
+   *
+   * A planet's orbital speed around its star is tens of km/s, far above any
+   * ship's top speed. Measuring against the world therefore pins the thrust
+   * limiter at zero everywhere in the universe: full throttle, no acceleration,
+   * no G, nothing moves. The ship is unflyable in any orbit.
+   */
+  readonly referenceVelocity = new Vector3();
+  /** velocity - referenceVelocity. Recomputed each step, never allocated. */
+  readonly relativeVelocity = new Vector3();
+
   /** The pilot's intent. Write into this, or call `applyInput()`. */
   readonly command: FlightCommand = {
     pitch: 0,
@@ -266,6 +284,7 @@ export class FlightModel {
 
   // --- readouts -----------------------------------------------------------
   private _speed = 0;
+  private _relSpeed = 0;
   private _verticalSpeed = 0;
   private _altitude = Number.POSITIVE_INFINITY;
   private _gForce = 0;
@@ -314,6 +333,10 @@ export class FlightModel {
   /** km/s. */
   get speed(): number {
     return this._speed;
+  }
+  /** Speed within the local frame — what the limiter and the HUD both mean. */
+  get relativeSpeed(): number {
+    return this._relSpeed;
   }
   /** km/s along `localUp`. Positive is climbing. */
   get verticalSpeed(): number {
@@ -376,6 +399,15 @@ export class FlightModel {
   }
 
   /** Local atmospheric density at the ship, kg/m³. 0 = vacuum. */
+  /**
+   * Tell the model which frame it is flying in. Pass the velocity of the body
+   * you are near; pass zero in deep space.
+   */
+  setReferenceVelocity(v: Vector3 | null): void {
+    if (v) this.referenceVelocity.copy(v);
+    else this.referenceVelocity.set(0, 0, 0);
+  }
+
   setAtmosphere(densityAtShip: number): void {
     this.density = densityAtShip > 0 ? densityAtShip : 0;
   }
@@ -490,7 +522,9 @@ export class FlightModel {
 
     // --- non-gravitational forces ------------------------------------------
     this.sAcc.set(0, 0, 0);
-    const speed = this.velocity.length();
+    // Relative to the local frame, not the world — see referenceVelocity.
+    this.sTmp.subVectors(this.velocity, this.referenceVelocity);
+    const speed = this.sTmp.length();
 
     // Thrust fades as the ceiling approaches. Never clamp the velocity: the
     // whole point is that you feel the engine give up, not the world stop you.
@@ -754,6 +788,8 @@ export class FlightModel {
 
   private updateReadouts(): void {
     this._speed = this.velocity.length();
+    this.relativeVelocity.subVectors(this.velocity, this.referenceVelocity);
+    this._relSpeed = this.relativeVelocity.length();
     this.computeLocalUp();
     this._verticalSpeed = this.velocity.dot(this.localUp);
 
