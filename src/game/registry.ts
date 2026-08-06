@@ -207,16 +207,27 @@ const GALLERY_SHOTS = new Set([
 class ReviewGuard implements GameModule {
   readonly name = 'review-guard';
   private lastShot: string | null = null;
+  /** The chart is its own instrument; the flight HUD stands down under it. */
+  private mapOpen = false;
 
   constructor(
     private readonly hud: Hud,
     private readonly gallery: Gallery,
   ) {}
 
+  init(): void {
+    bus.on('ui:map-opened', () => {
+      this.mapOpen = true;
+    });
+    bus.on('ui:map-closed', () => {
+      this.mapOpen = false;
+    });
+  }
+
   lateUpdate(_dt: number, ctx: EngineContext): void {
     const shot = activeShotName();
     const owned = shotOwnsScene();
-    this.hud.setVisible(!owned || shot === 'hud-full');
+    this.hud.setVisible((!owned || shot === 'hud-full') && !this.mapOpen);
     this.gallery.root.visible = shot !== null && GALLERY_SHOTS.has(shot);
 
     // Planet shots build a fixture and only clear it for each other. Leaving

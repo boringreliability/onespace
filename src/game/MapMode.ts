@@ -26,8 +26,18 @@ import type { Warp } from '@/ship/Warp';
 import type { Universe } from '@/game/Universe';
 import { shotOwnsScene } from '@/game/Shots';
 
-/** How far the chart camera sits from its target, as a multiple of disc radius. */
-const MAP_RANGE = 1.9;
+/**
+ * Radius of the neighbourhood the chart samples, in light years, and the range
+ * the camera opens at.
+ *
+ * The chart used to open at whole-galaxy zoom. That looks impressive and is
+ * useless: every system you can actually jump to lies within CHART_RADIUS, so
+ * at 90,000 ly they collapse into one pixel, every label collides, the
+ * declutter pass throws them all away, and there is nothing to click. Open on
+ * the neighbourhood; the wheel goes out to the whole disc for orientation.
+ */
+const CHART_RADIUS_LY = 140;
+const OPEN_RANGE_LY = CHART_RADIUS_LY * 1.7;
 /** Seconds for the open/close transition. Matches the StarMap's own animation. */
 const TRANSITION = 0.5;
 
@@ -79,21 +89,70 @@ export class MapMode implements GameModule {
     this.view.object3d.visible = false;
 
     this.ui = new StarMap(this.buildAdapter());
-    this.range = this.universe.galaxy.radiusLy * MAP_RANGE;
+    this.range = OPEN_RANGE_LY;
   }
+
+  private dragging = false;
+  private dragDX = 0;
+  private dragDY = 0;
 
   init(ctx: EngineContext): void {
     ctx.scene.add(this.view.object3d);
+
+    const down = (e: PointerEvent): void => {
+      if (this.open && e.button === 0) this.dragging = true;
+    };
+    const up = (): void => {
+      this.dragging = false;
+    };
+    const move = (e: PointerEvent): void => {
+      if (!this.open || !this.dragging) return;
+      this.dragDX += e.movementX;
+      this.dragDY += e.movementY;
+    };
+    const wheel = (e: WheelEvent): void => {
+      if (!this.open) return;
+      e.preventDefault();
+      this.range *= 1 + Math.sign(e.deltaY) * 0.12;
+    };
+    window.addEventListener('pointerdown', down);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointermove', move);
+    window.addEventListener('wheel', wheel, { passive: false });
+    this.disposers.push(
+      () => window.removeEventListener('pointerdown', down),
+      () => window.removeEventListener('pointerup', up),
+      () => window.removeEventListener('pointermove', move),
+      () => window.removeEventListener('wheel', wheel),
+    );
     void this.ui.init?.(ctx);
 
     this.rechart();
+    this.publishOrigin();
+    // Without a details provider the info panel has nothing to say about a
+    // contact; generating the system on hover is cheap and deterministic.
+    this.ui.setDetailsProvider((id) => {
+      const stub = this.charted.find((c) => c.id === id);
+      if (!stub) return null;
+      const sys = generateSystem(this.universe.galaxy, stub);
+      return {
+        id: sys.id,
+        name: sys.name,
+        spectralClass: sys.stars[0]!.spectralClass,
+        planetCount: sys.planets.length,
+        blurb: sys.blurb,
+      };
+    });
     registerGalaxyViewShots(() => this.view);
     registerStarMapShots(this.ui);
 
     this.disposers.push(
       bus.on('ui:toggle-map', () => this.toggle()),
       bus.on('nav:jump-requested', (req) => void this.jump(req.systemId, req.name, ctx)),
-      bus.on('system:entered', () => this.rechart()),
+      bus.on('system:entered', () => {
+        this.rechart();
+        this.publishOrigin();
+      }),
     );
   }
 
@@ -105,13 +164,23 @@ export class MapMode implements GameModule {
    * galaxy holds eighty thousand systems or eighty million.
    */
   private rechart(): void {
-    this.charted = sampleSystemsNear(this.universe.galaxy, this.universe.system.position, 140, 220);
+    this.charted = sampleSystemsNear(
+      this.universe.galaxy,
+      this.universe.system.position,
+      CHART_RADIUS_LY,
+      220,
+    );
     this.view.setLocalSystems(this.charted);
     this.target.set(
       this.universe.system.position[0],
       this.universe.system.position[1],
       this.universe.system.position[2],
     );
+  }
+
+  /** The chart measures every distance from here; it has to be told where. */
+  private publishOrigin(): void {
+    this.ui.setOrigin(this.universe.system.position, this.universe.system.name, this.universe.system.id);
   }
 
   private buildAdapter(): GalaxyViewAdapter {
@@ -158,9 +227,23 @@ export class MapMode implements GameModule {
 
   private toggle(): void {
     this.open = !this.open;
+
+    // Flight holds the pointer captured so mouse motion steers; while it is
+    // captured the cursor does not exist and nothing in the chart's DOM can be
+    // clicked. Release it when the chart opens. Re-capture is left to the
+    // player's next click on the canvas, which is the same gesture that starts
+    // flight in the first place.
+    if (this.open && document.pointerLockElement) document.exitPointerLock();
+    // Reset to the neighbourhood each time it is opened, so a zoomed-out
+    // sightseeing session does not leave the next jump unusable.
+    if (this.open) this.range = OPEN_RANGE_LY;
+    this.view.setGridVisible(this.open);
+
     bus.emit(this.open ? 'ui:map-opened' : 'ui:map-closed');
     bus.emit('log', {
-      text: this.open ? 'CHART — GALACTIC' : 'CHART STOWED',
+      text: this.open
+        ? 'CHART — GALACTIC · DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A SYSTEM'
+        : 'CHART STOWED',
       tone: 'normal',
     });
   }
@@ -194,6 +277,12 @@ export class MapMode implements GameModule {
     this.width = ctx.width;
     this.height = ctx.height;
 
+    // MapMode owns the StarMap rather than registering it with the engine, so
+    // it also has to drive it. Skipping this leaves the chart's panels in the
+    // DOM at zero opacity forever: the open transition is advanced by update(),
+    // and a module that is never updated never finishes opening.
+    this.ui.update(dt, ctx);
+
     if (shotOwnsScene()) {
       // Chart shots position the camera themselves; the module stands down but
       // leaves the view visible so those shots have something to frame.
@@ -220,19 +309,22 @@ export class MapMode implements GameModule {
 
     if (!showing) return;
 
-    // Orbit the chart with the pointer while it is open.
+    // Orbit the chart by dragging. Input only reports motion while the pointer
+    // is locked, which it deliberately is not here, so the chart reads the
+    // drag itself.
     if (this.open) {
-      this.azimuth += ctx.input.pointerDX * 0.004;
-      this.elevation = clamp(this.elevation - ctx.input.pointerDY * 0.004, -1.4, 1.4);
+      this.azimuth += this.dragDX * 0.004;
+      this.elevation = clamp(this.elevation - this.dragDY * 0.004, -1.4, 1.4);
+      this.dragDX = 0;
+      this.dragDY = 0;
       if (ctx.input.wheelDelta !== 0) {
         this.range *= 1 + ctx.input.wheelDelta * 0.12;
         this.wheelConsumed(ctx);
       }
-      this.range = clamp(
-        this.range,
-        this.universe.galaxy.radiusLy * 0.04,
-        this.universe.galaxy.radiusLy * 4,
-      );
+      // From a few systems across up to the whole disc. The old floor was
+      // 0.04 of the galaxy radius — about 2000 ly — which never reached the
+      // neighbourhood the chart is actually about.
+      this.range = clamp(this.range, 12, this.universe.galaxy.radiusLy * 2.5);
     }
 
     const cosE = Math.cos(this.elevation);
@@ -254,6 +346,15 @@ export class MapMode implements GameModule {
       ctx.camera.lookAt(this.scratch);
     }
 
+    // Zoomed to the neighbourhood the camera is INSIDE the disc, where the
+    // unresolved-starlight and dust layers — authored for a whole-galaxy view —
+    // fill the frame with warm haze and bury the very stars you are choosing
+    // between. Fade them out as the range closes; discrete stars take over.
+    const zoom = clamp(this.range / (this.universe.galaxy.radiusLy * 0.6), 0, 1);
+    this.view.setVolumeExposure(zoom * zoom);
+    this.view.setDustDensity(zoom);
+    this.view.setStarExposure(1 + (1 - zoom) * 1.4);
+
     this.viewState.set(
       this.scratch.copy(ctx.camera.position).sub(this.target),
       this.sunDir,
@@ -268,6 +369,10 @@ export class MapMode implements GameModule {
   /** Input.wheelDelta is cleared by Input.update; consume it explicitly here. */
   private wheelConsumed(ctx: EngineContext): void {
     (ctx.input as { wheelDelta: number }).wheelDelta = 0;
+  }
+
+  resize(width: number, height: number): void {
+    this.ui.resize?.(width, height);
   }
 
   dispose(): void {

@@ -48,12 +48,17 @@ import { AtmosphereRenderer } from '@/render/Atmosphere';
 import { DEFAULT_SHIP_CONFIG, FlightModel, type GravitySource } from '@/ship/FlightModel';
 
 /**
- * Orbits are simulated faster than real time. Mercury's year is 88 days; at 1:1
- * nothing in the sky would ever appear to move and the system would read as a
- * diorama. 400x puts a close moon's transit at about a minute — fast enough to
- * notice, slow enough that nothing strobes.
+ * Orbits run at 1:1 with the ship.
+ *
+ * An earlier version ran them at 400x so moons would visibly move. That is
+ * incoherent: the ship's physics is real time, so the world accelerates away
+ * from the player. Measured, an ice giant at 1.95 AU moves ~13 km/s, which at
+ * 400x is 5200 km/s — the planet you are orbiting simply leaves, and the
+ * altitude readout climbs while the ship sits still. Any time acceleration has
+ * to move the ship too, which is a separate feature ("time warp"), not a
+ * constant.
  */
-const ORBIT_TIME_SCALE = 400;
+const ORBIT_TIME_SCALE = 1;
 
 /** Gravitational parameter of one Earth mass, km^3/s^2. */
 const MU_EARTH = 398600.4418;
@@ -97,6 +102,25 @@ export interface UniverseOptions {
   readonly seed?: number;
   /** Skip generating a ship and flight model (used by isolated review shots). */
   readonly headless?: boolean;
+}
+
+
+/**
+ * Sunlight reaching a body, in units of Earth-at-1-AU-from-Sol.
+ * Inverse square on the primary's luminosity — the one number that decides
+ * whether a world is a sight or a silhouette.
+ */
+function illumination(system: StarSystemSpec, planet: PlanetSpec): number {
+  const auDist = planet.orbit.semiMajorAxis / AU;
+  return system.stars[0]!.luminosity / Math.max(auDist * auDist, 1e-9);
+}
+
+/** Below this the opening frame is black and the game looks broken. */
+const MIN_ARRIVAL_ILLUMINATION = 0.12;
+
+/** Saturating weight: being brighter than daylight buys nothing extra. */
+function litWeight(lit: number): number {
+  return Math.min(1, lit / MIN_ARRIVAL_ILLUMINATION) * 0.9 + 0.1;
 }
 
 export class Universe implements GameModule {
@@ -175,17 +199,27 @@ export class Universe implements GameModule {
 
     for (const stub of stubs.slice(0, 24)) {
       const sys = generateSystem(this.galaxy, stub);
-      // Score for *visual* interest, not habitability: we want a big banded
-      // world, rings, or a moon system in the opening frame.
       let score = 0;
+      let bestLit = 0;
       for (const p of sys.planets) {
-        if (p.bands) score += 3;
-        if (p.rings) score += 5;
-        if (p.atmosphere) score += 2;
-        if (p.ocean) score += 2;
-        score += Math.min(p.moons.length, 3);
+        // Visual interest is worthless if the subject is not lit. Three
+        // quarters of all stars are M dwarfs; one of luminosity 0.0019 leaves
+        // a world at 2 AU receiving a two-thousandth of Earth's sunlight, and
+        // the opening frame comes out genuinely, physically black. Weight
+        // every body by what actually reaches it.
+        const lit = illumination(sys, p);
+        bestLit = Math.max(bestLit, lit);
+        let s = 1;
+        if (p.bands) s += 3;
+        if (p.rings) s += 5;
+        if (p.atmosphere) s += 2;
+        if (p.ocean) s += 2;
+        s += Math.min(p.moons.length, 3);
+        score += s * litWeight(lit);
       }
       if (sys.planets.length < 3) score -= 6;
+      // Reject outright: an unlit system is not a place, it is a black screen.
+      if (bestLit < MIN_ARRIVAL_ILLUMINATION) score -= 100;
       if (score > bestScore) {
         bestScore = score;
         best = sys;
@@ -223,7 +257,17 @@ export class Universe implements GameModule {
     this.orbitTime = 0;
     this.updateOrbits();
 
-    if (!this.options.headless) this.placeShipOnArrival();
+    if (!this.options.headless) {
+      // Gravity has to exist before the ship is placed: orbitalVelocityAt()
+      // asks the flight model for the dominant attractor, and with no sources
+      // registered it returns a zero vector. The ship was being spawned at
+      // rest beside a planet and then simply falling — reported as "the speed
+      // increases without doing anything".
+      this.camWorld.set(0, 0, 0);
+      for (const b of this.bodies) b.distanceSq = 0;
+      this.applyGravity();
+      this.placeShipOnArrival();
+    }
 
     bus.emit('system:entered', { system });
     bus.emit('log', { text: `ARRIVED — ${system.name.toUpperCase()}`, tone: 'good' });
@@ -296,18 +340,33 @@ export class Universe implements GameModule {
   private pickHeroBody(): Body | null {
     let best: Body | null = null;
     let bestScore = -Infinity;
+    let brightest: Body | null = null;
+    let brightestLit = -1;
+
     for (const b of this.bodies) {
+      const lit = illumination(this.system, b.spec);
+      if (lit > brightestLit) {
+        brightestLit = lit;
+        brightest = b;
+      }
       if (b.spec.isMoon) continue;
-      let s = 0;
+      let s = 1;
       if (b.spec.rings) s += 6;
       if (b.spec.atmosphere) s += 3;
       if (b.spec.ocean) s += 3;
       if (b.spec.bands) s += 2;
       s += b.spec.moons.length;
+      s *= litWeight(lit);
       if (s > bestScore) {
         bestScore = s;
         best = b;
       }
+    }
+
+    // If nothing interesting is lit, take whatever is brightest — a plain
+    // world you can see beats a spectacular one you cannot.
+    if (best && illumination(this.system, best.spec) < MIN_ARRIVAL_ILLUMINATION) {
+      best = brightest ?? best;
     }
     return best ?? this.bodies[0] ?? null;
   }
@@ -386,7 +445,10 @@ export class Universe implements GameModule {
     // Only bodies that could plausibly matter — everything else is noise
     // against the star and costs a square root per frame for nothing.
     for (const b of this.bodies) {
-      if (b.distanceSq > 4e10) continue;
+      // Relative cut-off: a moon stops mattering a few hundred of its own
+      // radii away, but a gas giant still dominates at the same distance.
+      const reach = b.spec.radius * 400;
+      if (b.distanceSq > reach * reach) continue;
       this.gravity.push({
         position: b.world,
         mu: MU_EARTH * b.spec.mass,
