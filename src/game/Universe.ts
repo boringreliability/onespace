@@ -36,7 +36,7 @@ import {
 import { generateGalaxy, sampleSystemsNear, type StarSystemStub } from '@/gen/galaxy';
 import { shotOwnsScene } from '@/game/Shots';
 import { generateSystem } from '@/gen/system';
-import { orbitalPosition } from '@/gen/orbit';
+import { orbitalPosition, orbitalVelocity } from '@/gen/orbit';
 
 import { MutableViewState } from '@/render/ViewState';
 import { PlanetRenderer } from '@/render/Planet';
@@ -328,10 +328,35 @@ export class Universe implements GameModule {
     this.arrivalMat.lookAt(ZERO, this.arrivalLook, this.arrivalUp);
     this.arrivalQuat.setFromRotationMatrix(this.arrivalMat);
 
+    // Circular velocity about the planet, PLUS the planet's own motion about
+    // the star. Without the second term the ship is left behind at exactly the
+    // planet's orbital speed and the altitude readout creeps upward forever —
+    // which is what "the planet just disappeared" looked like the second time.
     this.flight.orbitalVelocityAt(this.tmpA, this.tmpB);
+    this.bodyVelocity(target, this.arrivalVel);
+    this.tmpB.add(this.arrivalVel);
     this.flight.teleport(this.tmpA, this.tmpB, this.arrivalQuat);
   }
 
+  /**
+   * World velocity of a body: its own Keplerian motion plus every parent's,
+   * so a moon carries its planet's motion around the star.
+   */
+  bodyVelocity(body: Body, out: Vector3): Vector3 {
+    out.set(0, 0, 0);
+    for (let b: Body | null = body; b; b = b.parent) {
+      const mu = b.parent
+        ? MU_EARTH * b.parent.spec.mass
+        : MU_SUN * this.system.stars[0]!.mass;
+      orbitalVelocity(b.spec.orbit, this.orbitTime, mu, this.orbitScratch);
+      out.x += this.orbitScratch.x;
+      out.y += this.orbitScratch.y;
+      out.z += this.orbitScratch.z;
+    }
+    return out;
+  }
+
+  private readonly arrivalVel = new Vector3();
   private readonly arrivalLook = new Vector3();
   private readonly arrivalUp = new Vector3();
   private readonly arrivalQuat = new Quaternion();

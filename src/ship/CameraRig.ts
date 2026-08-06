@@ -39,6 +39,9 @@ export type CameraMode = 'cockpit' | 'chase' | 'cinematic' | 'orbit';
 /** The order `cycleMode()` walks. Chase first: it is the default flight view. */
 const MODE_ORDER: readonly CameraMode[] = ['chase', 'cockpit', 'orbit', 'cinematic'];
 
+/** Radians the chase aim may deviate from the nose towards the velocity. ~11 deg. */
+const MAX_VELOCITY_AIM_ANGLE = 0.19;
+
 const TWO_PI = Math.PI * 2;
 const EPS = 1e-4;
 
@@ -716,9 +719,21 @@ export class CameraRig {
     // sideways is framed sideways and the drift is legible.
     const nose = this.tmpA.set(0, 0, -1).applyQuaternion(q);
     const speed = vel.length();
-    const align = this.velocityAlign * this.speedEase;
+    let align = this.velocityAlign * this.speedEase;
     if (align > 1e-3 && speed > 1e-5) {
       const vdir = this.tmpB.copy(vel).divideScalar(speed);
+      // Cap how far the aim may leave the nose.
+      //
+      // The blend exists so thrust-induced drift is legible. In ORBIT the
+      // velocity is permanently perpendicular to a nose pointed at the world
+      // below, so an uncapped 0.55 blend swings the aim ~30 degrees and parks
+      // the ship a quarter of the screen off-centre for as long as you are in
+      // orbit — with the HUD boresight still dead ahead. Limit the deviation
+      // so the subject never leaves the middle third; drift still reads,
+      // the ship stays framed.
+      const cosT = Math.max(-1, Math.min(1, nose.dot(vdir)));
+      const theta = Math.acos(cosT);
+      if (theta > 1e-4) align = Math.min(align, MAX_VELOCITY_AIM_ANGLE / theta);
       nose.lerp(vdir, align);
       const l = nose.length();
       // Flying backwards makes the two directions cancel. Rather than let the

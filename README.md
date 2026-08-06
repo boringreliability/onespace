@@ -14,18 +14,44 @@ Click the canvas to capture the pointer.
 
 ## Controls
 
+**Click the canvas first.** Steering is on the mouse and needs pointer capture;
+until you click, only the keyboard works. `Esc` releases it again.
+
 | | |
 |---|---|
-| mouse | steer |
-| `W` / `S` / wheel | throttle |
-| `A` `D` `R` `F` | lateral / vertical thrusters |
+| mouse | pitch and yaw |
 | `Q` / `E` | roll |
+| `W` / `S` / wheel | throttle (integrated, not instant — it spools) |
+| `A` `D` | lateral thrusters |
+| `R` `F` | up / down thrusters |
 | `Shift` | boost |
 | `Space` | brake |
+| `V` | camera: chase → cockpit → orbit → cinematic |
 | `M` | galaxy chart |
-| `V` | cycle camera (cockpit / chase / cinematic / orbit) |
+| `T` | scan |
 | `Tab` | cycle target |
+| `J` | warp |
 | `L` | land |
+
+### In the chart
+
+Drag to orbit, wheel to zoom, click a system or use the arrow keys, `Enter` to
+jump, `F` to search, `Esc` to close. Opening the chart releases the pointer so
+you can click; click the canvas again afterwards to fly.
+
+### Reading the instruments
+
+**VEL** is speed relative to the nearest body — the thing you are about to
+arrive at or hit — not relative to the star. Parked in a stable orbit it holds
+steady; the same ship reads ~53 km/s against the star, which is a true number
+that answers no useful question.
+
+**ALT** is height above that body's *surface*: distance to its centre minus its
+radius. In a circular orbit it should barely move. If it climbs steadily you
+are not in an orbit, you are leaving.
+
+**0.0G** is the accelerometer. Free fall reads zero, as a real one does — so an
+orbit reads 0G no matter how fast you are going.
 
 ## What it is
 

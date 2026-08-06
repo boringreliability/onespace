@@ -46,6 +46,7 @@ export class Pilot implements GameModule {
   private readonly rcs = new Vector3();
   private readonly up = new Vector3(0, 1, 0);
   private readonly toBody = new Vector3();
+  private readonly relVel = new Vector3();
   private readonly shipState = {
     throttle: 0,
     boost: 0,
@@ -124,7 +125,20 @@ export class Pilot implements GameModule {
     if (!this.hud) return;
     const v = this.vitals;
     v.throttle = flight.throttle;
-    v.speedKmS = flight.speed;
+
+    // Speed RELATIVE TO THE NEAREST BODY, not to the star.
+    // flight.speed is |velocity| in world space, which for a ship parked in a
+    // stable orbit reads as the planet's speed around its sun — a large number
+    // that never changes and answers a question no pilot asked. What matters
+    // is closing speed on the thing you are next to.
+    const near = this.universe.nearest;
+    if (near) {
+      this.universe.bodyVelocity(near, this.relVel);
+      this.relVel.subVectors(flight.velocity, this.relVel);
+      v.speedKmS = this.relVel.length();
+    } else {
+      v.speedKmS = flight.speed;
+    }
     v.altitudeKm = this.universe.nearestAltitudeKm;
     v.gLoad = flight.gForce;
 

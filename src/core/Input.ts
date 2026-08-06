@@ -41,7 +41,7 @@ const KEY_ACTIONS: Record<string, ActionName> = {
   ShiftRight: 'boost',
   Space: 'brake',
   KeyJ: 'warp',
-  KeyE: 'scan',
+  KeyT: 'scan',   // not E: E is roll, and a key cannot mean two things
   KeyM: 'map',
   KeyC: 'codex',
   KeyL: 'land',

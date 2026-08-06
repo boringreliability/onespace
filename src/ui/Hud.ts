@@ -1509,7 +1509,7 @@ const CSS = /* css */ `
 .os-hud .os-head-loc { color: var(--os-amber); text-shadow: var(--os-glow); }
 
 /* Throttle ---------------------------------------------------------------- */
-.os-hud .os-thr { left: 36px; top: 50%; transform: translateY(-50%); }
+.os-hud .os-thr { left: 64px; top: 50%; transform: translateY(-50%); }
 .os-hud .os-thr-body { display: flex; gap: 8px; margin: 8px 0 6px; height: 230px; }
 .os-hud .os-thr-ladder {
   display: flex;
