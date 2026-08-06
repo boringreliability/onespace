@@ -24,7 +24,7 @@ import { MutableViewState } from '@/render/ViewState';
 import { StarMap, registerStarMapShots, type GalaxyViewAdapter } from '@/ui/StarMap';
 import type { Warp } from '@/ship/Warp';
 import type { Universe } from '@/game/Universe';
-import { shotOwnsScene } from '@/game/Shots';
+import { activeShotName, shotOwnsScene } from '@/game/Shots';
 
 /**
  * Radius of the neighbourhood the chart samples, in light years, and the range
@@ -286,7 +286,15 @@ export class MapMode implements GameModule {
     if (shotOwnsScene()) {
       // Chart shots position the camera themselves; the module stands down but
       // leaves the view visible so those shots have something to frame.
-      this.view.object3d.visible = true;
+      //
+      // Only chart shots. Forcing it on for every takeover shot put the whole
+      // galaxy's diffuse layer behind the ship showroom, which is why those
+      // frames came back as a warm brown haze — the subject was inside the
+      // disc, not against black.
+      const shot = activeShotName();
+      const isChartShot = shot !== null && shot.startsWith('galaxy-map');
+      this.view.object3d.visible = isChartShot;
+      if (!isChartShot) return;
       this.viewState.set(
         ctx.camera.position,
         this.sunDir,
