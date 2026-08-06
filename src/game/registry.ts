@@ -15,6 +15,8 @@ import { config } from '@/core/Config';
 import { Universe } from '@/game/Universe';
 import { Pilot } from '@/game/Pilot';
 import { MapMode } from '@/game/MapMode';
+import { Showroom, registerShowroomShots, setShipVisualFactory } from '@/game/Showroom';
+import { createShipVisual } from '@/render/ships/ShipMesh';
 import { activeShotName, registerShot, shotOwnsScene, updateActiveShot } from '@/game/Shots';
 import type { NebulaSpec, PlanetSpec, RingSpec } from '@/gen/types';
 
@@ -283,6 +285,14 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   const galleryHost: PlanetSpec = base.rings ? base : { ...base, rings: FALLBACK_RINGS };
   const gallery = new Gallery(universe.galaxy.nebulae[0], galleryHost);
   await engine.add(gallery);
+
+  progress(0.90, 'opening the yard');
+  // The procedural ships live in an isolated showroom until they are reviewed;
+  // nothing here runs during flight. See docs/ships/BRIEF.md.
+  setShipVisualFactory(createShipVisual);
+  const showroom = new Showroom();
+  await engine.add(showroom);
+  registerShowroomShots(showroom);
 
   progress(0.94, 'grading');
   const postfx = new PostFX(engine.renderer, engine.scene, engine.camera, config.quality);
