@@ -186,6 +186,25 @@ function multiplicityFraction(mass: number): number {
  * Pass `field` when expanding several systems from one galaxy: `buildField` is
  * not memoised and dominates the cost of a single call.
  */
+/**
+ * Suffix any repeated name with a roman numeral, depth-first over planets and
+ * their moons. Mutates in place: the specs are readonly to consumers, but this
+ * runs before the system is handed out.
+ */
+function dedupeNames(planets: PlanetSpec[]): void {
+  const seen = new Map<string, number>();
+  const ROMAN = ['', ' II', ' III', ' IV', ' V', ' VI', ' VII', ' VIII'];
+  const visit = (body: PlanetSpec): void => {
+    const n = seen.get(body.name) ?? 0;
+    seen.set(body.name, n + 1);
+    if (n > 0) {
+      (body as { name: string }).name = body.name + (ROMAN[n] ?? ` ${n + 1}`);
+    }
+    for (const m of body.moons) visit(m);
+  };
+  for (const p of planets) visit(p);
+}
+
 export function generateSystem(
   galaxy: GalaxySpec,
   stub: StarSystemStub,
@@ -341,6 +360,15 @@ export function generateSystem(
       }),
     );
   }
+
+  // --- name collisions -----------------------------------------------------
+  //
+  // Each body names itself from its own seed, which keeps generation pure and
+  // order-independent — but two of them can independently land on the same
+  // string, and only the system can see that. Measured: one collision in a
+  // forty-system sample. Disambiguate in place rather than re-rolling, so a
+  // planet's name never depends on how many siblings it happens to have.
+  dedupeNames(planets);
 
   // --- civilisation --------------------------------------------------------
   /**
@@ -1085,6 +1113,7 @@ function moonsFor(
   parentRadiusKm: number,
   luminosity: number,
   semiMajorAxisAu: number,
+  starMassSolar: number,
   rng: Rng,
 ): PlanetSpec[] {
   const giant = parentType === 'gas-giant' || parentType === 'ice-giant';
@@ -1096,8 +1125,21 @@ function moonsFor(
     Math.max(0, Math.round(rng.power(0.4, maxMoons + 0.9, giant ? -0.6 : -1.6) - 0.4)),
   );
 
+  // The Hill sphere is the hard bound, and nothing enforced it before: moons
+  // stepped outward by up to 2.4x each, so eight of them reached a thousand
+  // parent radii and the outermost were measured 47% OUTSIDE the sphere they
+  // would have to be inside to be bound at all. Prograde satellites are only
+  // stable to roughly half the Hill radius in practice, so that is the ceiling.
+  const AU_KM = 1.495978707e8;
+  const EARTH_PER_SOLAR = 332946;
+  const hillKm =
+    semiMajorAxisAu *
+    AU_KM *
+    Math.cbrt(parentMassEarth / (3 * Math.max(0.02, starMassSolar) * EARTH_PER_SOLAR));
+  const maxAKm = hillKm * 0.5;
+
   const moons: PlanetSpec[] = [];
-  let aKm = parentRadiusKm * rng.range(2.6, 5.5);
+  let aKm = Math.min(parentRadiusKm * rng.range(2.6, 5.5), maxAKm);
 
   for (let i = 0; i < count; i++) {
     const seed = hashSeed(parentSeed, `moon:${i}`);
@@ -1173,7 +1215,7 @@ function moonsFor(
       isMoon: true,
     });
 
-    aKm *= mrng.range(1.5, 2.4);
+    aKm = Math.min(aKm * mrng.range(1.5, 2.4), maxAKm);
   }
 
   return moons;
@@ -1258,6 +1300,7 @@ export function generatePlanet(ctx: PlanetContext): PlanetSpec {
     radiusKm,
     ctx.luminosity,
     ctx.semiMajorAxisAu,
+    ctx.starMassSolar,
     rng,
   );
 
