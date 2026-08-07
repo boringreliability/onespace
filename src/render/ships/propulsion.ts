@@ -95,6 +95,9 @@ import type { EngineContext } from '@/core/Engine';
 import type { QualitySettings, QualityTier } from '@/core/Config';
 import type { ViewState } from '@/render/ViewState';
 import { registerShaderChunks } from '@/shaders/chunks';
+// Human-scale reference, read as a VALUE and not only as a type: nozzle
+// subdivision is derived from it. See `nozzleScale`.
+import { DECK_HEIGHT_KM } from '@/gen/ships/types';
 import type {
   EnginePod,
   Frame,
@@ -756,6 +759,121 @@ const PART_FACE = 3;
 const PART_THROAT = 4;
 
 /**
+ * The pitch a serviceable engine structure is laid out on, in kilometres.
+ *
+ * BRIEF §7's first rule — "detail scales with the ship, not with a constant" —
+ * and `types.ts`'s human-scale note ("every detail that tells the eye how big a
+ * ship is is a multiple of one of these, never a hand-tuned constant") are the
+ * same rule, and the engine cage was the largest thing on a Kessler hull still
+ * breaking it: `n = 4` longerons, `hoops = 2`, `rings = 6`, `ribs = 6`, at every
+ * bell size the blueprint can produce. Exit radius over beam spans p10 0.064 to
+ * p90 0.149, so the same cage was being scaled across a 2.3x range of absolute
+ * size and the tail assembly was recognisably one object on every hull in the
+ * family plate.
+ *
+ * THE REVIEW ASKED FOR `structure.bayAspect` AND THAT IS NOT REACHABLE HERE.
+ * `bayAspect` lives on the FAMILY spec in `families.ts`, not on `ShipBlueprint`;
+ * the blueprint bakes it into `bayLen` per spine chain and never republishes the
+ * ratio, and `ShipBlueprint` carries only a `familyId`. Reading a hull-section
+ * bay would also make the derivation non-monotonic in bell size, which is
+ * exactly what the review's own acceptance test asserts against. So the pitch is
+ * taken from the same absolute human-scale reference `families.ts` derives
+ * `bayAspect` against: a bay you can get a gantry and a crew into is a couple of
+ * decks across. That is the quantity the rule is really about — a longeron every
+ * ~4 m of cage circumference on any ship, rather than four longerons on every
+ * ship.
+ */
+const SERVICE_PITCH_KM = DECK_HEIGHT_KM * 1.6; // ≈ 4.2 m
+
+/**
+ * Circumferential spacing of the cage's longitudinal members.
+ *
+ * Tighter than the bay it braces, and not for a visual reason: a bay is sized by
+ * what a crew and a gantry hook need to get through, and a longeron is sized by
+ * the load coming out of the bell's flange ring, which is a ring load and wants
+ * more feet under it than the axial stations do. Keeping the two separate is
+ * also what gives the small end of the fleet any resolution at all — at one
+ * pitch for both, every bell under two metres landed on the clamp floor and the
+ * couriers went back to sharing a cage.
+ */
+const LONGERON_PITCH_KM = SERVICE_PITCH_KM * 0.78; // ≈ 3.2 m
+
+/**
+ * How finely one nozzle is subdivided, derived from its ABSOLUTE size.
+ *
+ * Every count here used to be a literal in the builder that consumed it. They
+ * are gathered into one object because they must move together: a bell with ten
+ * longerons and six profile rings looks like two different objects welded to
+ * each other.
+ *
+ * This is a per-SHIP quantity, not a per-instance one, because the nozzle
+ * geometry is one merged buffer shared by every instance on the hull (see
+ * `mergeNozzleShapes`) — a per-pod count would need a buffer per pod and a draw
+ * call per buffer. Pods of one ship differ by a few percent of a radius; ships
+ * differ by 2.3x, and it is the between-ship difference the family plate shows.
+ */
+interface NozzleScale {
+  /** Longitudinal members of the thrust frame. */
+  readonly longerons: number;
+  /** Bracing hoops along the cage. */
+  readonly hoops: number;
+  /** Straight tube segments per hoop. Roundness, not structure. */
+  readonly hoopSeg: number;
+  /** Profile rings along the bell wall. */
+  readonly bellRings: number;
+  /** Profile rings along an aerospike's central spike. */
+  readonly spikeRings: number;
+  /** Profile rings along an annular nozzle's outer wall. */
+  readonly annularRings: number;
+  /** Radial stiffeners on a reaction plate. */
+  readonly ribs: number;
+  /** Turbopumps round an open-cycle bell. */
+  readonly pumps: number;
+  /** Injector blocks round an aerospike throat. */
+  readonly blocks: number;
+}
+
+/**
+ * @param exitRadiusKm  the bell's absolute exit radius
+ * @param bellLengthKm  the bell's absolute length, throat to exit plane
+ *
+ * Every count is a length over `SERVICE_PITCH_KM` and every clamp is a range,
+ * so the LOD path can drop rungs out of the RESULT (see `thrustFrame`) instead
+ * of substituting a smaller literal — which is what made LOD1 a different cage
+ * rather than a coarser one.
+ */
+function nozzleScale(exitRadiusKm: number, bellLengthKm: number): NozzleScale {
+  const bay = SERVICE_PITCH_KM;
+  const r = Math.max(exitRadiusKm, 1e-6);
+  const len = Math.max(bellLengthKm, 1e-6);
+  // The cage stands off the bell at ~1.13 R and runs from z = -0.78 to z = 0.43
+  // in units of bell length; both numbers come from `thrustFrame`'s envelope.
+  const cageCirc = 2 * Math.PI * 1.13 * r;
+  const cageLen = 1.21 * len;
+
+  // Three is a floor because two longerons is not a cage, and eleven is a
+  // ceiling because `ShipMesh` charges propulsion's submitted triangles against
+  // the hull's LOD1 greeble allowance and an unbounded count would strip the
+  // greebles off a big hull to draw bracing nobody can resolve.
+  const longerons = Math.round(clamp(cageCirc / LONGERON_PITCH_KM, 3, 11));
+  const hoops = Math.round(clamp(cageLen / bay + 1, 2, 4));
+  return {
+    longerons,
+    hoops,
+    // Bounded by the longeron count so the cage reads as one lattice, but
+    // floored at 8 because a hoop is a circle and a hexagonal one is a nut.
+    hoopSeg: Math.round(clamp(longerons, 8, 12)),
+    // Finer pitch than the structure: this is curvature, not load path.
+    bellRings: Math.round(clamp(len / (bay * 0.42) + 3, 4, 12)),
+    spikeRings: Math.round(clamp(len / (bay * 0.42) + 2, 4, 10)),
+    annularRings: Math.round(clamp(len / (bay * 0.42) + 1, 3, 8)),
+    ribs: Math.round(clamp((2 * Math.PI * 0.94 * r) / (bay * 1.35), 3, 12)),
+    pumps: Math.round(clamp(cageCirc / (bay * 2.6), 2, 6)),
+    blocks: Math.round(clamp((2 * Math.PI * 0.98 * r) / (bay * 0.95), 4, 12)),
+  };
+}
+
+/**
  * Combustion chamber and injector, forward of the throat.
  *
  * This is what closes a bell. The chamber converges from the injector plane
@@ -789,10 +907,15 @@ function chamber(b: Buf, seg: number, throat: number): void {
  * thrust frame, because a crew with a gantry must be able to change one." That
  * sentence describes a silhouette, and until this existed nothing in the render
  * produced it — the bells sat flush against the plating with no visible way to
- * unbolt one. Four longerons, four diagonals, two hoops and a gantry pad.
+ * unbolt one.
+ *
+ * The member COUNTS come from `sc`, i.e. from the bell's absolute size over a
+ * service pitch, not from literals. A courier's cage is three bars and two
+ * hoops; a freighter's is ten and four. That difference is the whole reason the
+ * five hulls on the family plate stopped sharing one tail assembly.
  */
-function thrustFrame(b: Buf, full: boolean): void {
-  const n = 4;
+function thrustFrame(b: Buf, sc: NozzleScale, full: boolean): void {
+  const n = sc.longerons;
   const zA = -0.78;
   const zB = 0.30;
   for (let i = 0; i < n; i++) {
@@ -806,16 +929,29 @@ function thrustFrame(b: Buf, full: boolean): void {
     // The pad a gantry hook actually grabs.
     tube(b, cx * 1.06, sy * 1.06, zB, cx * 0.84, sy * 0.84, zB + 0.13, 0.052, 5, PART_HARDWARE);
   }
-  // The LONGERONS AND ONE HOOP SURVIVE A RUNG LONGER than the diagonals and the
-  // pads. The cage round the bells is part of the Kessler silhouette and
+  // The LONGERONS AND THE FORWARD HOOP SURVIVE A RUNG LONGER than the diagonals
+  // and the pads. The cage round the bells is part of the Kessler silhouette and
   // `ship-lod1`'s brief rejects a silhouette that changes at all; the bracing
   // inside it is 0.2 m tube on a 139 m hull, which is what that brief means by
   // "sub-metre hardware may go".
-  const hoops = full ? 2 : 1;
+  //
+  // LOD sheds FROM THE DERIVED COUNT rather than substituting a literal. The
+  // longerons — the members that carry the silhouette — keep their full derived
+  // count at every rung, so a big cage still reads as a big cage at LOD1; only
+  // the bracing thins, and it thins proportionally rather than to a constant.
+  // Hoops go to one at LOD1 whatever the ship: `ShipMesh` charges propulsion's
+  // triangles against the hull's LOD1 greeble allowance, and a hoop is
+  // `hoopSeg` capped tubes, i.e. the most expensive thing per pixel here.
+  const hoops = full ? sc.hoops : 1;
+  const k = full ? sc.hoopSeg : Math.max(5, Math.round(sc.hoopSeg * 0.5));
+  // A single hoop sits at the FORWARD station, which is where the two-hoop cage
+  // put its first one — so dropping to one hoop moves nothing that was there.
+  const zHoop0 = zA + 0.07;
+  const zHoop1 = zB - 0.06;
   for (let h = 0; h < hoops; h++) {
-    const z = h === 0 ? zA + 0.07 : zB - 0.06;
-    const r = h === 0 ? 1.12 : 1.06;
-    const k = full ? n * 2 : n;
+    const s = hoops === 1 ? 0 : h / (hoops - 1);
+    const z = zHoop0 + s * (zHoop1 - zHoop0);
+    const r = 1.12 + s * (1.06 - 1.12);
     for (let i = 0; i < k; i++) {
       const a0 = (i / k) * Math.PI * 2;
       const a1 = ((i + 1) / k) * Math.PI * 2;
@@ -825,8 +961,11 @@ function thrustFrame(b: Buf, full: boolean): void {
 }
 
 /** The expansion bell itself, without chamber, frame or turbomachinery. */
-function bellProfile(b: Buf, seg: number, throat: number): void {
-  const rings = 6;
+function bellProfile(b: Buf, seg: number, throat: number, sc: NozzleScale): void {
+  // Size-derived, but never finer along the axis than the ring is around it: a
+  // twelve-ring profile on a five-segment ring is a pentagonal prism with a lot
+  // of extra bands, and `ship-lod2`'s whole budget is 3 k for the entire ship.
+  const rings = Math.max(4, Math.min(sc.bellRings, seg));
   let prevIdx = -1;
   let prevR = 0;
   let prevZ = 0;
@@ -851,13 +990,13 @@ function bellProfile(b: Buf, seg: number, throat: number): void {
 }
 
 /** Classic expansion bell on an open thrust frame. Chemical, fusion, plasma. */
-function buildBell(seg: number, throat: number, detail: number): Buf {
+function buildBell(seg: number, throat: number, detail: number, sc: NozzleScale): Buf {
   const b = new Buf();
-  bellProfile(b, seg, throat);
+  bellProfile(b, seg, throat, sc);
   chamber(b, seg, throat);
   // The frame is a lattice of 3–7 segment tubes and roughly sixty percent of
   // this bell's triangles. It is also the first thing that stops resolving.
-  if (detail > 0) thrustFrame(b, detail >= 2);
+  if (detail > 0) thrustFrame(b, sc, detail >= 2);
   return b;
 }
 
@@ -892,7 +1031,7 @@ function buildGrid(seg: number, throat: number, detail: number): Buf {
 }
 
 /** Aerospike: annular throat round a truncated central spike. */
-function buildAerospike(seg: number, throat: number, detail: number): Buf {
+function buildAerospike(seg: number, throat: number, detail: number, sc: NozzleScale): Buf {
   const b = new Buf();
   const s0 = ring(b, seg, 0.0, 1.0, -0.1, 0, PART_WALL);
   const s1 = ring(b, seg, 0.22, 0.97, -0.1, 0.2, PART_WALL);
@@ -901,7 +1040,7 @@ function buildAerospike(seg: number, throat: number, detail: number): Buf {
   annulus(b, seg, 0.02, Math.max(throat, 0.8), 1.0, 0.0, 0.75, PART_THROAT, 1);
   // The spike. The exhaust clings to it, so it is `PART_WASHED` and glows from
   // the root outward — that gradient is the whole read of an aerospike.
-  const spikeRings = 5;
+  const spikeRings = Math.max(4, Math.min(sc.spikeRings, seg));
   let prev = -1;
   for (let i = 0; i < spikeRings; i++) {
     const s = i / (spikeRings - 1);
@@ -914,7 +1053,12 @@ function buildAerospike(seg: number, throat: number, detail: number): Buf {
   disc(b, seg, 0.95, 0.09, 1, PART_WASHED);
   // Injector blocks round the throat. Small, but they break the ring's
   // silhouette so it is not a bare washer.
-  const blocks = detail >= 2 ? Math.min(8, Math.max(4, seg >> 1)) : detail > 0 ? 4 : 0;
+  // Size-derived, then capped by the ring tessellation so the blocks can never
+  // out-resolve the throat they are bolted to. LOD halves the derived count
+  // rather than replacing it with 4.
+  const blocks = detail <= 0
+    ? 0
+    : Math.min(Math.max(4, seg >> 1), detail >= 2 ? sc.blocks : Math.max(3, sc.blocks >> 1));
   for (let i = 0; i < blocks; i++) {
     const a = (i / blocks) * Math.PI * 2;
     const cx = Math.cos(a);
@@ -925,9 +1069,9 @@ function buildAerospike(seg: number, throat: number, detail: number): Buf {
 }
 
 /** Annular: exhaust in the gap between an outer wall and a central plug. */
-function buildAnnular(seg: number, throat: number): Buf {
+function buildAnnular(seg: number, throat: number, sc: NozzleScale): Buf {
   const b = new Buf();
-  const rings = 4;
+  const rings = Math.max(3, Math.min(sc.annularRings, seg));
   let prev = -1;
   for (let i = 0; i < rings; i++) {
     const s = i / (rings - 1);
@@ -957,14 +1101,15 @@ function buildAnnular(seg: number, throat: number): Buf {
  * does not fabricate a gantry-serviceable structure, it welds a yoke onto
  * whatever the pod came off.
  */
-function buildOpenCycle(seg: number, throat: number, detail: number): Buf {
+function buildOpenCycle(seg: number, throat: number, detail: number, sc: NozzleScale): Buf {
   const b = new Buf();
-  bellProfile(b, seg, throat);
+  bellProfile(b, seg, throat, sc);
   chamber(b, seg, throat);
   if (detail <= 0) return b;
   // The yoke and at least two pumps stay: a scavenger drive hanging off a pylon
   // with its plumbing showing IS the Ossuary silhouette, not a decoration on it.
-  const pumps = detail >= 2 ? 4 : 2;
+  // How MANY pumps is a function of how much bell there is to feed.
+  const pumps = detail >= 2 ? sc.pumps : Math.max(2, sc.pumps >> 1);
   for (let i = 0; i < pumps; i++) {
     const a = (i / pumps) * Math.PI * 2 + 0.4;
     const cx = Math.cos(a);
@@ -988,7 +1133,7 @@ function buildOpenCycle(seg: number, throat: number, detail: number): Buf {
 }
 
 /** Reaction plate: a disc that is struck, not a nozzle that flows. */
-function buildPlate(seg: number, _throat: number, detail: number): Buf {
+function buildPlate(seg: number, _throat: number, detail: number, sc: NozzleScale): Buf {
   const b = new Buf();
   const r0 = ring(b, seg, 0.0, 1.0, 0, 0, PART_HARDWARE);
   const r1 = ring(b, seg, 1.0, 1.0, 0, 1, PART_HARDWARE);
@@ -998,7 +1143,9 @@ function buildPlate(seg: number, _throat: number, detail: number): Buf {
   disc(b, seg, 0.0, 1.0, 0, PART_HARDWARE, -1);
   // Radial stiffeners on the forward face. A flat disc with nothing on it
   // reads as a decal; the ribs are what make it a structural member.
-  const ribs = detail >= 2 ? 6 : detail > 0 ? 3 : 0;
+  // One stiffener per fixed arc of rim, so a 20 m plate is not a 2 m plate
+  // photographed closer. LOD halves the derived count.
+  const ribs = detail <= 0 ? 0 : detail >= 2 ? sc.ribs : Math.max(3, sc.ribs >> 1);
   for (let i = 0; i < ribs; i++) {
     const a = (i / ribs) * Math.PI * 2;
     const cx = Math.cos(a);
@@ -1056,20 +1203,20 @@ function buildFixture(seg: number): Buf {
  * `ship-lod1`'s brief rejects any change to the silhouette; at 0 it is gone,
  * which is `ship-lod2`, where the whole hull is eight sections around.
  */
-function buildNozzle(style: NozzleStyle, seg: number, throat: number, detail: number): Buf {
+function buildNozzle(style: NozzleStyle, seg: number, throat: number, detail: number, sc: NozzleScale): Buf {
   switch (style) {
     case 'bell':
-      return buildBell(seg, throat, detail);
+      return buildBell(seg, throat, detail, sc);
     case 'aerospike':
-      return buildAerospike(seg, throat, detail);
+      return buildAerospike(seg, throat, detail, sc);
     case 'annular':
-      return buildAnnular(seg, throat);
+      return buildAnnular(seg, throat, sc);
     case 'grid':
       return buildGrid(seg, throat, detail);
     case 'open-cycle':
-      return buildOpenCycle(seg, throat, detail);
+      return buildOpenCycle(seg, throat, detail, sc);
     case 'plate':
-      return buildPlate(seg, throat, detail);
+      return buildPlate(seg, throat, detail, sc);
   }
 }
 
@@ -1228,6 +1375,7 @@ attribute vec3  iCore;    // plume core colour, for the throat glow
 attribute float iTech;
 attribute float iSeed;
 attribute float iShape;   // which profile this instance draws
+attribute float iSoot;    // how much exhaust deposit this instance lives in
 
 varying vec3  vLocal;     // UNIT-nozzle space — every noise frequency lives here
 varying vec3  vPos;       // ship-local km, for the view vector
@@ -1237,6 +1385,7 @@ varying float vPart;
 varying vec3  vCore;
 varying float vTech;
 varying float vSeed;
+varying float vSoot;
 
 void main() {
   vec3 lp = position * iSize;
@@ -1254,6 +1403,7 @@ void main() {
   vCore = iCore;
   vTech = iTech;
   vSeed = iSeed;
+  vSoot = iSoot;
 
   gl_Position = projectionMatrix * modelViewMatrix * local;
   #include <logdepthbuf_vertex>
@@ -1294,6 +1444,7 @@ varying float vPart;
 varying vec3  vCore;
 varying float vTech;
 varying float vSeed;
+varying float vSoot;
 
 void main() {
   #include <logdepthbuf_fragment>
@@ -1310,39 +1461,80 @@ void main() {
   vec3 q = vLocal + vSeed;
   float soot = smoothstep(0.20, 0.92, os_fbm(q * 5.5, 3, 2.3, 0.55) * 0.5 + 0.5);
 
+  // AN ION DRIVE LEAVES NO CARBON. Every deposit term below is scaled by this,
+  // so a Sillane port keeps the clean cool land its doctrine calls for while a
+  // chemical or fusion bell blackens. vTech: 0 chemical, 1 ion, 2 fusion
+  // torch, 3 plasma, 4 reaction plate — see DRIVE_TECH.
+  float depTech = mix(1.0, 0.22, step(0.5, vTech) * step(vTech, 1.5));
+
   vec3 col;
 
   if (vPart < 0.5) {
     if (gl_FrontFacing) {
-      // Outside of the bell. Phase-modulating the corrugation varies its pitch
-      // and a per-rib hash varies its depth, so some rings are crisp and some
-      // are half beaten flat — a pure sine gives every ring the same everything.
+      // ---- outside of the bell ---------------------------------------------
+      //
+      // aT runs 0 AT THE THROAT to 1 AT THE EXIT LIP (see bellProfile), and
+      // that axis — not a noise field — is what this surface is made of.
+      //
+      // A bell is the most heat- and soot-loaded surface on a ship. The gas is
+      // hottest and cleanest where it is still confined, so the metal there
+      // tempers: straw over the shoulder, blued back towards the throat. It is
+      // coldest at the lip, where the flow has already expanded, and that is
+      // where unburnt product condenses out — so the lip is carbon and stays
+      // carbon. Luminance therefore RISES from lip to throat.
+      //
+      // Until this round it did the exact opposite: the warm tint was mixed in
+      // *towards* vT = 1 and the value peaked at the lip, which drew a clean,
+      // bright, bilaterally banded cone. Measured off ship-engine-close, the
+      // bell exterior came out at (214, 194, 166) — the brightest and warmest
+      // non-emissive surface on the whole ship, sixty points above the mid-hull,
+      // while a plume burned in the same frame. That is worse than no wear at
+      // all: it tells the viewer these engines have never fired.
+      float dep = smoothstep(0.08, 0.80, vT);
+      dep = clamp(dep * mix(0.88, 1.08, soot) * depTech, 0.0, 1.0);
+
+      // Phase-modulating the corrugation varies its pitch and a per-rib hash
+      // varies its depth, so some rings are crisp and some are half beaten
+      // flat — a pure sine gives every ring the same everything. Its amplitude
+      // now DIES INTO THE DEPOSIT: soot fills a corrugation. Banding that is as
+      // crisp at the lip as at the shoulder is what made the review read the
+      // pattern as decoration rather than as a heat gradient.
       float wob = os_fbm(q * 9.0, 2, 2.2, 0.5);
       float ribPhase = vT * 46.0 + 2.1 * wob;
       float ribId = floor(ribPhase / 6.2831853);
       float ribJ = fract(sin(ribId * 91.7 + 3.1 + vSeed) * 43758.5453);
       float rib = (0.5 + 0.5 * sin(ribPhase)) * mix(0.25, 1.0, ribJ);
+      rib = mix(0.5, rib, mix(1.0, 0.35, dep));
 
-      // Below the hull's MID-TONE, but no longer below its black point. The
-      // previous 0.014–0.038 put the bell twenty times darker than the plating
-      // it bolts to: against a lit hull it had no form at all, the only thing
-      // left on screen was its lit lip, and the review read the result as a cut
-      // pipe. A sooted bell is the darkest object on the ship. It is not a hole.
-      vec3 base = mix(vec3(0.052, 0.049, 0.046), vec3(0.132, 0.116, 0.098), rib);
-      base = mix(base, vec3(0.104, 0.077, 0.054), smoothstep(0.40, 1.0, vT));
-      base *= 1.0 - 0.55 * soot * smoothstep(0.15, 1.0, vT);
+      // THE VALUE CEILING, and it is the point of this branch. ShipMaterial
+      // authors its reference plate at ~0.058 and its VALUE_CEILING lets only
+      // bare steel and the faction accent go above that. The brightest this
+      // surface can reach is 0.044 — below the plate it bolts to. Round three
+      // over-corrected an earlier "the bell is a cut pipe" finding by lifting
+      // the whole cone to 0.132, i.e. 2.3x the plate; the actual fix for that
+      // finding is CONTRAST WITHIN THE BELL, which is what the ramp below is,
+      // not a uniformly brighter cone.
+      vec3 blued  = vec3(0.036, 0.040, 0.054);   // heat-blued steel, throat end
+      vec3 straw  = vec3(0.046, 0.038, 0.023);   // straw temper over the shoulder
+      vec3 carbon = vec3(0.0115, 0.0108, 0.0100); // deposit, at and past the lip
+      vec3 base = mix(blued, straw, smoothstep(0.04, 0.38, vT) * depTech);
+      base = mix(base, carbon, dep);
+      base *= mix(0.80, 1.10, rib);
 
-      float ao = 0.5 + 0.5 * rib;
+      float ao = 0.72 + 0.28 * rib;
       col = base * (uSunColor * NoL + uFill * 1.3) * ao;
-      // Grazing sheen. The cheapest thing that stops metal reading as clay, and
-      // soot has no lining — hence the dirt rationing.
+      // Grazing sheen: the cheapest thing that stops metal reading as clay. On
+      // a cone it peaks exactly ON THE SILHOUETTE, which is why it drew the
+      // bone-white rim round every bell in ship-star-rimlight. Carbon has no
+      // lining, so it is now killed by the deposit rather than only thinned by
+      // the noise.
       col += uSunColor * pow(1.0 - NoV, 4.0)
-           * smoothstep(-0.3, 0.3, dot(N, uSunDir)) * 0.055 * (1.0 - 0.7 * soot);
-      // Rationed hard, and pushed right up to the lip. At the reference ship's
-      // 0.45 over the aft half, a firing bell's own plume light drowns the
-      // corrugations and the metal reads as blue plastic — the wash has to lose
+           * smoothstep(-0.3, 0.3, dot(N, uSunDir))
+           * 0.038 * (1.0 - 0.85 * dep) * (1.0 - 0.5 * soot);
+      // The plume does light the outside of the lip — through a millimetre of
+      // soot. Rationed for the same reason the sheen is: the wash has to lose
       // to the geometry, not the other way round.
-      col += vCore * uThrottle * 0.26 * smoothstep(0.72, 1.0, vT);
+      col += vCore * uThrottle * 0.13 * smoothstep(0.72, 1.0, vT) * (1.0 - 0.55 * dep);
     } else {
       // ---- throat interior -------------------------------------------------
       // METAL first, light source second. This branch used to be pure emission,
@@ -1382,11 +1574,29 @@ void main() {
   } else if (vPart < 2.5) {
     // Hardware: pumps, flanges, ribs, thrust frame, light housings. Never
     // glows — if the plumbing lit up as brightly as the throat the eye would
-    // lose the throat. Lifted with the wall for the same reason the wall was:
-    // a thrust frame nobody can see is not a thrust frame.
-    vec3 base = mix(vec3(0.086, 0.082, 0.078), vec3(0.030, 0.028, 0.026), soot * 0.7);
+    // lose the throat.
+    //
+    // THE DEPOSIT FALLS OFF THE BELL ONTO WHAT SURROUNDS IT. vLocal.z is the
+    // unit-nozzle axis: 0 at the throat, 1 at the exit plane, and the cage runs
+    // -0.78 to 0.43 along it. So the tubes standing beside the mouth are carbon
+    // and the forward end of the cage, where a gantry crew works, is merely
+    // dirty. Without this the frame was a clean white lattice bolted around a
+    // firing engine.
+    //
+    // vSoot says how much of that this instance lives in, because deposit is
+    // a property of WHERE A PART SITS and this mesh's one fitting geometry is
+    // both an RCS cup (which blackens round its own mouth) and a navigation
+    // lamp cowl on clean plating amidships (which does not).
+    float aft = smoothstep(-0.55, 0.62, vLocal.z) * vSoot * depTech;
+    // Ceiling dropped from 0.086 to 0.056, i.e. from 1.5x the hull's reference
+    // plate to just under it. A thrust frame nobody can see is not a thrust
+    // frame — but a thrust frame brighter than every plate on the ship is a
+    // light fitting, and it read as one in every frame of round four.
+    vec3 base = mix(vec3(0.056, 0.053, 0.050), vec3(0.026, 0.024, 0.023), soot * 0.7);
+    base = mix(base, vec3(0.0135, 0.0128, 0.0120), aft * 0.88);
     col = base * (uSunColor * NoL + uFill * 1.25);
-    col += uSunColor * pow(1.0 - NoV, 4.0) * smoothstep(-0.3, 0.3, dot(N, uSunDir)) * 0.042;
+    col += uSunColor * pow(1.0 - NoV, 4.0) * smoothstep(-0.3, 0.3, dot(N, uSunDir))
+         * 0.030 * (1.0 - 0.8 * aft);
   } else if (vPart < 3.5) {
     // The emissive working face. Two completely different objects share this
     // branch because both are flat and neither is a bell.
@@ -2353,6 +2563,8 @@ export class ShipPropulsion {
   private readonly crowded: boolean;
   /** Mean throat/exit ratio, baked into every rung's nozzle geometry. */
   private readonly throatRatio: number;
+  /** Subdivision derived from the bells' absolute size. See `nozzleScale`. */
+  private readonly nozzleScale: NozzleScale;
   /**
    * The nozzle styles this ship uses, most-used first.
    *
@@ -2369,8 +2581,10 @@ export class ShipPropulsion {
   private readonly wakeStage: AdditiveBatch | null;
   private readonly nozzleCore: Float32Array;
   private readonly nozzleTech: Float32Array;
+  private readonly nozzleSoot: Float32Array;
   private readonly fixtureCore: Float32Array;
   private readonly fixtureTech: Float32Array;
+  private readonly fixtureSoot: Float32Array;
 
   // scratch — never allocated in update()
   private readonly _m4 = new Matrix4();
@@ -2445,6 +2659,26 @@ export class ShipPropulsion {
     const throat = pods.length > 0 ? throatSum / pods.length : 0.42;
 
     this.throatRatio = throat;
+
+    // Cage, hoop, rib and ring counts, from the ABSOLUTE size of the bells this
+    // ship actually carries. Weighted by nozzle count rather than by pod, so a
+    // hull with one huge pod and six small ones is subdivided for the six the
+    // eye spends its time on — the geometry is shared by every instance and
+    // there is exactly one of it (see `NozzleScale`).
+    let exitW = 0;
+    let lenW = 0;
+    let wSum = 0;
+    for (const p of pods) {
+      const w = Math.max(1, Math.round(p.nozzle.count));
+      const e = Math.max(p.nozzle.exitRadius, 1e-6);
+      exitW += e * w;
+      lenW += Math.max(p.nozzle.length, e * 0.12) * w;
+      wSum += w;
+    }
+    this.nozzleScale = wSum > 0
+      ? nozzleScale(exitW / wSum, lenW / wSum)
+      : nozzleScale(0.002, 0.003);
+
     const crowded = nozzleTotal > PLUME_CROWD_THRESHOLD;
     this.crowded = crowded;
 
@@ -2608,6 +2842,8 @@ export class ShipPropulsion {
 
     this.nozzleCore = this.repeatColor(coreColor, nzCount);
     this.nozzleTech = new Float32Array(nzCount).fill(tech);
+    // Every main-drive instance stands in its own exhaust, so all of it.
+    this.nozzleSoot = new Float32Array(nzCount).fill(1);
 
     // ---- lights, RCS jets and engine wash, one merged instanced quad -------
     const lights = this.collectLights(bp);
@@ -2730,6 +2966,16 @@ export class ShipPropulsion {
     };
     this.fixtureCore = this.repeatColor(coreColor, fixCount);
     this.fixtureTech = new Float32Array(fixCount).fill(tech);
+    // How much exhaust deposit a fitting lives in. Deposit is a property of
+    // WHERE A PART SITS, not of its shape, and this mesh's one geometry serves
+    // two completely different jobs: an RCS cup fires cold gas out of its own
+    // mouth and blackens round it; a navigation lamp is bolted to clean plating
+    // amidships and never sees combustion products at all. Without this the
+    // soot falloff added for the engine cage would have carbon-blacked every
+    // running light on the ship. Staged in the same order as `fixSize`: cups
+    // first, cowls after.
+    this.fixtureSoot = new Float32Array(fixCount);
+    for (let i = 0; i < fixCount; i++) this.fixtureSoot[i] = i < this.jetCount ? 0.55 : 0.10;
     this.quadStage = quadBatch;
 
     // ---- re-entry wake ----------------------------------------------------
@@ -2840,7 +3086,9 @@ export class ShipPropulsion {
       }
 
       const bufs: Buf[] = [];
-      for (const style of shapes) bufs.push(buildNozzle(style, plan.nozzleSeg, this.throatRatio, plan.nozzleDetail));
+      for (const style of shapes) {
+        bufs.push(buildNozzle(style, plan.nozzleSeg, this.throatRatio, plan.nozzleDetail, this.nozzleScale));
+      }
       const geo = mergeNozzleShapes(bufs);
       // Straight views onto the staged arrays: the instance order IS the ship
       // order, so there is nothing to gather.
@@ -2849,6 +3097,7 @@ export class ShipPropulsion {
       geo.setAttribute('iTech', new InstancedBufferAttribute(this.nozzleTech, 1));
       geo.setAttribute('iSeed', new InstancedBufferAttribute(stage.seed, 1));
       geo.setAttribute('iShape', new InstancedBufferAttribute(shapeIdx, 1));
+      geo.setAttribute('iSoot', new InstancedBufferAttribute(this.nozzleSoot, 1));
       nozzleMesh = new InstancedMesh(geo, this.nozzleMat, n);
       nozzleMesh.instanceMatrix.array.set(stage.matrix);
       nozzleMesh.instanceMatrix.needsUpdate = true;
@@ -2882,6 +3131,7 @@ export class ShipPropulsion {
       // One profile, so both shape channels are zero and the mask never fires.
       // Present because the program is shared with the nozzle mesh.
       geo.setAttribute('iShape', new InstancedBufferAttribute(new Float32Array(fixCount), 1));
+      geo.setAttribute('iSoot', new InstancedBufferAttribute(this.fixtureSoot, 1));
       fixtureMesh = new InstancedMesh(geo, this.nozzleMat, fixCount);
       fixtureMesh.instanceMatrix.array.set(fix.matrix.subarray(0, fixCount * 16));
       fixtureMesh.instanceMatrix.needsUpdate = true;

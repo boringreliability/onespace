@@ -31,7 +31,7 @@
  * per frame.
  */
 
-import { BufferGeometry, InstancedBufferAttribute, Matrix4, Vector3 } from 'three';
+import { BufferAttribute, BufferGeometry, InstancedBufferAttribute, Matrix4, Vector3 } from 'three';
 
 import type { GreebleFamily } from '@/gen/ships/families';
 import { HATCH_WIDTH_KM, type LodLevel, type PrimaryVolume } from '@/gen/ships/types';
@@ -247,7 +247,9 @@ const ASSEMBLIES: Record<GreebleKind, Assembly> = {
   /** A bundle of cables clipped along the outside, with two saddle clips. */
   'cable-loom': (b) => {
     for (let i = 0; i < 3; i++) {
-      const y = 0.1 + (i % 2) * 0.13;
+      // The bottom course lay at y = 0.1 with r = 0.08, i.e. two centimetres
+      // of daylight along its whole length, held up by two clips. Resting it.
+      const y = 0.075 + (i % 2) * 0.135;
       const z = (i - 1) * 0.14;
       addLyingCylinder(b, _m.identity(), -0.5, 0.5, y, z, 0.08, 6);
     }
@@ -272,12 +274,19 @@ const ASSEMBLIES: Record<GreebleKind, Assembly> = {
 
   /** A rigid instrument mast: four uprights, two collars, a head. */
   mast: (b) => {
-    b.addBox(_m.identity(), 0.6, 0.08, 0.6, 0, 0, 0);
+    // TWO TIERS, and the reason is the round-four finding. The uprights land
+    // at plan radius 0.2 and the deck flange was 0.6 square and 0.08 thick —
+    // so at the scale a mast is actually drawn, the four legs converge upward
+    // out of a plate one pixel high, which reads as four pins ending in mid
+    // air over the plating. A flange the full footprint wide, and a pedestal
+    // the legs demonstrably stand ON, is what a mast is bolted down with.
+    b.addBox(_m.identity(), 0.78, 0.05, 0.78, 0, 0, 0);
+    b.addBox(_m.makeTranslation(0, 0.05, 0), 0.5, 0.09, 0.5, 0, 0, 0);
     for (let i = 0; i < 4; i++) {
       const a = (i / 4) * TAU + Math.PI / 4;
       const x = Math.cos(a) * 0.2;
       const z = Math.sin(a) * 0.2;
-      addStrutLocal(b, _m.identity(), x, 0.08, z, x * 0.35, 0.86, z * 0.35, 0.035, 4);
+      addStrutLocal(b, _m.identity(), x, 0.14, z, x * 0.35, 0.86, z * 0.35, 0.035, 4);
     }
     for (const y of [0.34, 0.62]) b.addCylinder(_m.makeTranslation(0, y, 0), 0.17, 0.17, 0.04, 6, 0, 0, 0);
     b.addBox(_m.makeTranslation(0, 0.86, 0), 0.2, 0.14, 0.2, 0, 0, 0);
@@ -307,23 +316,52 @@ const ASSEMBLIES: Record<GreebleKind, Assembly> = {
 
   /** A band clamp round something, with its two bolt lugs. */
   clamp: (b) => {
-    b.addCylinder(_m.makeRotationZ(Math.PI / 2).setPosition(-0.12, 0.3, 0), 0.3, 0.3, 0.24, 10, 0, 0, 0, false, false);
+    // +0.12, not −0.12. See `drum` — `makeRotationZ(+π/2)` sends the lathe's
+    // own +Y to −X, so the offset has to be the +X end of the run.
+    b.addCylinder(_m.makeRotationZ(Math.PI / 2).setPosition(0.12, 0.3, 0), 0.3, 0.3, 0.24, 10, 0, 0, 0, false, false);
     for (const z of [-0.2, 0.2]) b.addBox(_m.makeTranslation(0, 0.44, z), 0.22, 0.16, 0.08, 0, 0, 0);
     b.addBox(_m.makeTranslation(0, 0, 0), 0.36, 0.1, 0.44, 0, 0, 0);
   },
 
   /** A pressure bottle strapped on: drum, two straps, a valve head. */
   drum: (b) => {
-    _m.makeRotationZ(Math.PI / 2).setPosition(-0.42, 0.34, 0);
+    // THE OFFSET IS +0.42, NOT −0.42, AND THE SIGN WAS THE WHOLE BUG.
+    //
+    // `makeRotationZ(+π/2)` maps the lathe's own +Y — the axis `addCylinder`
+    // extrudes along — to −X, so a base placed at x = −0.42 runs the barrel
+    // out to x = −1.26: three quarters of a footprint clear of the unit, clear
+    // of the two straps at x = ±0.24 that are supposed to hold it, and clear
+    // of the plating it is supposed to be strapped to. That is not a weak
+    // contact shadow, it is a pressure bottle floating beside its own mounts
+    // with nothing under it at all — the round-four "some do not touch it"
+    // finding, exactly. Starting at the +X end runs it to −0.42 and the straps
+    // close on it. `winch-drum` and `clamp` had the same sign.
+    //
+    // 0.32 rather than 0.34 for the axis height so the barrel grazes the plate
+    // instead of hovering two centimetres over it.
+    _m.makeRotationZ(Math.PI / 2).setPosition(0.42, 0.32, 0);
     b.addCylinder(_m, 0.32, 0.32, 0.84, 12, 0, 0, 0, true, true);
-    for (const x of [-0.24, 0.24]) b.addBox(_m2.makeTranslation(x, 0, 0), 0.08, 0.7, 0.72, 0, 0, 0);
-    b.addCylinder(_m2.makeTranslation(0.46, 0.34, 0), 0.09, 0.07, 0.2, 6, 0, 0, 0);
+    for (const x of [-0.24, 0.24]) b.addBox(_m2.makeTranslation(x, 0, 0), 0.08, 0.66, 0.72, 0, 0, 0);
+    // The valve stood at x = 0.46 on a barrel that ended at −0.42, so it too
+    // was a fitting attached to nothing. On the shoulder of the bottle, where
+    // a regulator goes, and overlapping it rather than abutting it.
+    b.addCylinder(_m2.makeTranslation(0.3, 0.56, 0), 0.09, 0.07, 0.2, 6, 0, 0, 0);
   },
 
-  /** A diagonal brace added after the fact, with a pad at each end. */
+  /**
+   * A diagonal brace added after the fact — now braced against something.
+   *
+   * The upper pad hung in mid-air: a diagonal member with a mounting pad on
+   * the end of it and nothing under that pad, which is the same read as the
+   * mast's legs. A brace needs two anchors, so the high end now gets a short
+   * stanchion of its own down to the plating and the diagonal is what stops
+   * that stanchion folding. Same envelope, same `frame` form, one more member.
+   */
   strut: (b) => {
-    addStrutLocal(b, _m.identity(), -0.42, 0.04, -0.2, 0.42, 0.66, 0.2, 0.055, 4);
+    addStrutLocal(b, _m.identity(), -0.42, 0.04, -0.2, 0.36, 0.58, 0.2, 0.055, 4);
+    addStrutLocal(b, _m.identity(), 0.36, 0.02, 0.2, 0.36, 0.58, 0.2, 0.05, 4);
     b.addBox(_m.makeTranslation(-0.42, 0, -0.2), 0.24, 0.08, 0.24, 0, 0, 0);
+    b.addBox(_m.makeTranslation(0.36, 0, 0.2), 0.22, 0.07, 0.22, 0, 0, 0);
     b.addBox(_m.makeTranslation(0.36, 0.58, 0.2), 0.2, 0.16, 0.2, 0, 0, 0);
   },
 
@@ -358,7 +396,12 @@ const ASSEMBLIES: Record<GreebleKind, Assembly> = {
         const z = j / n - 0.5;
         // Slack in the middle, pulled down at the corners: a taut tarp is a box.
         const sag = (1 - Math.abs(x) * 2) * (1 - Math.abs(z) * 2);
-        const y = 0.06 + 0.34 * sag + (jit('tarp', i * 8 + j) - 0.5) * 0.09 * sag;
+        // The constant term used to be 0.06, which floated the entire skirt a
+        // uniform six centimetres over the plating — a tarp with a strip of
+        // sky under every edge. The sag term is already zero at the rim, so
+        // dropping the constant lands the hem on the plate and changes nothing
+        // about the shape of the slack in the middle.
+        const y = 0.34 * sag + (jit('tarp', i * 8 + j) - 0.5) * 0.09 * sag;
         row.push(b.pushLocal(_m.identity(), x, y, z, 0, 0, 0.5 + y, 0));
       }
       grid.push(row);
@@ -426,9 +469,13 @@ const ASSEMBLIES: Record<GreebleKind, Assembly> = {
 
   /** A spool of cable on two end plates, with a crank boss. */
   'winch-drum': (b) => {
-    _m.makeRotationZ(Math.PI / 2).setPosition(-0.34, 0.36, 0);
+    // Same sign error as `drum`: the spool ran out to x = −1.02, a footprint
+    // clear of the two pedestals that carry it. It now spans ±0.34, and each
+    // end plate is placed at the end of the run it caps (a plate spans
+    // `[x − 0.08, x]`, so the +X plate starts at 0.42 and the −X one at −0.34).
+    _m.makeRotationZ(Math.PI / 2).setPosition(0.34, 0.36, 0);
     b.addCylinder(_m, 0.26, 0.26, 0.68, 12, 0, 0, 0, true, true);
-    for (const x of [-0.34, 0.34]) {
+    for (const x of [-0.34, 0.42]) {
       _m.makeRotationZ(Math.PI / 2).setPosition(x, 0.36, 0);
       b.addCylinder(_m, 0.38, 0.38, 0.08, 12, 0, 0, 0, true, true);
     }
@@ -436,6 +483,150 @@ const ASSEMBLIES: Record<GreebleKind, Assembly> = {
     b.addBox(_m2.makeTranslation(0, 0, -0.28), 0.9, 0.4, 0.14, 0, 0, 0);
     b.addCylinder(_m2.makeRotationZ(Math.PI / 2).setPosition(0.46, 0.36, 0), 0.08, 0.08, 0.12, 6, 0, 0, 0);
   },
+};
+
+// ---------------------------------------------------------------------------
+// Mounting footprints
+// ---------------------------------------------------------------------------
+
+/**
+ * WHY EVERY FITTING NEEDS A FOOTPRINT, AND WHY IT IS GEOMETRY.
+ *
+ * Round four: "every fitting meets the plate on a clean boolean edge — no
+ * flange, weld bead, bolt ring or grime collar", and a radial profile round a
+ * cylinder greeble that never drops below the plate field at all. Both halves
+ * of that are the same omission. Nothing in the vocabulary owned any geometry
+ * at the seam, so there was nothing at the seam for the light to catch and
+ * nothing for the occlusion channel to be authored ONTO. A darkening painted
+ * on the surrounding plating instead would be a halo, which is what the critic
+ * measured and rejected by name; the fix has to be a part.
+ *
+ * So each family declares the real footprint of its own base — not its unit
+ * square, the actual plan of the bit that touches — and gets a low collar
+ * standing slightly proud of it: inner edge lifted to `rise` against the
+ * part's side, falling to the plating over `out`. That is a fillet weld on a
+ * welding hull and a gasket ring on a moulding one, and it reads as either.
+ *
+ * The collar carries the contact gradient in its own vertices, authored, not
+ * uniform: near-black where it meets the part and back to open sky at its rim,
+ * which is roughly one footprint out. That is exactly the profile the review
+ * asked for — tightest at contact, monotone rising, gone by a footprint radius
+ * — and unlike a halo it is bounded by real geometry, so it cannot spill onto
+ * plating that has nothing on it.
+ *
+ * `LOUVRE`, `WELD-BEAD` and `SEALANT` deliberately have none. A louvre is cut
+ * INTO the shell and its whole identity is that it stands proud of nothing; a
+ * weld bead and a blob of cured foam ARE mounting hardware and giving them
+ * mounting hardware of their own is a fitting bolted to a fitting.
+ */
+const SEAT_AO_SEAM = 0.05;
+const SEAT_AO_RIM = 0.86;
+
+interface GreebleSeat {
+  readonly shape: 'rect' | 'ring';
+  /** Half-extent in x (rect) or radius (ring) of the part's OWN base. */
+  readonly hx: number;
+  /** Half-extent in z. Defaults to `hx`. Ignored by `ring`. */
+  readonly hz?: number;
+  /** How far the collar stands proud — and therefore the falloff radius. */
+  readonly out: number;
+  /** Height of the collar's inner edge, where it meets the part. */
+  readonly rise: number;
+  /** Ring segments. Match the part's own lathe so the rims do not beat. */
+  readonly seg?: number;
+  readonly cx?: number;
+  readonly cz?: number;
+}
+
+/**
+ * One collar, in the assembly's own unit frame.
+ *
+ * Two rings of hard-edged vertices and one quad strip between them: 8 extra
+ * triangles for a rectangular base, 12–16 for a round one, against a
+ * vocabulary whose mean family is 56. The budget is spent in triangles (see
+ * `triCap`), so this buys the seam out of the instance count rather than out
+ * of the frame — which is the right side of that trade, because an unseated
+ * fitting is not detail, it is a decal.
+ */
+function addSeat(b: HullBuilder, s: GreebleSeat): void {
+  // Flat on the mounting face, so the unoccluded direction is the hull normal
+  // — which in the assembly's own frame is +Y. The bake rotates it into ship
+  // space; the instanced path zeroes it and falls back to the face normal.
+  b.setBent(0, 1, 0);
+  const cx = s.cx ?? 0;
+  const cz = s.cz ?? 0;
+  const inner: number[] = [];
+  const outer: number[] = [];
+  if (s.shape === 'rect') {
+    const hz = s.hz ?? s.hx;
+    // Wound so `(b−a)×(c−a)` points up and outward, matching `HullBuilder`'s
+    // +Y face convention. Reversing this back-face culls the whole collar.
+    const corners: readonly (readonly [number, number])[] = [
+      [-1, -1],
+      [-1, 1],
+      [1, 1],
+      [1, -1],
+    ];
+    for (const [ux, uz] of corners) {
+      inner.push(b.vertex(cx + ux * s.hx, s.rise, cz + uz * hz, 0, 0, SEAT_AO_SEAM, 0));
+      outer.push(b.vertex(cx + ux * (s.hx + s.out), 0, cz + uz * (hz + s.out), 0, 0, SEAT_AO_RIM, 0));
+    }
+    for (let i = 0; i < 4; i++) {
+      const n = (i + 1) % 4;
+      b.quad(outer[i], outer[n], inner[n], inner[i]);
+    }
+  } else {
+    const seg = Math.max(4, s.seg ?? 8);
+    for (let i = 0; i < seg; i++) {
+      const a = (i / seg) * TAU;
+      const c = Math.cos(a);
+      const si = Math.sin(a);
+      inner.push(b.vertex(cx + c * s.hx, s.rise, cz + si * s.hx, 0, 0, SEAT_AO_SEAM, 0));
+      outer.push(b.vertex(cx + c * (s.hx + s.out), 0, cz + si * (s.hx + s.out), 0, 0, SEAT_AO_RIM, 0));
+    }
+    for (let i = 0; i < seg; i++) {
+      const n = (i + 1) % seg;
+      b.quad(outer[i], inner[i], inner[n], outer[n]);
+    }
+  }
+  // The collar is the last thing added, and leaving builder state set is how
+  // `bakeScatter` used to poison every vertex written after it.
+  b.setBent(0, 0, 0);
+}
+
+/**
+ * The base each family actually stands on.
+ *
+ * Sized on the part, never on the unit square: a floodlight's yoke plate is
+ * 0.44 across inside a 1.0 footprint, and a collar drawn at 1.0 would be a
+ * skirt with the light floating in the middle of it.
+ */
+const GREEBLE_SEAT: Partial<Record<GreebleKind, GreebleSeat>> = {
+  hatch: { shape: 'rect', hx: 0.5, hz: 0.5, out: 0.09, rise: 0.05 },
+  bracket: { shape: 'rect', hx: 0.46, hz: 0.45, out: 0.08, rise: 0.05 },
+  ribbed: { shape: 'rect', hx: 0.5, hz: 0.45, out: 0.08, rise: 0.05 },
+  stack: { shape: 'rect', hx: 0.5, hz: 0.4, out: 0.09, rise: 0.06 },
+  pipe: { shape: 'ring', hx: 0.5, out: 0.09, rise: 0.05, seg: 12 },
+  vent: { shape: 'rect', hx: 0.5, hz: 0.45, out: 0.07, rise: 0.04 },
+  grille: { shape: 'rect', hx: 0.5, hz: 0.5, out: 0.06, rise: 0.03 },
+  // Almost flush by definition, so the collar is almost nothing: a recessed
+  // seam and a hairline rim, which is what makes a flush panel read as a panel
+  // and not as a rectangle painted on the plating.
+  'flush-panel': { shape: 'rect', hx: 0.5, hz: 0.43, out: 0.05, rise: 0.02 },
+  blister: { shape: 'ring', hx: 0.5, out: 0.07, rise: 0.03, seg: 12 },
+  'cable-loom': { shape: 'rect', hx: 0.42, hz: 0.26, out: 0.07, rise: 0.03 },
+  conduit: { shape: 'rect', hx: 0.5, hz: 0.28, out: 0.07, rise: 0.04 },
+  'antenna-whip': { shape: 'ring', hx: 0.28, out: 0.09, rise: 0.03, seg: 8 },
+  mast: { shape: 'rect', hx: 0.39, hz: 0.39, out: 0.08, rise: 0.04 },
+  clamp: { shape: 'rect', hx: 0.18, hz: 0.22, out: 0.07, rise: 0.04 },
+  drum: { shape: 'rect', hx: 0.32, hz: 0.37, out: 0.07, rise: 0.05 },
+  // Under the low pad only. The braced end has its own foot, and a collar
+  // spanning both would be a plinth — this family is open frame.
+  strut: { shape: 'rect', hx: 0.12, hz: 0.12, out: 0.07, rise: 0.03, cx: -0.42, cz: -0.2 },
+  'doubler-plate': { shape: 'rect', hx: 0.5, hz: 0.41, out: 0.05, rise: 0.03 },
+  floodlight: { shape: 'rect', hx: 0.22, hz: 0.22, out: 0.07, rise: 0.04 },
+  fairlead: { shape: 'rect', hx: 0.5, hz: 0.35, out: 0.07, rise: 0.05 },
+  'winch-drum': { shape: 'rect', hx: 0.45, hz: 0.35, out: 0.07, rise: 0.05 },
 };
 
 /**
@@ -686,9 +877,73 @@ function drawSize(rng: Rng, env: GreebleEnvelope): number {
 export function greebleGeometry(kind: GreebleKind): BufferGeometry {
   const b = new HullBuilder(512);
   ASSEMBLIES[kind](b);
+  // The collar last, so it is authored over a finished base and so the three
+  // families that must not have one simply do not declare one.
+  const seat = GREEBLE_SEAT[kind];
+  if (seat) addSeat(b, seat);
   const g = b.toGeometry(true);
   g.name = `greeble:${kind}`;
   return g;
+}
+
+/**
+ * How buried a family sits, as an occlusion fraction.
+ *
+ * A louvre is cut into the plate and a mast stands clear of it, and one
+ * constant for both was flat. Both the instanced and the baked path have to
+ * read this from the same place or the same family shades differently
+ * depending on which side of `splitScatterBudget` it landed on.
+ */
+export function greebleBurial(env: GreebleEnvelope): number {
+  return clamp(0.36 - 0.16 * env.h, 0.12, 0.36);
+}
+
+/**
+ * The per-vertex contact occlusion an instanced batch binds as `aBent`.
+ *
+ * THIS IS THE FIX FOR "ONLY A TOKEN DARKENING", and the bug it closes is a
+ * data-path one, not an art one. `greebleGeometry`'s own comment says the
+ * assemblies author a real mount gradient — `addBox` writes `mountAO`, dark at
+ * the mounting face and open at the top — and that building with
+ * `toGeometry(false)` "left every fitting shaded by a single flat per-instance
+ * occlusion constant, which is why a scatter of two thousand assemblies read
+ * as two thousand flat chips". `instanceView` then did exactly that anyway: it
+ * borrowed only position, normal and index from the base and bound `aBent` as
+ * an InstancedBufferAttribute, so every vertex of every instanced fitting got
+ * one constant 0.12–0.36 and the authored gradient never reached the GPU. At
+ * `uAoStrength` 0.55 that is at most a 20% flat dimming over the whole part —
+ * a token darkening, evenly, exactly as measured. Only the BAKED half of the
+ * scatter ever had the gradient, which is why the finding reads as "some".
+ *
+ * WHAT IS GIVEN UP. `aBent.xyz` per instance carried the hull normal in ship
+ * space, and a per-vertex attribute cannot: the vertex program does not rotate
+ * `vBent.xyz` by `instanceMatrix`. So xyz is left at zero, which the fragment
+ * program explicitly reads as "no opinion" and answers with the geometric
+ * normal — and that normal IS correctly instance-transformed. What that costs
+ * is the `sunVis` cone direction, which for a greeble was doing almost nothing
+ * anyway (a constant w of 0.12–0.36 gives `coneCos` ≈ −0.76…−0.28, i.e. a
+ * smoothstep that is saturated open for nearly every sun direction). What it
+ * buys is the direction-free `ao` term going from a flat 0.80 to 0.53 at the
+ * seam and back to unity at the top of the part. That is the trade, and it is
+ * the right way round: the contact read is the one under review.
+ *
+ * `w` composes the two as open-sky fractions, identically to `bakeScatter`, so
+ * a family shades the same whether it is drawn or welded. Nothing per-instance
+ * is lost by moving the burial term here — it is a function of `env.h` alone.
+ *
+ * One array per family for the whole scene, held by the refcounted store.
+ */
+function contactBent(base: BufferGeometry, kind: GreebleKind): BufferAttribute {
+  const src = base.getAttribute('aBent');
+  const pos = base.getAttribute('position');
+  const n = src ? src.count : pos.count;
+  const burial = greebleBurial(GREEBLE_ENVELOPE[kind]);
+  const a = new Float32Array(n * 4);
+  for (let i = 0; i < n; i++) {
+    const vw = src ? clamp(src.getW(i), 0, 1) : 0;
+    a[i * 4 + 3] = 1 - (1 - vw) * (1 - burial);
+  }
+  return new BufferAttribute(a, 4);
 }
 
 /**
@@ -715,6 +970,8 @@ export function greebleGeometry(kind: GreebleKind): BufferGeometry {
  */
 interface CacheEntry {
   readonly geometry: BufferGeometry;
+  /** Built on first instanced use; see `contactBent`. Shared by every batch. */
+  contact?: BufferAttribute;
   refs: number;
 }
 
@@ -728,12 +985,17 @@ const GEOMETRY_STORE = new Map<GreebleKind, CacheEntry>();
  * GL buffer behind *every* attribute the geometry still references — including
  * the position and index buffers this view borrowed from the cache and that
  * every other ship is drawing from. Detaching the borrowed attributes first
- * makes the dispose free exactly what this view owns: its own `aSurf`,
- * `aBent` and `aShade`.
+ * makes the dispose free exactly what this view owns: its own `aSurf` and
+ * `aShade`.
+ *
+ * `aBent` joined the borrowed list when the contact gradient moved back to
+ * per-vertex: it is one array per family for the whole scene, so releasing a
+ * single batch must not take it down with the batch.
  */
 function releaseInstanceView(g: BufferGeometry): void {
   g.deleteAttribute('position');
   g.deleteAttribute('normal');
+  g.deleteAttribute('aBent');
   g.setIndex(null);
   g.dispose();
 }
@@ -775,26 +1037,32 @@ export class GreebleCache {
    * would have fired the first time a ship dropped to LOD1 and came back.
    * A view per batch cannot alias another batch, in this ship or any other.
    */
-  instanceView(
-    kind: GreebleKind,
-    surf: Float32Array,
-    bent: Float32Array,
-    shade: Float32Array,
-  ): BufferGeometry {
+  instanceView(kind: GreebleKind, surf: Float32Array, shade: Float32Array): BufferGeometry {
     const base = this.get(kind);
     const g = new BufferGeometry();
     g.name = base.name;
     g.setAttribute('position', base.getAttribute('position'));
     const nrm = base.getAttribute('normal');
     if (nrm) g.setAttribute('normal', nrm);
+    // Borrowed too: `aBent` is now the family's authored contact gradient, one
+    // per-vertex array for the whole scene, and it is what makes an instanced
+    // fitting darken where it meets the plating instead of everywhere at once.
+    g.setAttribute('aBent', this.contact(kind));
     g.setIndex(base.getIndex());
     // Per-instance from here down. Declared here rather than left to the
     // assembler so a batch is correct the moment it is handed over.
     g.setAttribute('aSurf', new InstancedBufferAttribute(surf, 4));
-    g.setAttribute('aBent', new InstancedBufferAttribute(bent, 4));
     g.setAttribute('aShade', new InstancedBufferAttribute(shade, 1));
     this.views.add(g);
     return g;
+  }
+
+  /** The family's contact gradient, built once and shared by every batch. */
+  private contact(kind: GreebleKind): BufferAttribute {
+    const e = GEOMETRY_STORE.get(kind);
+    if (!e) throw new Error(`greeble cache: no entry for ${kind}`);
+    if (!e.contact) e.contact = contactBent(e.geometry, kind);
+    return e.contact;
   }
 
   /** Frees this view's batches, and any family no other ship still holds. */
@@ -890,9 +1158,10 @@ export interface InstancedScatter {
   readonly kind: GreebleKind;
   /**
    * Hand this to `InstancedMesh`. It is this batch's own thin geometry: the
-   * position, normal and index `BufferAttribute`s are the shared cached ones
-   * by reference, and `aSurf`/`aBent`/`aShade` are this batch's per-instance
-   * buffers, already bound. Never shared with another batch or another LOD.
+   * position, normal, index and `aBent` `BufferAttribute`s are the shared
+   * cached ones by reference, and `aSurf`/`aShade` are this batch's
+   * per-instance buffers, already bound. The per-instance pair is never shared
+   * with another batch or another LOD.
    */
   readonly geometry: BufferGeometry;
   /**
@@ -911,13 +1180,18 @@ export interface InstancedScatter {
    */
   readonly surf: Float32Array;
   /**
-   * `count × 4` — `aBent` = (bent normal xyz in SHIP space, occlusion).
+   * `count × 4` — (bent normal xyz in SHIP space, family burial).
    *
-   * Ship space, not instance space: the shader cannot know whether it was
-   * handed a per-vertex or a per-instance channel, so the instance's own
-   * orientation is folded in here. For a greeble that is the hull normal it
-   * is bolted to, which is exactly right — a fitting sees the hemisphere its
-   * mounting face points into and nothing behind it.
+   * NO LONGER BOUND AS `aBent`. The instanced path takes its `aBent` from the
+   * family's authored per-vertex contact gradient (`contactBent`), because a
+   * per-instance constant cannot express "dark at the seam, open at the top"
+   * and a flat constant is what the review measured. This array survives for
+   * `bakeScatter`, which welds into the hull buffer and therefore CAN carry
+   * both: it rotates the assembly's own bent normal into ship space per vertex
+   * and falls back to this hull normal where the assembly has no opinion.
+   *
+   * Ship space, not instance space: the instance's orientation is folded in
+   * here, so for a greeble this is the hull normal it is bolted to.
    */
   readonly bent: Float32Array;
   /** `count` — the palette selector. See `volumes.ts` SHADE_*. */
@@ -1394,14 +1668,13 @@ export function scatterGreebles(opts: ScatterOptions): InstancedScatter[] {
         // A fitting is a different plate size from the hull it is bolted to;
         // and the major fittings are big enough to carry hull-scale plating.
         surf.push(expo, partId, 0, major ? 0.8 : 0.55);
-        // The unoccluded direction is the hull normal under it. That single
-        // vec4 is what replaces the analytic contact-shadow array. The scalar
-        // is how buried the family sits: a louvre is cut into the plate, a
-        // mast stands clear of it, and one constant for both was flat.
-        // The band is centred on the 0.28 that used to be a constant, so the
-        // hull's overall value does not move; what changes is that the two
-        // ends of the vocabulary are now half a band apart instead of equal.
-        bent.push(_nrm.x, _nrm.y, _nrm.z, clamp(0.36 - 0.16 * env.h, 0.12, 0.36));
+        // The unoccluded direction is the hull normal under it, and the scalar
+        // is how buried the family sits. The bake reads both; the instanced
+        // path reads neither, because a per-instance constant is precisely the
+        // flat shading round four measured — see `contactBent`, which composes
+        // this same burial with the assembly's authored per-vertex gradient so
+        // the two paths agree.
+        bent.push(_nrm.x, _nrm.y, _nrm.z, greebleBurial(env));
         shade.push(env.shade);
         // The caster is a SPHERE, so its radius has to be the size of the
         // contact patch and not of the bounding box. `max(rad, sy/2)` let the
@@ -1430,7 +1703,7 @@ export function scatterGreebles(opts: ScatterOptions): InstancedScatter[] {
     out.push({
       key: `greeble:${kind}`,
       kind,
-      geometry: opts.cache.instanceView(kind, surfA, bentA, shadeA),
+      geometry: opts.cache.instanceView(kind, surfA, shadeA),
       base,
       count: n,
       matrices: Float32Array.from(mats),

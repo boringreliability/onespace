@@ -79,7 +79,7 @@ import {
   tryFactionById,
   wearWeightsFor,
 } from './families';
-import type { FactionDna, HullFamily, RoleSpec as FamilyRoleSpec } from './families';
+import type { FactionDna, HullFamily, MassingDna, RoleSpec as FamilyRoleSpec } from './families';
 import { engineRatedThrustN, shipDockingFrames, shipMassProperties, shipPhysicsProfile, shipScanLines, shipThrust } from './physics';
 
 import {
@@ -1488,6 +1488,17 @@ interface Ctx {
   readonly bounds: (Aabb | undefined)[];
   /** Index-aligned with `modules`; see `moduleBoundsAt`. */
   readonly moduleBounds: (Aabb | undefined)[];
+  /**
+   * Where each module was mounted, in its host volume's own (t, θ) parameters.
+   * Internal only, never emitted — `types.ts` is append-only and not mine.
+   *
+   * It exists because a torn-off module has to leave a mark ON THE PLATING, and
+   * plating damage is addressed in the host's surface parameters. The mount
+   * knew them; `ShipModule` only keeps a world frame, and recovering θ from a
+   * frame on a superelliptical section is a root-find nobody should be doing at
+   * history time.
+   */
+  readonly mounts: Map<string, { readonly volumeId: VolumeId; readonly t: number; readonly theta: number }>;
   readonly counters: Map<string, number>;
   readonly palette: ShipPalette;
 
@@ -2259,29 +2270,94 @@ function payloadBias(kind: VolumeKind): SectionBias {
 // actually goes, and it is the hole.
 // ---------------------------------------------------------------------------
 
-/** A structural stub from `a` to `b`. The visible half of a load path. */
+/**
+ * A structural stub from `a` to `b`. The visible half of a load path.
+ *
+ * The LANGUAGE of that stub is the faction's, not a constant.
+ *
+ * `StructureDna.exposure` was being read in exactly one place — `exposureFor`,
+ * which decides whether the SPINE is drawn — and nowhere else. So a yard whose
+ * whole identity is `exposure: 'buried'`, monocoque, "nothing unbolts, nothing
+ * is visible, it arrives finished", got its dorsal mass held up on two slim
+ * round masts standing clear of the skin: the bolt-on architecture that is a
+ * welded-plate yard's signature, drawn identically on the one faction it is
+ * supposed to distinguish it FROM. On the three-faction contrast plate the
+ * Sillane dorsal array was indistinguishable from the Kessler dorsal array
+ * beside it, which is the whole test that shot exists to run.
+ *
+ * A monocoque yard still has to get the load from the mass into the hull. It
+ * does it the way a cast structure does: a broad fore-and-aft WEB, filleted
+ * into the skin at its root, deep in the plane of the load and thin across it.
+ * The daylight underneath survives — it has to, `ensureSpanningStructure`
+ * measures it — but the outline reads as one continuous form arching over a
+ * recess rather than a shelf on two poles.
+ *
+ * The volume KIND stays `pylon` on both branches deliberately. `spanHost` and
+ * `largestPrimaryArea` both exclude `pylon`, and a support that changed kind
+ * would start competing to be the span host and to set the accent-size cap —
+ * which is the sort of shared-parameter change that broke the silhouette
+ * framing in an earlier round.
+ */
 function strut(ctx: Ctx, rng: Rng, a: Vec3, b: Vec3, radius: number, hostId: VolumeId | null): PrimaryVolume {
   const d: Vec3 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
   const len = Math.max(1e-6, Math.hypot(d[0], d[1], d[2]));
   const fwd: Vec3 = [d[0] / len, d[1] / len, d[2] / len];
   const up = Math.abs(fwd[1]) > 0.94 ? FWD_Z : UP_Y;
+  // `up` is the section's local +Y, so `halfHeight` runs along it: for a dorsal
+  // support that is the fore-and-aft direction, which is the one a web wants to
+  // be deep in and a mast wants to be slim in.
+  const buried = ctx.faction.structure.exposure === 'buried';
   const v = sweptVolume(ctx, rng, {
     kind: 'pylon',
     frame: frameAt(a, fwd, up),
     length: len,
-    halfWidth: radius,
-    halfHeight: radius * rng.range(1.1, 1.8),
-    bias: 'boom',
+    halfWidth: buried ? radius * rng.range(0.5, 0.72) : radius,
+    halfHeight: radius * (buried ? rng.range(3.4, 4.8) : rng.range(1.1, 1.8)),
+    bias: buried ? 'panel' : 'boom',
     capStart: 'flat',
     capEnd: 'flat',
-    materialSlot: MAT_STRUCT,
-    detailDensity: 0.55,
+    // Hull plate, hull panel size, hull shade: the web is part of the casting,
+    // not a piece of structural steel bolted through it.
+    materialSlot: buried ? MAT_HULL : MAT_STRUCT,
+    detailDensity: buried ? 0.12 : 0.55,
     loadShare: 0.45,
-    stations: 3,
+    stations: buried ? 4 : 3,
+    // The fillet. A cast web is widest where it meets the skin and thins as it
+    // reaches the mass, which is what makes it read as grown rather than bolted.
+    profile: buried ? (u): number => lerp(1.5, 0.85, smoothstep(clamp01(u * 1.3))) : undefined,
+    profileY: buried ? (u): number => lerp(1.22, 0.92, smoothstep(clamp01(u * 1.6))) : undefined,
     anchor: hostId ? { kind: 'volume', volumeId: hostId, t: 0.5 } : null,
   });
   ctx.volumes.push(v);
   return v;
+}
+
+/**
+ * May this yard build a separate mass of this kind at all?
+ *
+ * `MassingDna` is the doctrine that decides what a hull is made OF, and it is a
+ * refusal list rather than a set of weights for the reason its own header
+ * gives: a preference expressed as a multiplier gets flattened by the floor
+ * share downstream and stops being doctrine. `forbiddenKinds` and a budget of
+ * `[0, 0]` are the same statement said twice, and both are honoured here.
+ *
+ * This is the gate the r5 census was missing. `exposureFor` consulted
+ * `structure.exposure` for the SPINE and nothing consulted anything for the
+ * things hung on the OUTSIDE of the hull — so the one yard whose entry reads
+ * "there is no external volume of any kind — no pod, no boom, no pylon" got a
+ * dorsal mass on two masts at the same standoff, spacing and silhouette weight
+ * as the welded-plate yard beside it on the contrast plate.
+ *
+ * Read defensively. `families.ts` is another agent's file and is mid-round;
+ * a faction whose `massing` block has not landed yet must generate a ship
+ * rather than throw, and "no doctrine stated" means "no refusal".
+ */
+function yardBuilds(ctx: Ctx, kind: VolumeKind): boolean {
+  const massing: MassingDna | undefined = ctx.faction.massing;
+  if (massing === undefined) return true;
+  if (massing.forbiddenKinds.includes(kind)) return false;
+  const budget = massing.budget.find((b) => b.kind === kind);
+  return budget === undefined || budget.count[1] > 0;
 }
 
 /** The volume a rack or gantry should hang from: the longest axial primary. */
@@ -2333,6 +2409,11 @@ interface StandoffSpec {
  * on the hero freighter ended up butted against the keel with no gap at all.
  */
 function standoff(ctx: Ctx, rng: Rng, s: StandoffSpec): PrimaryVolume | null {
+  // A standoff is two things at once — an external mass AND the pylons under it
+  // — so a yard that refuses either refuses the construct. Callers must have a
+  // fused answer ready; `ensurePayloadMass` does, and `ensureSpanningStructure`
+  // logs the refusal rather than pretending it did not measure.
+  if (!yardBuilds(ctx, s.kind) || !yardBuilds(ctx, 'pylon')) return null;
   const host = spanHost(ctx);
   if (!host) return null;
   const nx = Math.cos(s.theta);
@@ -2420,11 +2501,21 @@ function standoff(ctx: Ctx, rng: Rng, s: StandoffSpec): PrimaryVolume | null {
   ctx.volumes.push(mass);
   ctx.standoffs++;
 
-  // Two pylons, at the quarter points of the run. Two and not one: one is a
-  // cantilever and reads as a bracket, two read as a structure and leave a
-  // rectangle of daylight between them that a black silhouette can close round.
+  // Two supports. Two and not one: one is a cantilever and reads as a bracket,
+  // two read as a structure and leave a rectangle of daylight between them that
+  // a black silhouette can close round.
+  //
+  // WHERE they stand is doctrine. A yard that bolts things on puts its masts at
+  // the quarter points, because that is where a simply-supported beam wants
+  // them. A monocoque yard springs an arch from the two ENDS of the run, and it
+  // has to: `strut` draws a buried yard's support as a deep fore-and-aft web,
+  // and a deep web at the quarter points would eat the daylight this whole
+  // construct exists to create. Ends plus web is the same hole, differently
+  // told — measured below by `enclosedHoleFraction`, which is the only opinion
+  // that counts.
+  const buried = ctx.faction.structure.exposure === 'buried';
   const rPylon = clamp(Math.min(outHalf, s.sideHalf) * 0.3, HATCH_WIDTH_KM * 0.35, Math.max(HATCH_WIDTH_KM * 0.4, s.gap * 0.5));
-  for (const i of [1, 3]) {
+  for (const i of buried ? [0, SAMPLES - 1] : [1, 3]) {
     const base = skin[i];
     const top: Vec3 = [nx * (d - outHalf * 0.85), ny * (d - outHalf * 0.85), base[2]];
     strut(ctx, rng, base, top, rPylon, host.id);
@@ -2580,18 +2671,28 @@ function ensureSpanningStructure(ctx: Ctx): void {
   // it when it is placed, and stages 5 to 7 can still fill that daylight with a
   // radiator or a strake. Measuring is cheap next to a mass integration and
   // assuming is how a post-condition becomes a comment.
+  // A yard whose massing doctrine has no external masses in it cannot be
+  // rescued this way, and pretending otherwise is what the r5 contrast plate
+  // caught: a monocoque hull carrying a welded-plate yard's dorsal gantry. The
+  // measurement still runs and the refusal is still logged — a rule nobody
+  // measures is a rule nobody keeps — but the answer for that yard is a
+  // silhouette carried by proportion and section, which stages 1 and 3 own.
+  const rescueable = yardBuilds(ctx, 'boom') && yardBuilds(ctx, 'pylon');
   for (let attempt = 0; attempt < 2; attempt++) {
     const side = enclosedHoleFraction(ctx, 0);
     if (side >= SIL_MIN_HOLE) return;
     reject(ctx, {
       stage: 'secondary',
       rule: 'silhouette-has-no-hole',
-      what: 'side projection encloses no daylight',
+      what: rescueable
+        ? 'side projection encloses no daylight'
+        : 'side projection encloses no daylight; this yard builds no external mass to open one with',
       at: [0, 0, 0],
       measured: side,
       required: SIL_MIN_HOLE,
       attempt,
     });
+    if (!rescueable) return;
     // Dorsal first, ventral if the dorsal run found nowhere to stand. Never a
     // lateral pair: a boom either side widens the beam without opening the one
     // projection this rule is about, and a hull that grows fat to satisfy its
@@ -2831,9 +2932,82 @@ function ensurePayloadMass(ctx: Ctx, rng: Rng): void {
     detailDensity: kind === 'machinery' ? 0.85 : rng.range(0.2, 0.5),
     loadShare: 0.4,
   });
-  if (!mass) return;
-  // `mirrorOf` is not set: this is one rack on the centreline, and the pylons
-  // under it are already a mirrored pair by construction.
+  if (mass) return;
+  // `mirrorOf` is not set on the rack: it is one mass on the centreline, and
+  // the pylons under it are already a mirrored pair by construction.
+
+  // --- the fused answer ----------------------------------------------------
+  //
+  // A rack is one yard's answer to "the payload must be the largest thing on
+  // the ship", not the only one, and on a yard whose doctrine is "where a hull
+  // needs more volume the loft swells; where it needs less it draws out again"
+  // it is the wrong one. BRIEF §4's requirement is about MASS AND READ, not
+  // about racks: the payload still has to dominate the side projection and
+  // still has to be visibly the thing this ship is for.
+  //
+  // So it swells. One volume on the ship's own axis, running the same 60% of
+  // the hull, a little fuller than the section it grows out of, in hull plate
+  // with the hull's own panel size — a bulge in one continuous body rather than
+  // a box on masts. It reads as a hold from outside for the same reason a
+  // widebody's belly does.
+  const host = spanHost(ctx);
+  if (!host) return;
+  // Over the SHIP, not over the host, and for the reason `standoff` gives: on a
+  // stacked hull the longest single volume is one segment of four, and a
+  // payload sized to one segment is a third of the length it has to be and
+  // loses the "which mass is largest" argument it exists to win.
+  let shipZ0 = Infinity;
+  let shipZ1 = -Infinity;
+  for (let i = 0; i < ctx.volumes.length; i++) {
+    const b = boundsAt(ctx, i);
+    if (b.min[2] < shipZ0) shipZ0 = b.min[2];
+    if (b.max[2] > shipZ1) shipZ1 = b.max[2];
+  }
+  if (!Number.isFinite(shipZ0) || shipZ1 <= shipZ0) return;
+  const z0 = lerp(shipZ0, shipZ1, runFrom);
+  const z1 = lerp(shipZ0, shipZ1, runTo);
+  const runLen = z1 - z0;
+  if (runLen <= 0) return;
+  // Sampled off the host at the middle of the run rather than off the nominal
+  // beam, so the swelling starts from the surface it is a swelling OF.
+  const mid = host.stations[Math.floor(host.stations.length * 0.5)];
+  // …and then grown until it MEETS the requirement, exactly as the rack's
+  // `minSideArea` does. The profile below draws the ends in, so the run's mean
+  // half-height is about 0.9 of the peak and the area has to be asked for
+  // against that rather than against the peak.
+  const MEAN_PROFILE = 0.9;
+  const needHalfH = driveArea > 0 ? (driveArea * 1.45) / (2 * runLen * MEAN_PROFILE) : 0;
+  const swellW = Math.max(HATCH_WIDTH_KM, mid.halfWidth * (1.06 + 0.22 * frac));
+  const swellH = clamp(
+    Math.max(mid.halfHeight * (1.08 + 0.3 * frac), needHalfH),
+    HATCH_WIDTH_KM,
+    // A swelling, not a second hull bolted through the first: past twice the
+    // section it grew out of it stops reading as one body, which is the whole
+    // reason this branch exists.
+    Math.max(HATCH_WIDTH_KM * 1.01, mid.halfHeight * 2.0),
+  );
+  ctx.volumes.push(sweptVolume(ctx, rng, {
+    kind,
+    frame: axialFrame(host.frame.origin[0], host.frame.origin[1], z0),
+    length: runLen,
+    halfWidth: swellW,
+    halfHeight: swellH,
+    bias,
+    // Faired at both ends into the run it came out of. A flat cap here would be
+    // a step, and a step is a joint, and this doctrine has no joints.
+    capStart: 'taper',
+    capEnd: 'taper',
+    materialSlot: MAT_HULL,
+    detailDensity: 0.1,
+    loadShare: 0.4,
+    stations: 7,
+    frameEvery: 3,
+    // Fullest amidships, drawn out at both ends: the loft swelling and drawing
+    // out again, in one profile.
+    profile: (u): number => lerp(0.72, 1, Math.sin(clamp01(u) * Math.PI) ** 0.55),
+    profileY: (u): number => lerp(0.68, 1, Math.sin(clamp01(u) * Math.PI) ** 0.5),
+    anchor: { kind: 'volume', volumeId: host.id, t: 0.5 },
+  }));
 }
 
 // --- monolithic ------------------------------------------------------------
@@ -3463,7 +3637,14 @@ function buildAsymmetric(ctx: Ctx, rng: Rng): void {
   const gz0 = lerp(-L * 0.42, -L * 0.2, rng.next());
   const gz1 = lerp(L * 0.1, L * 0.38, rng.next());
   const gr = p.beamKm * rng.range(0.16, 0.26);
-  const gx = side * (p.beamKm * rng.range(0.24, 0.36));
+  // The offset mass is the archetype and it stays on every yard. Whether it
+  // stands OFF the hull on a pylon or grows OUT of it is doctrine: a yard that
+  // refuses pylons gets the mass pulled in until it overlaps, which is the same
+  // asymmetry told as a swelling in one loft rather than as a bolt-on.
+  const slung = yardBuilds(ctx, 'pylon');
+  const gx = slung
+    ? side * (p.beamKm * rng.range(0.24, 0.36))
+    : shift + side * gr * rng.range(0.45, 0.7);
   const gantryKind: VolumeKind = ctx.role === 'salvager' || ctx.role === 'station-tender' ? 'machinery' : payloadOf(ctx);
   ctx.volumes.push(sweptVolume(ctx, rng, {
     kind: gantryKind,
@@ -3482,8 +3663,10 @@ function buildAsymmetric(ctx: Ctx, rng: Rng): void {
   }));
 
   // The pylon that carries it. Without this the mass floats; with it the hull
-  // reads as having been modified to take the load, which is the story.
-  ctx.volumes.push(sweptVolume(ctx, rng, {
+  // reads as having been modified to take the load, which is the story. On a
+  // fused yard the mass is already inside the loft, so there is nothing to
+  // carry and a pylon would be a joint on a hull that has none.
+  if (slung) ctx.volumes.push(sweptVolume(ctx, rng, {
     kind: 'pylon',
     frame: frameAt([shift, 0, lerp(gz0, gz1, 0.5)], [side, 0, 0], UP_Y),
     length: Math.abs(gx - shift),
@@ -4611,6 +4794,7 @@ function mountModule(
     crewAccessible: opts?.crewAccessible ?? (type === 'airlock' || type === 'docking' || type === 'service'),
   };
   ctx.modules.push(mod);
+  ctx.mounts.set(id, { volumeId: mount.host.id, t: mount.t, theta: mount.theta });
   occupy(ctx, socket, id);
   return mod;
 }
@@ -4690,7 +4874,29 @@ function placeModules(ctx: Ctx): void {
   }
 
   // --- radiators: not buried inside other volumes (BRIEF §5) ---------------
-  if (needs.has('radiator')) {
+  //
+  // `ThermalDna.elementCounts` is a HARD CAP, not a hint, and `architecture`
+  // decides whether there is any external hardware to count.
+  //
+  // The count was sampled from the faction and then run through
+  // `clamp(…, 1, 5)`, whose floor of one PAIR silently resurrected a radiator
+  // on a yard that declares `elementCounts: [0]`. Three Sillane hulls in four
+  // came out carrying external fins, on the one faction whose catalogue entry
+  // says in as many words that the hull is long *because* its skin is the
+  // radiator and there is no external structure of any kind. The role's
+  // `requiredVolumeKinds` does not get a vote here: a freighter needs heat
+  // rejection, not fins, and this yard's answer to heat rejection is area —
+  // which is exactly what `slendernessBandFor`'s thermal floor already buys it,
+  // and what `heatStaining: [0.7, 1.0]` then draws on its flanks.
+  const heat = ctx.faction.thermal;
+  const declaredElements = heat.elementCounts.length > 0 ? Math.max(...heat.elementCounts) : 4;
+  // Two doctrines have to agree before a fin exists: the thermal one, which
+  // says whether this yard rejects heat through hardware, and the massing one,
+  // which says whether it builds separate external masses at all. Either may
+  // refuse; neither may be overruled by a clamp.
+  const skinRadiator = heat.architecture === 'skin' || heat.architecture === 'none'
+    || declaredElements <= 0 || !yardBuilds(ctx, 'radiator');
+  if (needs.has('radiator') && !skinRadiator) {
     const heatW = ctx.engines.reduce((s, e) => s + e.heatW, 0);
     const th = ctx.faction.thermal;
     // `areaPerWatt` is the faction's heat doctrine. Its absolute product with a
@@ -4703,7 +4909,11 @@ function placeModules(ctx: Ctx): void {
     // capital grows visibly bigger fins than an ion grid on a courier.
     const heatRatio = clamp(Math.pow(heatW / 2.0e11, 0.35), 0.4, 3.0);
     const wanted = th.elementCounts.length > 0 ? rng.pick(th.elementCounts) : 4;
-    const pairs = clamp(Math.round((wanted / 2) * heatRatio * doctrine), 1, 5);
+    // The floor of one may never resurrect an element the doctrine deleted; a
+    // yard that declares a count of zero on this draw builds zero, full stop.
+    // The ceiling is left where it was: it is what sizes the Kessler slab pair
+    // against a torch drive, and nothing about this defect touched it.
+    const pairs = wanted <= 0 ? 0 : clamp(Math.round((wanted / 2) * heatRatio * doctrine), 1, 5);
     const hosts = hostsFor(ctx, ['afterbody', 'hull', 'midbody', 'keel', 'machinery']);
     const size = moduleSize(ctx, rng, 'radiator-panel');
     // A NAMED silhouette accent is a requirement, not a probability.
@@ -5418,7 +5628,13 @@ function buildSecondary(ctx: Ctx): void {
   // volumes gets external drums, which is itself a strong industrial read.
   const hasTank = ctx.volumes.some((v) => v.kind === 'tank' || v.construction.kind === 'tank');
   if (!hasTank) {
-    const n = rng.int(1, 3);
+    // A bottle strapped to the flank is one yard's industrial read; a moulded
+    // bay inside the loft is another's, and the difference is doctrine rather
+    // than taste. `attach: 'flush'` puts the drum INSIDE the body it belongs
+    // to: same volume, same propellant mass, no external object. Only the
+    // standoff distance changes, which is the whole of the disagreement.
+    const fused = (ctx.faction.massing as MassingDna | undefined)?.attach === 'flush';
+    const n = fused ? 1 : rng.int(1, 3);
     const host = hostsFor(ctx, ['hull', 'keel', 'midbody', 'afterbody'])[0];
     const r = Math.max(p.beamKm, p.heightKm) * rng.range(0.1, 0.18);
     const shape = makeSection(rng, ctx.dna, 'tank', true);
@@ -5432,9 +5648,11 @@ function buildSecondary(ctx: Ctx): void {
       const theta = n === 1 ? (lands ? DORSAL : VENTRAL) : (i % 2 === 0 ? 0.5 : Math.PI - 0.5);
       const sp = volumeSurfacePoint(host, clamp(t, 0.05, 0.9), theta, [0, 0, 0]);
       const sn = surfaceNormal(host, clamp(t, 0.05, 0.9), theta, [0, 0, 0]);
+      // `-r` sinks the drum a full radius INSIDE the skin it was sitting on.
+      const stand = fused ? -r : r;
       ctx.volumes.push(sweptVolume(ctx, rng, {
         kind: 'tank',
-        frame: axialFrame(sp[0] + sn[0] * r, sp[1] + sn[1] * r, sp[2] - L * 0.09),
+        frame: axialFrame(sp[0] + sn[0] * stand, sp[1] + sn[1] * stand, sp[2] - L * 0.09),
         length: L * rng.range(0.14, 0.26),
         halfWidth: r,
         halfHeight: r,
@@ -5489,7 +5707,20 @@ function buildSecondary(ctx: Ctx): void {
 
   // Sensor booms: instruments held away from the hull so they are not looking
   // through their own ship. Science and survey hulls earn long ones.
-  if (ctx.spec.needs.includes('sensor') && (ctx.role === 'science' || ctx.role === 'survey' || rng.chance(0.3))) {
+  //
+  // …but only where the yard's sensor doctrine puts instruments on booms at all.
+  // `SensorDna` states it twice — as a `language` and as a `standoff` band —
+  // and this stage was reading neither, so a yard whose entry says
+  // `conformal-array`, "flush phased-array patches; no protrusion",
+  // `standoff: [0.0, 0.03]`, still grew a mast off its crown on three hulls in
+  // ten. On a buried-structure faction that mast is the strongest thing in the
+  // silhouette and it is another culture's word.
+  const sens = ctx.faction.sensors;
+  const boomYard = yardBuilds(ctx, 'boom')
+    && (sens.language === 'boom-instrument' || sens.language === 'mast-array'
+      || sens.language === 'whip-forest' || sens.language === 'caged-dish'
+      || sens.standoff[1] >= 0.08);
+  if (boomYard && ctx.spec.needs.includes('sensor') && (ctx.role === 'science' || ctx.role === 'survey' || rng.chance(0.3))) {
     const host = hostsFor(ctx, ['forebody', 'hull', 'bridge'])[0];
     const t = rng.range(0.05, 0.25);
     const theta = rng.chance(0.6) ? DORSAL : VENTRAL;
@@ -5511,7 +5742,12 @@ function buildSecondary(ctx: Ctx): void {
     ctx.volumes.push(sweptVolume(ctx, rng, {
       kind: 'boom',
       frame: frameAt([sp[0], sp[1], sp[2]], dir, FWD_Z),
-      length: L * rng.range(0.1, 0.22),
+      // How far out is the yard's number, not a constant: a caged-dish yard
+      // keeps its instruments close, a whip-forest holds them well clear. The
+      // clamp is the envelope guard the paragraph above earned — the declared
+      // band tops out at 0.6 × length, which is the 84 m mast on a 279 m hull
+      // this code was already fixed once for.
+      length: L * clamp(sampleRange(sens.standoff, rng), 0.09, 0.24),
       halfWidth: Math.max(HATCH_WIDTH_KM * 0.3, p.beamKm * 0.014),
       halfHeight: Math.max(HATCH_WIDTH_KM * 0.3, p.beamKm * 0.014),
       bias: 'boom',
@@ -5725,17 +5961,25 @@ function buildAccents(ctx: Ctx): void {
   const host = hostsFor(ctx, ['hull', 'midbody', 'forebody', 'keel'])[0];
   if (!host) { enforceLongitudinalAxis(ctx, bow); return; }
 
+  // Each accent IS a volume kind, so each is subject to the yard's massing
+  // doctrine. A weight of zero is the only refusal that survives `pickWeighted`
+  // and the archetype floor, which is why `yardBuilds` is multiplied in rather
+  // than consulted afterwards: an accent a culture cannot build must be
+  // impossible on every seed, not merely rare. This is stage 7's half of the
+  // same gate `standoff` applies at stage 3 — a fin, a hoop and a shoulder pod
+  // are external masses however recognisable they are.
+  const may = (k: VolumeKind): number => (yardBuilds(ctx, k) ? 1 : 0);
   const options: (readonly [Accent, number])[] = [
-    ['dorsal-fin', ctx.dna.dorsalChance * 6],
-    ['tail-flare', 4],
-    ['bow-ram', ctx.role === 'miner' || ctx.role === 'tug' || ctx.role === 'gunship' ? 5 : 1],
-    ['canards', ctx.tech.atmosphereCapable ? 4 : 1],
-    ['collar-ring', ctx.archetype === 'ring' ? 0 : 3],
+    ['dorsal-fin', ctx.dna.dorsalChance * 6 * may('fin')],
+    ['tail-flare', 4 * may('shroud')],
+    ['bow-ram', (ctx.role === 'miner' || ctx.role === 'tug' || ctx.role === 'gunship' ? 5 : 1) * may('machinery')],
+    ['canards', (ctx.tech.atmosphereCapable ? 4 : 1) * may('fin')],
+    ['collar-ring', (ctx.archetype === 'ring' ? 0 : 3) * may('ring')],
     // A hull that sets down on a surface does not carry a deep ventral keel
     // strake: it is the one accent the undercarriage has to reach past, and it
     // was taking the gear off six couriers in eight.
-    ['ventral-strake', ROLE_TOPOLOGY[ctx.role].landsOnSurfaces ? 0 : ctx.dna.keelChance * 5],
-    ['shoulder-pods', 3],
+    ['ventral-strake', (ROLE_TOPOLOGY[ctx.role].landsOnSurfaces ? 0 : ctx.dna.keelChance * 5) * may('keel')],
+    ['shoulder-pods', 3 * may('pod')],
   ];
   const count = rng.chance(0.35) ? 2 : 1;
   const chosen: Accent[] = [];
@@ -6653,6 +6897,42 @@ function buildHistory(ctx: Ctx, damageLevel: number): void {
     return ev;
   };
 
+  /**
+   * The plate did not evaporate; it was pushed.
+   *
+   * `Displacement` is the contract's word for "the geometry MOVED rather than
+   * eroded", and it was being set on exactly one damage kind — `strut-bent` —
+   * on 1.1 % of events. Everything else was a hole with nothing around it,
+   * which is the difference between a hull that has been hit and a hull that
+   * has been sandblasted, and it is why the history frame reads as dirty rather
+   * than as a specific story. A plate taken off by a collision hinges along one
+   * edge and stands out of the skin; a plate taken off by a gun goes with the
+   * shot. Both are a rotation about a pivot at the wound rim, so both are this.
+   */
+  const peel = (
+    hit: { p: Vec3; n: Vec3 }, incidence: Vec3, radius: number, sev: number, rngIn: Rng,
+  ): Displacement => {
+    // Hinge axis: in the plane of the plate, square to the direction the hit
+    // came from. That is what makes the flap open AWAY from the incidence
+    // instead of in some radially symmetric direction nobody can read.
+    let axis = vCross(hit.n, incidence);
+    if (Math.hypot(axis[0], axis[1], axis[2]) < 1e-6) axis = perpendicular(hit.n);
+    axis = vNormalize([axis[0], axis[1], axis[2]]);
+    const lift = radius * rngIn.range(0.1, 0.4) * sev;
+    return {
+      // Along the incidence, and a little proud of the skin: the plate went
+      // where it was pushed and took a set on the way.
+      offset: [
+        incidence[0] * lift + hit.n[0] * lift * 0.5,
+        incidence[1] * lift + hit.n[1] * lift * 0.5,
+        incidence[2] * lift + hit.n[2] * lift * 0.5,
+      ],
+      axis: [axis[0], axis[1], axis[2]],
+      angle: rngIn.range(0.08, 0.5) * sev * (rngIn.chance(0.5) ? 1 : -1),
+      pivot: [hit.p[0], hit.p[1], hit.p[2]],
+    };
+  };
+
   const addRepair = (
     kind: RepairKind, of: DamageEvent | null, target: GeometryRef, frame: Frame,
     half: Vec2, quality: number, ageS: number, disp: RepairEvent['displacement'] = null,
@@ -6681,6 +6961,84 @@ function buildHistory(ctx: Ctx, damageLevel: number): void {
       if (i >= 0) ctx.damage[i] = { ...of, repairedBy: ev.id };
     }
     return ev;
+  };
+
+  /** Fittings a hull can lose and still be the ship it was. See `tearOff`. */
+  const tearable = (): readonly ShipModule[] => ctx.modules.filter(
+    (m) => m.present
+      && m.type !== 'engine' && m.type !== 'cockpit' && m.type !== 'bridge'
+      && m.type !== 'landing' && m.type !== 'rcs'
+      // A radiator panel owns a `PrimaryVolume` of its own (`radiatorVolume`,
+      // anchored to this very socket) and the slab is drawn from the volume
+      // list, not the module list. Marking the module absent while its slab
+      // stayed in the silhouette would be a lie the frame can see. Until the
+      // geometry module keys that slab off `present`, radiators do not come off.
+      && m.type !== 'radiator',
+  );
+
+  /**
+   * Take a fitting off the hull and leave the evidence, in two records.
+   *
+   * The first is the canonical one: `module-torn-off`, targeting the module, so
+   * anything reading the blueprint knows the socket is empty and what direction
+   * the thing left in. That is the record `physics.ts` prices and the record
+   * `buildMountingStubs` in the geometry module is waiting for.
+   *
+   * The second is the mark on the PLATING, and it is why this is a function
+   * rather than four lines. Module-targeted damage says a part is missing; it
+   * says nothing about the hull it was bolted to, and the surface pass only
+   * ever resolves wounds that name a volume and a (span, arc) on it. So a
+   * torn-off module left the mesh completely untouched — the absence was true
+   * in the data and invisible in the frame, which is precisely the failure
+   * BRIEF §7 is written against. A module does not come off cleanly: it takes
+   * its plate, its fastener ring and a strip of conduit with it, and that is a
+   * `panel-loss` at the mount, in the host's own parameters, with the flap
+   * standing where it was pushed.
+   */
+  const tearOff = (cause: DamageCause, when: number, incidence: Vec3): boolean => {
+    const pool = tearable();
+    if (pool.length === 0) return false;
+    const victim = rng.pick(pool);
+    const vi = ctx.modules.indexOf(victim);
+    ctx.modules[vi] = { ...victim, present: false, integrity: 0 };
+    const r = Math.max(victim.halfExtents[0], victim.halfExtents[1]);
+
+    const id = nextId(ctx, 'dmg');
+    ctx.damage.push({
+      id,
+      kind: 'module-torn-off',
+      cause,
+      target: { kind: 'module', moduleId: victim.id },
+      frame: victim.frame,
+      radius: r,
+      depth: skin * 3,
+      incidence,
+      severity: 1,
+      ageSeconds: when,
+      displacement: peel(
+        { p: victim.frame.origin, n: victim.frame.forward }, incidence, r * 2, 1, rng,
+      ),
+      repairedBy: null,
+      seed: sub(shipSubSeed(ctx.seed, 'history'), id),
+    });
+
+    const mnt = ctx.mounts.get(victim.id);
+    const host = mnt ? ctx.volumes.find((v) => v.id === mnt.volumeId) : undefined;
+    if (mnt && host) {
+      const sp = volumeSurfacePoint(host, mnt.t, mnt.theta, [0, 0, 0]);
+      const sn = surfaceNormal(host, mnt.t, mnt.theta, [0, 0, 0]);
+      const hit = {
+        v: host, t: mnt.t, theta: mnt.theta,
+        p: [sp[0], sp[1], sp[2]] as Vec3, n: [sn[0], sn[1], sn[2]] as Vec3,
+      };
+      // A hair wider than the flange, never so deep that a hull with a modelled
+      // interior gets a hole the camera can see the far side through.
+      const wound = r * rng.range(1.05, 1.5);
+      const sev = rng.range(0.5, 0.9);
+      addDamage('panel-loss', cause, sev, when + 1, hit, wound, skin * rng.range(2, 5),
+        incidence, peel(hit, incidence, wound, sev, rng));
+    }
+    return true;
   };
 
   // --- micrometeorites: constant rate over the whole service life ----------
@@ -6729,8 +7087,15 @@ function buildHistory(ctx: Ctx, damageLevel: number): void {
         const kind = pickWeighted(rng, [
           ['panel-loss', 4] as const, ['puncture', 3] as const, ['ablation', 2] as const, ['debris-embedded', 1] as const,
         ]);
-        addDamage(kind, 'collision', rng.range(0.35, 0.8), when + rng.range(-60, 60), near,
-          R * rng.range(0.25, 0.7), skin * rng.range(1.5, 5), [incidence[0], incidence[1], incidence[2]]);
+        const sev = rng.range(0.35, 0.8);
+        const wr = R * rng.range(0.25, 0.7);
+        // A collision MOVES metal. `debris-embedded` is the one kind in this
+        // cluster that does not — the thing that hit is still in the hole —
+        // so it is the one exception rather than the rule the whole list used
+        // to be.
+        addDamage(kind, 'collision', sev, when + rng.range(-60, 60), near,
+          wr, skin * rng.range(1.5, 5), [incidence[0], incidence[1], incidence[2]],
+          kind === 'debris-embedded' ? null : peel(near, incidence, wr, sev, rng));
       }
       // Bent structure. A 3° bend on a boom is very legible and cannot be
       // expressed as a texture, which is exactly why it is here.
@@ -6746,23 +7111,55 @@ function buildHistory(ctx: Ctx, damageLevel: number): void {
             pivot,
           });
       }
-      // Something was torn off and never replaced: the socket and the mounting
-      // stubs stay, and that absence tells more of the story than the wound.
-      const victims = ctx.modules.filter((m) => m.present && m.type !== 'engine' && m.type !== 'cockpit' && m.type !== 'landing');
-      if (victims.length > 0 && rng.chance(0.45)) {
-        const victim = rng.pick(victims);
-        const vi = ctx.modules.indexOf(victim);
-        ctx.modules[vi] = { ...victim, present: false, integrity: 0 };
-        addDamage('module-torn-off', 'collision', 1, when, {
-          v: ctx.volumes[0], t: 0.5, theta: 0, p: victim.frame.origin, n: victim.frame.forward,
-        }, Math.max(victim.halfExtents[0], victim.halfExtents[1]), skin * 3,
-          [incidence[0], incidence[1], incidence[2]]);
-        ctx.damage[ctx.damage.length - 1] = {
-          ...ctx.damage[ctx.damage.length - 1],
-          target: { kind: 'module', moduleId: victim.id },
-        };
+      // Something was torn off in the impact itself. This one belongs to the
+      // event and is scaled by how hard the hull was hit; the service-life rate
+      // below is separate and is what a wreck actually accumulates.
+      if (rng.chance(clamp01(0.12 + damageLevel * 0.6))) {
+        tearOff('collision', when, [incidence[0], incidence[1], incidence[2]]);
       }
     }
+  }
+
+  // --- attrition: what a service life takes off a hull ---------------------
+  //
+  // BRIEF §7 names this explicitly — "a torn-off module leaves its mounting
+  // stubs" — and it was one coin flip, `chance(0.45)`, nested inside the
+  // collision branch, unscaled by anything. So a hull could lose at most ONE
+  // module however wrecked it was, and 62-year-old salvage breakers at 8 %
+  // maintenance came out with a full set of fittings: 2 % of modules absent
+  // across two hundred heavily damaged seeds, and none at all on the seed the
+  // history shot is taken on.
+  //
+  // Loss is a RATE, and it belongs to the whole service life rather than to one
+  // bad afternoon. Squared in `damageLevel` so a working hull keeps its gear
+  // and a wreck sheds it; linear in neglect, because the difference between a
+  // kept ship and an abandoned one is whether anyone re-bolted the thing after
+  // it worked loose. Critical fittings are exempt: a hull with no cockpit, no
+  // engines, no attitude control and no undercarriage is not a wreck, it is a
+  // different ship, and the physics and landing audits both reason about them.
+  // Squared in BOTH terms. A single power on neglect put the median working
+  // hull — default damage, ordinary upkeep — at one missing fitting, and a
+  // freighter in service is not missing a fitting; the story only starts when
+  // nobody has been re-bolting things for a decade. Squared, an averagely kept
+  // hull loses nothing and a hull at 0.95/0.08 loses four or five.
+  const lossOdds = clamp01(
+    damageLevel * damageLevel * (0.06 + 0.26 * (1 - care) * (1 - care))
+    * lerp(0.75, 1.25, clamp01(age / 80)),
+  );
+  const pool = tearable();
+  // Expectation first, then one draw for the fraction. A pure per-module coin
+  // flip has a standard deviation of nearly two on a twenty-module hull, which
+  // is how "most wrecks have none" survives a rate that looks right on paper.
+  const expected = pool.length * lossOdds;
+  let toLose = Math.floor(expected);
+  if (rng.next() < expected - toLose) toLose++;
+  for (let i = 0; i < toLose; i++) {
+    // Spread over the life, not all on one day: an absence with an age is a
+    // timeline, and the repair pass reads `ageSeconds` to decide what has been
+    // capped off since.
+    const when = rng.range(0.15, 0.95) * age * YEAR_S;
+    const inc = vNormalize([rng.range(-1, 1), rng.range(-0.7, 0.7), rng.range(-1, 0.5)]);
+    if (!tearOff(rng.chance(0.45) ? 'collision' : 'fatigue', when, [inc[0], inc[1], inc[2]])) break;
   }
 
   // --- weapons, for hulls that live where that happens ---------------------
@@ -6772,9 +7169,15 @@ function buildHistory(ctx: Ctx, damageLevel: number): void {
     for (let i = 0; i < hits; i++) {
       const hit = randomSurface(ctx, rng, 0);
       if (!hit) break;
-      addDamage(rng.chance(0.5) ? 'burn-through' : 'panel-loss', 'weapons', rng.range(0.4, 1),
-        rng.range(0, age) * YEAR_S, hit, ctx.prop.beamKm * rng.range(0.02, 0.1), skin * rng.range(2, 8),
-        [incidence[0], incidence[1], incidence[2]]);
+      const kind = rng.chance(0.5) ? 'burn-through' : 'panel-loss';
+      const sev = rng.range(0.4, 1);
+      const wr = ctx.prop.beamKm * rng.range(0.02, 0.1);
+      // A plate taken off by a shot went somewhere. `burn-through` did not move
+      // metal, it removed it, so that one keeps its null.
+      addDamage(kind, 'weapons', sev,
+        rng.range(0, age) * YEAR_S, hit, wr, skin * rng.range(2, 8),
+        [incidence[0], incidence[1], incidence[2]],
+        kind === 'panel-loss' ? peel(hit, incidence, wr, sev, rng) : null);
     }
   }
 
@@ -7735,6 +8138,7 @@ function newContext(params: ShipParams, id: Identity, spine: StructuralSpine): C
     rejections: [],
     bounds: [],
     moduleBounds: [],
+    mounts: new Map(),
     counters: new Map(),
     spine,
     landing: null,
@@ -8028,8 +8432,18 @@ export function shipSelfTest(): string[] {
         if (!sock) { bad++; out.push(`FAIL socket: module ${m.id} (${m.kind}) references a socket that does not exist`); continue; }
         if (sock.type !== MODULE_SOCKET[m.kind]) { bad++; out.push(`FAIL socket: ${m.kind} on a '${sock.type}' socket`); }
         if (sock.accepts.length > 0 && !sock.accepts.includes(m.kind)) { bad++; out.push(`FAIL socket: ${m.kind} not in the accept list of ${sock.id}`); }
-        if (m.halfExtents[2] * 2 > sock.clearance * 1.0001) { bad++; out.push(`FAIL socket: ${m.kind} is ${fmt(m.halfExtents[2] * 2)} km deep into ${fmt(sock.clearance)} km of clearance`); }
-        if (m.massKg > sock.budget.massKg * 1.0001) { bad++; out.push(`FAIL socket: ${m.kind} exceeds the mount's mass rating`); }
+        // The GEOMETRIC bars apply to what is actually on the hull. A module
+        // with `present: false` was torn off: its half-extents describe a part
+        // that is not there any more, and asking whether it fits the corridor
+        // it used to sit in is a question about a ship that no longer exists.
+        // `remeasureClearances` shortens a socket's published clearance after
+        // the fact — that is its job — so an absent module reliably fails a bar
+        // it is not subject to, which is exactly what this said when the loss
+        // rate went up. The identity bars above still apply to every row,
+        // because a socket reference has to stay valid whatever happened to the
+        // thing that was bolted to it.
+        if (m.present && m.halfExtents[2] * 2 > sock.clearance * 1.0001) { bad++; out.push(`FAIL socket: ${m.kind} is ${fmt(m.halfExtents[2] * 2)} km deep into ${fmt(sock.clearance)} km of clearance`); }
+        if (m.present && m.massKg > sock.budget.massKg * 1.0001) { bad++; out.push(`FAIL socket: ${m.kind} exceeds the mount's mass rating`); }
         if (sock.occupiedBy !== m.id) occupancyErrors++;
         if (!Number.isFinite(sock.clearance)) { bad++; out.push(`FAIL socket: ${sock.id} has a non-finite clearance (types.ts forbids Infinity)`); }
       }

@@ -44,9 +44,19 @@
  *      absolute band and the role as a position inside it, which made the yard
  *      legible and flattened every role in it — eighteen roles inside a Kessler
  *      window 1.77× wide, and a tug, a liner and a gunship from one seed came
- *      out as the same box in three sizes. As a product, the yard ratio is 1.7×
- *      on every role and the role ratio is 5× in every yard, and neither costs
- *      the other anything.
+ *      out as the same box in three sizes. As a product, the yard ratio is 1.5×
+ *      between adjacent yards on every role and the role ratio is 5× in every
+ *      yard, and neither costs the other anything.
+ *
+ *   0. And the one this file was missing until round five: A CULTURE IS THE SET
+ *      OF MASSES IT BUILDS FROM. A census over 150 shared seeds found the three
+ *      yards emitting the same volume kinds in the same proportions to within a
+ *      few per cent — boom 1.41/1.34/1.70, pylon 2.51/2.49/2.77, nacelle
+ *      2.55/2.51/2.49 — because `FactionDna` had blocks for structure,
+ *      propulsion, thermal, sensors, markings, palette and proportion and none
+ *      at all for what the culture builds out of. `MassingDna` is that block,
+ *      and it is numbered zero because BRIEF §4 puts primary volumes at stage 3,
+ *      ahead of every other difference in this file.
  *
  *   2. Kessler engines stand off the hull on a visible thrust frame because a
  *      Kessler crew must be able to change one in the field with a gantry. That
@@ -334,6 +344,178 @@ export interface ConstructionDna {
   readonly repairFraction: Range;
 }
 
+// ---------------------------------------------------------------------------
+// Massing — WHAT MASSES A CULTURE BUILDS FROM, and how it joins them
+// ---------------------------------------------------------------------------
+
+/**
+ * The topologies a yard is able to build. Structurally the same string union as
+ * `blueprint.ts:HullArchetype`, restated here rather than imported because
+ * `blueprint.ts` imports this file and a type import in the other direction
+ * would draw the dependency arrow backwards. `blueprint.ts` should assert the
+ * two are assignable in one line; if this list ever falls behind, that
+ * assertion is where it fails.
+ */
+export type MassingArchetype =
+  | 'monolithic'
+  | 'stacked'
+  | 'spine-and-pod'
+  | 'fork'
+  | 'ring'
+  | 'slab'
+  | 'tower'
+  | 'asymmetric'
+  | 'cluster';
+
+/**
+ * How two masses on one hull are made into one ship. This is the joint
+ * doctrine at *silhouette* scale, where `ConstructionDna.joint` is the same
+ * question at plate scale.
+ */
+export type AssemblyDoctrine =
+  | 'slung' //   masses hang off a visible frame on short pylons, in pairs
+  | 'fused' //   there is one mass; anything else is a swelling in the same loft
+  | 'threaded'; // unequal found cans clamped along somebody else's keel
+
+/** What physically holds an external mass on. */
+export type MassAttachment =
+  | 'pylon' //     a short structural stub, always in a mirrored pair
+  | 'flush' //     the mass is part of the loft; there is no attachment
+  | 'keel-clamp'; // band clamps and torch-cut brackets onto the found keel
+
+/** How many of one volume kind a hull of this culture carries. Integers. */
+export interface VolumeKindBudget {
+  readonly kind: VolumeKind;
+  /** Inclusive count band per hull, before the role has its say. */
+  readonly count: Range;
+}
+
+/**
+ * WHAT THIS CULTURE BUILDS ITS SHIPS OUT OF.
+ *
+ * The block this file was missing, and the reason a per-hull volume-kind census
+ * over 150 shared seeds came back within a few per cent between all three yards
+ * on every kind but `radiator`: boom 1.41/1.34/1.70, pylon 2.51/2.49/2.77,
+ * nacelle 2.55/2.51/2.49, tank 2.01/1.99/2.01. Three factions were drawing from
+ * one parts bin in one set of proportions, and every other block in `FactionDna`
+ * — structure, propulsion, thermal, sensors, markings, palette, proportion — is
+ * downstream of a massing decision that nothing was making.
+ *
+ * BRIEF §4 puts primary volumes at stage 3, ahead of everything cosmetic. A
+ * faction that only differs from stage 6 onwards is one design language in three
+ * palettes, and no amount of surface, value or clutter repairs that.
+ *
+ * THE THREE ANSWERS, in one line each, which is what a reviewer checks a black
+ * silhouette against:
+ *
+ *   Kessler  masses are SLUNG. Pods and tanks hang off a visible frame on short
+ *            pylons in mirrored pairs, because a pod on a pylon is a pod a
+ *            gantry can reach. Many parts, all from one catalogue, all the same
+ *            size as each other.
+ *   Sillane  masses are FUSED. There is one mass. What looks like a second is a
+ *            swelling in the same loft, and there is no external volume of any
+ *            kind — no pod, no boom, no pylon, no nacelle, no rack, no fin.
+ *   Ossuary  masses are THREADED. Unequal salvaged cans clamped along a keel
+ *            somebody else built, each a different diameter, at whatever clock
+ *            angle cleared. The widest vocabulary in the fleet, because none of
+ *            it was chosen.
+ *
+ * HOW IT MUST BE APPLIED, because the existing soft version of this already
+ * failed. `blueprint.ts:FACTION_ARCHETYPE_BIAS` states similar preferences as
+ * multipliers, and then `ARCHETYPE_FLOOR_SHARE` puts every non-zero entry back
+ * up to 11% of the role's table — so a 0.2 and a 3.0 both end up somewhere
+ * between 11% and 45%, and the doctrine is gone. A refusal has to be a ZERO to
+ * survive that floor, which is why `archetypes` here is an allow-list and
+ * `forbiddenKinds` is a list rather than a small number. A culture's habit may
+ * make a shape rare; only its trade may make one impossible.
+ */
+export interface MassingDna {
+  /** The sentence a reviewer checks a black silhouette against. */
+  readonly doctrine: string;
+  readonly assembly: AssemblyDoctrine;
+  readonly attach: MassAttachment;
+  /**
+   * The ONLY topologies this yard builds. Everything absent is zero, and zero
+   * must stay zero downstream — see the note above about the floor share.
+   *
+   * Never empties a role's own table: every entry in `ROLE_TOPOLOGY` shares at
+   * least one archetype with every faction that builds that role, and a
+   * generator that finds an empty intersection anyway must fall back to the
+   * role's table rather than to a default hull.
+   */
+  readonly archetypes: readonly MassingArchetype[];
+  /**
+   * How many masses carry the load path from the drives to the nose (BRIEF §4
+   * stage 2/3). Integers. This is the count that decides whether a hull reads as
+   * a structure or as a pile: Kessler's frame carries through two or three
+   * welded blocks, a Sillane is one shell, an Ossuary hangs everything on one
+   * found keel it did not design.
+   */
+  readonly loadBearingMasses: Range;
+  /**
+   * How many masses sit OUTSIDE the primary loft — pods, tanks, nacelles,
+   * booms, racks. Integers. Zero is a statement, not a small number: it is the
+   * whole of the Sillane silhouette.
+   */
+  readonly externalMasses: Range;
+  /**
+   * Largest ÷ smallest external mass. Near 1 means a catalogue: every pod is
+   * the same pod. High means salvage, and it is the strongest single read of a
+   * scavenger hull at silhouette distance.
+   */
+  readonly massRatio: Range;
+  /**
+   * How many DISTINCT volume kinds one hull may use. A yard with one catalogue
+   * builds from few kinds; a breakers' anchorage builds from whatever came
+   * through the gate. Bounding this is what stops all three factions using all
+   * twenty-one kinds in the same proportions, which is what the census found.
+   */
+  readonly maxDistinctKinds: number;
+  /**
+   * Count band per volume kind, per hull, before the role has its say. Kinds
+   * absent from this list are role-driven (`hull`, `forebody`, `midbody`,
+   * `afterbody`, `bridge`, `habitat`, `cargo-bay`) and are not a faction
+   * statement. A kind listed at [0, 0] is a refusal with a reason.
+   */
+  readonly budget: readonly VolumeKindBudget[];
+  /**
+   * Never, under any seed or role. The identity lives here as much as anywhere.
+   *
+   * PRECEDENCE against `RoleSpec.requiredVolumeKinds`, which is the one place in
+   * this file where a role and a faction can make contradictory demands.
+   * Everywhere else the ROLE wins (`intersectRange`, and BRIEF §4's "function
+   * decides form"), and that stays true here — but a required volume kind names
+   * the USUAL FORM of a function, not the function. A culture may refuse the
+   * form if, and only if, it has already declared another way of performing the
+   * same function somewhere else in its own DNA. Every live case is a Sillane
+   * one and every one of them is answered:
+   *
+   *   role wants          Sillane refuses    because it already declares
+   *   ─────────────────────────────────────────────────────────────────────────
+   *   radiator (7 roles)  radiator           `thermal.architecture: 'skin'`,
+   *                                          `elementCounts: [0]`, and a
+   *                                          length/beam floor that exists to
+   *                                          make the skin big enough
+   *   boom (survey)       boom               `sensors.language:
+   *                                          'conformal-array'`, standoff
+   *                                          0–0.03: the instruments are IN the
+   *                                          skin, which is the whole read
+   *   keel (colony)       keel               `structure.exposure: 'buried'`
+   *   pylon (carrier)     pylon              `propulsion.mounting: 'recessed'`
+   *                                          and a monocoque: a Sillane carrier
+   *                                          swallows its craft, it does not
+   *                                          hang them outside
+   *   ring (colony)       ring               a Sillane colony hull spins about
+   *                                          its own long axis. It is one loft;
+   *                                          there is nothing to hang a hoop on
+   *
+   * A refusal with no such answer is a bug in this file, not a style. Use
+   * `requiredVolumeKindsFor` rather than reading `RoleSpec.requiredVolumeKinds`
+   * directly, so the subtraction happens in one audited place.
+   */
+  readonly forbiddenKinds: readonly VolumeKind[];
+}
+
 /** Proportion rules — the part of identity that survives at impostor range. */
 export interface ProportionDna {
   /**
@@ -362,6 +544,34 @@ export interface ProportionDna {
    * That second number is the faction signature and it is now visible on ONE
    * hull rather than in a histogram, which is what the round-two note asked for
    * and did not get.
+   *
+   * HOW BIG THE GAIN RATIO HAS TO BE, which round three authored by feel and
+   * round five measured. The r5 probe compared the three yards on 200 shared
+   * seeds across 8 roles and found the pair ordering held on 89% of seeds for
+   * Sillane/Kessler (authored 1.68×) but only 67% for Sillane/Ossuary (1.23×)
+   * and 71% for Ossuary/Kessler (1.37×). Those are not authoring mistakes, they
+   * are what those ratios are worth once the generator has finished with them:
+   *
+   *   authored ratio     band alone     + the ×0.78–1.30 per-seed fineness
+   *                                       jitter in `blueprint.ts`
+   *                                                    + the ×0.5–1.15 archetype
+   *                                                      fineness modifier
+   *   1.23×                 82%              75%               66%
+   *   1.37×                 93%              85%               74%
+   *   1.55×                 99%              93%               84%
+   *   1.75×                100%              97%               88%
+   *   2.00×                100%              99%               92%
+   *
+   * Two things follow, and both are why the numbers below are what they are.
+   * First, an adjacent pair needs at least 1.5× before it survives the trip —
+   * so the three gains are now spaced 1.55× and 1.49× (0.86, 1.33, 1.98) rather
+   * than 1.37× and 1.23×, which puts Sillane at 2.3× Kessler across the fleet.
+   * Second, the last column is not reachable from this file: at 2.0× the
+   * measured ordering is still 92%, because the archetype modifier alone is a
+   * ×2.3 spread applied AFTER the yard's band. Narrowing the bands does not
+   * help either — it buys one point. The remaining separation has to come from
+   * the archetype being chosen by doctrine instead of drawn from a role table
+   * that every yard shares, which is what `MassingDna.archetypes` is for.
    */
   readonly slendernessGain: number;
   /**
@@ -680,6 +890,14 @@ export interface HullFamily {
    * dragged the whole band down and undid it. A hull line is a product decision
    * worth a few per cent of proportion; what it is FOR is worth a factor of
    * five, and that already lives in the role.
+   *
+   * HARD RULE, ±5%, from round five: no entry may leave 0.95–1.05. The ±12% the
+   * table had settled on was still a tenth of the yard gain it multiplies, and
+   * two yards' lines can pull in opposite directions on the same role. They did:
+   * the Sillane Carapace (0.92) and the Ossuary Threadline (1.05) between them
+   * serve freighter, tanker, carrier and colony, and turned an authored 1.23×
+   * yard ratio into 1.08× on precisely the roles the fleet shot pins. A line trim
+   * that can cancel the faction signature is not a trim.
    */
   readonly lengthBeamBias: number;
   /** Section family this line prefers over the faction default, or null. */
@@ -720,6 +938,12 @@ export interface FactionDna {
   readonly doctrine: string;
 
   readonly construction: ConstructionDna;
+  /**
+   * What masses this culture builds from and how it joins them. Read at BRIEF
+   * §4 stage 3 (primary volumes) and stage 6 (secondary volumes), before
+   * anything cosmetic exists.
+   */
+  readonly massing: MassingDna;
   readonly proportion: ProportionDna;
   /** How this yard closes a bow. Mandatory; see `ForeEndDna`. */
   readonly foreEnd: ForeEndDna;
@@ -808,20 +1032,91 @@ const KESSLER: FactionDna = {
     repairFraction: [0.7, 0.95],
   },
 
+  // Everything hangs off the frame, and the frame is the ship. A Kessler mass is
+  // a rolled box on two pylons in a mirrored pair, because a crew with a gantry
+  // has to be able to unbolt it, and because a mirrored parts list is half as
+  // long to stock. The catalogue is SMALL — six kinds — and every pod on the
+  // hull is the same pod, which is the read that separates a chartered yard from
+  // a breakers' anchorage at silhouette distance even though both hulls are
+  // "several masses held off a core".
+  massing: {
+    doctrine:
+      'Rectangular masses slung off a visible frame on short pylons, always in mirrored pairs, every one of them the same size as its twin and drawn from one catalogue.',
+    assembly: 'slung',
+    attach: 'pylon',
+    // No cluster, no asymmetric, no ring. A bundle of parallel capsules round a
+    // core is not a thing you can walk between with a spanner, an asymmetric
+    // hull is a hull nobody sized from a load table, and a spin ring is a
+    // mechanism — the three things this doctrine exists to refuse.
+    archetypes: ['monolithic', 'stacked', 'slab', 'tower', 'fork', 'spine-and-pod'],
+    loadBearingMasses: [2, 3],
+    externalMasses: [4, 10],
+    // A catalogue: every pod is the same pod, to within the batch.
+    massRatio: [1.0, 1.2],
+    maxDistinctKinds: 7,
+    budget: [
+      { kind: 'pod', count: [2, 4] },
+      { kind: 'pylon', count: [2, 6] },
+      // Low, and it is `PropulsionDna.mounting` speaking: an `exposed-frame`
+      // yard puts bare bells on a visible thrust structure, so what the eye
+      // gets is frame and pylon, not pod. The pods on a Kessler carry cargo.
+      { kind: 'nacelle', count: [0, 2] },
+      // Tracks `ThermalDna.elementCounts` exactly, and must keep doing so —
+      // radiator COUNT is the thermal block's decision, and this budget is only
+      // here so a stage-6 caller reading one block does not contradict the
+      // other. What separates a Kessler radiator from an Ossuary one is
+      // `mirrored` and `aspect`, not how many there are.
+      { kind: 'radiator', count: [2, 4] },
+      { kind: 'tank', count: [1, 3] },
+      { kind: 'machinery', count: [0, 2] },
+      // A boom holds something AWAY from the hull, which is the opposite of
+      // "within reach". Kessler put it on a pylon or they put it inside.
+      { kind: 'boom', count: [0, 1] },
+      { kind: 'cargo-rack', count: [0, 2] },
+      { kind: 'shroud', count: [0, 1] },
+      { kind: 'keel', count: [0, 1] },
+      { kind: 'wing', count: [0, 1] },
+      // A ring VOLUME is a welded hoop — a docking collar, a magnetic loop —
+      // and a plate yard can roll one. A ring TOPOLOGY is a rotating habitat,
+      // i.e. a mechanism with a schedule, and that is why `archetypes` above
+      // has no 'ring' in it. The two are different statements and only the
+      // second is a refusal.
+      { kind: 'ring', count: [0, 1] },
+    ],
+    // A fin is styling on a hull that never sees air, and it is already refused
+    // in prose by `neverBuildsPhysically`; this is the enforceable half of that
+    // sentence.
+    forbiddenKinds: ['fin'],
+  },
+
   proportion: {
     // The bluntest gain in the fleet. A Kessler hull is a box that has been
     // persuaded to have a front, because a slender hull is a long unsupported
     // span and Kessler sizes members from a load table that punishes exactly
-    // that. Sillane's gain is 1.7× this one, and that ratio holds on every role
-    // the two both build — which is the faction read on ONE hull.
-    slendernessGain: 0.95,
-    // The envelope, not the identity. Floor 2.0: a Kessler tug or station tender
-    // is a brick and the load table is happy about it. Ceiling 6.6: their finest
-    // product is a revenue cutter and even that is a plated box with a wedge on
-    // the front. Both ends are stated in HULL fineness — see the measurement
-    // note on `slendernessBand`; the outline a reviewer measures runs about half
-    // of this.
-    slendernessBand: [2.0, 6.6],
+    // that.
+    //
+    // Was 0.95, against Sillane 1.6 and Ossuary 1.3 — ratios of 1.68 and 1.37
+    // that the downstream noise ate. Measured over 200 shared seeds the yards
+    // ordered correctly on only 67% and 71% of the two weak pairs, i.e. one
+    // Ossuary in three came out finer than the Sillane built from the same seed.
+    // A ratio of 1.55 per adjacent pair is what survives that noise; see the
+    // arithmetic on `slendernessGain` in `ProportionDna`.
+    slendernessGain: 0.86,
+    // The envelope, not the identity. Ceiling 6.6 is the load table talking:
+    // their finest product is a revenue cutter and even that is a plated box
+    // with a wedge on the front, and finer than that is an unsupported span
+    // their own members will not carry.
+    //
+    // FLOOR LOWERED 2.0 → 1.35, and it is a bug fix rather than a taste change.
+    // The load table punishes SPAN, which is a statement about the ceiling; there
+    // has never been a structural reason a Kessler cannot be stubby, and the
+    // doctrine says the opposite ("a tug is a brick and the load table is happy
+    // about it"). At 2.0 the floor clipped SEVEN roles — miner, salvager,
+    // shuttle, prospector, refinery, tug and station-tender — onto the identical
+    // band 2.70–4.2, which is BRIEF §4's "a role that is only a label on the same
+    // hull", in this file, in a number nobody had measured. Both ends are stated
+    // in HULL fineness — see the measurement note below.
+    slendernessBand: [1.35, 6.6],
     // Deliberately well above the slenderness band, which is the same statement
     // in the other axis: L/H above L/B means H < B, so a Kessler section is a
     // WIDE FLAT SLAB rather than a tube. That is the read the welded-plate story
@@ -1074,7 +1369,13 @@ const KESSLER: FactionDna = {
       roles: ['patrol', 'gunship', 'carrier'],
       signature:
         'The same plate, stepped: the armour belt is a visible thickening amidships and the bow plate is a narrow chined face rather than a broad one.',
-      lengthBeamBias: 1.1,
+      // Was 1.1. See `HullFamily.lengthBeamBias`: a line trim of ±10% is a tenth
+      // of the yard gain it sits on, and the three yards are separated by 1.55×.
+      // Two yards' lines pulling in opposite directions on the same role cancel
+      // most of that — a Sillane Carapace at 0.92 against an Ossuary Threadline
+      // at 1.05 turned a 1.23× yard ratio into 1.08× on exactly the roles a
+      // fleet shot pins. ±5% is what "a hull line is worth a few per cent" meant.
+      lengthBeamBias: 1.05,
       sectionFamily: 'superellipse',
       // Was 'taper'. A hull line may not contradict `foreEnd.style`: three
       // Kessler lines with three different bows meant the yard had no bow, and
@@ -1092,7 +1393,8 @@ const KESSLER: FactionDna = {
       roles: ['colony', 'liner', 'science', 'survey'],
       signature:
         'Habitat cans on a spine with punched window rows at deck spacing, and unused mounting frames left on for the next module.',
-      lengthBeamBias: 0.9,
+      // Was 0.9; see the Revenue's note.
+      lengthBeamBias: 0.96,
       sectionFamily: 'polygon',
       // Was 'flat', which `noseCapFor` rewrites to an ogive or a taper on more
       // than half of all draws — the exact mechanism that put a dome on the
@@ -1201,17 +1503,73 @@ const SILLANE: FactionDna = {
     repairFraction: [0.3, 0.6],
   },
 
+  // ONE MASS. Everything else in this block follows from that and none of it is
+  // a preference: a hull that left the mould in one piece cannot have a pod on
+  // it, because a pod is a part, and a part is a seam, and a seam is an
+  // admission. So the external mass count is not "low", it is ZERO — the only
+  // zero of its kind in the fleet, and the reason a Sillane reads as a round of
+  // ammunition next to two hulls that read as assemblies.
+  //
+  // The census that provoked this block had Sillane emitting 1.34 booms, 2.49
+  // pylons and 2.51 nacelles per hull — three kinds the culture's own
+  // `neverBuildsPhysically` list says out loud it cannot make.
+  massing: {
+    doctrine:
+      'One continuous loft. Where a hull needs more volume the loft swells; where it needs less it draws out again. Nothing is attached to a Sillane hull, because there is nothing to attach it to.',
+    assembly: 'fused',
+    attach: 'flush',
+    // Three topologies, all of which are one body: a single loft, a single loft
+    // with a moulded waist, and a single loft stood on its end. Cluster,
+    // asymmetric, fork, spine-and-pod, slab and ring are all statements about
+    // separate masses, and there are no separate masses.
+    archetypes: ['monolithic', 'stacked', 'tower'],
+    loadBearingMasses: [1, 1],
+    externalMasses: [0, 0],
+    massRatio: [1.0, 1.0],
+    // The smallest vocabulary in the fleet by a wide margin, and it is the
+    // identity: a hull, a nose, a tail and the fairing over the drive throat.
+    maxDistinctKinds: 4,
+    budget: [
+      { kind: 'pod', count: [0, 0] },
+      { kind: 'boom', count: [0, 0] },
+      { kind: 'pylon', count: [0, 0] },
+      { kind: 'nacelle', count: [0, 0] },
+      { kind: 'radiator', count: [0, 0] },
+      { kind: 'cargo-rack', count: [0, 0] },
+      { kind: 'keel', count: [0, 0] },
+      { kind: 'wing', count: [0, 0] },
+      { kind: 'fin', count: [0, 0] },
+      { kind: 'ring', count: [0, 0] },
+      // Internal, and there is at most one of them: a moulded bay inside the
+      // loft rather than a bottle strapped to it.
+      { kind: 'tank', count: [0, 1] },
+      { kind: 'machinery', count: [0, 1] },
+      // The one thing they do build twice: the fairing round the recessed drive
+      // throat, which is the same surface as the flank and reads as hull.
+      { kind: 'shroud', count: [1, 2] },
+    ],
+    // The longest refusal list in the fleet, exactly as `forbiddenGreebles` is,
+    // and for the same reason. Every one of these is a separate object bolted to
+    // a hull that has no bolts.
+    forbiddenKinds: ['pod', 'boom', 'pylon', 'nacelle', 'radiator', 'cargo-rack', 'keel', 'wing', 'fin', 'ring'],
+  },
+
   proportion: {
-    // 1.7× Kessler's gain, and that ratio IS the faction signature. It applies
-    // to every role both yards build, so a Sillane freighter is 1.7× as fine as
-    // a Kessler freighter and a Sillane tug 1.7× as fine as a Kessler tug — a
-    // difference you can see on one hull without knowing what a Kessler looks
-    // like, which is what the previous non-overlapping-absolute-bands scheme was
-    // trying and failing to buy. Measured over the whole role table it comes out
-    // at 2.65 against 4.96 on the outline, because the Sillane thermal floor
-    // lifts the hot roles further still.
-    slendernessGain: 1.6,
-    // THE THERMAL FLOOR. 4.6 is the shortest hull that can reject a plasma
+    // 2.3× Kessler's gain and 1.49× Ossuary's, and those ratios ARE the faction
+    // signature: they apply to every role the yards both build, so a Sillane
+    // freighter is 2.3× as fine as a Kessler freighter and a Sillane tug 2.3× as
+    // fine as a Kessler tug — a difference you can see on one hull without
+    // knowing what a Kessler looks like, which is what the previous
+    // non-overlapping-absolute-bands scheme was trying and failing to buy.
+    //
+    // Was 1.6. The r5 probe measured the Sillane/Ossuary pair ordering correctly
+    // on 133 of 200 shared seeds — 67%, i.e. one Ossuary in three came out finer
+    // than the Sillane built from the same seed — against an authored ratio of
+    // 1.23×. The full arithmetic is on `ProportionDna.slendernessGain`; the short
+    // version is that 1.23× is smaller than the per-seed noise the generator adds
+    // downstream, and 1.5× is not.
+    slendernessGain: 1.98,
+    // THE THERMAL FLOOR. 4.8 is the shortest hull that can reject a plasma
     // drive's heat through its own skin at a working acceleration; below it the
     // flanks glow. No role, no hull line and no archetype may go under it, which
     // is why the floor of the envelope is the load-bearing half of this field
@@ -1222,11 +1580,20 @@ const SILLANE: FactionDna = {
     // heat to reject goes as mass×accel ≈ L×B²×a. Cancel L×B and the beam has a
     // hard ceiling of order 1/a — so a fast Sillane is not a stubby Sillane
     // with a bigger drive, it is a longer one.
-    slendernessBand: [4.4, 9.5],
+    // CEILING RAISED 9.5 → 11.0, and this is not the widening the review warned
+    // against. The overlap it warned about was at the BLUNT end, where Ossuary's
+    // [1.9, 9.5] swallowed this band whole; raising a ceiling moves the two
+    // further apart, not closer. What it repairs is a role collapse inside this
+    // yard: at 9.5 both a Sillane courier and a Sillane patrol saturated against
+    // the same wall and came out with the same band, which is the other half of
+    // BRIEF §8. Ossuary's ceiling is now 8.2, so the two no longer saturate onto
+    // one number.
+    slendernessBand: [4.8, 11.0],
     // Tracks the slenderness band closely, which makes H ≈ B: a Sillane section
     // is round. Kessler's L/H is far above its L/B and Sillane's sits on top of
     // its own, and that single difference is "slab" versus "spindle" in outline.
-    lengthHeight: [4.4, 9.5],
+    // Moved with the band above, because it is the same statement.
+    lengthHeight: [4.8, 11.0],
     // Just forward of centre. A Sillane carries its payload amidships-forward
     // and trails a long, nearly empty tail, which is what produces the read of a
     // ship falling forward rather than pushing.
@@ -1456,7 +1823,8 @@ const SILLANE: FactionDna = {
       roles: ['courier', 'shuttle', 'patrol', 'gunship'],
       signature:
         'A single ogive spindle with a 3-lobe chine and a recessed throat; the beam never exceeds a seventh of the length.',
-      lengthBeamBias: 1.08,
+      // Was 1.08; see the Kessler Revenue's note on line trims.
+      lengthBeamBias: 1.05,
       sectionFamily: 'superellipse',
       noseCap: 'ogive',
       accentOverride: null,
@@ -1472,7 +1840,12 @@ const SILLANE: FactionDna = {
       // still no seam anywhere on it.
       signature:
         'One continuous fairing swollen amidships and drawn out again aft, with a moulded waist rather than a joint; the fattest thing Sillane build and still finer than anything Kessler do.',
-      lengthBeamBias: 0.92,
+      // Was 0.92, and it was the single worst line trim in the file: the
+      // Carapace serves freighter, tanker, liner, carrier and colony, and every
+      // one of those is served on the Ossuary side by the Threadline at 1.05.
+      // The two lines pulled against each other and turned the yard ratio into
+      // 1.08x on exactly the roles the fleet shot pins.
+      lengthBeamBias: 0.96,
       sectionFamily: 'superellipse',
       // Was 'dome', and this single line is why the fleet-contrast shot showed
       // three identical rounded caps: the Carapace serves 'freighter', the role
@@ -1593,19 +1966,94 @@ const OSSUARY: FactionDna = {
     repairFraction: [0.35, 0.7],
   },
 
+  // Threaded, not slung. The difference between this and Kessler is the whole of
+  // the r5 census finding: both hulls are "several masses held off a core", and
+  // the numbers said so — pylon 2.51 against 2.77, nacelle 2.55 against 2.49,
+  // boom 1.41 against 1.70. Two cultures with opposite doctrines were building
+  // from one parts bin in one set of proportions.
+  //
+  // What actually separates them is the SIZE and the COUNT, not the kind. A
+  // Kessler pod is one of four identical pods on mirrored pylons; an Ossuary can
+  // is one of six that do not match, clamped straight to the found keel at
+  // whatever clock angle cleared, with the biggest three times the smallest.
+  // That is why `massRatio`, `maxDistinctKinds` and the `count` bands carry the
+  // identity here and the kind list barely does.
+  massing: {
+    doctrine:
+      'Unequal salvaged cans clamped along a keel somebody else built, no two the same diameter, at whatever clock angle was free, with the bare keel visible between them.',
+    assembly: 'threaded',
+    attach: 'keel-clamp',
+    // Monolithic is out, and it is the only hard refusal in the list: a
+    // breakers' anchorage cannot pour a single body, which is the exact
+    // inversion of Sillane. Slab and ring go with it — both are one large
+    // precision structure, and the anchorage has never made one.
+    archetypes: ['asymmetric', 'cluster', 'fork', 'spine-and-pod', 'tower', 'stacked'],
+    // One found keel. Everything else on the ship is cargo as far as the load
+    // path is concerned, which is exactly why the thrust axis misses the centre
+    // of mass and why they counterweight instead of re-mounting.
+    loadBearingMasses: [1, 2],
+    externalMasses: [5, 14],
+    // Nothing matches. The largest can on the keel is two to four times the
+    // smallest, because both were somebody else's answer to somebody else's
+    // problem.
+    massRatio: [1.8, 4.0],
+    // The widest vocabulary in the fleet, and the only one that is wide because
+    // the culture had no say in it.
+    maxDistinctKinds: 12,
+    budget: [
+      // Every tank on the ship was a tank when they found it — the highest tank
+      // count in the fleet by more than double, against Kessler's 1–3 and
+      // Sillane's 0–1.
+      { kind: 'tank', count: [3, 6] },
+      { kind: 'boom', count: [2, 5] },
+      { kind: 'cargo-rack', count: [1, 4] },
+      { kind: 'machinery', count: [1, 4] },
+      // Bare pipe loops are a bad radiator, so there are a lot of them and they
+      // are never a matched pair.
+      { kind: 'radiator', count: [1, 5] },  // = `thermal.elementCounts`
+      { kind: 'keel', count: [1, 2] },
+      // `podded`, and `engineCounts` says one to three of them. Twice Kessler's,
+      // because a Kessler bell hangs on a frame and an Ossuary drive arrives
+      // already in somebody else's pod.
+      { kind: 'nacelle', count: [1, 3] },
+      // They do not build pods and they do not build pylons: a pod is a
+      // designed sub-hull and a pylon is a designed mount. What they have is
+      // cans and clamps.
+      { kind: 'pod', count: [0, 1] },
+      { kind: 'pylon', count: [0, 2] },
+      { kind: 'fin', count: [0, 2] },
+      { kind: 'wing', count: [0, 1] },
+      { kind: 'ring', count: [0, 1] },
+    ],
+    // The cowling was the first thing sold. Nothing on an Ossuary hull is
+    // faired over, which is the inversion of Sillane's one permitted kind.
+    forbiddenKinds: ['shroud'],
+  },
+
   proportion: {
-    // Between the other two and nearer Kessler, because a scavenger inherits the
-    // fleet's average rather than a doctrine. The gain is what a found keel
-    // brings; everything Ossuary themselves decide is in the envelope, which is
-    // the widest in the fleet by a long way.
-    slendernessGain: 1.3,
-    // The widest envelope in the fleet, and the only one that is wide because
-    // the culture has NO POLICY rather than because the number was hedged.
-    // Ossuary keels come off other people's ships; whatever the donor was, that
-    // is what this hull is. It therefore straddles both of the other two and
-    // overlapping them is correct — the Ossuary read is never "the long one" or
-    // "the short one", it is "you cannot tell what it was".
-    slendernessBand: [1.9, 9.5],
+    // Between the other two, because a scavenger inherits the fleet's average
+    // rather than a doctrine — 1.55× Kessler's and 1.49× under Sillane's, which
+    // are the ratios that survive the generator's own per-seed noise. Was 1.3
+    // against Sillane's 1.6: a 1.23× separation that the r5 probe could only
+    // read on two seeds in three.
+    slendernessGain: 1.33,
+    // A REAL INTERVAL, at last. This was [1.9, 9.5] — the union of the other two
+    // yards' envelopes, which is not a band but the absence of one. It let an
+    // Ossuary hull be blunter than any Kessler and finer than any Sillane, and
+    // since it shared its ceiling with Sillane exactly, every fast role in both
+    // yards saturated against the same wall and came out the same shape. The
+    // measured distributions duly overlapped almost completely: p10–p90 of
+    // 1.54–6.49 against Sillane's 1.98–7.16.
+    //
+    // The floor sits above Kessler's and the ceiling below Sillane's, so no two
+    // of the three envelopes now share a wall and a clipped role stays ordered.
+    // The culture's "no policy" has not been deleted, it has been moved to where
+    // it is actually visible: `diameterStep` 0.45–0.85, `massConcentration`
+    // 0.2–0.55, `primaryMasses` 3–6, `panelSizeVariance` 0.65 and the whole
+    // `massing` block above. A salvage yard is unpredictable in what it bolts
+    // on, not in how long its hulls are — the keels it starts from came out of
+    // the same fleet as everyone else's.
+    slendernessBand: [2.05, 8.2],
     // Far below the slenderness band, which is the inverse of Kessler: an
     // Ossuary hull is TALLER than it is wide, because things got welded on top
     // of the keel where there was room and nothing was ever faired back in.
@@ -1876,7 +2324,9 @@ const OSSUARY: FactionDna = {
       roles: ['freighter', 'tanker', 'tug', 'station-tender', 'colony', 'liner', 'carrier'],
       signature:
         'An exposed box-truss keel with four to six mismatched cans threaded onto it at arbitrary clock angles, and the gaps between them left open.',
-      lengthBeamBias: 1.05,
+      // Was 1.05. See the Sillane Carapace: these two lines serve the same
+      // roles from opposite directions and cancelled the yard signature.
+      lengthBeamBias: 1.02,
       sectionFamily: null,
       // Was 'flat', which `noseCapFor` rewrites to a taper or an ogive on more
       // than half of all draws — this line carries 'freighter', the role the
@@ -1893,7 +2343,8 @@ const OSSUARY: FactionDna = {
       roles: ['salvager', 'miner', 'prospector', 'refinery'],
       signature:
         'A short keel almost buried under working machinery, with two jointed arms that can fold back past the drives and a floodlit open working bay amidships.',
-      lengthBeamBias: 0.88,
+      // Was 0.88.
+      lengthBeamBias: 0.95,
       sectionFamily: 'polygon',
       noseCap: 'open',
       // A working hull gets more of the acid green than a hauler does: the
@@ -1906,7 +2357,9 @@ const OSSUARY: FactionDna = {
       roles: ['courier', 'shuttle', 'patrol', 'gunship', 'survey', 'science', 'derelict'],
       signature:
         'One donor hull with everything non-essential cut off and a drive far too large for it bolted to the transom on a field-welded frame.',
-      lengthBeamBias: 1.12,
+      // Was 1.12, the largest trim in the fleet, on the line that serves the
+      // fast roles where this yard has to stay clear of Sillane.
+      lengthBeamBias: 1.05,
       sectionFamily: 'superellipse',
       // Was 'blunt', which is Kessler's bow: a scavenger line and a plate yard
       // arriving at the same broad flat face is the failure this whole field
@@ -3395,6 +3848,116 @@ export function factionsBuilding(role: ShipRole): readonly FactionDna[] {
   return FACTIONS.filter((f) => factionRoleWeight(f, role) > 0);
 }
 
+// ---------------------------------------------------------------------------
+// Massing — the interface `blueprint.ts` reads at BRIEF §4 stage 3 and stage 6
+// ---------------------------------------------------------------------------
+
+/**
+ * THE FOUR CALLS THE GENERATOR MAKES, and the order it makes them in.
+ *
+ *   stage 3, before any dimension exists:
+ *     `archetypeWeightsFor(faction, ROLE_TOPOLOGY[role].archetypes)`
+ *        → the role's own table with everything this yard cannot build zeroed.
+ *          Feed the result to the existing weighting; zeros MUST stay zero
+ *          through `ARCHETYPE_FLOOR_SHARE`, which is the reason this returns
+ *          zeros rather than small numbers. `FACTION_ARCHETYPE_BIAS` may keep
+ *          shading the survivors — the two compose, and the bias is a
+ *          preference where this is a capability.
+ *     `massCountFor(faction, 'load-bearing' | 'external')`
+ *        → how many masses carry the load path, and how many hang outside it.
+ *
+ *   stage 6, per candidate secondary volume:
+ *     `allowsVolumeKind(faction, kind)` → a hard refusal, before any placement
+ *        work is done. A Sillane hull emits no `pod`, `boom`, `pylon`,
+ *        `nacelle`, `radiator`, `cargo-rack`, `keel`, `wing`, `fin` or `ring`
+ *        under any seed, any role and any archetype.
+ *     `volumeKindBudgetFor(faction, kind)` → the count band for a kind this
+ *        yard does build, to be intersected with whatever the role demands.
+ *
+ * Everything here is a pure function of frozen data and does no drawing, so a
+ * caller may evaluate it before it has an `Rng` and cache the result per
+ * (faction, role) for a fleet.
+ */
+export function massingFor(faction: FactionDna): MassingDna {
+  return faction.massing;
+}
+
+/** True when this culture will emit this volume kind at all. */
+export function allowsVolumeKind(faction: FactionDna, kind: VolumeKind): boolean {
+  const m = faction.massing;
+  if (m.forbiddenKinds.includes(kind)) return false;
+  for (const b of m.budget) if (b.kind === kind) return b.count[1] >= 1;
+  // Unlisted kinds are the role-driven ones (`hull`, `forebody`, `midbody`,
+  // `afterbody`, `bridge`, `habitat`, `cargo-bay`). A faction has no opinion
+  // about whether a ship has a nose.
+  return true;
+}
+
+/**
+ * The count band for a volume kind, per hull, before the role has its say.
+ *
+ * `[0, 0]` for a refusal — a caller that treats that as "rare" rather than as
+ * "never" has reintroduced exactly the bug this block exists to fix. Unlisted
+ * kinds return `null`, which means "not a faction decision, ask the role".
+ */
+export function volumeKindBudgetFor(faction: FactionDna, kind: VolumeKind): Range | null {
+  const m = faction.massing;
+  if (m.forbiddenKinds.includes(kind)) return [0, 0];
+  for (const b of m.budget) if (b.kind === kind) return b.count;
+  return null;
+}
+
+/**
+ * The role's required volume kinds, minus the ones this culture performs
+ * another way. See the precedence table on `MassingDna.forbiddenKinds`: a
+ * required kind names the usual FORM of a function, and a yard that has already
+ * declared a different architecture for that function does not also owe the
+ * form. Reading `RoleSpec.requiredVolumeKinds` directly is how a Sillane hull
+ * ends up owing a radiator fin.
+ *
+ * Never returns a kind the yard refuses, and never invents one.
+ */
+export function requiredVolumeKindsFor(faction: FactionDna, role: RoleSpec): readonly VolumeKind[] {
+  const out: VolumeKind[] = [];
+  for (const k of role.requiredVolumeKinds) if (allowsVolumeKind(faction, k)) out.push(k);
+  return out;
+}
+
+/** How many masses of each structural duty a hull of this culture carries. */
+export function massCountFor(faction: FactionDna, duty: 'load-bearing' | 'external'): Range {
+  const m = faction.massing;
+  return duty === 'load-bearing' ? m.loadBearingMasses : m.externalMasses;
+}
+
+/**
+ * The role's archetype table with everything this yard cannot build zeroed.
+ *
+ * Generic in the weight-list element so `blueprint.ts` can pass its own
+ * `readonly [HullArchetype, number][]` straight in and get the same shape back,
+ * without this file importing anything from it.
+ *
+ * Falls back to the role's own table if the intersection is empty. That should
+ * be unreachable — every role in `ROLE_TOPOLOGY` shares at least one archetype
+ * with every faction that builds it, and `factionRoleWeight` already excludes
+ * the pairings that do not exist — but a generator with nothing to draw from
+ * would silently produce a default hull, which is the worst failure mode
+ * available here.
+ */
+export function archetypeWeightsFor<A extends string>(
+  faction: FactionDna,
+  roleWeights: readonly (readonly [A, number])[],
+): readonly (readonly [A, number])[] {
+  const allowed = faction.massing.archetypes as readonly string[];
+  const out: (readonly [A, number])[] = [];
+  let total = 0;
+  for (const [a, w] of roleWeights) {
+    const v = allowed.includes(a) ? w : 0;
+    total += v;
+    out.push([a, v]);
+  }
+  return total > 0 ? out : roleWeights;
+}
+
 /**
  * How much of the declared hull fineness survives to the measured outline.
  *
@@ -3449,22 +4012,41 @@ const SKIN_RADIATOR_REFERENCE_ACCEL_MS2 = 100;
 const SKIN_RADIATOR_SLENDERNESS_EXP = 0.25;
 
 /**
- * Slide `inner` until it lies inside `hard`, keeping its WIDTH.
+ * Slide `inner` until it lies inside `hard`, keeping its RATIO.
  *
  * A plain clamp collapses a band that falls outside onto a point, and a point
  * means every seed of that (faction, role) comes out with the same proportion —
  * trading one BRIEF §8 failure ("the faction's DNA is not recognisable") for the
  * other ("different seeds are the same ship redressed"). Sliding keeps the
  * variation the role and the hull line asked for and moves it somewhere legal.
+ *
+ * WHAT IS PRESERVED IS THE RATIO, NOT THE WIDTH, and that is this round's
+ * correction. A fineness band is multiplicative: the role table's `[5.0, 9.0]`
+ * for a courier says "1.8× of spread", and the same 1.8× at the blunt end of the
+ * table is `[1.4, 2.4]` — an absolute width of 4.0 against 1.0. Preserving the
+ * absolute width when a band is pushed against a wall therefore INFLATES it:
+ * a Sillane courier arrived as 2.16× of spread and an Ossuary courier as 2.58×,
+ * against the 1.8× the role asked for, and every bit of that extra spread is
+ * pure per-seed noise landing exactly where two yards meet. It cost the
+ * Sillane/Ossuary pair ordering directly, since both were saturating against a
+ * shared ceiling with bands the clip had widened.
+ *
+ * Geometric sliding also cannot produce a floor below zero or an inverted band,
+ * which the linear version could for a hard band narrower than the inner one.
  */
 function slideIntoBand(inner: Range, hard: Range): Range {
-  const hw = hard[1] - hard[0];
-  if (hw <= 0) return [hard[0], hard[0]];
-  const w = Math.min(Math.max(inner[1] - inner[0], 0), hw);
-  let lo = inner[0];
+  const lo0 = Math.max(inner[0], 1e-6);
+  if (!(hard[1] > hard[0]) || hard[0] <= 0) return [hard[0], hard[0]];
+  // The inner band's ratio, never below 1 (a reversed band is a caller bug, and
+  // collapsing it to a point here is the safe reading) and never wider than the
+  // envelope itself.
+  const want = inner[1] / lo0;
+  const room = hard[1] / hard[0];
+  const r = want < 1 ? 1 : want > room ? room : want;
+  let lo = lo0;
   if (lo < hard[0]) lo = hard[0];
-  if (lo + w > hard[1]) lo = hard[1] - w;
-  return [lo, lo + w];
+  if (lo * r > hard[1]) lo = hard[1] / r;
+  return [lo, lo * r];
 }
 
 /**

@@ -311,6 +311,29 @@ export const SHIP_MARK_MAX_HIGH = 4;
  * out of the loop.
  */
 export const SHIP_WOUND_MAX_HIGH = 4;
+/**
+ * Repairs shaded from `bp.repairHistory`, as rectangles with a real place, a
+ * real size and the shade the blueprint actually chose.
+ *
+ * THIS SET EXISTS BECAUSE THE REPAIR STORY WAS BEING SHADED BY A DIFFERENT SHIP.
+ * `volumes.ts` builds every entry of `repairHistory` as geometry — the wreck's
+ * `patch-plate` is 19.3 x 22.6 m standing 115 mm proud on a 95.7 m hull — while
+ * this file drew its "replaced panel" shade from `sm_hash21(pid, partId)`, an
+ * independent random field over the plate grid. So the wrong-shade plates and
+ * the proud plates were two uncorrelated sets: the big rebuilt panel was proud
+ * and NOT a different shade, and a scatter of unrelated plates were a different
+ * shade and NOT proud. BRIEF §7 asks for one plate that is both. Reading the
+ * blueprint's own list is the only way to get one.
+ *
+ * Four is enough for the story and matches the wound set's reasoning: the four
+ * largest repairs on a hull are the ones a viewer can name, and a fifth adds
+ * area rather than narrative. Sorted by area at upload so a weld seam cannot
+ * evict the patch that rebuilt the hull round a hole.
+ *
+ * Cost: 12 uniform vectors and ~45 ALU, against a set that turns "this hull is
+ * dirty" into "this hull was rebuilt around a hole".
+ */
+export const SHIP_REPAIR_MAX_HIGH = 4;
 
 interface TierBudget {
   readonly occ: number;
@@ -318,20 +341,22 @@ interface TierBudget {
   readonly stain: number;
   readonly mark: number;
   readonly wound: number;
+  readonly repair: number;
   readonly grimeOctaves: number;
   readonly rivets: boolean;
   readonly bump: boolean;
 }
 
 const TIER_BUDGETS: Record<QualityTier, TierBudget> = {
-  low: { occ: 4, lamp: 4, stain: 3, mark: 2, wound: 2, grimeOctaves: 2, rivets: false, bump: false },
-  medium: { occ: 6, lamp: 6, stain: 4, mark: 3, wound: 3, grimeOctaves: 3, rivets: true, bump: true },
+  low: { occ: 4, lamp: 4, stain: 3, mark: 2, wound: 2, repair: 2, grimeOctaves: 2, rivets: false, bump: false },
+  medium: { occ: 6, lamp: 6, stain: 4, mark: 3, wound: 3, repair: 3, grimeOctaves: 3, rivets: true, bump: true },
   high: {
     occ: SHIP_OCC_MAX_HIGH,
     lamp: SHIP_LAMP_MAX_HIGH,
     stain: SHIP_STAIN_MAX_HIGH,
     mark: SHIP_MARK_MAX_HIGH,
     wound: SHIP_WOUND_MAX_HIGH,
+    repair: SHIP_REPAIR_MAX_HIGH,
     grimeOctaves: 4,
     rivets: true,
     bump: true,
@@ -342,6 +367,7 @@ const TIER_BUDGETS: Record<QualityTier, TierBudget> = {
     stain: SHIP_STAIN_MAX_HIGH,
     mark: SHIP_MARK_MAX_HIGH,
     wound: SHIP_WOUND_MAX_HIGH,
+    repair: SHIP_REPAIR_MAX_HIGH,
     grimeOctaves: 4,
     rivets: true,
     bump: true,
@@ -438,7 +464,144 @@ const FILM_STOPS = 3.2;
  * being a surface. Kessler's reference hull sits at 0.26, well clear of this, so
  * the floor only ever engages on the extreme end of the maintenance band.
  */
-const FILM_FLOOR = 0.14;
+/**
+ * RESTATED, BECAUSE ITS UNITS MOVED. This is a fraction of the AUTHORED plate
+ * reflectance, and `HULL_KEY_SCALE` has just multiplied that reflectance by
+ * 0.44 — so the same 0.14 that used to floor a hull at 0.8% reflectance would
+ * now floor it at 0.24%, which is the "hole in space" this constant exists to
+ * prevent and which BRIEF §8's "it holds up against black space" rejects harder
+ * than a pale hull. 0.22 keeps the absolute floor at roughly 0.4% and engages
+ * at filmT 0.68, i.e. only at the dirtiest end of the reference hull's own
+ * range and across most of a neglected sixty-year-old salvager's. It is also
+ * what keeps the damage frame legible: a repair that separates by 30% of a
+ * floored value is still 30% of something.
+ */
+const FILM_FLOOR = 0.22;
+
+/**
+ * Optical depth, in stops, of the same film's authority over the COHERENT
+ * reflection — the specular lobe, its Fresnel F0 and the environment lobe.
+ *
+ * THIS IS THE HALF OF THE REFLECTANCE BUDGET NOBODY WAS PAYING, and it is why
+ * three rounds of "pull the hull down" moved the measured frame by ten points
+ * each time. Integrated against the showroom key over a hull's normals and
+ * weighted by screen area — which is the only weighting that predicts a median
+ * — the r5 lit hull splits:
+ *
+ *     diffuse (albedo x key)        51.5 %
+ *     specular lobe                 37.4 %
+ *     grazing sheen                 10.3 %
+ *     environment + planetshine      0.8 %
+ *
+ * So 47.7% of every lit pixel has NO ALBEDO IN IT AT ALL. Halving the albedo
+ * halves 51.5% of the pixel and leaves 47.7% exactly where it was: the frame
+ * moves 26%, the iris gives most of that back, and the surviving half is the
+ * one wearing the STAR's chromaticity (R/B 1.22) rather than the paint's
+ * (R/B 0.82). That single fact explains both critical findings at once — the
+ * median sat at 105 instead of 62 AND the lit hull measured R-B +23 — and it is
+ * why the two are one fix and not two.
+ *
+ * The form is the same Beer-Lambert argument `FILM_STOPS` already makes, and
+ * the reason this exponent is LARGER than the albedo's is physical rather than
+ * convenient: a scattering film destroys a coherent reflection on the first
+ * scattering event, while diffuse light merely has to get back out. A chalked,
+ * dust-frosted surface therefore loses its highlight long before it loses its
+ * pigment — which is exactly why a dirty car has no highlight rather than a
+ * wide one, and why the previous linear `1 - 0.72 * t` form could never reach
+ * the depth its own comment claimed (bounded by t, and negative past k = 1).
+ *
+ * 4.8 stops takes the reference Kessler hull (filmT 0.489, paintFade 0.3) to
+ * coh = 0.37, i.e. F0 0.040 -> 0.0148 and the lobe to 37% of its old weight.
+ * Predicted split after the change: diffuse 56%, specular 28%, sheen 16% — the
+ * paint is the majority of the pixel for the first time, which is the only
+ * condition under which an authored hull hue can survive to the frame.
+ */
+const SPEC_FILM_STOPS = 4.8;
+
+/**
+ * What the plate's authored reflectance is multiplied by before it reaches the
+ * shader, and the one number that answers "why is a near-black hull rendering
+ * at display 105".
+ *
+ * `VALUE_CEILING` below normalises every OTHER albedo constant against the
+ * plate. Nothing normalised the plate against the KEY, and that was the hole:
+ * `families.ts` authors reflectance against an implied unit key ("sits at ~0.06
+ * linear, well under the 0.2 ceiling") while every shot in `Showroom.ts` runs
+ * `sunIntensity` 3.0, so a 0.06 chip arrives as 0.17 scene-linear and lands in
+ * the top half of the grade's tone curve. That is a UNITS mismatch across a
+ * module boundary, not an art disagreement, and `families.ts` is not the place
+ * to fix it — the palette has to keep meaning "reflectance" or the faction hue
+ * arithmetic in that file stops being checkable.
+ *
+ * Sized by measurement, not by taste. Inverting the real grade (ACES, the noir
+ * curve, the shoulder and the black lift) on the r5 frames puts the lit hull's
+ * median at 0.103 scene-linear post-iris against a 50-75 display band that
+ * wants 0.044-0.069. Feeding the frame's own histogram back through
+ * `LuminancePass` — the hull carries 93% of the meter's weight in a hero
+ * framing, so `uMeterGain` 0.65 hands back most of any cut — the hull's
+ * radiance has to fall to ~0.40 of its r5 value for the median to land at 66.
+ * With `SPEC_FILM_STOPS` taking the achromatic 47.7% down to ~0.28, the
+ * albedo's share of that budget is 0.44.
+ *
+ * Applied to the plate shades, the patch shades and the mismatch stock — the
+ * three things that ARE plate — and to `plateLuminance()`, so every ceiling in
+ * `VALUE_CEILING` follows automatically and no detail colour is left floating a
+ * stop above a hull that moved underneath it.
+ *
+ * It is NOT an exposure or a key change: it is a reflectance, so it scales with
+ * the key like everything else and a hull still reads differently under a 0.55
+ * key and a 6.0 one, and it leaves every emitter — plume, lamps, navlights,
+ * re-entry incandescence — untouched.
+ */
+const HULL_KEY_SCALE = 0.44;
+
+/**
+ * A deliberate cool tilt on the plate's chromaticity, applied as `R /= t`,
+ * `B *= t` at constant luminance.
+ *
+ * `families.ts` sets Kessler's plate to R/B 0.821 and states the reasoning:
+ * that is the reciprocal of the key's own 1.22, so the plate "comes back off
+ * the key neutral". The arithmetic is right for the DIFFUSE term and wrong for
+ * the pixel, because roughly 40% of a lit fragment is achromatic specular that
+ * arrives wearing the key's chromaticity undiluted. Cancelling a warm key on a
+ * pixel that is part paint and part mirror needs the paint to be cooler than
+ * the reciprocal, by exactly the achromatic fraction:
+ *
+ *     R/B_pixel = kappa * (1 - f * (1 - p))
+ *
+ * with kappa = 1.22 the key ratio, f the diffuse share of the blue channel
+ * (~0.60 after `SPEC_FILM_STOPS`) and p the plate's R/B. Solving for the pixel
+ * ratio that lands display R-B at about -7 once the grade's split tone is
+ * accounted for gives p = 0.75, i.e. B/R 1.33 — which is the number the surface
+ * critic arrived at independently from the frames.
+ *
+ * MULTIPLICATIVE, so the faction spread survives intact: Kessler 1.22 -> 1.33,
+ * Sillane 1.56 -> 1.70, Ossuary 0.95 -> 1.04. Hue stays the axis the factions
+ * are told apart on; nobody is flattened towards a house blue.
+ *
+ * Plate stock only. The accent, the trim, the primer, the oxide and the
+ * markings keep their authored hue — the whole point of a cool hull is that the
+ * one warm thing on it reads.
+ */
+const HULL_COOL_TILT = 1.046;
+
+/**
+ * How far a replaced plate's shade must sit from the hull's own, as a fraction
+ * of the plate's luminance, before it is allowed on the ship.
+ *
+ * BRIEF §7 requires a replaced panel to be proud AND in the wrong shade.
+ * Measured against the reference plate, `palette.patchShades` arrives at 1.16,
+ * 0.73 and 0.99 of the plate — so one patch in three is a shade the eye cannot
+ * find, and on the damage frame that is the one that landed on the big repairs.
+ * A shade that separates by 1% of luminance is not a wrong shade; it is noise
+ * with a rectangle drawn round it, and the film grain the grade adds is larger.
+ *
+ * So each patch shade is pushed AWAY from the plate, along the direction its
+ * author already chose, until it clears this much — hue untouched, so a warm
+ * patch stays warm and Sillane's grey patch on a blue hull stays grey. Ships
+ * whose palette already separates properly are unaffected.
+ */
+const PATCH_MIN_SEPARATION = 0.30;
 
 /**
  * Ceilings on every non-plate albedo constant, as a multiple of the ship's own
@@ -494,8 +657,35 @@ const VALUE_CEILING = {
   trim: 1.2,
   /** Primer and oxide are underlayers of the same paint system. */
   underlayer: 1.25,
-  /** A replaced plate may be a shade lighter. A third of a stop, not two. */
-  patch: 1.35,
+  /**
+   * A replaced plate may be a shade lighter — and it now has to be, by at least
+   * `PATCH_MIN_SEPARATION`, so the ceiling has to leave room above that or the
+   * spread and the cap fight and the cap wins. 1.45 is a third of a stop.
+   */
+  patch: 1.45,
+  /**
+   * Soot. It is the one deposit whose job is to REMOVE value, so it is a
+   * ceiling in the other direction — capped BELOW the plate, not above it.
+   *
+   * `uScorch` is the only albedo constant that reached the shader unmeasured,
+   * and it is consumed as `mix(albedo, uScorch, soot * 0.9)`, i.e. as the
+   * absolute floor of the exhaust deposit. Kessler's is 0.18 of its plate,
+   * Ossuary's 0.34, so how black a nozzle's surround gets was a per-faction
+   * accident rather than a decision, and on any hull whose plate came down it
+   * would have stopped darkening at all.
+   */
+  scorch: 0.42,
+  /**
+   * Cryogenic rime. Frost is bright FOR A HULL SURFACE, not bright absolutely.
+   *
+   * This ceiling exists because the constant it replaces was written straight
+   * into the fragment shader — `mix(albedo, vec3(0.42, 0.47, 0.55), rime * 0.6)`
+   * — which is eight times the reference plate's luminance and nineteen times a
+   * correctly scaled one. A frost bloom is a light-scattering deposit on paint;
+   * at that value it is a lamp, and it is one of the bright near-white patches
+   * the hull was being marked down for.
+   */
+  rime: 1.3,
 } as const;
 
 /**
@@ -574,7 +764,14 @@ float sm_hash21(vec2 p) {
   return fract((q.x + q.y) * q.z);
 }
 
-vec3 sm_panels(vec2 q) {
+// w is the SECOND distance — the far edge of the pair the fragment sits
+// between — so min(d) is "how close to an edge" and max(d) is "how close to a
+// CORNER". A plate's corner is the one part of it a handling frame, a boot and
+// a suit backpack all reach, so it is where the topcoat goes first; an edge
+// band alone cannot express that, and the critic could find no frame where a
+// plate corner differed from the plate's middle. One extra component out of
+// numbers the function already computed.
+vec4 sm_panels(vec2 q) {
   vec2 g0 = floor(q);
   vec2 f0 = q - g0;
   float r = sm_hash21(g0 + 11.3);
@@ -583,9 +780,10 @@ vec3 sm_panels(vec2 q) {
   vec2 g1 = floor(q1);
   vec2 f1 = q1 - g1;
   vec2 d = min(f1, 1.0 - f1) / sub;
-  return vec3(min(d.x, d.y),
+  return vec4(min(d.x, d.y),
               sm_hash21(g0 * 3.71 + g1 * 1.13 + 5.0),
-              d.x < d.y ? q.y : q.x);
+              d.x < d.y ? q.y : q.x,
+              max(d.x, d.y));
 }
 
 float sm_seam(float d, float w) {
@@ -721,8 +919,13 @@ uniform vec3 uMetal;
 uniform vec3 uPrimer;
 uniform vec3 uOxide;
 uniform vec3 uScorch;
+// Cryogenic rime, value-bound to the plate. See VALUE_CEILING.rime.
+uniform vec3 uRime;
 uniform vec3 uAmber;
 uniform vec3 uPlumeColor;
+// Reference plate luminance. Read ONLY by terms that must stay a ratio of the
+// hull's own reflectance (the amber seam leak). Never by an emitter.
+uniform float uPlateRef;
 /**
  * Chromaticity of the grime film, normalised to unit luminance.
  *
@@ -777,6 +980,15 @@ uniform vec4  uWound[SHIP_WOUND_MAX];
 // downstream of it and the everted lip is on the far side. w packs severity and
 // age — floor(w)/15 is severity, fract(w) is 0 fresh .. 1 old.
 uniform vec4  uWoundAxis[SHIP_WOUND_MAX];
+
+// --- repairs ----------------------------------------------------------------
+// xyz centre in ship space, w = shadeIndex + fastenerFlag*0.5 (0 = empty slot,
+// so an occupied slot always carries w >= 1 — see fillRepairs()).
+uniform vec4  uRepair[SHIP_REPAIR_MAX];
+// xyz across-axis divided by half-width, w how proud the patch stands, km.
+uniform vec4  uRepairU[SHIP_REPAIR_MAX];
+// xyz up-axis divided by half-height, w 0 fresh .. 1 old.
+uniform vec4  uRepairV[SHIP_REPAIR_MAX];
 
 #ifdef SHIP_MARKINGS
 // xyz centre, w kind: 0 text, 1 hazard chevrons, 2 stripe band, 3 emblem
@@ -850,15 +1062,39 @@ void main() {
   vec2  poff = vec2(sm_hash21(vec2(partId * 3.17, 8.4)),
                     sm_hash21(vec2(partId * 5.09, 2.2))) * 23.0;
 
-  vec3 pa = sm_panels(P.zy * ps + poff);
-  vec3 pb = sm_panels(P.xz * ps + poff);
-  vec3 pc = sm_panels(P.xy * ps + poff);
+  vec4 pa = sm_panels(P.zy * ps + poff);
+  vec4 pb = sm_panels(P.xz * ps + poff);
+  vec4 pc = sm_panels(P.xy * ps + poff);
 
   // A cast hull's break is both SHALLOWER and NARROWER than a butt joint
   // between two rolled plates, so uSeamVis moves the width as well as the
   // amplitude. Gating only the amplitude leaves a full-width grey line, which
   // still reads as a grid.
-  float seamW = 0.008 * mix(0.45, 1.0, uSeamVis);
+  //
+  // FLOORED AT A PIXEL, and that floor is the whole reason the plating could
+  // not be found in any frame in the set.
+  //
+  // 0.008 of a plate cell is 3.6 cm on the reference hull's 4.5 m plate. At the
+  // distance the hero and docking frames are shot one pixel spans about 30 cm
+  // of hull, so the seam is an EIGHTH of a pixel wide: sm_seam antialiases it
+  // against its own fwidth and hands back an eighth of the contrast, and every
+  // consumer downstream — the albedo groove, the cavity darkening, the dirt
+  // that collects in a joint, the corrosion, the relief — gets an eighth of
+  // what it was authored for. That is why the groove-to-field contrast measured
+  // in single digits against a 25% requirement, why no panel grid was visible
+  // at all in ship-docking-scale even after a gamma boost, and why the only
+  // things the scale critic could measure were structural rings and greeble
+  // silhouettes. The pitch was never the problem; the LINE was.
+  //
+  // A plate joint is not a 3.6 cm crack anyway: it is a lap, a sealant bead, a
+  // paint break, a dirt line and the shadow of all four, and the honest visual
+  // width of that is a decimetre or more. Below a pixel, a line either gets
+  // drawn AT a pixel or it does not exist — so the width is floored at 0.55 px
+  // and the contrast is left alone. It cannot alias: kPlate has already faded
+  // the whole band out by the time the PLATE stops covering pixels, which
+  // happens long before the seam floor could start to fill one.
+  float seamPx = 0.55 * pxKm / wPlate;
+  float seamW  = max(0.008 * mix(0.45, 1.0, uSeamVis), seamPx);
   float plateSeam = (sm_seam(pa.x, seamW) * an.x
                    + sm_seam(pb.x, seamW) * an.y
                    + sm_seam(pc.x, seamW) * an.z) * kPlate;
@@ -870,18 +1106,21 @@ void main() {
   plateSeam *= uSeamVis;
 
   // Panel identity from the dominant plane only. Blending ids is mush.
-  vec3 dom = anj.x > anj.y ? (anj.x > anj.z ? pa : pc) : (anj.y > anj.z ? pb : pc);
+  vec4 dom = anj.x > anj.y ? (anj.x > anj.z ? pa : pc) : (anj.y > anj.z ? pb : pc);
   vec2 q2  = anj.x > anj.y ? (anj.x > anj.z ? P.zy : P.xy) : (anj.y > anj.z ? P.xz : P.xy);
   float pid = dom.y;
 
   // Two coarser tiers on the dominant plane only, one evaluation each. The bay
   // tier is a real structural break — deeper, and it is what survives to LOD1.
-  vec3  bay      = sm_panels(q2 / wBay + 7.31);
+  // Floored at a pixel for the same reason the plate seam is, and floored
+  // WIDER, because it is a frame station and not a butt joint.
+  vec4  bay      = sm_panels(q2 / wBay + 7.31);
   // Only PARTLY gated by uSeamVis. A structural bay break is a frame station —
   // a monocoque still has ring stiffeners and still shows where they are — so
   // a cast hull loses its plate grid but keeps the coarse tier that gives it
   // scale. Taking both away leaves a featureless tube.
-  float bayGroove = sm_seam(bay.x, 0.012) * kBay * mix(0.40, 1.0, uSeamVis);
+  float bayGroove = sm_seam(bay.x, max(0.012, 0.8 * pxKm / wBay))
+                  * kBay * mix(0.40, 1.0, uSeamVis);
 
   // --- production batches ------------------------------------------------
   // Adjacent plates arrive from one delivery and share a shade; the run
@@ -1002,6 +1241,114 @@ void main() {
   // heads are proud steel. Both are small areas, so neither lifts the mean.
   albedo = mix(albedo, uMetal * 0.8, max(patchRim * 0.28, patchRing * 0.45));
 
+  // --- the repairs the blueprint actually records ---------------------------
+  //
+  // Everything above this line is the PLATING STORY: batches, drift, the odd
+  // panel from another delivery. It is a texture and it is supposed to be one.
+  // What it is not, and what it was standing in for, is the REPAIR story —
+  // bp.repairHistory, which carries a place, a size, a proud height, a shade
+  // index and a date for every time somebody rebuilt part of this hull, and
+  // which this file was not reading at all.
+  //
+  // The consequence was precise and it is the identity finding: volumes.ts
+  // builds those patches as geometry, so on the wreck a 19.3 x 22.6 m plate —
+  // a fifth of the ship — genuinely stands 115 mm proud, and the material
+  // shaded a completely different, randomly placed set of plates in the wrong
+  // shade. Proud and wrong-shade were two disjoint sets. BRIEF §7 asks for one
+  // plate that is both, and there is exactly one place the two can be joined:
+  // here, off the same list the geometry read.
+  //
+  // Four masks, and between them they separate the patch by VALUE, by HUE, by
+  // SILHOUETTE and by AGE, so the read survives the noir grade rather than
+  // living inside the film grain:
+  //   repCov   the plate itself, in the shade the blueprint chose;
+  //   repSeam  the recess round its edge — a patch is laid ON the hull, so
+  //              there is a real gap round it and dirt gets into it;
+  //   repLip   the cut edge just inboard, bare and unpainted, which is what
+  //              catches the key and gives the patch an outline;
+  //   repRing  the fastener line that holds it down, at plate scale.
+  float repCov  = 0.0;
+  float repSeam = 0.0;
+  float repLip  = 0.0;
+  float repRing = 0.0;
+  float repAge  = 0.0;
+  // Signed, in km, for the relief block: a patch-plate stands proud and a
+  // flush panel replacement does not, and the blueprint says which.
+  float repProud = 0.0;
+  vec3  repCol  = uPatch0;
+  // One edge-jitter field for the whole set, hoisted out of the loop for the
+  // same reason the wound set hoists its own: four slots times a 2-octave fbm
+  // inside a loop would be the single most expensive thing in this shader, and
+  // the patches do not need decorrelated edges — they need ragged ones.
+  float repJag = os_fbm(P * (150.0 / L) + uSeed.zxy, 2, 2.3, 0.5);
+  for (int i = 0; i < SHIP_REPAIR_MAX; i++) {
+    vec4 rp = uRepair[i];
+    vec4 ru = uRepairU[i];
+    vec4 rv = uRepairV[i];
+    float live = step(0.5, rp.w);
+    vec3  nrm  = normalize(cross(ru.xyz, rv.xyz) + vec3(0.0, 0.0, 1e-9));
+    vec3  d    = P - rp.xyz;
+    float u    = dot(d, ru.xyz);
+    float v    = dot(d, rv.xyz);
+    // Same projection gate as a marking: reject the far side of the hull and
+    // anything not facing the patch, so a plate bolted to the port flank does
+    // not also appear on the starboard one.
+    float depth = abs(dot(d, nrm));
+    float gate  = live
+                * (1.0 - smoothstep(0.15, 0.55, depth * length(ru.xyz)))
+                * smoothstep(0.30, 0.72, dot(N, nrm));
+    // A field repair is not a rectangle a machine cut. The edge wanders, and
+    // how much it wanders is the quality the blueprint recorded — carried in
+    // the fractional part of the shade index so it costs no extra slot.
+    float m = max(abs(u), abs(v)) + fract(rp.w) * 0.09 * repJag;
+    float e = fwidth(m) * 1.2 + 1e-6;
+    float inside = (1.0 - smoothstep(1.0 - e, 1.0 + e, m)) * gate;
+    // Band widths in patch-space, floored at a pixel for the same reason the
+    // plate seam is: an 8 cm gap round a 20 m plate is a hundredth of a pixel
+    // at the distance the damage frame is shot, and an outline that cannot be
+    // resolved is not an outline.
+    // Ceilinged as well as floored: on a patch that has shrunk to a handful of
+    // pixels the bands would otherwise be wider than the patch and the ring
+    // would fold through its own centre. Past that point the whole set is
+    // sub-pixel and the plate's flat shade is the honest answer.
+    float bw = clamp(1.1 * pxKm * length(ru.xyz), 0.030, 0.14);
+    float seamBand = (1.0 - smoothstep(bw, bw * 2.2, abs(m - 1.0))) * gate;
+    float lipBand  = (1.0 - smoothstep(bw * 1.6, bw * 3.4, abs(m - (1.0 - bw * 2.6)))) * inside;
+    // The bolt line, and only if the blueprint says this repair was bolted
+    // rather than welded — carried in the SIGN of the proud height, so the
+    // whole set still costs three vec4s per slot.
+    float ringBand = (1.0 - smoothstep(bw * 1.2, bw * 2.6, abs(m - (1.0 - bw * 5.5))))
+                   * step(0.45, fract((abs(u) > abs(v) ? v : u) * 5.5))
+                   * inside * step(0.0, ru.w);
+    // Last patch wins rather than accumulating: two overlapping repairs are a
+    // later job laid over an earlier one, not a double-thickness plate.
+    if (inside > repCov) {
+      repCov = inside;
+      repAge = rv.w;
+      repProud = abs(ru.w);
+      float si = floor(rp.w) - 1.0;
+      repCol = mix(mix(uPatch0, uPatch1, step(0.5, si)), uPatch2, step(1.5, si));
+    }
+    repSeam = max(repSeam, seamBand);
+    repLip  = max(repLip,  lipBand);
+    repRing = max(repRing, ringBand);
+  }
+  // FULL substitution, not a lean. The per-plate replaced field above is a
+  // batch difference and mixes at 0.72 for that reason; this is a plate that
+  // was cut somewhere else, primed somewhere else and bolted on by somebody in
+  // a suit, and it is a different piece of steel. Anything less than a real
+  // substitution and PATCH_MIN_SEPARATION's whole point — that the shade must
+  // clear the grain the grade adds — is thrown away on the mix.
+  //
+  // A fresh patch is also CLEANER than the hull round it (nobody paints over a
+  // repair, but nor has it had thirty years of dirt on it), and an old one has
+  // caught up. That is the second axis the timeline reads on, and it is applied
+  // in the directional-wear block below where dirt exists.
+  albedo = mix(albedo, repCol, repCov * 0.92);
+  // Recess round it, bare cut edge inboard of that, bolt heads on the ring.
+  albedo *= 1.0 - 0.45 * repSeam;
+  albedo = mix(albedo, uMetal * 0.85, max(repLip * 0.40, repRing * 0.50));
+
   // --- fasteners and welds -------------------------------------------------
   //
   // Whether a joint is bolted or welded is a decision the yard made for the
@@ -1076,6 +1423,15 @@ void main() {
   // It runs aft, it pools on downward faces, and it collects in the gaps.
   float dirt = streak * (0.45 + 0.55 * clamp(-N.y * 0.6 + 0.55, 0.0, 1.0));
   dirt = mix(dirt, 1.0, 0.30 * plateSeam);
+  // ...and it collects hardest where something is BOLTED TO THE PLATE. vBent.w
+  // is the baked occlusion, which is high in exactly one place: the few
+  // centimetres of plating a bracket foot, a hatch rim, a pipe clamp or a
+  // greeble base sits against. Grime does not start in the middle of a panel;
+  // it starts at a fitting, and BRIEF §7 asks for it around hatches by name.
+  // The trail downstream of those fittings is the drip term in the stain
+  // loop below — this is its anchor, and it is free: the channel is already
+  // being read four lines further down for corrosion.
+  dirt = mix(dirt, 1.0, 0.45 * smoothstep(0.22, 0.72, clamp(vBent.w, 0.0, 1.0)));
   // A HULL-LONG GRADIENT, not a mean. Everything a ship emits — propellant
   // residue, radiator plume, vented atmosphere, its own dust — travels one way
   // along the flow axis, so the plating aft of the drive is filthy and the nose
@@ -1090,6 +1446,11 @@ void main() {
   // ARCHITECTURE §6: everything is dirty. Ribbons over clean paint is a model of
   // a hull; the film is a floor with ribbons on top of it.
   dirt = clamp((0.26 + 0.74 * dirt) * uGrime * uWearA.z * 1.9, 0.0, 1.0);
+  // A repair is dated, and dirt is how a date shows on a hull: last month's
+  // patch is conspicuously cleaner than the plate round it and thirty years ago
+  // has caught up completely. Together with the shade, the recess and the bolt
+  // ring this is what lets a viewer say WHICH repair is recent without a label.
+  dirt *= mix(1.0, mix(0.40, 1.12, repAge), repCov);
 
   // Analytic stain sources. Soot from the exhaust axes, heat staining off the
   // radiators, frost off cryogenic vents — three masks from one loop, because
@@ -1099,6 +1460,15 @@ void main() {
   float bake = 0.0;
   float rime = 0.0;
   float wash = 0.0;
+  // How far up the temper scale a heat-stained fragment has got. A radiator
+  // root runs hot and the plate a few metres away runs cooler, and steel does
+  // not fade smoothly between them — it walks a fixed sequence of interference
+  // colours. Accumulated as an f-weighted mean of the along-axis coordinate so
+  // it is a POSITION on that sequence rather than a strength. See the temper
+  // ramp where bake is consumed.
+  float bakeT = 0.0;
+  // Grime running DOWNSTREAM of real hardware. See the drip block in the loop.
+  float drip = 0.0;
   for (int i = 0; i < SHIP_STAIN_MAX; i++) {
     vec4 s  = uStain[i];
     vec4 ax = uStainAxis[i];
@@ -1136,18 +1506,56 @@ void main() {
     f *= live * fract(ax.w);
 
     float kind = floor(ax.w);
+    float isBake = step(0.5, kind) * (1.0 - step(1.5, kind));
     soot += f * (1.0 - step(0.5, kind));
-    bake += f * step(0.5, kind) * (1.0 - step(1.5, kind));
+    bake += f * isBake;
+    bakeT += f * isBake * u;
     rime += f * step(1.5, kind);
+    // GRIME TRAILING DOWNSTREAM OF A FITTING, which is the one directional wear
+    // BRIEF §7 names that this file had nothing at all for. The streak field
+    // above is anisotropic but it has no ORIGIN: it is the same ribbon noise at
+    // the nose as at the tail, which is the "uniform noise laid evenly over
+    // everything" failure arrived at from the anisotropic end.
+    //
+    // Every slot in this array is a real piece of hardware bolted to the hull —
+    // a nozzle throat, a radiator root, a tank boss — with a real position off
+    // the blueprint. A deposit leaving one of them travels along the SHIP's flow
+    // axis, not along the source's own axis, so the trail is a narrow cone about
+    // flow starting at the fitting: wide as the fitting at its foot, three
+    // times that at the end of its run, and it exists only downstream.
+    //
+    // Costs one dot, one length and two smoothsteps inside a loop that is
+    // already resident. It is deliberately NOT its own analytic set: a second
+    // eight-slot loop to say "grime runs aft of things" would be the most
+    // expensive sentence in the shader.
+    float dAlong = dot(d, flow);
+    float dPerp  = length(d - flow * dAlong);
+    float run    = clamp(dAlong / max(s.w * 26.0, 1e-9), 0.0, 1.0);
+    drip += live * step(0.0, dAlong)
+          * (1.0 - smoothstep(s.w * (1.1 + 2.2 * run) * 0.35, s.w * (1.1 + 2.2 * run), dPerp))
+          * (1.0 - run) * (1.0 - run);
     // The plume lights the plating. A real light would cost a shadow pass and a
     // permutation; this is a distance-and-facing gradient off the same sources,
     // and its e-folding length is derived from the nozzle, not from a constant.
     wash += live * (1.0 - step(0.5, kind))
           * exp(-dl / max(s.w * 9.0, 1e-9)) * max(dot(N, -d / dl), 0.0);
   }
-  soot = clamp(soot * uWearA.w, 0.0, 1.0);
+  // Soot is the deposit whose absence the engine frame is judged on, so it gets
+  // its weight back: uWearA.w is a 0..1 character knob out of families.ts (0.7
+  // on a Kessler) and multiplying a mask that already tapers by it left the
+  // plating a nozzle-diameter outboard of a bell at a third of the deposit it
+  // should carry. The taper does the storytelling; the weight only says which
+  // yards run dirty engines.
+  soot = clamp(soot * (0.45 + 0.75 * uWearA.w), 0.0, 1.0);
   bake = clamp(bake * uWearB.x, 0.0, 1.0);
+  // Position on the temper sequence, not a strength: normalise out the weight.
+  bakeT = clamp(bakeT / max(bake / max(uWearB.x, 1e-4), 1e-4), 0.0, 1.0);
   rime = clamp(rime * uWearB.w, 0.0, 1.0);
+  // The trail ribbons up with the same streak noise the rest of the grime uses,
+  // so it reads as dirt running rather than as a painted cone, and then it JOINS
+  // the dirt field instead of becoming a ninth independent mask.
+  drip = clamp(drip, 0.0, 1.0) * (0.35 + 0.65 * streak);
+  dirt = clamp(dirt + drip * 0.55 * uGrime * uWearA.z * 1.9, 0.0, 1.0);
 
   // --- damage history: dated, directional wounds --------------------------
   //
@@ -1224,11 +1632,28 @@ void main() {
   // border drawn around every plate on the ship, and it was a large part of why
   // the lit hull measured as a mid-grey. It also has to disappear on a hull
   // whose joints are moulded rather than butted, hence uSeamVis.
-  float plateEdge = (1.0 - smoothstep(0.006, 0.038, dom.x)) * kPlate * uSeamVis;
+  float plateEdge = (1.0 - smoothstep(0.006, max(0.038, seamPx * 3.0), dom.x)) * kPlate * uSeamVis;
   edge = clamp(max(edge, plateEdge * 0.45), 0.0, 1.0);
+  // THE CORNER, which is a different thing from the edge and is the one the
+  // critic asked to measure. dom.w is the distance to the plate's OTHER edge —
+  // the far side of the pair the fragment sits between — so a fragment with
+  // both distances small is in a corner, and nowhere else on a hull is. A plate
+  // corner is what a handling frame catches, what a boot finds, what a suit
+  // backpack scrapes and where the topcoat cracks first, so it goes further
+  // through to bare metal than the edge band ever does. It is a small area by
+  // construction (four spots per plate) so it lifts nothing but itself.
+  float plateCorner = (1.0 - smoothstep(0.010, max(0.055, seamPx * 4.0), dom.w))
+                    * (1.0 - smoothstep(0.010, max(0.055, seamPx * 4.0), dom.x))
+                    * kPlate;
   float wearNoise = os_fbm(P * (46.0 / L) + uSeed.yxz, 3, 2.2, 0.55) * 0.5 + 0.5;
   float wear = smoothstep(0.55, 0.95,
                  edge * (0.25 + 1.05 * wearNoise) * (0.4 + 0.8 * vSurf.x)) * uWearA.x;
+  // Corner wear is not gated on the noise the way the edge band is: a corner
+  // wears because of what it IS, not because the dice said so. It keeps the
+  // part's own exposure gate — a corner nobody can reach stays painted — and a
+  // light noise modulation so four identical spots per plate do not read as a
+  // stamped pattern.
+  wear = max(wear, plateCorner * (0.55 + 0.45 * wearNoise) * (0.35 + 0.85 * vSurf.x) * uWearA.x);
   float chip = smoothstep(0.72, 0.80, os_fbm(P * (27.0 / L) + uSeed, 3, 2.4, 0.5) * 0.5 + 0.5)
              * smoothstep(0.06, 0.50, edge) * uWearA.x;
 
@@ -1262,8 +1687,41 @@ void main() {
   float bare = clamp(wear + chip * 0.7 + scuff * 0.16 + pit * 0.55, 0.0, 1.0);
 
   // --- markings -----------------------------------------------------------
-  // The faction's accent hue appears here and nowhere else on the plating.
+  //
+  // THE ACCENT IS A RATION, AND IT WAS BEING SPENT LIKE A LIVERY.
+  //
+  // ARCHITECTURE §6 allows one saturated accent and never more than two
+  // saturated hues on screen. Measured on ship-hero-close, 25.5% of the lit hull
+  // exceeded saturation 0.30 — 17.2% of it warm, and the warm half is this loop.
+  // At that area the orange has stopped marking anything: it is the hull's
+  // colour, the oxide chevrons no longer separate from the plate they are meant
+  // to warn about, and the frame carries three chroma families (orange marking,
+  // blue plume wash, cool plate) rather than two.
+  //
+  // Two things were spending it, and neither of them is the accent's hue.
+  //
+  // 1. THE STRIPE. Kind 2 covered |v| < 0.75 of its whole decal rectangle in
+  //    solid accent. A painted band on a real hull is a band — a fraction of a
+  //    deck height with a hard edge — not three quarters of the area it is
+  //    registered against. Narrowed to a band with a hard edge and a thin
+  //    companion line, which is both more legible AND a fifth of the area.
+  //
+  // 2. THE TEXT. Registry numbers, load ratings and stencils were painted in
+  //    the FACTION ACCENT. Nobody stencils a load rating in hazard orange; they
+  //    stencil it in white or black, because the point of a stencil is that it
+  //    is readable and the point of an accent is that it is rare. Text and
+  //    numerals now take a low-chroma stencil ink derived from the trim, so
+  //    they still read as painted markings and stop competing.
+  //
+  // What keeps the accent: hazard chevrons (that is what a hazard colour is
+  // FOR), the narrowed band, and the emblem — which is the faction read and is
+  // twenty pixels of ring. Fewer, smaller, better placed, exactly as asked.
   #ifdef SHIP_MARKINGS
+  // Stencil ink: the trim's own hue pulled most of the way to achromatic and
+  // lifted, i.e. the pale grey-white a yard actually stencils with. Bound to the
+  // plate through uTrim, so it follows HULL_KEY_SCALE and can never become the
+  // brightest thing on the ship.
+  vec3 stencilInk = mix(uTrim, vec3(dot(uTrim, vec3(0.30, 0.59, 0.11))), 0.82) * 1.35;
   for (int i = 0; i < SHIP_MARK_MAX; i++) {
     vec4 m  = uMark[i];
     vec4 mu = uMarkU[i];
@@ -1283,16 +1741,24 @@ void main() {
                * smoothstep(0.45, 0.80, dot(N, nrm));
 
     float kind = m.w;
+    float isText = 1.0 - step(0.5, kind);
     float ink = 0.0;
-    // 0 — painted text from the glyph atlas.
+    // 0 — painted text from the glyph atlas. STENCIL INK, not accent.
     float row = mv.w;
     vec2  auv = vec2(u * 0.5 + 0.5, (row + (v * 0.5 + 0.5)) / max(uMarkRows, 1.0));
-    ink += texture2D(uMarkAtlas, auv).r * (1.0 - step(0.5, kind));
-    // 1 — hazard chevrons round exhausts and moving parts.
+    ink += texture2D(uMarkAtlas, auv).r * isText;
+    // 1 — hazard chevrons round exhausts and moving parts. Accent, and the
+    //     clearest case for it on the whole ship.
     float chev = step(0.5, fract((u * 3.0 + abs(v) * 1.6) * 1.5));
     ink += chev * step(0.5, kind) * (1.0 - step(1.5, kind));
-    // 2 — a painted band; the cheapest faction read there is.
-    ink += (1.0 - smoothstep(0.75, 1.0, abs(v))) * step(1.5, kind) * (1.0 - step(2.5, kind));
+    // 2 — a painted band. A BAND: one part in five of the decal's height, with
+    //     a hard edge and a thin companion line inboard of it, which is how a
+    //     yard actually paints one and is a fifth of the area the old
+    //     three-quarter fill covered.
+    float bandCore = 1.0 - smoothstep(0.16, 0.21, abs(v));
+    float bandLine = (1.0 - smoothstep(0.40, 0.44, abs(v))) * smoothstep(0.33, 0.37, abs(v));
+    ink += clamp(bandCore + bandLine * 0.9, 0.0, 1.0)
+         * step(1.5, kind) * (1.0 - step(2.5, kind));
     // 3 — the emblem: a bold ring cut by a chevron. Geometric, so it survives
     //     being 20 px across, which a detailed crest would not.
     float rr = length(vec2(u, v));
@@ -1305,7 +1771,7 @@ void main() {
     float cov = clamp(ink, 0.0, 1.0) * gate * kBay
               * (1.0 - mu.w * smoothstep(0.30, 0.85, wearNoise))
               * (1.0 - 0.7 * bare);
-    albedo = mix(albedo, uAccent, cov);
+    albedo = mix(albedo, mix(uAccent, stencilInk, isText), cov);
   }
   #endif
 
@@ -1330,17 +1796,41 @@ void main() {
   albedo = mix(albedo, uPrimer, chip * 0.55);          // primer under the topcoat
   albedo = mix(albedo, uMetal, bare);                  // then bare steel
   albedo = mix(albedo, uOxide, corr * 0.85);           // oxide in the crevices
-  // Soot is warm and it eats the paint's chroma as well as its value.
-  albedo = mix(albedo, uScorch, soot * 0.9);
-  // Heat staining is temper colour, not dirt: it shifts hue before it darkens.
-  // Purely multiplicative now. The + uOxide * 0.30 this replaces was an
-  // ADDITIVE term worth +45% of the hull's own red on Kessler's palette, laid
-  // over whatever area the radiator stain covered — a light source with no
-  // light behind it, and one more contributor to a hull measuring warm where
-  // the direction says cool. Temper colour is thin-film interference on steel:
-  // it moves hue and it loses a little value. It never adds any.
-  albedo = mix(albedo, albedo * vec3(1.30, 0.94, 0.62), bake * 0.6);
-  albedo = mix(albedo, vec3(0.42, 0.47, 0.55), rime * 0.6);
+  // Soot. It darkens and it DESATURATES — a deposit of carbon is the least
+  // chromatic thing on a ship — and both are now guaranteed rather than
+  // inherited from whatever value a faction happened to author for scorch:
+  // VALUE_CEILING.scorch binds uScorch below the plate, so the deposit under a
+  // nozzle is always a real, monotonic darkening no matter whose hull it is on
+  // or what HULL_KEY_SCALE did to the plate underneath it.
+  albedo = mix(albedo, mix(uScorch, vec3(dot(uScorch, vec3(0.30, 0.59, 0.11))), 0.5), soot * 0.95);
+  // Heat staining is TEMPER COLOUR, and temper colour is a sequence, not a
+  // tint. Steel run up in temperature walks straw -> bronze -> plum -> blue as
+  // the oxide film thickens, and the thing that decides where on that walk a
+  // patch of plate sits is HOW FAR IT IS FROM THE HEAT — which is precisely
+  // bakeT, the along-axis coordinate of the radiator stain that produced it.
+  //
+  // The single warm multiply this replaces (1.30, 0.94, 0.62 at 0.6) shifted
+  // hue by about six percent over whatever area the radiator covered, which is
+  // why the critic could not identify heat staining anywhere on the ship: it
+  // was a uniform faint warm wash, i.e. the thing BRIEF §7 rejects, applied to
+  // the one mask that had a real position to key off. Ramped, it is a set of
+  // concentric bands round a radiator root that nothing else on a hull looks
+  // like, and it is still purely multiplicative — temper never ADDS value.
+  //
+  // All three triples are normalised to luminance <= 1 (0.98, 0.86, 0.78), so
+  // the statement above stays true by construction at every point on the ramp:
+  // this is a rotation with a slight darkening and never a lift, which is what
+  // stops a radiator surround becoming the one place on the hull with a light
+  // source behind it.
+  vec3 temper = mix(mix(vec3(1.26, 0.93, 0.47),   // straw, right at the root
+                        vec3(1.24, 0.72, 0.58),   // bronze/plum
+                        smoothstep(0.10, 0.45, bakeT)),
+                    vec3(0.62, 0.78, 1.18),       // and blue at the cool end
+                    smoothstep(0.45, 0.85, bakeT));
+  albedo = mix(albedo, albedo * temper, bake * 0.85);
+  // Frost. uRime is value-bound to the plate — see VALUE_CEILING.rime for the
+  // near-white constant this replaces and why it was a lamp.
+  albedo = mix(albedo, uRime, rime * 0.6);
 
   // The wound timeline, in order of age. Oldest first so a fresh strike through
   // an old scar still shows its bright rim.
@@ -1352,7 +1842,13 @@ void main() {
   // constant. Un-clamped, every wound bottomed out at the scorch colour on a
   // lit surface and the hull histogram went bimodal: cream plate, black blobs,
   // and nothing in between.
-  albedo = mix(albedo, max(albedo * 0.34, uScorch * 1.6), scarDark * 0.85);
+  //
+  // Expressed as a MULTIPLE of the plate plus a soot tint rather than as a max()
+  // against a palette constant. max(albedo * 0.34, uScorch * 1.6) was only a
+  // clamp while uScorch happened to be darker than the plate; with the plate
+  // scaled into the key it is not, and the max would have inverted — the
+  // deepest part of every dent coming out BRIGHTER than the plate around it.
+  albedo = mix(albedo, albedo * 0.34 + uScorch * 0.30, scarDark * 0.85);
 
   // Grime last, because it settles on top of everything above it — including
   // the wounds, which is what makes an old one read as old.
@@ -1439,12 +1935,21 @@ void main() {
   // highlight, and it was — the coherent reflection is the term that arrives
   // wearing the STAR's colour rather than the paint's.
   float filmT = clamp(uFilmDepth * (0.58 + 0.42 * dirt), 0.0, 1.0);
-  albedo *= max(exp2(-SHIP_FILM_STOPS * filmT), SHIP_FILM_FLOOR);
+  float film  = max(exp2(-SHIP_FILM_STOPS * filmT), SHIP_FILM_FLOOR);
+  albedo *= film;
 
   // Trim, and only on the handful of fittings the crew actually grab. Applied
   // across everything merely "exposed" it stops being trim and becomes a second
   // hull colour.
-  albedo = mix(albedo, uTrim, smoothstep(0.90, 1.0, vSurf.x) * 0.22);
+  //
+  // FILMED, like the plate it sits on. This mix happens after the weathering
+  // film, so an unfilmed uTrim arrived at 4.6x the value of the plating round
+  // it — a handrail is a different coat of paint, not a strip of light, and on
+  // a hull where vSurf.x is high over whole fittings this was one of the bright
+  // near-white patches the value finding is about. The weld bead below already
+  // carried this argument in its comment; the trim, the rivet head and the weld
+  // bead's own oxide were the three places it had not been applied.
+  albedo = mix(albedo, uTrim * film, smoothstep(0.90, 1.0, vSurf.x) * 0.22);
 
   // Cavity: a seam is a hole, so it is darker and rougher than the plate.
   albedo *= 1.0 - 0.34 * plateSeam - 0.20 * bayGroove;
@@ -1453,7 +1958,7 @@ void main() {
   // them, but only a little after the film — mixed towards a value tied to the
   // plate so a rivet field can never become a field of sparkling white dots on
   // a near-black hull. The read comes from the dome's shading, not from this.
-  albedo = mix(albedo, mix(uMetal * 0.9, albedo * 1.5, 0.55), rivet * 0.16);
+  albedo = mix(albedo, mix(uMetal * 0.9 * film, albedo * 1.5, 0.55), rivet * 0.16);
   rough = mix(rough, 0.42, rivet * 0.25);
   // Weld metal is a different material from the plate either side of it: heat
   // tint, no topcoat, and a coarse ripple. It is DARKER than the paint, not
@@ -1466,7 +1971,7 @@ void main() {
   // is supposed to be a scar on. Everything upstream of the film (primer, bare
   // steel, oxide, scars, patches) is filmed with the plate and needs no such
   // treatment.
-  albedo = mix(albedo, albedo * 0.62 + uOxide * 0.10, weld * 0.55);
+  albedo = mix(albedo, albedo * 0.62 + uOxide * 0.10 * film, weld * 0.55);
   rough = mix(rough, 0.88, weld * 0.6);
   // Paint tooth, as a ROUGHNESS field rather than as a normal or an albedo
   // tint. That is what a blast profile physically is — a variation in microfacet
@@ -1523,7 +2028,19 @@ void main() {
     // recess plus a lip standing proud on one side of it gives each seam a
     // bright edge on the key side and a black one opposite, which is the whole
     // difference between a joint and a decal.
-    float lip = sm_seam(abs(dom.x - 0.017), 0.006)
+    // The lip that stands proud on ONE side of each joint, which is what turns
+    // a groove into a lit edge and a shadowed edge rather than a grey line —
+    // the scale critic's "give the grooves a lit bevel on one side so they
+    // survive at low luminance" is this term.
+    //
+    // Placed and sized RELATIVE TO seamW rather than at fixed cell fractions.
+    // seamW is now floored at a pixel (see the plate seam block), so a lip
+    // pinned at 0.017 +/- 0.006 of a cell sat inside the widened groove at hero
+    // distance and cancelled against it — the bevel was being drawn underneath
+    // the recess it was supposed to be the edge of. Anchored to the groove's
+    // own width it always lands just outboard of it, at every distance.
+    float lipW = max(seamW * 0.75, 0.004);
+    float lip = sm_seam(abs(dom.x - seamW * 2.1), lipW)
               * (step(0.5, sm_hash21(vec2(pid * 19.0, 4.4))) * 2.0 - 1.0);
     float depth = clamp(uSeamDepth, 0.0, SEAM_RELIEF_MAX);
 
@@ -1549,6 +2066,15 @@ void main() {
     // amplifying it would only wreck them.
     float hCoarse = (-bayGroove * 1.6 + patchSign * replaced * kPlate * 1.2
                      + scarBright * 0.6 - scarDark * 2.2) * depth;
+    // The recorded repairs, at their OWN recorded height rather than at a
+    // fraction of the seam depth. RepairEvent.proud is 103-115 mm on the
+    // wreck's big patches — four times a seam and a real step — and it is the
+    // only reason a viewer can tell a plate that was bolted on from a plate
+    // that was repainted. The recess round the patch goes in with it, so the
+    // outline is a shadow line as well as a value break: BRIEF §7 asks for
+    // proud AND wrong-shade, and this is the half the geometry already built
+    // and the material was not shading.
+    hCoarse += repCov * repProud - repSeam * repProud * 0.55;
 
     // Micro: rolling scale and oil-canning in the plate itself. This is the
     // band that was missing entirely — it existed only as a 17% albedo tint,
@@ -1614,7 +2140,18 @@ void main() {
   // showroom key), so every point of specular fraction is a point of warmth
   // laid over paint authored at R/B = 0.82 specifically to come back neutral.
   // Metals keep their own F0 — a bare steel chip is supposed to be a mirror.
-  vec3  F0 = mix(vec3(mix(0.040, 0.009, filmT)), albedo, metalness);
+  //
+  // BEER-LAMBERT, like the albedo's film, and DEEPER — see SPEC_FILM_STOPS.
+  // mix(0.040, 0.009, filmT) was a linear interpolation towards a floor, so
+  // the reference hull at filmT 0.49 kept 62% of factory-fresh lacquer's
+  // Fresnel; a chalked surface has no interface left to reflect coherently off
+  // and does not stop at 62% of one. coh is the single number for how much of
+  // the coherent reflection survives the film, and it is the same number the
+  // lobe attenuation and the environment lobe read, because it is one physical
+  // quantity and having three of them is how the last three rounds each moved
+  // one and left the others paying.
+  float coh = exp2(-SHIP_SPEC_STOPS * filmT * (0.45 + 0.55 * uPaintFade));
+  vec3  F0 = mix(vec3(0.040 * coh), albedo, metalness);
   vec3  F  = F0 + (1.0 - F0) * pow(1.0 - VoH, 5.0);
 
   // Dust does not only broaden the specular lobe, it ABSORBS it: a film of it
@@ -1651,8 +2188,18 @@ void main() {
   // much film is on it, and having the pigment darken with the dirt while the
   // lobe attenuated with only the ship-wide average is what let a heavily
   // streaked panel keep a clean-plate highlight.
-  float filmed = (1.0 - 0.55 * max(dirt, soot))
-               * (1.0 - 0.72 * filmT * (0.45 + 0.55 * uPaintFade));
+  //
+  // THE SECOND HALF OF coh, AND WHY IT IS APPLIED TWICE ON PURPOSE. The
+  // coherent reflection makes a round trip: it passes through the film on the
+  // way in and again on the way out, and it only has to be scattered once at
+  // either end to stop being coherent. So its survival goes as coh^2 while the
+  // pigment, which is generated below the film and only has to diffuse back
+  // out, goes as the shallower SHIP_FILM_STOPS. That single exponent difference
+  // is the whole of the value AND hue correction: it takes the achromatic share
+  // of a lit fragment from 48% to about 28%, which hands the majority of the
+  // pixel back to the paint for the first time and is the only condition under
+  // which an authored hull hue can survive to the frame.
+  float filmed = (1.0 - 0.55 * max(dirt, soot)) * coh;
 
   vec3 spec = (D * G / max(4.0 * NoV * NoL, 1e-4)) * F * NoL * filmed;
   // No 1/PI on diffuse: uSunColor is authored as irradiance with PI already
@@ -1719,19 +2266,29 @@ void main() {
   // coefficient goes up to keep the rim itself bright while the body it wraps
   // goes dark.
   //
-  // DELIBERATELY NOT CUT with the rest of the achromatic budget, and this is a
-  // regression guard rather than an oversight. ship-star-rimlight is a backlit
-  // frame whose entire subject is this term — the hull there is already almost
-  // pure black and the rim is the only thing that says a ship is present — so
-  // trimming the rim to help the key-lit frames would have traded one named
-  // fail condition for another. The 7th-power confinement is what keeps it from
-  // becoming a halo, and it is unchanged; only the coefficient comes down, and
-  // only by enough to stop the broad camera-facing area collecting a haze it
-  // should not have. A hull's silhouette must still be findable against black.
+  // CUT WITH THE ACHROMATIC BUDGET, BUT ONLY BY HALF, and that ratio is the
+  // regression guard rather than an exemption.
+  //
+  // The previous round exempted this term outright: ship-star-rimlight is a
+  // backlit frame whose entire subject is this rim, the hull there is nearly
+  // black, and trimming the rim to help the key-lit frames trades one named fail
+  // condition for another. But measured by screen area against the showroom key
+  // the sheen is 10.3% of the LIT hull too, and an exempt 10% is a floor the
+  // value finding cannot get under no matter what the albedo and the lobe do —
+  // it alone puts the median at display 45 with everything else at zero.
+  //
+  // sqrt(coh) is the compromise and it is not arbitrary: a grazing reflection
+  // crosses the film at a shallow angle, so geometrically it should be attenuated
+  // MORE than a normal-incidence one, not less — but a rim at grazing incidence
+  // is also the one place where the film's own particles catch the light rather
+  // than hiding it. Half the film's authority is the honest reading of those two
+  // pulling opposite ways, and on the reference hull it leaves the rim at 62% of
+  // its r5 strength while the lobe it wraps goes to 28%. The rim therefore gets
+  // RELATIVELY brighter against its own hull, which is what a rim is for.
   float graze = pow(1.0 - NoV, 7.0);
   float sheen = smoothstep(0.02, 0.34, dot(N, uSunDir)) * sunVis;
   col += uSunColor * graze * sheen * (0.042 + 0.135 * (1.0 - rough))
-       * (1.0 - 0.65 * max(dirt, soot)) * ao;
+       * (1.0 - 0.65 * max(dirt, soot)) * ao * sqrt(coh);
 
   // --- self illumination ---------------------------------------------------
   // Amber leaking from a badly seated panel. Rationed hard — a handful of seams,
@@ -1742,9 +2299,18 @@ void main() {
   // was nine times the value of the hull it was leaking out of. On the dorsal
   // sail that put a scatter of saturated orange dashes across the plating and
   // took the frame straight into "more than one saturated hue competing".
+  //
+  // The gain is expressed as a MULTIPLE OF THE HULL'S OWN REFLECTANCE, not as an
+  // absolute radiance: what makes a light leak read as a leak rather than as a
+  // neon strip is its ratio to the plating it is escaping from, and that ratio
+  // has to survive the plate being scaled into the key. 1.82 * uPlateRef
+  // reproduces the previous 0.11 exactly on the palette it was tuned against and
+  // then follows HULL_KEY_SCALE down with everything else, instead of becoming
+  // a saturated amber dash nine times the value of a hull that moved underneath
+  // it. uAmber itself is a light and is deliberately not scaled.
   float leak = plateSeam * step(0.978, sm_hash21(vec2(pid * 57.0, 7.3)));
   leak *= smoothstep(0.5, 0.8, sm_hash21(vec2(floor(dom.z * 5.0), pid * 13.0)));
-  col += uAmber * leak * (0.55 + 0.45 * sin(uTime * 2.1 + pid * 40.0)) * 0.11;
+  col += uAmber * leak * (0.55 + 0.45 * sin(uTime * 2.1 + pid * 40.0)) * (1.82 * uPlateRef);
 
   // Every lit aperture pools light on the plating around it. An emitter that
   // lights nothing is a sticker; these pools are also the only second light
@@ -1784,7 +2350,38 @@ void main() {
   // blew the thrust structure to flat white in every drive-on frame. It also
   // stole the exposure — a subject-weighted meter reads that as the ship's
   // level and stops the iris down on everything else.
-  col += uPlumeColor * albedo * (1.0 - metalness) * clamp(wash, 0.0, 1.0)
+  //
+  // AND IT IS THE SHIP'S SECOND-LARGEST SATURATED AREA, which is why it comes
+  // down here rather than in propulsion.ts. Masking ship-hero-close for
+  // saturation > 0.30 puts 7.7% of the lit hull in the COOL bucket, and every
+  // one of those pixels is inside the aft third of the ship where this term is
+  // non-zero — mean RGB (40, 50, 69), i.e. this wash and nothing else. On the
+  // CRUISE frames it is 35-40%. ARCHITECTURE §6 allows a cool engine light and
+  // the plume itself is that light; a saturated blue bounce spread over the
+  // whole thrust structure is a THIRD chroma family competing with the accent,
+  // and the checkerboard end caps the identity critic marked down are this term
+  // catching alternate cells.
+  //
+  // The correction is to the wash's CHROMA and not to its level, and that
+  // split is deliberate. uPlumeColor is palette.engineCore — the
+  // chromaticity of the plume's own CORE, the hottest, most saturated part of
+  // it — and what actually reaches plating several metres off-axis is the
+  // broad, far whiter shock structure and the diffuse glow around it. Using
+  // the core's chromaticity for the spill is the same category error as using
+  // a nozzle's exit radius for a radiator's stain: right number, wrong part of
+  // the object. Pulled 55% towards its own luminance the wash sits at
+  // saturation 0.32 instead of 0.56, which is still unmistakably a cold engine
+  // light — ARCHITECTURE §6 asks for one — and stops being a third saturated
+  // FAMILY spread over the whole thrust structure.
+  //
+  // The 6.0 gain is deliberately UNCHANGED. It multiplies albedo, so it is
+  // already a ratio to the plating it lights and it follows HULL_KEY_SCALE down
+  // in step with the key-lit surfaces; cutting it as well would take the aft
+  // plating below the shadow-side floor the value finding explicitly protects,
+  // and that floor is the only thing keeping the drive structure from becoming
+  // a black hole in the drive-on frames.
+  vec3 washCol = mix(uPlumeColor, vec3(dot(uPlumeColor, vec3(0.30, 0.59, 0.11))), 0.55);
+  col += washCol * albedo * (1.0 - metalness) * clamp(wash, 0.0, 1.0)
        * uThrottle * 6.0 * ao;
 
   // --- re-entry ------------------------------------------------------------
@@ -2072,23 +2669,90 @@ function lumOf(r: number, g: number, b: number): number {
 }
 
 /**
+ * Plate stock, as the shader wants it: the authored reflectance scaled into the
+ * project's key (`HULL_KEY_SCALE`) and tilted cool (`HULL_COOL_TILT`).
+ *
+ * `cool` is off for the patch and mismatch stock — those are other people's
+ * plate and the whole point of them is that they do not match this hull's tint.
+ */
+function plateStock(c: RGB | undefined, fallback: readonly [number, number, number], cool: boolean): Float32Array {
+  const out = v3(c, fallback);
+  out[0] *= HULL_KEY_SCALE;
+  out[1] *= HULL_KEY_SCALE;
+  out[2] *= HULL_KEY_SCALE;
+  if (!cool) return out;
+  const before = lumOf(out[0], out[1], out[2]);
+  out[0] /= HULL_COOL_TILT;
+  out[2] *= HULL_COOL_TILT;
+  // The tilt is a hue rotation, so its luminance change is given back. Value is
+  // HULL_KEY_SCALE's business and hue is this one's; keeping them separable is
+  // what makes either of them tunable against a measurement.
+  const after = lumOf(out[0], out[1], out[2]);
+  if (after > 1e-9) {
+    const k = before / after;
+    out[0] *= k;
+    out[1] *= k;
+    out[2] *= k;
+  }
+  return out;
+}
+
+/**
  * The ship's reference plate luminance — the value every other albedo constant
  * is measured against. Mean of the four plate shades, because that is what the
  * production-batch mix in `SURFACE_FRAG` actually averages to over a hull.
+ *
+ * Measured on the SCALED plate, so `VALUE_CEILING` continues to mean "a stop
+ * above the plate this ship actually renders" rather than "a stop above the
+ * plate somebody authored against a different key". Everything the ceiling
+ * touches — bare metal, accent, trim, primer, oxide, scorch, rime — therefore
+ * follows `HULL_KEY_SCALE` down without a second constant.
  */
 function plateLuminance(palette: ShipPalette): number {
   const shades = palette.plateShades;
   const n = Math.min(shades.length, 4);
   if (n === 0) {
     const h = palette.hull ?? [0.05, 0.055, 0.05];
-    return Math.max(lumOf(h[0], h[1], h[2]), 1e-5);
+    return Math.max(lumOf(h[0], h[1], h[2]) * HULL_KEY_SCALE, 1e-5);
   }
   let sum = 0;
   for (let i = 0; i < n; i++) {
     const c = shades[i];
     sum += lumOf(c[0], c[1], c[2]);
   }
-  return Math.max(sum / n, 1e-5);
+  return Math.max((sum / n) * HULL_KEY_SCALE, 1e-5);
+}
+
+/**
+ * Plate stock for a repair: scaled and ceilinged like any other plate, then
+ * pushed away from the hull's own value until it is a shade a viewer can find.
+ *
+ * See `PATCH_MIN_SEPARATION`. The push is along whichever side of the plate the
+ * palette author already put it on, so a faction that wanted a lighter patch
+ * gets a lighter one; a shade sitting on the plate's own value within 2% has no
+ * authored intent to respect and is broken by index parity instead, which keeps
+ * the set spread rather than piling every ambiguous shade on one side.
+ */
+function patchStock(
+  c: RGB | undefined,
+  fallback: readonly [number, number, number],
+  plateLum: number,
+  index: number,
+): Float32Array {
+  const out = plateStock(c, fallback, false);
+  const lum = lumOf(out[0], out[1], out[2]);
+  if (lum <= 1e-6 || plateLum <= 1e-6) return out;
+  const ratio = lum / plateLum;
+  const lighter = Math.abs(ratio - 1) < 0.02 ? index % 2 === 0 : ratio >= 1;
+  const spread = lighter
+    ? Math.max(ratio, 1 + PATCH_MIN_SEPARATION)
+    : Math.min(ratio, 1 - PATCH_MIN_SEPARATION);
+  const target = Math.min(spread, VALUE_CEILING.patch);
+  const k = target / ratio;
+  out[0] *= k;
+  out[1] *= k;
+  out[2] *= k;
+  return out;
 }
 
 /**
@@ -2145,26 +2809,31 @@ function makeUniforms(budget: TierBudget, palette: ShipPalette, markRows: number
     uSeed: { value: new Float32Array([0, 0, 0]) },
     uAftSpan: { value: new Float32Array([-0.015, 0.015]) },
 
-    uPlate0: { value: v3(palette.plateShades[0] ?? palette.hull, [0.05, 0.055, 0.05]) },
-    uPlate1: { value: v3(palette.plateShades[1] ?? palette.hull, [0.05, 0.055, 0.05]) },
-    uPlate2: { value: v3(palette.plateShades[2] ?? palette.hull, [0.05, 0.055, 0.05]) },
-    uPlate3: { value: v3(palette.plateShades[3] ?? palette.plateShades[0] ?? palette.hull, [0.05, 0.055, 0.05]) },
-    uPatch0: { value: v3Capped(palette.patchShades[0] ?? palette.hull, [0.08, 0.07, 0.05], pl, VALUE_CEILING.patch) },
-    uPatch1: {
-      value: v3Capped(palette.patchShades[1] ?? palette.patchShades[0] ?? palette.hull, [0.04, 0.046, 0.044], pl, VALUE_CEILING.patch),
-    },
-    uPatch2: {
-      value: v3Capped(palette.patchShades[2] ?? palette.patchShades[0] ?? palette.hull, [0.095, 0.048, 0.022], pl, VALUE_CEILING.patch),
-    },
-    uMismatch: {
-      value: v3Capped(palette.mismatch[0] ?? palette.patchShades[0] ?? palette.hull, [0.05, 0.05, 0.055], pl, VALUE_CEILING.patch),
-    },
+    uPlate0: { value: plateStock(palette.plateShades[0] ?? palette.hull, [0.05, 0.055, 0.05], true) },
+    uPlate1: { value: plateStock(palette.plateShades[1] ?? palette.hull, [0.05, 0.055, 0.05], true) },
+    uPlate2: { value: plateStock(palette.plateShades[2] ?? palette.hull, [0.05, 0.055, 0.05], true) },
+    uPlate3: { value: plateStock(palette.plateShades[3] ?? palette.plateShades[0] ?? palette.hull, [0.05, 0.055, 0.05], true) },
+    uPatch0: { value: patchStock(palette.patchShades[0] ?? palette.hull, [0.08, 0.07, 0.05], pl, 0) },
+    uPatch1: { value: patchStock(palette.patchShades[1] ?? palette.patchShades[0] ?? palette.hull, [0.04, 0.046, 0.044], pl, 1) },
+    uPatch2: { value: patchStock(palette.patchShades[2] ?? palette.patchShades[0] ?? palette.hull, [0.095, 0.048, 0.022], pl, 2) },
+    uMismatch: { value: patchStock(palette.mismatch[0] ?? palette.patchShades[0] ?? palette.hull, [0.05, 0.05, 0.055], pl, 1) },
     uAccent: { value: v3Capped(palette.accent, [0.4, 0.078, 0.008], pl, VALUE_CEILING.accent) },
     uTrim: { value: v3Capped(palette.trim, [0.1, 0.098, 0.062], pl, VALUE_CEILING.trim) },
     uMetal: { value: v3Capped(palette.bareMetal, [0.2, 0.21, 0.235], pl, VALUE_CEILING.metal) },
     uPrimer: { value: v3Capped(palette.primer, [0.125, 0.034, 0.018], pl, VALUE_CEILING.underlayer) },
     uOxide: { value: v3Capped(palette.oxide, [0.088, 0.032, 0.013], pl, VALUE_CEILING.underlayer) },
-    uScorch: { value: v3(palette.scorch, [0.011, 0.0095, 0.0088]) },
+    uScorch: { value: v3Capped(palette.scorch, [0.011, 0.0095, 0.0088], pl, VALUE_CEILING.scorch) },
+    // Rime has no palette entry — no faction authors "what frost looks like on
+    // our steel" — so the chromaticity is fixed and only the VALUE is bound to
+    // the hull. See VALUE_CEILING.rime for what this replaces.
+    uRime: { value: v3Capped([0.42, 0.47, 0.55], [0.42, 0.47, 0.55], pl, VALUE_CEILING.rime) },
+    // The reference plate luminance, so the handful of shader constants that
+    // must stay a RATIO of the hull rather than an absolute radiance — the
+    // amber seam leak, chiefly — follow HULL_KEY_SCALE without a second knob.
+    // Anything that is a light (uAmber, uPlumeColor, lamp tints, re-entry
+    // incandescence) deliberately does NOT read this: photons do not care what
+    // the paint reflects.
+    uPlateRef: { value: pl },
     uAmber: { value: v3(palette.interiorLight, [1.0, 0.52, 0.13]) },
     uPlumeColor: { value: v3(palette.engineCore, [0.16, 0.36, 1.0]) },
     uGrimeTint: { value: grimeTint(palette) },
@@ -2189,6 +2858,9 @@ function makeUniforms(budget: TierBudget, palette: ShipPalette, markRows: number
     uStainAxis: { value: new Float32Array(budget.stain * 4) },
     uWound: { value: new Float32Array(budget.wound * 4) },
     uWoundAxis: { value: new Float32Array(budget.wound * 4) },
+    uRepair: { value: new Float32Array(budget.repair * 4) },
+    uRepairU: { value: new Float32Array(budget.repair * 4) },
+    uRepairV: { value: new Float32Array(budget.repair * 4) },
   };
 
   if (markRows > 0) {
@@ -2229,6 +2901,10 @@ function acquireProgram(bp: ShipBlueprint, quality: QualitySettings, markRows: n
     // — the per-ship position on it — varies.
     SHIP_FILM_STOPS: FILM_STOPS.toFixed(3),
     SHIP_FILM_FLOOR: FILM_FLOOR.toFixed(3),
+    // The same film's authority over the coherent reflection. Deeper than the
+    // albedo's, for the reason SPEC_FILM_STOPS states.
+    SHIP_SPEC_STOPS: SPEC_FILM_STOPS.toFixed(3),
+    SHIP_REPAIR_MAX: Math.max(budget.repair, 1),
   };
   if (budget.rivets) defines.SHIP_RIVETS = '';
   if (budget.bump) defines.SHIP_BUMP = '';
@@ -2361,6 +3037,9 @@ class ShipMaterials implements ShipMaterialSet {
   private readonly stainAxis: Float32Array;
   private readonly wound: Float32Array;
   private readonly woundAxis: Float32Array;
+  private readonly repair: Float32Array;
+  private readonly repairU: Float32Array;
+  private readonly repairV: Float32Array;
   private readonly mark: Float32Array;
   private readonly markU: Float32Array;
   private readonly markV: Float32Array;
@@ -2415,6 +3094,9 @@ class ShipMaterials implements ShipMaterialSet {
     this.stainAxis = new Float32Array(budget.stain * 4);
     this.wound = new Float32Array(budget.wound * 4);
     this.woundAxis = new Float32Array(budget.wound * 4);
+    this.repair = new Float32Array(budget.repair * 4);
+    this.repairU = new Float32Array(budget.repair * 4);
+    this.repairV = new Float32Array(budget.repair * 4);
     this.mark = new Float32Array(budget.mark * 4);
     this.markU = new Float32Array(budget.mark * 4);
     this.markV = new Float32Array(budget.mark * 4);
@@ -2513,6 +3195,7 @@ class ShipMaterials implements ShipMaterialSet {
     this.fillLamps(bp);
     this.fillStains(bp);
     this.fillWounds(bp);
+    this.fillRepairs(bp);
     this.atlas = this.fillMarkings(bp, markings);
   }
 
@@ -2600,6 +3283,103 @@ class ShipMaterials implements ShipMaterialSet {
       );
       // floor = severity in 16 steps, fract = age. Same idiom as packStain().
       this.woundAxis[w * 4 + 3] = Math.round(clamp01(d.severity) * 15) + Math.min(age, 0.999);
+      w++;
+    }
+  }
+
+  /**
+   * The repairs, as an analytic set — the identity half of BRIEF §7's "a
+   * replaced panel sits slightly proud AND in the wrong shade".
+   *
+   * `volumes.ts` already builds every one of these as geometry off the same
+   * list. This is the other half, and until now there was no other half: the
+   * shader invented its own wrong-shade plates from a hash over the plate grid,
+   * so the proud plates and the wrong-shade plates were disjoint sets and the
+   * biggest, most story-carrying repair on a hull was the one guaranteed not to
+   * be shaded at all.
+   *
+   * Ranked by AREA, not by kind. A capped list has to keep the repairs a viewer
+   * can name, and what makes a repair nameable is how much of the ship it is: a
+   * 19.3 x 22.6 m patch on a 95.7 m hull is a rebuild and a 0.4 m weld doubler
+   * next to it is a detail. `repairsFilterKind` deliberately does not exist —
+   * a `weld-seam` big enough to make the top four has earned its slot.
+   *
+   * PACKING, three vec4s per slot:
+   *   uRepair   xyz centre, w = (shadeIndex + 1) + edgeRoughness
+   *             floor(w) - 1 is the shade, fract(w) is how ragged the cut is.
+   *             w == 0 therefore means "empty" with no separate flag.
+   *   uRepairU  xyz across-axis pre-divided by half-width; |w| = proud height
+   *             in km, and its SIGN says whether the patch was bolted (+) or
+   *             welded (-), so the bolt ring costs no fourth vector.
+   *   uRepairV  xyz up-axis pre-divided by half-height, w = age 0 fresh..1 old.
+   */
+  private fillRepairs(bp: ShipBlueprint): void {
+    this.repair.fill(0);
+    this.repairU.fill(0);
+    this.repairV.fill(0);
+    const slots = this.repair.length / 4;
+    if (slots === 0) return;
+
+    const area = (r: { readonly halfExtents: readonly [number, number] }): number =>
+      Math.max(r.halfExtents[0], 0) * Math.max(r.halfExtents[1], 0);
+    const events = bp.repairHistory
+      .filter((r) => area(r) > 0)
+      .slice()
+      .sort((a, b) => area(b) - area(a));
+
+    // Same age curve as `fillWounds`, and deliberately the same one: a repair
+    // and the wound it addresses have to agree about what "old" means or the
+    // patch reads as newer than the hole it is covering.
+    const OLD_SECONDS = 30 * 365 * 24 * 3600;
+    const FRESH_SECONDS = 30 * 24 * 3600;
+    // A patch wider than a third of the hull is not a patch, it is a rebuild,
+    // and the geometry module has already expressed it as a changed volume.
+    const halfMax = this.hullLen * 0.34;
+
+    let w = 0;
+    for (const r of events) {
+      if (w >= slots) break;
+      const hw = Math.min(Math.max(r.halfExtents[0], 1e-6), halfMax);
+      const hh = Math.min(Math.max(r.halfExtents[1], 1e-6), halfMax);
+
+      // Outward normal and up come off the frame; across is their cross
+      // product. Both stored pre-divided so the shader's rectangle test is a
+      // plain |u| <= 1, exactly as the markings are.
+      const n = r.frame.forward;
+      const up = r.frame.up;
+      const ax = up[1] * n[2] - up[2] * n[1];
+      const ay = up[2] * n[0] - up[0] * n[2];
+      const az = up[0] * n[1] - up[1] * n[0];
+      const al = Math.hypot(ax, ay, az) || 1;
+      const ul = Math.hypot(up[0], up[1], up[2]) || 1;
+
+      const shade = Math.min(Math.max(Math.round(r.shadeIndex), 0), 2);
+      // Edge raggedness is the inverse of the recorded quality, held below 1 so
+      // it cannot carry into the integer part.
+      const ragged = Math.min(1 - clamp01(r.quality), 0.98);
+
+      this.repair[w * 4] = r.frame.origin[0];
+      this.repair[w * 4 + 1] = r.frame.origin[1];
+      this.repair[w * 4 + 2] = r.frame.origin[2];
+      this.repair[w * 4 + 3] = shade + 1 + ragged;
+
+      this.repairU[w * 4] = ax / al / hw;
+      this.repairU[w * 4 + 1] = ay / al / hw;
+      this.repairU[w * 4 + 2] = az / al / hw;
+      // Floored so a repair the blueprint recorded as barely proud still throws
+      // a shadow line: the whole finding is that a step nobody can see is not a
+      // step. Ceilinged at a plate's own thickness so a patch cannot look like
+      // a box bolted to the hull.
+      const proud = Math.min(Math.max(r.proud, this.panelSize * 0.02), this.panelSize * 0.05);
+      this.repairU[w * 4 + 3] = r.fastenerCount > 0 ? proud : -proud;
+
+      this.repairV[w * 4] = (up[0] / ul) / hh;
+      this.repairV[w * 4 + 1] = (up[1] / ul) / hh;
+      this.repairV[w * 4 + 2] = (up[2] / ul) / hh;
+      this.repairV[w * 4 + 3] = clamp01(
+        Math.log(Math.max(r.ageSeconds, FRESH_SECONDS) / FRESH_SECONDS) /
+          Math.log(OLD_SECONDS / FRESH_SECONDS),
+      );
       w++;
     }
   }
@@ -2906,6 +3686,9 @@ class ShipMaterials implements ShipMaterialSet {
     u.uAftSpan.value = this.aftSpan;
     u.uWound.value = this.wound;
     u.uWoundAxis.value = this.woundAxis;
+    u.uRepair.value = this.repair;
+    u.uRepairU.value = this.repairU;
+    u.uRepairV.value = this.repairV;
     u.uWearA.value = this.wearA;
     u.uWearB.value = this.wearB;
     u.uOcc.value = this.occ;

@@ -37,6 +37,7 @@ import {
   Box3,
   BufferGeometry,
   Color,
+  Euler,
   Float32BufferAttribute,
   Group,
   InstancedMesh,
@@ -62,11 +63,13 @@ import {
   HUMAN_HEIGHT_KM,
   frameRight,
   frameToShip,
+  type Aabb,
   type EnginePod,
   type Frame,
   type PrimaryVolume,
   type ShipBlueprint,
   type ShipModule,
+  type ShipRole,
 } from '@/gen/ships/types';
 
 // ===========================================================================
@@ -677,6 +680,79 @@ function isShaderSized(geometry: BufferGeometry | undefined): boolean {
 }
 
 // ===========================================================================
+// Layout arithmetic
+// ===========================================================================
+
+const _posedCorner = new Vector3();
+
+/**
+ * The axis-aligned box a hull occupies once the layout's shared pose is on it.
+ *
+ * Writes the box centre (in the hull's own local frame, rotated) into `centre`
+ * and its half-extents into `half`. Both are needed: the extents are what the
+ * packing spaces, and the centre is the offset between the hull's origin — the
+ * thing the scene graph positions — and the shape the critic sees.
+ *
+ * Re-boxing on world axes overestimates a rotated box by up to ~40%, which is
+ * why the shared pose is applied to the CORNERS rather than to the extents.
+ * The overestimate is not free here: it is spacing bought at the cost of pixels
+ * on every hull in the plate.
+ */
+function posedBox(bounds: Aabb, q: Quaternion, centre: Vector3, half: Vector3): void {
+  let minX = Infinity;
+  let minY = Infinity;
+  let minZ = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let maxZ = -Infinity;
+  for (let k = 0; k < 8; k++) {
+    _posedCorner
+      .set(
+        (k & 1) !== 0 ? bounds.max[0] : bounds.min[0],
+        (k & 2) !== 0 ? bounds.max[1] : bounds.min[1],
+        (k & 4) !== 0 ? bounds.max[2] : bounds.min[2],
+      )
+      .applyQuaternion(q);
+    if (_posedCorner.x < minX) minX = _posedCorner.x;
+    if (_posedCorner.x > maxX) maxX = _posedCorner.x;
+    if (_posedCorner.y < minY) minY = _posedCorner.y;
+    if (_posedCorner.y > maxY) maxY = _posedCorner.y;
+    if (_posedCorner.z < minZ) minZ = _posedCorner.z;
+    if (_posedCorner.z > maxZ) maxZ = _posedCorner.z;
+  }
+  centre.set((minX + maxX) * 0.5, (minY + maxY) * 0.5, (minZ + maxZ) * 0.5);
+  half.set(
+    Math.max((maxX - minX) * 0.5, 1e-4),
+    Math.max((maxY - minY) * 0.5, 1e-4),
+    Math.max((maxZ - minZ) * 0.5, 1e-4),
+  );
+}
+
+/**
+ * Shout when a comparison set drew the same role twice.
+ *
+ * `console.error` rather than `throw`: `scripts/ship-review.mjs` fails the run
+ * on a non-empty console error list, so this is as loud as an assertion, and
+ * unlike a throw it still delivers the frame — a critic who can see the broken
+ * plate beside the message can tell whether the roles or the hulls collapsed.
+ *
+ * Read off the generated BLUEPRINT, not off the shot's parameters. A role
+ * pinned in the table and quietly re-rolled by the generator (a faction that
+ * does not build it, a size band it is never built in) is exactly the case a
+ * check on the request would miss.
+ */
+function reportRoleCollision(entries: readonly CacheEntry[]): void {
+  const seen = new Set<ShipRole>();
+  for (const e of entries) seen.add(e.blueprint.role);
+  if (seen.size === entries.length) return;
+  console.error(
+    `[showroom] ROLE COLLISION: ${entries.length} hulls, ${seen.size} distinct roles ` +
+      `(${entries.map((e) => e.blueprint.role).join(', ')}). A comparison plate with a ` +
+      `repeated role cannot separate "same role" from "same ship".`,
+  );
+}
+
+// ===========================================================================
 // Setup description
 // ===========================================================================
 
@@ -704,8 +780,26 @@ export interface ShowroomSetup {
   readonly fillColor?: Triple;
   readonly fillDirection?: Triple;
   readonly scaleReference?: boolean;
-  /** Gap between hulls as a multiple of their own radii. 1 = just touching. */
+  /**
+   * CLEAR AIR between two neighbouring hulls, as a fraction of the larger of
+   * the two's half-extent along the row. 0 is just touching; every positive
+   * value is a gap the critic can see.
+   *
+   * It used to be "a multiple of their own radii", struck against
+   * `boundingRadius`, and that is what fused two hulls in the r5 DNA plate —
+   * see the packing comment in `configure`. The unit is now the hull's own
+   * POSED box, so the same number means the same gap at any yaw.
+   */
   readonly spacing?: number;
+  /**
+   * Fail loudly when two hulls in the set come out with the same `role`.
+   *
+   * For comparison plates whose experiment is "one control, one variable". A
+   * family plate that draws two tankers is not a test of seed variation: the
+   * critic cannot tell a repeated ROLE from a repeated SHIP, which is the exact
+   * confound the plate exists to expose.
+   */
+  readonly requireDistinctRoles?: boolean;
   /**
    * Break the set into this many rows, stacked vertically.
    *
@@ -913,58 +1007,120 @@ export class Showroom implements GameModule {
     this.subjects = [];
 
     const entries = setup.ships.map((p) => this.resolve(p, tier, quality));
+    if (setup.requireDistinctRoles === true) reportRoleCollision(entries);
 
     // Laid out along X, nose forward, in the order given, broken into `rows`
     // rows stacked in Y. Sorting by size would flatter the frame; the fleet
     // shots exist to show the actual spread, so the order is the caller's and
     // stays deterministic.
-    const gap = setup.spacing ?? 1.35;
+    //
+    // -----------------------------------------------------------------------
+    // PACKED ON WHAT THE HULL PRESENTS, NOT ON THE SPHERE AROUND IT
+    //
+    // `boundingRadius` is a sphere about the hull, so it is the hull's half
+    // LENGTH whichever way the hull is turned. The old packing put centre i+1
+    // at `spacing * r_i + r_{i+1}`, which means a `spacing` below 1 places the
+    // two hulls' own spheres INSIDE each other — at the 0.55 the family plate
+    // was authored with, by 45% of the left hull's radius. That is the fused
+    // pair and the hull hidden behind the centre ship's engine bells in r5:
+    // five seeds went out as three readable shapes, on the one plate whose
+    // whole job is to compare five.
+    //
+    // The 0.55 was itself a compensation. Round three yawed every hull a
+    // quarter turn for the fleet frames, and reasoned that a spacing struck
+    // against the RADIUS was now buying half a hull of dead space — but a
+    // broadside hull presents very nearly its own radius, so the compensation
+    // was owed in the other direction. A unit that changes meaning when the
+    // pose changes will be mis-tuned every time the pose changes.
+    //
+    // So the layout measures each hull's own box AFTER the shared pose and
+    // packs the BOXES edge to edge with real air between them. `spacing` is
+    // that air, as a fraction of the larger neighbour's half-extent: 0 is just
+    // touching, and the number means the same thing at any yaw.
+    const gap = Math.max(setup.spacing ?? 0.3, 0);
     const rows = Math.max(1, Math.min(Math.round(setup.rows ?? 1), Math.max(entries.length, 1)));
     const perRow = Math.ceil(entries.length / rows);
 
+    const pose = new Quaternion().setFromEuler(
+      new Euler(setup.pitch ?? 0, setup.yaw ?? 0, setup.roll ?? 0),
+    );
+    const boxCentre: Vector3[] = [];
+    const boxHalf: Vector3[] = [];
+    for (const e of entries) {
+      const c = new Vector3();
+      const h = new Vector3();
+      posedBox(e.blueprint.dimensions.bounds, pose, c, h);
+      boxCentre.push(c);
+      boxHalf.push(h);
+    }
+
     const px: number[] = new Array(entries.length).fill(0);
     const py: number[] = new Array(entries.length).fill(0);
-    const rowHalfHeight: number[] = [];
+    // Top and bottom of each row's own boxes, in the hulls' shared pose.
+    const rowTop: number[] = [];
+    const rowBottom: number[] = [];
     for (let r = 0; r < rows; r++) {
       const from = r * perRow;
       const to = Math.min(from + perRow, entries.length);
-      let cursor = 0;
-      let hh = 0;
-      const centres: number[] = [];
+      let edge = 0; // X of the right-hand face of the last box placed
+      let top = 0;
+      let bottom = 0;
       for (let i = from; i < to; i++) {
-        const bpr = Math.max(entries[i]!.blueprint.dimensions.boundingRadius, 1e-4);
-        cursor += bpr;
-        centres.push(cursor);
-        cursor += bpr * gap;
-        const bnd = entries[i]!.blueprint.dimensions.bounds;
-        hh = Math.max(hh, (bnd.max[1] - bnd.min[1]) * 0.5);
+        const h = boxHalf[i]!;
+        const c = boxCentre[i]!;
+        if (i > from) edge += gap * Math.max(boxHalf[i - 1]!.x, h.x);
+        // Placed by the box's left face, with the hull's own origin offset
+        // taken back out: on a hull whose engines hang off the aft plate the
+        // origin is nowhere near the middle of its box, and a layout that
+        // spaces origins spaces nothing.
+        px[i] = edge + h.x - c.x;
+        edge += h.x * 2;
+        // A row's vertical extent has to include how much of each hull's DEPTH
+        // the lens projects into the vertical: the fleet cameras sit a few
+        // degrees above the layout plane, so a box that only just cleared at
+        // zero elevation touches the one above it on screen. 0.25 covers
+        // elevations to about 14 degrees, which is the band both fleet shots
+        // are composed in; a steeper fleet camera has to buy its own room with
+        // `spacing`.
+        const vy = h.y + h.z * 0.25;
+        top = i === from ? c.y + vy : Math.max(top, c.y + vy);
+        bottom = i === from ? c.y - vy : Math.min(bottom, c.y - vy);
       }
-      const last = to - 1;
-      const span = to > from ? centres[centres.length - 1]! + entries[last]!.blueprint.dimensions.boundingRadius : 0;
-      const shift = span * 0.5;
-      for (let i = from; i < to; i++) px[i] = centres[i - from]! - shift;
-      rowHalfHeight.push(Math.max(hh, 1e-4));
+      for (let i = from; i < to; i++) px[i] -= edge * 0.5;
+      rowTop.push(top);
+      rowBottom.push(bottom);
     }
+    // A set of one is not a layout. Centring a row on its BOXES is what buys
+    // the fleet plates their even gaps, but for a lone hull it would move the
+    // ship off the world origin by its box offset — up to 15 m on the hero —
+    // for no gain at all, and fifteen of the nineteen shots are single-hull
+    // frames that are not under review. `placeCamera` recentres on the
+    // projected box either way, so this changes nothing a lens can see; it
+    // just keeps those frames byte-comparable with the round they passed in.
+    if (entries.length === 1) px[0] = 0;
     // Rows are stacked top-first, so the reading order of a fleet frame runs
-    // left to right and then down, like any other comparison plate.
-    //
-    // The gap is struck against the taller of the two rows' half-heights, so at
-    // 0.85 the clear air between a hull's deck and the keel above it is roughly
-    // 40% of a hull height. It has to be that generous because the rows are
-    // separated in Y and the camera is never exactly level: a few degrees of
-    // elevation projects each hull's own DEPTH into the vertical, and a block
-    // that only just cleared at zero elevation would touch.
-    const rowGap = 0.85;
-    let vcursor = 0;
-    const rowY: number[] = [];
+    // left to right and then down, like any other comparison plate. The air
+    // between two rows is struck the same way as the air within one — a
+    // fraction of the taller neighbour's half-height, measured on the boxes —
+    // so a row of tugs under a row of freighters is not crushed against them.
+    const rowGap = 0.5;
+    const rowOffset: number[] = [];
+    let ceiling = 0;
     for (let r = 0; r < rows; r++) {
-      vcursor += rowHalfHeight[r]!;
-      rowY.push(vcursor);
-      vcursor += rowHalfHeight[r]! * rowGap;
+      const halfH = (rowTop[r]! - rowBottom[r]!) * 0.5;
+      if (r > 0) ceiling -= rowGap * Math.max((rowTop[r - 1]! - rowBottom[r - 1]!) * 0.5, halfH);
+      rowOffset.push(ceiling - rowTop[r]!);
+      ceiling -= rowTop[r]! - rowBottom[r]!;
     }
-    const vspan = rowY[rows - 1]! + rowHalfHeight[rows - 1]!;
+    // `ceiling` is now the bottom of the last row; the block runs [ceiling, 0].
+    const vshift = ceiling * 0.5;
     for (let i = 0; i < entries.length; i++) {
-      py[i] = rows > 1 ? vspan * 0.5 - rowY[Math.floor(i / perRow)]! : 0;
+      // Single-row sets keep y = 0 exactly as before. `setScaleReference`
+      // places the figure and the container against the hull's own bounds
+      // assuming the hull sits where the blueprint puts it, and a fleet fix
+      // that quietly moved a single hull in Y would take the scale props off
+      // the plating with it.
+      py[i] = rows > 1 ? rowOffset[Math.min(Math.floor(i / perRow), rows - 1)]! - vshift : 0;
     }
 
     let radius = 0;
@@ -1340,6 +1496,84 @@ export class Showroom implements GameModule {
     return 8;
   }
 
+  /**
+   * Check, on the placed camera, that a comparison plate is actually readable:
+   * every hull separate from every other, and every hull inside the frame.
+   *
+   * The layout guarantees clear air between the hulls in WORLD space, which is
+   * the right place to guarantee it — a layout that solved against the camera
+   * would have to be re-solved every time a shot was recomposed. But "clear in
+   * world space" is only "clear on screen" while the lens stays near square to
+   * the layout plane, and nothing else in this file enforces that. So the two
+   * are reconciled here, once, after the camera is placed: the same boxes the
+   * layout packed are projected through the real projection matrix (roll and
+   * all) and the result is printed with the numbers a critic would otherwise
+   * have to measure off the PNG.
+   *
+   * An overlap is a `console.error` because it VOIDS the plate — five hulls
+   * that cannot be told apart answer none of the questions the shot asks — and
+   * `scripts/ship-review.mjs` fails a run whose console carried errors. The
+   * frame margin is printed rather than errored: a hull touching the edge
+   * spoils a plate, it does not invalidate it.
+   *
+   * Called once per shot from `apply()`, never per frame.
+   */
+  reportLayoutSeparation(ctx: EngineContext, shotName: string): void {
+    const n = this.subjects.length;
+    if (n < 2) return;
+    // Once per shot. Everything else on this path allocates far more.
+    const lo: Vector3[] = [];
+    const hi: Vector3[] = [];
+    let margin = 0;
+    for (let si = 0; si < n; si++) {
+      const s = this.subjects[si]!;
+      const bnd = s.blueprint.dimensions.bounds;
+      const min = new Vector3(Infinity, Infinity, Infinity);
+      const max = new Vector3(-Infinity, -Infinity, -Infinity);
+      for (let k = 0; k < 8; k++) {
+        this.scratchPoint
+          .set(
+            (k & 1) !== 0 ? bnd.max[0] : bnd.min[0],
+            (k & 2) !== 0 ? bnd.max[1] : bnd.min[1],
+            (k & 4) !== 0 ? bnd.max[2] : bnd.min[2],
+          )
+          .applyQuaternion(s.root.quaternion)
+          .add(s.position)
+          .project(ctx.camera);
+        min.min(this.scratchPoint);
+        max.max(this.scratchPoint);
+      }
+      lo.push(min);
+      hi.push(max);
+      margin = Math.max(margin, Math.abs(min.x), Math.abs(max.x), Math.abs(min.y), Math.abs(max.y));
+    }
+
+    const collisions: string[] = [];
+    for (let a = 0; a < n; a++) {
+      for (let b = a + 1; b < n; b++) {
+        // A 0.002 NDC tolerance — under two pixels — so a shared edge is not
+        // reported as a fused pair.
+        const gapX = Math.max(lo[a]!.x - hi[b]!.x, lo[b]!.x - hi[a]!.x);
+        const gapY = Math.max(lo[a]!.y - hi[b]!.y, lo[b]!.y - hi[a]!.y);
+        if (Math.max(gapX, gapY) < 0.002) {
+          collisions.push(`${this.subjects[a]!.blueprint.role}#${a}/${this.subjects[b]!.blueprint.role}#${b}`);
+        }
+      }
+    }
+
+    console.info(
+      `[showroom] ${shotName} layout hulls=${n} maxNdc=${margin.toFixed(3)} ` +
+        `spans=${lo.map((v, i) => `[${v.x.toFixed(2)},${hi[i]!.x.toFixed(2)}]`).join(' ')} ` +
+        `overlaps=${collisions.length}`,
+    );
+    if (collisions.length > 0) {
+      console.error(
+        `[showroom] LAYOUT OVERLAP in ${shotName}: ${collisions.join(', ')} — the hulls ` +
+          `share screen area, so this comparison plate cannot be read.`,
+      );
+    }
+  }
+
   private toWorld(s: ShowroomSubject, p: Vector3): void {
     p.applyQuaternion(s.root.quaternion).add(s.position);
   }
@@ -1698,16 +1932,35 @@ const WRECK_SHIP: ShipParams = {
 };
 
 /**
- * Five seeds from one yard, size band pinned and role left free.
+ * Five seeds from one yard, size band pinned, and FIVE DIFFERENT JOBS.
  *
  * Pinning the size class is what makes the frame judgeable: `generateFleet`
  * walks every role, which spans 27 m to 400 m and leaves the small hulls at
  * seven pixels. The DNA question is "do these look related", and that cannot
  * be answered about something too small to see.
+ *
+ * The role used to be left free, and r5 is what that costs: the five seeds drew
+ * gunship / tug / patrol / tanker / tanker. A plate with two tankers on it
+ * cannot answer either half of its own question — a critic looking at two
+ * similar hulls cannot tell "this yard has a house style" from "these two are
+ * the same ship", because the one variable that would have separated them was
+ * duplicated by chance. Role is now a CONTROL, one per hull, and the remaining
+ * free variable is the seed.
+ *
+ * These five are all roles Kessler builds by doctrine (`families.ts`
+ * `roleAffinity`, none of them in `neverBuilds`) and all five list `medium`
+ * among their size classes, so nothing here is a role the generator has to
+ * talk itself into. They are also as far apart in FORM as one size band
+ * allows — sealed countable units, one pressure vessel, machinery outboard,
+ * almost-all-engine, arms and collars — which is what makes "same builder"
+ * a claim about construction language rather than about shape.
  */
-const FAMILY_FLEET: readonly ShipParams[] = [0, 1, 2, 3, 4].map((i) => ({
+const FAMILY_ROLES: readonly ShipRole[] = ['freighter', 'tanker', 'miner', 'tug', 'station-tender'];
+
+const FAMILY_FLEET: readonly ShipParams[] = FAMILY_ROLES.map((role, i) => ({
   seed: hashSeed(0x4c17f11e, `showroom/family/${i}`),
   factionId: 'kessler',
+  role,
   sizeClass: 'medium' as const,
 }));
 
@@ -1980,23 +2233,59 @@ const SHOT_DEFS: readonly ShowroomShotDef[] = [
   {
     name: 'ship-star-rimlight',
     description:
-      'Backlit: the star almost directly behind the hull, six times the hero intensity. ' +
-      'LOOK AT: the rim. A hard, thin, wrapping highlight that traces the true outline, ' +
-      'broken where the form breaks, brightest on edges square to the light. This is the ' +
-      'test of whether the grazing sheen term exists and whether the silhouette survives ' +
-      'contact with a bright background. FAILS IF: the rim is a soft even glow all the way ' +
-      'round; the whole hull washes out; bloom eats the outline; or there is no rim at all ' +
-      'and the ship is a black cut-out.',
+      'A TRUE BACK-KEY: the star behind the hull, high and off one shoulder, six times the ' +
+      'hero intensity, no fill of any kind and the drive shut down, so the only light in ' +
+      'frame is the star and the ship\'s own lamps. LOOK AT: the rim. A hard, thin ' +
+      'highlight along the STAR-FACING side of the outline, broken where the form breaks, ' +
+      'brightest on edges square to the light — and everything facing the lens near black ' +
+      'beneath it. This is the test of whether the grazing sheen term exists and whether the ' +
+      'silhouette survives contact with a bright background. FAILS IF: the rim is a soft ' +
+      'even glow all the way round; the faces turned towards the camera are lifted by ' +
+      'anything at all; the whole hull washes out; bloom eats the outline; or there is no ' +
+      'rim and the ship is a black cut-out.',
+    // WHY THE DRIVE IS COLD, AND IT IS THE FIX RATHER THAN A PREFERENCE.
+    //
+    // r5 came back with 61% of hull pixels above 0.30 saturation, all cool, no
+    // terminator anywhere and a median hull luminance of 54 on a frame whose
+    // subject is supposed to be unlit. That light is not ambient and it is not
+    // the grade: `ShipMaterial` adds `uPlumeColor * wash * uThrottle * 6.0`,
+    // and `uPlumeColor` is [0.16, 0.36, 1.0]. At CRUISE's 0.68 throttle the
+    // drive was washing four units of BLUE over every surface facing the
+    // nozzles, star or no star. A rig that runs the engines during a backlight
+    // test has put a second light on the subject and called the result ambient.
+    // Cold, the hull's only lit surfaces are the ones the star can reach, and
+    // the windows and navigation lights — which are emissive and throttle-
+    // independent — do the separating, exactly as `ship-dark-side` asks for.
+    //
+    // WHY THE STAR MOVED OFF THE VIEW AXIS.
+    //
+    // It was 172 degrees behind: as close to dead astern as makes no
+    // difference. On a hull built of flat developable plate that leaves a
+    // grazing band about eight degrees wide for a rim to live in, and a plate
+    // either falls inside it or misses entirely — mostly it misses, which is
+    // why there was no rim to find. At 148 degrees the band is 32 degrees wide,
+    // so the plates that turn towards the star along one side of the silhouette
+    // catch it and the ones facing the lens still sit at -0.85 and stay black.
+    // The rim becomes a hard edge on ONE side, which is what a rim is; a
+    // highlight that runs the whole way round is the failure this shot lists
+    // first.
+    //
+    // The camera drops off dead astern to a low rear three-quarter for the same
+    // reason: astern, the ship's outline is the engine bell cluster, and there
+    // is no long silhouette for an edge to run along.
     setup: {
       ships: [HERO_SHIP],
-      drive: CRUISE,
-      sunDirection: [-0.16, 0.12, -0.98],
+      drive: COLD,
+      sunDirection: [-0.84, 0.23, -0.49],
       sunColor: [1.0, 0.95, 0.88],
       sunIntensity: 6.0,
-      fillColor: [0.006, 0.008, 0.013],
+      // Zero, and meant literally. ARCHITECTURE §6 allows no ambient fill in
+      // space, and this is the frame that proves the material obeys it; a
+      // token 0.006 here is a number a reader has to argue about.
+      fillColor: [0, 0, 0],
       fillDirection: [0, -1, 0.1],
     },
-    camera: { dir: [0.12, 0.1, 0.98], fovDeg: 24, fill: 0.7, roll: -0.18, aimAt: 'hull' },
+    camera: { dir: [0.58, 0.14, 0.8], fovDeg: 24, fill: 0.7, roll: -0.18, aimAt: 'hull' },
     settle: 3,
   },
   {
@@ -2034,8 +2323,35 @@ const SHOT_DEFS: readonly ShowroomShotDef[] = [
       'figures across. FAILS IF: the hull behind the figure has no feature at all whose ' +
       'size can be checked; hatch, window or plate size contradicts the figure; the plating ' +
       'is so coarse or so fine that the hull could be any length; the reference objects are ' +
-      'the only human-scale things in frame.',
-    setup: { ships: [HERO_SHIP], drive: COLD, scaleReference: true, ...KEY_LIGHT },
+      'the only human-scale things in frame; or the hull behind the reference is unlit and ' +
+      'the props are the only lit objects in the picture.',
+    // THE KEY HAS TO FALL ON THE FLANK THE LENS IS LOOKING AT.
+    //
+    // This is the one shot in the set that stands on the ship's PORT side —
+    // the reference props are placed off the port flank so they read against
+    // plating rather than against space, and `aimAt: 'scale'` frames them.
+    // Every other hull frame stands on the opposite side of the hull, and
+    // `KEY_LIGHT` is authored for those: its sun is 116 degrees off THIS
+    // camera's axis, so the flank in frame was the far side of the terminator. Measured on r5: 89% of ship
+    // pixels below luminance 25, median 8 against a background of 3. The hull
+    // was not dark, it was absent — and with nothing else in frame carrying any
+    // light, PostFX's meter opened to its clamp and blew the container to 212,
+    // which is how a neutral ruler became the brightest object in the picture.
+    //
+    // Mirrored onto the camera's own side: 60 degrees of incidence on a flank
+    // whose normal is nearly the view axis, with the light 53 degrees up. That
+    // is bright enough for the panel grid to read at the reference's own scale
+    // and still raking enough that every hatch lip, rail and proud plate throws
+    // a shadow down the plating — which is the whole point of putting a ruler
+    // against it. Intensity stays at the standard 3.0: the ruler has to be
+    // exposed like every other frame or it is not calibrating anything.
+    setup: {
+      ships: [HERO_SHIP],
+      drive: COLD,
+      scaleReference: true,
+      ...KEY_LIGHT,
+      sunDirection: [-0.5, 0.8, 0.31],
+    },
     camera: { dir: [-0.88, 0.2, 0.43], fovDeg: 30, fill: 0.72, offsetX: -0.18, offsetY: 0.06, aimAt: 'scale' },
     settle: 2,
   },
@@ -2044,13 +2360,16 @@ const SHOT_DEFS: readonly ShowroomShotDef[] = [
   {
     name: 'ship-fleet-family',
     description:
-      'Five seeds from one yard (Kessler), size band pinned, role left free. THE DNA TEST, ' +
-      'and it has two halves that pull against each other. LOOK AT: (1) do these five read ' +
-      'as coming from the same builder — shared construction language, joint style, ' +
-      'proportion habits, radiator architecture, nozzle family; and (2) are they genuinely ' +
-      'FIVE SHIPS rather than one ship with the parts moved. FAILS IF: you cannot name a ' +
-      'single shared trait; or you can name the shared traits but the hulls differ only in ' +
-      'where the bolt-ons landed; or the role of each is unguessable.',
+      'Five seeds from one yard (Kessler), size band pinned, and five DIFFERENT jobs — ' +
+      'left to right, top row then bottom: freighter, tanker, miner, then tug and ' +
+      'station-tender. THE DNA TEST, and it has two halves that pull against each other. ' +
+      'LOOK AT: (1) do these five read as coming from the same builder — shared ' +
+      'construction language, joint style, proportion habits, radiator architecture, nozzle ' +
+      'family; and (2) is each one\'s JOB guessable from its form, or are they one hull with ' +
+      'the parts moved. FAILS IF: you cannot name a single shared trait; or you can name the ' +
+      'shared traits but the hulls differ only in where the bolt-ons landed; or you could not ' +
+      'have guessed the roles in that order. All five hulls must be separately readable — ' +
+      'if any two touch or overlap on screen, the plate is void, say so and stop.',
     // BROADSIDE, and that is the whole shot.
     //
     // Round three photographed this plate from [0.12, 0.5, 0.86] — thirty
@@ -2072,18 +2391,29 @@ const SHOT_DEFS: readonly ShowroomShotDef[] = [
     //
     // `rows: 2` stays. The reason it was introduced — a five-wide row wastes
     // two thirds of the frame's height — is still true; it was the camera that
-    // was wrong, not the layout. Spacing comes down to 0.55 because the gap is
-    // struck against the bounding RADIUS while the hull now presents its
-    // length, so 1.15 was buying half a hull of empty space between neighbours.
+    // was wrong, not the layout. Five in a row would put each hull at roughly
+    // 280 px of length and 45 px of height, which is under the size at which a
+    // critic can read a joint.
+    //
+    // `spacing` is 0.45 of CLEAR AIR now, not 0.55 of an overlapping radius:
+    // see the packing comment in `configure` for what the old unit did to this
+    // plate. 0.45 rather than something tighter because perspective eats about
+    // 40% of the world-space gap at the ends of the row — the hull nearest the
+    // edge is seen from 25 degrees off and its own beam projects into the gap.
+    // Solved against these five blueprints at this lens: the closest pair
+    // clears 60 px of sky at 1920, every hull is 246-604 px long, and the whole
+    // block lands at 0.90 of the frame. The old 0.55-of-a-radius produced five
+    // overlapping pairs on the same five hulls.
     //
     // The key is re-aimed with it: `KEY_LIGHT` puts the sun behind a camera on
     // +Z, which would have left every broadside flank unlit.
     setup: {
       ships: FAMILY_FLEET,
       drive: COLD,
-      spacing: 0.55,
+      spacing: 0.45,
       rows: 2,
       yaw: Math.PI / 2,
+      requireDistinctRoles: true,
       ...KEY_LIGHT,
       sunDirection: [-0.48, 0.46, 0.75],
     },
@@ -2108,10 +2438,17 @@ const SHOT_DEFS: readonly ShowroomShotDef[] = [
     // half again the size of the right, and the difference a critic is asked to
     // attribute to doctrine was partly just perspective. Square to the row,
     // all three are the same number of metres from the lens.
+    // Spacing re-expressed in the new unit and nothing else changed here: r5's
+    // 0.75-of-a-radius left 49 px and 67 px of sky between the three hulls,
+    // which is about 0.23 of a half-length — this plate got away with the bad
+    // unit because a freighter's sphere is a good deal larger than the length
+    // it presents. 0.4 of clear air solves to 75 px between the closest pair
+    // and costs the widest hull 3% of its length. This frame was not one of the
+    // failures; it is touched only because the unit changed underneath it.
     setup: {
       ships: FACTION_FLEET,
       drive: COLD,
-      spacing: 0.75,
+      spacing: 0.4,
       yaw: Math.PI / 2,
       ...KEY_LIGHT,
       sunDirection: [-0.48, 0.46, 0.75],
@@ -2548,6 +2885,9 @@ export function registerShowroomShots(showroom: Showroom): void {
           clear,
           def.name,
         );
+        // The camera is placed; a comparison plate can now be checked against
+        // the only thing that matters about it — what the lens will see.
+        showroom.reportLayoutSeparation(ctx, def.name);
         // Spool before the shutter. Every damped value on a drive starts at
         // zero, so a shot captured cold photographs a powered-down hull no
         // matter which drive state it asked for.
