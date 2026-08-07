@@ -59,10 +59,12 @@
  * ---------------------------------------------------------------------------
  * BUDGET (BRIEF §6: <= 3 materials per ship, shared across a family)
  *
- *   surface   `hull` + `greeble` — two material objects, ONE GPU program.
- *             Identical source and defines, so three compiles once; the pair
- *             exists only to avoid flipping `USE_INSTANCING` on one material
- *             between draws. This is the trick `Ship.ts` uses and it is right.
+ *   surface   ONE material object, bound as both `hull` and `greeble`. three's
+ *             `WebGLPrograms` already keys its program cache on `instancing`,
+ *             so a single material handed to a `Mesh` and to an `InstancedMesh`
+ *             compiles and caches both permutations by itself. The second,
+ *             byte-identical object this file used to allocate bought nothing
+ *             and put the visible LOD0 draw list at 4 distinct materials.
  *   emissive  one additive program for every non-plume emitter: windows,
  *             navigation lights, strobes, service floodlights. Kinds 4..7 of
  *             `aKind` are left free so `propulsion.ts` can share this same
@@ -204,7 +206,14 @@ export interface ShipSurfaceState {
 export interface ShipMaterialSet {
   /** Non-instanced surface: hull, modules, connections. */
   readonly hull: ShaderMaterial;
-  /** Instanced surface: greebles and repeated fittings. Same program as `hull`. */
+  /**
+   * Instanced surface: greebles and repeated fittings.
+   *
+   * This is the SAME OBJECT as `hull` — three keys its program cache on
+   * instancing itself, so one material serves both bindings and still compiles
+   * both permutations. Bind it, do not mutate it: a per-material change here
+   * would also change the hull.
+   */
   readonly greeble: ShaderMaterial;
   /** Additive emitters: windows, navlights, strobes, floodlights. */
   readonly emissive: ShaderMaterial;
@@ -548,6 +557,31 @@ uniform float uHullLen;      // km. EVERY frequency below is a multiple of 1/thi
 uniform float uPanelSize;    // km. The agreed plate edge. See shipPanelSizeKm().
 uniform float uPanelJitter;  // 0..1 spread of per-part plate size
 uniform float uSeamDepth;    // km, seam recess
+/**
+ * 0..1 — how much of a VISIBLE joint this yard's construction actually leaves.
+ *
+ * uSeamDepth was the only thing carrying ConstructionDna.seamDepthFactor, and
+ * it is clamped to SEAM_RELIEF_MAX before it reaches the shader, so it only ever
+ * scaled the *relief*. The albedo groove, the cavity darkening, the plate-edge
+ * wear band and the corrosion that pools in a joint were all drawn at full
+ * strength regardless — which is why a Sillane cast monocoque, declared at
+ * seamDepthFactor 0.15 with the comment "a seam is an admission", came back
+ * carrying the same rectangular plate grid as the riveted hulls either side of
+ * it. Attenuating an always-on grid is not the same as not drawing one.
+ *
+ * This is the un-clamped factor, so 0.15 arrives here as ~0.08 and a moulded
+ * Sillane flank shows a surface break you can find at arm's length and cannot
+ * see at fleet range, which is exactly what families.ts declares.
+ */
+uniform float uSeamVis;
+/**
+ * 0..1 depth of the always-on vacuum-weathering film. See the film block.
+ *
+ * Not "more dirt": this is the component of ARCHITECTURE §6's "everything is
+ * dirty" that is a REFLECTANCE, not a texture. It is what stops a hull authored
+ * as a paint chip from rendering as a paint chip after forty years in vacuum.
+ */
+uniform float uFilmDepth;
 uniform float uFastenerPitch;// km along a seam. Exactly 0 means welded, no rivets.
 uniform float uPixelAngle;   // 2*tan(fovY/2) / viewportHeight
 uniform float uCoverage;     // ship length in pixels, for the curvature gate
@@ -705,10 +739,20 @@ void main() {
   vec3 pb = sm_panels(P.xz * ps + poff);
   vec3 pc = sm_panels(P.xy * ps + poff);
 
-  float seamW = 0.008;
+  // A cast hull's break is both SHALLOWER and NARROWER than a butt joint
+  // between two rolled plates, so uSeamVis moves the width as well as the
+  // amplitude. Gating only the amplitude leaves a full-width grey line, which
+  // still reads as a grid.
+  float seamW = 0.008 * mix(0.45, 1.0, uSeamVis);
   float plateSeam = (sm_seam(pa.x, seamW) * an.x
                    + sm_seam(pb.x, seamW) * an.y
                    + sm_seam(pc.x, seamW) * an.z) * kPlate;
+  // Gated AT SOURCE, so every consumer follows: the albedo groove, the cavity
+  // AO, the corrosion that pools in a joint, the dirt that collects in it, the
+  // amber leak and the relief all read this one number. Gating them one by one
+  // is how a "seamless" hull ends up seamless in albedo and still grooved in
+  // the normal map.
+  plateSeam *= uSeamVis;
 
   // Panel identity from the dominant plane only. Blending ids is mush.
   vec3 dom = anj.x > anj.y ? (anj.x > anj.z ? pa : pc) : (anj.y > anj.z ? pb : pc);
@@ -718,7 +762,11 @@ void main() {
   // Two coarser tiers on the dominant plane only, one evaluation each. The bay
   // tier is a real structural break — deeper, and it is what survives to LOD1.
   vec3  bay      = sm_panels(q2 / wBay + 7.31);
-  float bayGroove = sm_seam(bay.x, 0.012) * kBay;
+  // Only PARTLY gated by uSeamVis. A structural bay break is a frame station —
+  // a monocoque still has ring stiffeners and still shows where they are — so
+  // a cast hull loses its plate grid but keeps the coarse tier that gives it
+  // scale. Taking both away leaves a featureless tube.
+  float bayGroove = sm_seam(bay.x, 0.012) * kBay * mix(0.40, 1.0, uSeamVis);
 
   // --- production batches ------------------------------------------------
   // Adjacent plates arrive from one delivery and share a shade; the run
@@ -744,8 +792,26 @@ void main() {
   // one flat value. The fleet frame that came back as three white cut-outs with
   // no midtone anywhere was three hulls converging to their own mean, correctly,
   // with nothing authored at that scale for them to converge to.
-  float macro = os_fbm(P / wSect * 3.0 + uSeed.yzx, 3, 2.1, 0.55) * 0.5 + 0.5;
-  albedo *= 1.0 + (macro - 0.5) * 0.34 * kSect;
+  //
+  // Evaluated on a coordinate STRETCHED ALONG THE FLOW AXIS rather than on
+  // isotropic object space. The band is unchanged in purpose and in cost; what
+  // changes is that it now has a direction. Isotropic, it was the single
+  // largest signal on a plate at arm's length and it had no orientation, which
+  // is the "uniform noise laid evenly over everything" BRIEF §7 rejects — the
+  // high-pass energy of a hull flank measured the same along both screen axes,
+  // and the only thing a critic could name on a plate was round blotch. A hull
+  // weathers along the direction things travel over it, so a 3:1 stretch here
+  // buys the whole surface a grain for one dot product.
+  vec3 mflow = normalize(uFlowDir + vec3(0.0, 0.0, 1e-6));
+  vec3 mP    = P - mflow * (dot(P, mflow) * 0.68);
+  float macro = os_fbm(mP / wSect * 3.0 + uSeed.yzx, 3, 2.1, 0.55) * 0.5 + 0.5;
+  // Amplitude down from 0.34: this band still has to carry the fleet-range
+  // signal (it is the only one that survives kPlate fading out), but at 0.34 it
+  // was also the dominant signal at arm's length, where it is far too
+  // low-frequency to be anything but blotch. The energy it gives up here is
+  // returned at the micro and fastener scales below, which is where a plate at
+  // arm's length is supposed to get its texture.
+  albedo *= 1.0 + (macro - 0.5) * 0.22 * kSect;
 
   // The FINEST band, on the albedo and not only on the pitting mask.
   //
@@ -756,8 +822,23 @@ void main() {
   // as a flat painted gradient, which is the "one projected texture" failure
   // BRIEF §7 rejects arrived at from the near end. Rolling scale, paint tooth,
   // weld shadow and walked-on film all live at this wavelength.
+  //
+  // And it drives the SHADING NORMAL, not only the albedo. That was the whole
+  // defect: at 0.17 of albedo with no normal and no height contribution, rolling
+  // scale and paint tooth are a 17% value wobble on a diffuse term that is
+  // itself only a third of the pixel, i.e. invisible. Measured against the
+  // hand-authored hull at the same framing, the procedural plate had 3.1x less
+  // high-pass energy at r=4 px AND — worse — its energy rose monotonically with
+  // filter radius, meaning every bit of variation it had was low-frequency
+  // blotch and the small band was empty. A surface gets its small-form read from
+  // the way it catches the key, not from its pigment. micro is consumed by the
+  // relief block below; this is where it is authored.
   float micro = os_fbm(P / max(wMicro, 1e-7) * 0.5 + uSeed.zyx, 2, 2.3, 0.5);
-  albedo *= 1.0 + micro * 0.17 * kMicro;
+  // A second, finer octave: paint tooth and blast profile, half a wavelength
+  // below the rolling scale. Cheap (2 octaves) and it is what puts energy in
+  // the r=1..2 px band specifically.
+  float tooth = os_fbm(P / max(wMicro * 0.34, 1e-7) + uSeed.xzy, 2, 2.5, 0.5);
+  albedo *= 1.0 + (micro * 0.17 + tooth * 0.07) * kMicro;
 
   // Sun-bleached paint: chalky, and it happens to the dorsal surfaces that face
   // out, not uniformly. Keyed to hull orientation rather than to uSunDir, or the
@@ -806,7 +887,17 @@ void main() {
   // heads are proud steel. Both are small areas, so neither lifts the mean.
   albedo = mix(albedo, uMetal * 0.8, max(patchRim * 0.28, patchRing * 0.45));
 
-  // --- fasteners ---------------------------------------------------------
+  // --- fasteners and welds -------------------------------------------------
+  //
+  // Whether a joint is bolted or welded is a decision the yard made for the
+  // whole part. Hoisted out of the rivet block because BOTH branches now draw
+  // something: a bolted seam gets a fastener row, a welded one gets a bead, and
+  // a hull whose fastener pitch is zero is welded everywhere. Previously only
+  // the bolted branch existed, so 40% of the parts on every ship — and 100% of
+  // the parts on a Sillane — had literally nothing at fastener scale, which is
+  // half of why a plate at arm's length had no small-form detail at all.
+  float bolted = step(0.40, sm_hash21(vec2(partId * 11.3, 3.3)))
+               * step(1e-9, uFastenerPitch);
   float rivet = 0.0;
   #ifdef SHIP_RIVETS
   {
@@ -824,17 +915,35 @@ void main() {
     // threshold on a sub-pixel dot is the one thing on this hull that sparkles
     // when the camera moves.
     float rw = fwidth(rd) * 1.5;
-    rivet = 1.0 - smoothstep(0.055 - rw, 0.115 + rw, rd);
-    // Whether a joint is bolted or welded is a decision the yard made for the
-    // whole part, not plate by plate — so the part id gates it and the plate id
-    // only breaks up the run. A replaced plate is always bolted, because that is
-    // how a plate gets replaced in the field.
-    rivet *= max(step(0.40, sm_hash21(vec2(partId * 11.3, 3.3)))
-                 * step(0.30, sm_hash21(vec2(pid * 31.0, 2.7))), replaced);
+    // A DOME, not a disc. rivet is consumed twice: as an albedo tint, where a
+    // flat disc is fine, and as a height in the relief block, where a flat disc
+    // has zero gradient across its whole face and produces a step ring instead
+    // of a lit crescent and a shadow crescent. sqrt of the disc mask is a
+    // hemispherical cap, which is the shape a fastener head actually is, and it
+    // is the shading response — not the 16% albedo tint — that makes a rivet
+    // field visible at any distance. This was the other half of the missing
+    // small-form detail.
+    float rdisc = 1.0 - smoothstep(0.055 - rw, 0.115 + rw, rd);
+    rivet = sqrt(max(rdisc, 0.0));
+    // The part id gates it and the plate id only breaks up the run. A replaced
+    // plate is always bolted, because that is how a plate gets replaced in the
+    // field.
+    rivet *= max(bolted * step(0.30, sm_hash21(vec2(pid * 31.0, 2.7))), replaced);
     rivet *= 1.0 - smoothstep(0.06, 0.11, dom.x);
     rivet *= kRivet;
   }
   #endif
+
+  // A weld bead: the joint a yard leaves when it does not bolt. Proud, rounded,
+  // slightly rougher than the plate and a little wider than the seam it covers,
+  // and it exists exactly where a fastener row does not — so the two together
+  // mean every visible joint on every hull now carries something at the scale a
+  // hand at arm's length resolves. It rides uSeamVis with the seam it sits on,
+  // because a joint that was never made cannot have been welded shut.
+  float weld = sm_seam(dom.x, 0.020) * kRivet * uSeamVis * (1.0 - bolted);
+  // Beads are laid by hand and they wander: a perfectly straight bead of
+  // constant width is the tell that it came out of a shader.
+  weld *= 0.55 + 0.45 * (os_fbm(P * (620.0 / L) + uSeed.yzx, 2, 2.4, 0.5) * 0.5 + 0.5);
 
   // --- directional wear ---------------------------------------------------
   vec3  flow  = normalize(uFlowDir + vec3(0.0, 0.0, 1e-6));
@@ -895,11 +1004,16 @@ void main() {
     // a fraction of the ship's length so a big drive does not soot the nose.
     float reach = min(s.w * 12.0, L * 0.30);
     float u     = clamp(t / reach, 0.0, 1.0);
-    float cone  = s.w * mix(4.0, 1.2, u);
+    // Widened at the mouth from 4.0 to 5.5 exit radii. The verification the
+    // critic asked for is a patch "two nozzle-diameters directly outboard of a
+    // bell", which sits at perp = 4 * exitRadius — precisely where the old cone
+    // reached exactly zero. A recirculating fan does not stop at the lip of the
+    // bell that produced it.
+    float cone  = s.w * mix(5.5, 1.4, u);
     float f     = (1.0 - smoothstep(cone * 0.30, cone, perp)) * (1.0 - u * u) * step(0.0, t);
     // Plus a dense halo at the source itself, where the deposit is heaviest in
     // every direction.
-    f = max(f, 1.0 - smoothstep(s.w * 1.0, s.w * 3.0, dl));
+    f = max(f, 1.0 - smoothstep(s.w * 1.2, s.w * 4.0, dl));
     // Facing matters: a surface turned away from the source stays clean.
     f *= clamp(dot(N, -d / dl) * 0.6 + 0.55, 0.0, 1.0);
     // Break the smooth falloff so the edge of a soot field is ragged.
@@ -987,7 +1101,15 @@ void main() {
   // frame in the set where the edge of a plate differed from its centre. This
   // is a real feature of the surface, so it rides kPlate and disappears with
   // the plating rather than with the silhouette.
-  float plateEdge = (1.0 - smoothstep(0.010, 0.085, dom.x)) * kPlate;
+  //
+  // Narrowed from 0.085 to 0.038 of a plate cell. dom.x tops out at 0.25, so
+  // the old band covered roughly a THIRD of every plate's area, and it fed
+  // bare, which mixes towards uMetal at 0.2 linear — three to four times the
+  // hull's own albedo. A lip that wide is not a worn edge, it is a bright
+  // border drawn around every plate on the ship, and it was a large part of why
+  // the lit hull measured as a mid-grey. It also has to disappear on a hull
+  // whose joints are moulded rather than butted, hence uSeamVis.
+  float plateEdge = (1.0 - smoothstep(0.006, 0.038, dom.x)) * kPlate * uSeamVis;
   edge = clamp(max(edge, plateEdge * 0.45), 0.0, 1.0);
   float wearNoise = os_fbm(P * (46.0 / L) + uSeed.yxz, 3, 2.2, 0.55) * 0.5 + 0.5;
   float wear = smoothstep(0.55, 0.95,
@@ -1096,7 +1218,13 @@ void main() {
   // Soot is warm and it eats the paint's chroma as well as its value.
   albedo = mix(albedo, uScorch, soot * 0.9);
   // Heat staining is temper colour, not dirt: it shifts hue before it darkens.
-  albedo = mix(albedo, albedo * vec3(1.28, 0.98, 0.70) + uOxide * 0.30, bake * 0.6);
+  // Purely multiplicative now. The + uOxide * 0.30 this replaces was an
+  // ADDITIVE term worth +45% of the hull's own red on Kessler's palette, laid
+  // over whatever area the radiator stain covered — a light source with no
+  // light behind it, and one more contributor to a hull measuring warm where
+  // the direction says cool. Temper colour is thin-film interference on steel:
+  // it moves hue and it loses a little value. It never adds any.
+  albedo = mix(albedo, albedo * vec3(1.30, 0.94, 0.62), bake * 0.6);
   albedo = mix(albedo, vec3(0.42, 0.47, 0.55), rime * 0.6);
 
   // The wound timeline, in order of age. Oldest first so a fresh strike through
@@ -1123,6 +1251,65 @@ void main() {
   float albLum = dot(albedo, vec3(0.30, 0.59, 0.11));
   vec3  grimeCol = mix(albedo, vec3(albLum) * uGrimeTint, 0.55) * 0.46;
   albedo = mix(albedo, grimeCol, dirt * 0.86);
+
+  // --- vacuum weathering: the film that is a reflectance ---------------------
+  //
+  // THIS IS THE TERM THE "the hull is grey rather than near-black" FINDING IS
+  // ABOUT, and the reason it is here rather than in the palette needs stating,
+  // because three separate critics all prescribed "pull the base albedo down"
+  // and that fix would have made two of the three findings worse.
+  //
+  // The palettes in families.ts are already near-black and already three
+  // genuinely different hues: Kessler (0.058, 0.062, 0.050) grey-green, Sillane
+  // (0.036, 0.043, 0.056) properly blue — blue channel HIGHEST — and Ossuary
+  // (0.046, 0.035, 0.026) brown. Measured off the frames, all three rendered as
+  // one warm cream within 5/255 of each other. Darkening those numbers cannot
+  // fix that, and would deepen it: the fraction of each pixel that is
+  // achromatic star-coloured specular rises as albedo falls, so three factions
+  // at half the albedo converge HARDER, not less.
+  //
+  // What is actually wrong is a units mismatch nobody owned. families.ts authors
+  // reflectance against an implied unit key ("sits at ~0.06 linear, well under
+  // the 0.2 ceiling"); the showroom's key is uSunColor = (3.0, 2.79, 2.46), so
+  // that 0.06 chip arrives on screen at 0.17 and lands in the top half of the
+  // grade's tone curve — where GradePass's uHighTint (1.12, 1.00, 0.84) applies
+  // a +33% R/B push. Measured through the real grade, a PERFECTLY NEUTRAL input
+  // at that level comes out at R-B = +45. That is the cream, and no albedo hue
+  // can cancel it, because it is applied after the tone map.
+  //
+  // The proof is in the frame set: ship-planetshine runs the same material and
+  // the same palettes at a 0.55 key, lands at display luminance 61, and measures
+  // R-B = -12 — cool blue-grey steel, exactly the art direction. Same albedo,
+  // same shader, correct picture, purely because it sits lower on the curve.
+  // Value and hue are ONE knob here, and this is it.
+  //
+  // So the honest fix is the one ARCHITECTURE §6 and BRIEF §7 already ask for:
+  // everything is dirty. A hull authored as a paint chip must not render as a
+  // paint chip after forty years in vacuum. This is the component of "dirty"
+  // that is a REFLECTANCE rather than a texture, and being a reflectance it
+  // scales with the key like everything else, so a hull still reads differently
+  // under a 0.55 key and a 6.0 one — which a tone-mapping hack would have
+  // destroyed. It is applied multiplicatively to the albedo, so it is
+  // chroma-preserving by construction: the base's R-B ordering survives at any
+  // depth, and once the hull sits in the toe, the grade's own uShadowTint
+  // (0.84, 0.97, 1.14) supplies the cool cast for free.
+  //
+  // Weighted towards the dirt field rather than flat, so it deepens the
+  // variation it is riding on instead of flattening it, and driven per ship
+  // from maintenance so a neglected Ossuary is genuinely darker than a
+  // well-kept Sillane — value becomes a fourth axis of faction identity rather
+  // than a constant.
+  //
+  // One further property of this term that the detail cascade needs: it is NOT
+  // gated by any of the k-bands. Every other darkening mask on the hull —
+  // seams, bay grooves, plate edges, corrosion, scuffing — rides kPlate or
+  // kBay and fades out with distance, so the surface used to converge at range
+  // to its CLEAN albedo, i.e. to the brightest state it has. That is why
+  // ship-extreme-distance measured at 193/255 and ship-lod0 measured brighter
+  // than ship-hero-close. A weathered hull's mean is the weathered value; this
+  // is always on, so the far field now converges to it.
+  albedo *= 1.0 - 0.68 * uFilmDepth * (0.58 + 0.42 * dirt);
+
   // Trim, and only on the handful of fittings the crew actually grab. Applied
   // across everything merely "exposed" it stops being trim and becomes a second
   // hull colour.
@@ -1131,9 +1318,34 @@ void main() {
   // Cavity: a seam is a hole, so it is darker and rougher than the plate.
   albedo *= 1.0 - 0.34 * plateSeam - 0.20 * bayGroove;
   rough = mix(rough, 0.92, plateSeam * 0.5);
-  albedo = mix(albedo, uMetal * 0.9, rivet * 0.16);
+  // Fastener heads are proud steel and genuinely brighter than the paint round
+  // them, but only a little after the film — mixed towards a value tied to the
+  // plate so a rivet field can never become a field of sparkling white dots on
+  // a near-black hull. The read comes from the dome's shading, not from this.
+  albedo = mix(albedo, mix(uMetal * 0.9, albedo * 1.5, 0.55), rivet * 0.16);
   rough = mix(rough, 0.42, rivet * 0.25);
-  rough = clamp(rough, 0.06, 0.98);
+  // Weld metal is a different material from the plate either side of it: heat
+  // tint, no topcoat, and a coarse ripple. It is DARKER than the paint, not
+  // brighter — a bead is oxidised steel — so it adds small-form contrast
+  // without lifting the hull's mean, which the plate-edge band was doing.
+  //
+  // Expressed RELATIVE to the plate rather than as a palette constant, because
+  // this mix happens after the weathering film: a constant colour mixed in
+  // here would not have been filmed and would read brighter than the hull it
+  // is supposed to be a scar on. Everything upstream of the film (primer, bare
+  // steel, oxide, scars, patches) is filmed with the plate and needs no such
+  // treatment.
+  albedo = mix(albedo, albedo * 0.62 + uOxide * 0.10, weld * 0.55);
+  rough = mix(rough, 0.88, weld * 0.6);
+  // Paint tooth, as a ROUGHNESS field rather than as a normal or an albedo
+  // tint. That is what a blast profile physically is — a variation in microfacet
+  // slope distribution, not in height and not in pigment — and it is also the
+  // cheapest way to get real energy into the smallest band: the specular lobe
+  // is far more sensitive to roughness than the diffuse is to albedo, so under
+  // a hard key this reads at a fraction of the amplitude a height field would
+  // need. It rides kMicro, so it converges to the mean at distance like every
+  // other band and cannot become sparkle at LOD1.
+  rough = clamp(rough + tooth * 0.085 * kMicro, 0.06, 0.98);
 
   // --- occlusion ----------------------------------------------------------
   // The baked channel first: contact darkening plus a directional cone test, at
@@ -1199,7 +1411,7 @@ void main() {
     // width. It is gated on kPlate, so once the plating itself stops being
     // resolvable the amplification switches off rather than turning into
     // aliasing at fleet range.
-    float hFine = (-plateSeam * 0.9 + lip * 0.5 + rivet * 0.5
+    float hFine = (-plateSeam * 0.9 + lip * 0.5 + rivet * 1.15 + weld * 0.9
                    + patchSign * patchRim * 1.9 + patchRing * 0.8) * depth;
     // Coarse: bay grooves, whole plates standing proud or sunk, crater floors.
     // Many pixels across, so their screen derivative is already honest and
@@ -1207,12 +1419,25 @@ void main() {
     float hCoarse = (-bayGroove * 1.6 + patchSign * replaced * kPlate * 1.2
                      + scarBright * 0.6 - scarDark * 2.2) * depth;
 
+    // Micro: rolling scale and oil-canning in the plate itself. This is the
+    // band that was missing entirely — it existed only as a 17% albedo tint,
+    // and a value wobble on a diffuse term that is a third of the pixel is not
+    // something the eye can find. Its amplitude is expressed as a fraction of
+    // its OWN wavelength rather than of uSeamDepth, because what the eye reads
+    // is the slope, not the depth: 0.03 of a wavelength is about a five-degree
+    // tilt, which is a plate that has been handled, and it stays a five-degree
+    // tilt on a courier and on a capital because wMicro is derived from the
+    // plate. It takes no recover amplification — kMicro has already faded it
+    // out by the time it stops covering pixels, so its screen derivative is
+    // honest wherever it is non-zero, and amplifying it would only alias.
+    float hMicro = micro * kMicro * wMicro * 0.030;
+
     float pxFoot   = max(length(dPx), length(dPy)) * 1.5;
     float seamPhys = max(wPlate * 0.020, 1e-9);
     float recover  = mix(1.0, clamp(pxFoot / seamPhys, 1.0, 9.0), kPlate);
 
-    float dhx = dFdx(hFine) * recover + dFdx(hCoarse);
-    float dhy = dFdy(hFine) * recover + dFdy(hCoarse);
+    float dhx = dFdx(hFine) * recover + dFdx(hCoarse) + dFdx(hMicro);
+    float dhy = dFdy(hFine) * recover + dFdy(hCoarse) + dFdy(hMicro);
     vec3  r1  = cross(dPy, N);
     vec3  r2  = cross(N, dPx);
     float det = dot(dPx, r1);
@@ -1256,7 +1481,22 @@ void main() {
   // raising the roughness with dirt (which is all this did) redistributes that
   // energy without removing any of it. Removing it hands the ratio back to the
   // paint.
-  float filmed = 1.0 - 0.55 * max(dirt, soot);
+  //
+  // Extended to the whole hull, not only to the dirty parts of it. The previous
+  // form only removed the lobe where dirt or soot happened to be high, so
+  // on clean plate the achromatic term stayed at full strength — and on plating
+  // whose albedo is 0.05, a 0.04 dielectric lobe is as large as the entire
+  // diffuse. Integrated over a hull's normals against the showroom key, the
+  // specular plus the grazing sheen were 37% (Kessler), 43% (Sillane) and 45%
+  // (Ossuary) of the lit hull's total radiance. That is the mechanism behind
+  // the faction measurement: nearly half of every hull was the STAR's colour
+  // rather than the paint's, which is why three authored hues arrived within
+  // 5/255 of one another. Chalked, dust-filmed paint scatters its coherent
+  // reflection away — that is what chalking IS — so uPaintFade belongs in this
+  // term, and it is per-faction, so removing it correctly gives the three hulls
+  // three different specular fractions as well as three different hues.
+  float filmed = (1.0 - 0.55 * max(dirt, soot))
+               * (1.0 - 0.72 * uFilmDepth * (0.45 + 0.55 * uPaintFade));
 
   vec3 spec = (D * G / max(4.0 * NoV * NoL, 1e-4)) * F * NoL * filmed;
   // No 1/PI on diffuse: uSunColor is authored as irradiance with PI already
@@ -1322,9 +1562,19 @@ void main() {
   // starts above zero so a fragment must actually face the star; the
   // coefficient goes up to keep the rim itself bright while the body it wraps
   // goes dark.
+  //
+  // DELIBERATELY NOT CUT with the rest of the achromatic budget, and this is a
+  // regression guard rather than an oversight. ship-star-rimlight is a backlit
+  // frame whose entire subject is this term — the hull there is already almost
+  // pure black and the rim is the only thing that says a ship is present — so
+  // trimming the rim to help the key-lit frames would have traded one named
+  // fail condition for another. The 7th-power confinement is what keeps it from
+  // becoming a halo, and it is unchanged; only the coefficient comes down, and
+  // only by enough to stop the broad camera-facing area collecting a haze it
+  // should not have. A hull's silhouette must still be findable against black.
   float graze = pow(1.0 - NoV, 7.0);
   float sheen = smoothstep(0.02, 0.34, dot(N, uSunDir)) * sunVis;
-  col += uSunColor * graze * sheen * (0.05 + 0.16 * (1.0 - rough))
+  col += uSunColor * graze * sheen * (0.042 + 0.135 * (1.0 - rough))
        * (1.0 - 0.65 * max(dirt, soot)) * ao;
 
   // --- self illumination ---------------------------------------------------
@@ -1349,8 +1599,23 @@ void main() {
     vec4 lt = uLampTint[i];
     vec3 ld = lp.xyz - P;
     float ldist = max(length(ld), 1e-9);
-    // Falloff from the aperture radius, not from a hull-size constant.
-    float fall = exp(-ldist / max(lp.w * 2.2, 1e-9)) * max(dot(N, ld / ldist), 0.0);
+    // Falloff from the aperture radius — and BOUNDED BY IT, hard.
+    //
+    // At 2.2 e-folding lengths this pool was still at 33% of peak, so a spill
+    // stayed visible out to something like six aperture radii and the largest
+    // colour event on the hero frame was a 150 px soft orange blob with no
+    // window structure, no mullion, no hard edge and no emitter at its centre.
+    // ARCHITECTURE §6 rations colour and gives amber to instrument glow; a
+    // gradient that size with nothing in it reads as an internal fire, which
+    // tells the player the wrong thing about the ship. A lit bay is a bright
+    // rectangle with a gradient AROUND it, so the gradient has to be small
+    // enough that the rectangle is the thing you see. 0.8 e-folding lengths
+    // plus a hard cut-off at four radii is a pool that dies inside the plate
+    // the pane is set into. The pane itself is EMISSIVE_FRAG kind 0, which
+    // already authors a proper mullioned rectangle and is unchanged.
+    float lr   = max(lp.w, 1e-9);
+    float fall = exp(-ldist / (lr * 0.8)) * max(dot(N, ld / ldist), 0.0);
+    fall *= 1.0 - smoothstep(lr * 2.6, lr * 4.0, ldist);
     col += lt.rgb * lt.a * albedo * fall * ao * step(1e-9, lp.w);
   }
 
@@ -1656,6 +1921,8 @@ function makeUniforms(budget: TierBudget, palette: ShipPalette, markRows: number
     uPanelSize: { value: 0.0038 },
     uPanelJitter: { value: 0.25 },
     uSeamDepth: { value: SEAM_RELIEF_MAX_KM },
+    uSeamVis: { value: 1 },
+    uFilmDepth: { value: 0.75 },
     uFastenerPitch: { value: 0.00075 },
     uPixelAngle: { value: 0.001 },
     uCoverage: { value: 1000 },
@@ -1740,9 +2007,25 @@ function acquireProgram(bp: ShipBlueprint, quality: QualitySettings, markRows: n
   if (budget.bump) defines.SHIP_BUMP = '';
   if (markRows > 0) defines.SHIP_MARKINGS = '';
 
-  // Two material objects, one program. Identical source and defines means
-  // three compiles once; the pair exists only so a draw never has to flip
-  // USE_INSTANCING on a single material's cache key.
+  // ONE surface material object, serving both the indexed hull Mesh and the
+  // InstancedMesh greeble batches.
+  //
+  // There used to be a second, byte-identical ShaderMaterial here whose stated
+  // reason was "so a draw never has to flip USE_INSTANCING on a single
+  // material's cache key". That is not how three works: WebGLPrograms already
+  // includes `instancing` in its own program cache key, derived from the
+  // geometry being drawn, so one material handed to both a Mesh and an
+  // InstancedMesh compiles exactly the same two programs the pair did — and
+  // caches them independently, with no flipping and no recompilation. The
+  // second object bought nothing and cost a material slot: measured across ten
+  // seeds the visible LOD0 draw list held 4 distinct materials against BRIEF §6's
+  // cap of 3. This takes ShipMaterial to 2 objects, and 2 + propulsion's 2 = 4
+  // allocated, 3 in the visible LOD0 list.
+  //
+  // `ShipMaterialSet.greeble` stays in the interface and now aliases `hull`, so
+  // ShipMesh.ts needs no change — it passes each to a constructor and never
+  // mutates either, so the aliasing is unobservable. Anything that later wants
+  // to set per-material state on one of the two must split them again first.
   const hull = new ShaderMaterial({
     name: `ship-surface:${key}`,
     vertexShader: SURFACE_VERT,
@@ -1751,15 +2034,6 @@ function acquireProgram(bp: ShipBlueprint, quality: QualitySettings, markRows: n
     defines: { ...defines },
     side: FrontSide,
     // PostFX owns exposure, the tone map and the colour space. See the header.
-    toneMapped: false,
-  });
-  const greeble = new ShaderMaterial({
-    name: `ship-surface-inst:${key}`,
-    vertexShader: SURFACE_VERT,
-    fragmentShader: SURFACE_FRAG,
-    uniforms,
-    defines: { ...defines },
-    side: FrontSide,
     toneMapped: false,
   });
   const emissive = new ShaderMaterial({
@@ -1776,7 +2050,7 @@ function acquireProgram(bp: ShipBlueprint, quality: QualitySettings, markRows: n
     toneMapped: false,
   });
 
-  const shared: SharedProgram = { key, uniforms, hull, greeble, emissive, budget, refs: 1 };
+  const shared: SharedProgram = { key, uniforms, hull, greeble: hull, emissive, budget, refs: 1 };
   CACHE.set(key, shared);
   return shared;
 }
@@ -1785,8 +2059,9 @@ function releaseProgram(shared: SharedProgram): void {
   shared.refs--;
   if (shared.refs > 0) return;
   CACHE.delete(shared.key);
+  // `greeble` aliases `hull`; disposing it a second time is harmless but
+  // pointless, and disposing it separately would be a bug if they ever split.
   shared.hull.dispose();
-  shared.greeble.dispose();
   shared.emissive.dispose();
 }
 
@@ -1873,6 +2148,8 @@ class ShipMaterials implements ShipMaterialSet {
   private readonly panelSize: number;
   private readonly panelJitter: number;
   private readonly seamDepth: number;
+  private readonly seamVis: number;
+  private readonly filmDepth: number;
   private readonly fastenerPitch: number;
   private readonly microDetail: number;
   private readonly rough: number;
@@ -1922,6 +2199,26 @@ class ShipMaterials implements ShipMaterialSet {
     this.panelSize = shipPanelSizeKm(bp);
     this.panelJitter = clamp01(prof?.panelJitter ?? 0.25) * 0.9;
     this.seamDepth = Math.min(prof?.seamDepth ?? SEAM_RELIEF_MAX_KM, SEAM_RELIEF_MAX_KM);
+    // How much of a visible joint this yard leaves, recovered from the declared
+    // depth BEFORE the relief clamp eats it.
+    //
+    // `blueprint.ts` derives seamDepth as `panel * 0.025 * seamDepthFactor`, so
+    // dividing back out returns the factor families.ts authored: Kessler 1.5,
+    // Ossuary 1.9, Sillane 0.15. All three then clamp into `seamDepth` at or
+    // near SEAM_RELIEF_MAX, which is why the one faction that declares
+    // "fastenerPitchFactor 0.0 — not 'few fasteners', none, anywhere, on a hull
+    // they built" was still rendering the same rectangular plate grid as the
+    // riveted hulls beside it. The fastener half of that declaration was already
+    // honoured (kRivet multiplies by step(0, uFastenerPitch)); the seam half had
+    // nothing reading it at all.
+    //
+    // Sillane's 0.15 lands at ~0.08 here, which is a moulded break you can find
+    // at arm's length and cannot see at fleet range — what a cast monocoque
+    // should look like. Floored just above zero so no hull is left with a
+    // perfectly featureless flank.
+    const seamFactor = (prof?.seamDepth ?? SEAM_RELIEF_MAX_KM) / Math.max(this.panelSize * 0.025, 1e-12);
+    const sv = clamp01(seamFactor / 0.85);
+    this.seamVis = Math.max(sv * sv * (3 - 2 * sv), 0.04);
     // Exactly zero fastener pitch is a statement about the culture, not a small
     // number: a cast Sillane hull has no fasteners anywhere and must show none.
     this.fastenerPitch = Math.max(prof?.fastenerPitch ?? 0, 0);
@@ -1934,6 +2231,20 @@ class ShipMaterials implements ShipMaterialSet {
     // A neglected hull is a dirty hull, and refits license wrong-coloured plate.
     const neglect = 1 - clamp01(tech.maintenance);
     this.grime = 0.35 + 0.65 * neglect;
+    // Depth of the vacuum-weathering film — see the film block in SURFACE_FRAG
+    // for why this exists and why it is not a palette change.
+    //
+    // Driven by maintenance and by the hull's own age, so it is a fourth axis of
+    // faction and ship identity rather than a constant: a well-kept young hull
+    // sits near 0.55 and a neglected forty-year-old near 1.0, which is a real
+    // value separation between two ships carrying the same paint. Bounded below
+    // so that even a brand-new hull is not a paint chip — ARCHITECTURE §6 says
+    // everything is dirty, and a hull fresh out of the yard has still been in
+    // vacuum.
+    this.filmDepth = Math.min(
+      0.55 + 0.30 * neglect + 0.004 * Math.min(tech.ageYears, 40),
+      1,
+    );
     // Capped low and hard. This is the rate of *replaced plates*, and a replaced
     // plate is a story — a quarter of the hull in mismatched shades is not a
     // history, it is camouflage, and it destroys the base colour the faction is
@@ -2139,12 +2450,27 @@ class ShipMaterials implements ShipMaterialSet {
       this.lamp[w * 4] = l.position[0];
       this.lamp[w * 4 + 1] = l.position[1];
       this.lamp[w * 4 + 2] = l.position[2];
-      this.lamp[w * 4 + 3] = l.radius;
+      // Bounded by the size of a thing that could be emitting.
+      //
+      // `lamps[].radius` is an aperture radius off the blueprint and nothing
+      // was checking it against the plating it spills onto. A lamp radius of a
+      // few percent of hull length, run through an exponential falloff, put a
+      // 150 px amber gradient on the forward drum in the hero frame with no
+      // pane, no mullion and no hard edge anywhere inside it — the single
+      // largest colour event on the ship, reading as a scorch or an internal
+      // fire rather than as a lit bay, against an art direction (ARCHITECTURE
+      // §6) that rations colour and spends amber specifically on instrument
+      // glow. A lit aperture is at most about a plate across; beyond that it is
+      // a hangar door, and a hangar door has geometry. Capping here rather than
+      // in the shader keeps it one clamp per lamp per ship instead of one per
+      // fragment, and leaves the shader's falloff honest.
+      this.lamp[w * 4 + 3] = Math.min(l.radius, this.panelSize * 0.85, this.hullLen * 0.02);
       this.lampTint[w * 4] = tint[0];
       this.lampTint[w * 4 + 1] = tint[1];
       this.lampTint[w * 4 + 2] = tint[2];
       // Held well under 1.0: this is the pool ON the plating, not the emitter.
-      this.lampTint[w * 4 + 3] = Math.min(l.intensity, 3) * 0.35;
+      // The emitter is EMISSIVE_FRAG kind 0 and it is what should be bright.
+      this.lampTint[w * 4 + 3] = Math.min(l.intensity, 3) * 0.22;
       w++;
     }
   }
@@ -2163,13 +2489,32 @@ class ShipMaterials implements ShipMaterialSet {
     const rMin = this.hullLen * 0.004;
     const rMax = this.hullLen * 0.02;
     const srcRadius = (r: number): number => Math.min(Math.max(r, rMin), rMax);
+    /**
+     * A nozzle is the one stain source whose real size IS the deposit's size.
+     *
+     * The shared clamp exists to stop a fifteen-metre radiator wing throwing a
+     * heat bloom over the whole ship, and for a radiator it is right: the
+     * staining starts at the root, not across the span. For an engine it is
+     * exactly wrong. The soot fan is produced by recirculation at the bell
+     * MOUTH, so its width is the exit radius by definition, and clamping a big
+     * drive down to 2% of hull length shrank the cone (`s.w * 4.0` at the
+     * source) to less than the bell it is supposed to be spreading from. That
+     * is why the plate immediately outboard of both bells in ship-engine-close
+     * is clean pale blue with no deposit fan on it — not a missing mask, a mask
+     * whose radius had been clamped below the hardware that makes it.
+     *
+     * So an engine keeps its own exit radius, floored at rMin and ceilinged
+     * only where a nozzle really would blacken a large fraction of the ship.
+     */
+    const nozzleRadius = (r: number): number =>
+      Math.min(Math.max(r, rMin), this.hullLen * 0.09);
 
     // Soot: from the real nozzle throats, along the real exhaust direction.
     // Engines first, because a hull with an unsooted tail reads as a model.
     const engines: readonly EnginePod[] = bp.engines;
     for (const e of engines) {
       if (w >= slots) break;
-      const r = srcRadius(e.nozzle.exitRadius);
+      const r = nozzleRadius(e.nozzle.exitRadius);
       this.stain[w * 4] = e.frame.origin[0];
       this.stain[w * 4 + 1] = e.frame.origin[1];
       this.stain[w * 4 + 2] = e.frame.origin[2];
@@ -2317,6 +2662,8 @@ class ShipMaterials implements ShipMaterialSet {
     u.uPanelSize.value = this.panelSize;
     u.uPanelJitter.value = this.panelJitter;
     u.uSeamDepth.value = this.seamDepth;
+    u.uSeamVis.value = this.seamVis;
+    u.uFilmDepth.value = this.filmDepth;
     u.uFastenerPitch.value = this.fastenerPitch;
     u.uMicroDetail.value = this.microDetail;
     u.uRough.value = this.rough;

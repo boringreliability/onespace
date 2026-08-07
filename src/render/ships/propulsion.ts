@@ -42,6 +42,14 @@
  *    falls below a few pixels, which is what makes a capital read as inhabited
  *    instead of as an unlit slab.
  *
+ * 6. **Propulsion has its own LOD ladder, on the hull's thresholds.** It used
+ *    to build one set of meshes and draw them from arm's length to the horizon,
+ *    which put 3.4–11.9 k triangles on a LOD2 ship whose whole budget is 3 k.
+ *    Four rungs are built lazily from one staged set of instance data — the
+ *    same bells in the same places, tessellated differently and packed into
+ *    fewer meshes — and only the drawing one is parented. `setLod` is the
+ *    entry point; see `rungPlan` for what each rung sheds and why.
+ *
  * SCENE CONTRACT. The scene is linear HDR and `PostFX` owns the tone map:
  * every material here is `toneMapped: false` with no `<tonemapping_fragment>`,
  * no `<colorspace_fragment>` and no `os_dither`. All four `logdepthbuf` chunks
@@ -228,6 +236,132 @@ const BUDGETS: Record<QualityTier, Budget> = {
 };
 
 /**
+ * What propulsion draws at one rung of the LOD ladder.
+ *
+ * This file used to have no idea what LOD the ship was at: it built one set of
+ * meshes in the constructor and drew them from arm's length to the horizon.
+ * Measured over ten seeds, its triangle contribution was the SAME NUMBER at
+ * LOD0, LOD1, LOD2 and LOD3 — 3.4 k to 11.9 k — against a LOD2 budget of 3 k
+ * for the whole ship (BRIEF §6), so propulsion alone was 1.8× to 4.8× over on
+ * every seed and the hull's ladder was being thrown away.
+ *
+ * The rungs shed, in this order, the things whose absence you cannot see at
+ * the distance the rung serves:
+ *
+ *   LOD1  the bolted hardware — thrust frames, turbopumps, yokes, gantry pads.
+ *         It is a lattice of 3–7 segment tubes and it is ~60% of a bell's
+ *         triangles; below a few hundred pixels of hull it is one grey smudge.
+ *         Plume drops to a single shell, which changes its DEPTH, not its size.
+ *   LOD2  every fixture (RCS cups, lamp housings), the engine wash cards, the
+ *         re-entry wake, and the per-style nozzle split: one simplified mesh
+ *         serves the whole ship, which is also one draw call instead of one
+ *         per doctrine.
+ *   LOD3  the nozzles themselves. At impostor range the drive IS the plume and
+ *         a handful of navigation lights, which is exactly what the brief says
+ *         should carry the read at thirty pixels.
+ */
+interface RungPlan {
+  /** Draw nozzle hardware at all. */
+  readonly nozzles: boolean;
+  readonly nozzleSeg: number;
+  /** Frames, pumps, yokes, ribs, blocks: 2 full, 1 outline only, 0 none. */
+  readonly nozzleDetail: number;
+  /** One simplified nozzle mesh for the whole ship instead of one per style. */
+  readonly mergeStyles: boolean;
+  readonly plumeSeg: number;
+  readonly plumeSteps: number;
+  readonly plumeLayers: number;
+  /**
+   * How many fittings (RCS cups, then lamp housings) survive. -1 keeps all of
+   * them, 0 none. A capital's fitting list runs to hundreds and each one is a
+   * closed cup of 8 × (seg/2) triangles, so this is the second-largest item in
+   * the budget after the bells themselves.
+   */
+  readonly fixtureLimit: number;
+  /**
+   * How many emissive quads survive. -1 keeps all of them; a finite limit keeps
+   * the HEAD of the buffer, which is where the navigation lights live — the RCS
+   * jets and the wash cards are staged behind them precisely so a cap drops
+   * those two first.
+   */
+  readonly quadLimit: number;
+  readonly wake: boolean;
+}
+
+function rungPlan(b: Budget, level: number, crowded: boolean): RungPlan {
+  if (level <= 0) {
+    return {
+      nozzles: true,
+      nozzleSeg: b.nozzleSeg,
+      nozzleDetail: 2,
+      mergeStyles: false,
+      // A shell has no interior detail: its silhouette IS the effect, and at
+      // 8–14 segments a plume seen anywhere near its own axis is a visible
+      // polygon. Segments are the cheapest thing in this budget.
+      plumeSeg: crowded ? Math.max(10, b.plumeSeg >> 1) : b.plumeSeg,
+      plumeSteps: crowded ? Math.max(5, ((b.plumeSteps * 2) / 3) | 0) : b.plumeSteps,
+      plumeLayers: crowded ? 1 : b.plumeLayers,
+      fixtureLimit: -1,
+      quadLimit: -1,
+      wake: true,
+    };
+  }
+  if (level === 1) {
+    return {
+      nozzles: true,
+      nozzleSeg: Math.max(8, Math.round(b.nozzleSeg * 0.6)),
+      nozzleDetail: 1,
+      mergeStyles: false,
+      plumeSeg: Math.max(10, Math.round(b.plumeSeg * (crowded ? 0.5 : 0.68))),
+      plumeSteps: Math.max(4, Math.round(b.plumeSteps * 0.6)),
+      plumeLayers: 1,
+      fixtureLimit: 64,
+      quadLimit: -1,
+      wake: true,
+    };
+  }
+  if (level === 2) {
+    return {
+      nozzles: true,
+      nozzleSeg: 5,
+      nozzleDetail: 0,
+      mergeStyles: true,
+      plumeSeg: 6,
+      plumeSteps: crowded ? 2 : 3,
+      plumeLayers: 1,
+      fixtureLimit: 0,
+      quadLimit: 24,
+      wake: false,
+    };
+  }
+  return {
+    nozzles: false,
+    nozzleSeg: 5,
+    nozzleDetail: 0,
+    mergeStyles: true,
+    plumeSeg: 5,
+    plumeSteps: 2,
+    plumeLayers: 1,
+    fixtureLimit: 0,
+    quadLimit: 12,
+    wake: false,
+  };
+}
+
+/**
+ * Base plume radiance, before the per-surface division.
+ *
+ * A ray through the column crosses two faces per nested shell and every one of
+ * them adds, so the number that actually reaches the framebuffer is this over
+ * `layers * 2`. That division used to be baked into the per-instance attribute,
+ * which made it impossible for two LOD rungs with different shell counts to
+ * share one staged batch; it is now the `uPlumeGain` uniform, pushed with the
+ * rest of the per-ship values. Adding a shell must make the column DEEPER, not
+ * brighter.
+ */
+const PLUME_RADIANCE = 0.62;
+
+/**
  * Above this many nozzles the plume tessellation is halved.
  *
  * A ten-pod capital with four bells each is 40 plume instances of pure additive
@@ -282,19 +416,28 @@ const DRIVE_TECH: Record<TechnologyProfile['drive'], number> = {
 };
 
 /**
- * Plume proportion per drive technology, on top of the blueprint's own ratios.
+ * Plume proportion per drive technology: `[lengthMultiplier, exitFit]`.
  *
  * The blueprint gives `lengthRatio` per pod, which varies the drive within a
  * culture. These multipliers are what keep the five technologies apart when two
  * factions happen to land on similar ratios — an ion drive must never be able
  * to look like a short fat chemical plume, whatever the seed says.
+ *
+ * THE SECOND NUMBER USED TO BE GIRTH AND IS NOW A BOUNDARY CONDITION. At
+ * `fusion-torch: 0.6` the column left a bell of radius R as a tube of radius
+ * 0.6 R: 40% narrower than the hardware it came out of, with a visible step at
+ * the exit plane. A plume has exactly one boundary condition — it leaves the
+ * exit plane AT the exit radius — so this number now only trims the last few
+ * percent (a magnetic nozzle necks slightly, a grid's beam starts just inside
+ * the grid) and every technology's real girth difference is carried by its
+ * EXPANSION RATE instead. See `PLUME_EXPANSION`.
  */
 const PLUME_SHAPE: Record<TechnologyProfile['drive'], readonly [number, number]> = {
-  chemical: [1.0, 1.0],
-  ion: [1.35, 0.42],
-  'fusion-torch': [1.6, 0.6],
-  plasma: [1.0, 1.15],
-  'reaction-plate': [0.22, 2.2],
+  chemical: [1.0, 0.96],
+  ion: [1.35, 0.88],
+  'fusion-torch': [1.35, 1.00],
+  plasma: [1.0, 0.98],
+  'reaction-plate': [0.22, 1.30],
 };
 
 /** Every RCS group, in the order the per-frame demand array uses. */
@@ -587,7 +730,7 @@ function chamber(b: Buf, seg: number, throat: number): void {
  * produced it — the bells sat flush against the plating with no visible way to
  * unbolt one. Four longerons, four diagonals, two hoops and a gantry pad.
  */
-function thrustFrame(b: Buf): void {
+function thrustFrame(b: Buf, full: boolean): void {
   const n = 4;
   const zA = -0.78;
   const zB = 0.30;
@@ -597,14 +740,21 @@ function thrustFrame(b: Buf): void {
     const cx = Math.cos(a);
     const sy = Math.sin(a);
     tube(b, cx * 1.13, sy * 1.13, zA, cx * 1.06, sy * 1.06, zB, 0.058, 5, PART_HARDWARE);
+    if (!full) continue;
     tube(b, cx * 1.13, sy * 1.13, zA, Math.cos(a2) * 1.06, Math.sin(a2) * 1.06, zB, 0.030, 4, PART_HARDWARE);
     // The pad a gantry hook actually grabs.
     tube(b, cx * 1.06, sy * 1.06, zB, cx * 0.84, sy * 0.84, zB + 0.13, 0.052, 5, PART_HARDWARE);
   }
-  for (let h = 0; h < 2; h++) {
+  // The LONGERONS AND ONE HOOP SURVIVE A RUNG LONGER than the diagonals and the
+  // pads. The cage round the bells is part of the Kessler silhouette and
+  // `ship-lod1`'s brief rejects a silhouette that changes at all; the bracing
+  // inside it is 0.2 m tube on a 139 m hull, which is what that brief means by
+  // "sub-metre hardware may go".
+  const hoops = full ? 2 : 1;
+  for (let h = 0; h < hoops; h++) {
     const z = h === 0 ? zA + 0.07 : zB - 0.06;
     const r = h === 0 ? 1.12 : 1.06;
-    const k = n * 2;
+    const k = full ? n * 2 : n;
     for (let i = 0; i < k; i++) {
       const a0 = (i / k) * Math.PI * 2;
       const a1 = ((i + 1) / k) * Math.PI * 2;
@@ -640,11 +790,13 @@ function bellProfile(b: Buf, seg: number, throat: number): void {
 }
 
 /** Classic expansion bell on an open thrust frame. Chemical, fusion, plasma. */
-function buildBell(seg: number, throat: number): Buf {
+function buildBell(seg: number, throat: number, detail: number): Buf {
   const b = new Buf();
   bellProfile(b, seg, throat);
   chamber(b, seg, throat);
-  thrustFrame(b);
+  // The frame is a lattice of 3–7 segment tubes and roughly sixty percent of
+  // this bell's triangles. It is also the first thing that stops resolving.
+  if (detail > 0) thrustFrame(b, detail >= 2);
   return b;
 }
 
@@ -656,7 +808,7 @@ function buildBell(seg: number, throat: number): Buf {
  * structure of any kind." So the port is a moulded land in the plating with a
  * single shallow step, and the grid is a CLOSED face at the bottom of it.
  */
-function buildGrid(seg: number, throat: number): Buf {
+function buildGrid(seg: number, throat: number, detail: number): Buf {
   const b = new Buf();
   const rBack = Math.max(throat, 0.80);
   const g0 = ring(b, seg, 0.30, rBack, 0.55, 0.3, PART_WALL);
@@ -669,15 +821,17 @@ function buildGrid(seg: number, throat: number): Buf {
   radialDisc(b, seg, 0.30, rBack, PART_FACE, 1);
   // The moulded land round the port. A step and a flat, no bolted flange:
   // Sillane does not have fasteners on the outside of anything.
-  annulus(b, seg, 1.0, 1.0, 1.24, 1, 1, PART_HARDWARE, 1);
-  const l0 = ring(b, seg, 1.0, 1.24, 0, 1, PART_HARDWARE);
-  const l1 = ring(b, seg, 0.90, 1.32, 0, 1, PART_HARDWARE);
-  band(b, l0, l1, seg);
+  if (detail > 0) {
+    annulus(b, seg, 1.0, 1.0, 1.24, 1, 1, PART_HARDWARE, 1);
+    const l0 = ring(b, seg, 1.0, 1.24, 0, 1, PART_HARDWARE);
+    const l1 = ring(b, seg, 0.90, 1.32, 0, 1, PART_HARDWARE);
+    band(b, l0, l1, seg);
+  }
   return b;
 }
 
 /** Aerospike: annular throat round a truncated central spike. */
-function buildAerospike(seg: number, throat: number): Buf {
+function buildAerospike(seg: number, throat: number, detail: number): Buf {
   const b = new Buf();
   const s0 = ring(b, seg, 0.0, 1.0, -0.1, 0, PART_WALL);
   const s1 = ring(b, seg, 0.22, 0.97, -0.1, 0.2, PART_WALL);
@@ -699,7 +853,7 @@ function buildAerospike(seg: number, throat: number): Buf {
   disc(b, seg, 0.95, 0.09, 1, PART_WASHED);
   // Injector blocks round the throat. Small, but they break the ring's
   // silhouette so it is not a bare washer.
-  const blocks = Math.min(8, Math.max(4, seg >> 1));
+  const blocks = detail >= 2 ? Math.min(8, Math.max(4, seg >> 1)) : detail > 0 ? 4 : 0;
   for (let i = 0; i < blocks; i++) {
     const a = (i / blocks) * Math.PI * 2;
     const cx = Math.cos(a);
@@ -742,11 +896,14 @@ function buildAnnular(seg: number, throat: number): Buf {
  * does not fabricate a gantry-serviceable structure, it welds a yoke onto
  * whatever the pod came off.
  */
-function buildOpenCycle(seg: number, throat: number): Buf {
+function buildOpenCycle(seg: number, throat: number, detail: number): Buf {
   const b = new Buf();
   bellProfile(b, seg, throat);
   chamber(b, seg, throat);
-  const pumps = 4;
+  if (detail <= 0) return b;
+  // The yoke and at least two pumps stay: a scavenger drive hanging off a pylon
+  // with its plumbing showing IS the Ossuary silhouette, not a decoration on it.
+  const pumps = detail >= 2 ? 4 : 2;
   for (let i = 0; i < pumps; i++) {
     const a = (i / pumps) * Math.PI * 2 + 0.4;
     const cx = Math.cos(a);
@@ -770,7 +927,7 @@ function buildOpenCycle(seg: number, throat: number): Buf {
 }
 
 /** Reaction plate: a disc that is struck, not a nozzle that flows. */
-function buildPlate(seg: number, _throat: number): Buf {
+function buildPlate(seg: number, _throat: number, detail: number): Buf {
   const b = new Buf();
   const r0 = ring(b, seg, 0.0, 1.0, 0, 0, PART_HARDWARE);
   const r1 = ring(b, seg, 1.0, 1.0, 0, 1, PART_HARDWARE);
@@ -780,7 +937,7 @@ function buildPlate(seg: number, _throat: number): Buf {
   disc(b, seg, 0.0, 1.0, 0, PART_HARDWARE, -1);
   // Radial stiffeners on the forward face. A flat disc with nothing on it
   // reads as a decal; the ribs are what make it a structural member.
-  const ribs = 6;
+  const ribs = detail >= 2 ? 6 : detail > 0 ? 3 : 0;
   for (let i = 0; i < ribs; i++) {
     const a = (i / ribs) * Math.PI * 2;
     const cx = Math.cos(a);
@@ -822,20 +979,36 @@ function buildFixture(seg: number): Buf {
   return b;
 }
 
-function buildNozzle(style: NozzleStyle, seg: number, throat: number): Buf {
+/**
+ * `detail` is the LOD switch for BOLTED HARDWARE only: 2 full, 1 reduced,
+ * 0 none.
+ *
+ * Every style keeps its full profile and its closed throat at every rung: the
+ * profile is the silhouette and the closed throat is the difference between a
+ * nozzle and a hole you can see the starfield through. What thins out is the
+ * lattice hung off it — the thrust frame, the turbopumps and their feed lines,
+ * the injector blocks, the plate's stiffeners, the moulded land round an ion
+ * port. All of it is 3–7 segment tubes and it is the majority of the triangle
+ * count.
+ *
+ * At 1 the OUTLINE of that hardware survives and only its bracing goes, because
+ * `ship-lod1`'s brief rejects any change to the silhouette; at 0 it is gone,
+ * which is `ship-lod2`, where the whole hull is eight sections around.
+ */
+function buildNozzle(style: NozzleStyle, seg: number, throat: number, detail: number): Buf {
   switch (style) {
     case 'bell':
-      return buildBell(seg, throat);
+      return buildBell(seg, throat, detail);
     case 'aerospike':
-      return buildAerospike(seg, throat);
+      return buildAerospike(seg, throat, detail);
     case 'annular':
       return buildAnnular(seg, throat);
     case 'grid':
-      return buildGrid(seg, throat);
+      return buildGrid(seg, throat, detail);
     case 'open-cycle':
-      return buildOpenCycle(seg, throat);
+      return buildOpenCycle(seg, throat, detail);
     case 'plate':
-      return buildPlate(seg, throat);
+      return buildPlate(seg, throat, detail);
   }
 }
 
@@ -899,7 +1072,13 @@ function buildShellGeometry(seg: number, steps: number, layers: number, ySquash:
         uv[v * 2] = s / seg;
         uv[v * 2 + 1] = tt;
         t[v] = tt;
-        layer[v] = layers > 1 ? l : 1;
+        // 0 = the cool envelope, 1 = the hot core. A ONE-shell plume is neither,
+        // so it gets a value between them and comes out the size and colour of
+        // the pair it replaces. The old value here was 1, which gave every
+        // single-shell rung — every `low` tier, every crowded capital — a plume
+        // 40% shorter and 56% narrower than the same ship at `high`. That is a
+        // quality setting changing the SIZE of an object, which is a bug.
+        layer[v] = layers > 1 ? l : 0.55;
         v++;
       }
     }
@@ -1053,8 +1232,16 @@ void main() {
       // now how far AFT of the throat the glow reaches as the drive spools.
       float depth = 1.0 - smoothstep(0.0, uGlowDepth, vT);
       float turb = 0.75 + 0.25 * os_snoise(q * 4.0 + vec3(0.0, 0.0, -t * 7.0));
-      col += vCore * depth * (0.10 + 2.3 * uThrottle) * turb * uPower;
-      col += vec3(1.0, 0.93, 0.86) * depth * pow(uThrottle, 3.0) * 0.70;
+      // HALVED, and deliberately. This is an OPAQUE surface filling the mouth of
+      // the bell, so whatever radiance it carries is what the shot's subject —
+      // the nozzle geometry — is rendered at. At 2.3 + 0.70 it sat three times
+      // the tone map's white point across the whole visible throat, which meant
+      // the bell interior was a flat white disc and the corrugation, the lip and
+      // the injector behind it were all gone. At 1.15 + 0.34 it is still fifteen
+      // times the lit plating beside it, which is all "the throat is visibly
+      // hotter than the outside of the bell" ever needed.
+      col += vCore * depth * (0.08 + 1.15 * uThrottle) * turb * uPower;
+      col += vec3(1.0, 0.93, 0.86) * depth * pow(uThrottle, 3.0) * 0.34;
     }
   } else if (vPart < 1.5) {
     // Spike or plug: metal the exhaust washes over. It is hot at the root and
@@ -1092,7 +1279,7 @@ void main() {
       // The idle floor is raised because a recessed drive's whole read is that
       // you see a LIT THROAT and never a bell. At 0.10 the face was dark enough
       // that the port read as an empty hole in the skin.
-      col = base + vCore * hole * edge * shimmer * uPower * (0.32 + 2.4 * uThrottle);
+      col = base + vCore * hole * edge * shimmer * uPower * (0.28 + 1.55 * uThrottle);
     }
   } else {
     // ---- injector face: the closed floor of the throat ---------------------
@@ -1106,8 +1293,10 @@ void main() {
     // makes it legible cold is fill plus its own concentric machining.
     col = base * (uFill * 3.2 + uSunColor * NoL * 0.22);
     float hot = pow(1.0 - r, 1.6);
-    col += vCore * uPower * (0.06 + 2.9 * uThrottle) * hot * mix(0.72, 1.0, el);
-    col += vec3(1.0, 0.94, 0.88) * pow(uThrottle, 2.2) * hot * 1.1;
+    // Same reasoning as the throat interior above: this is opaque hardware, and
+    // hardware that tone maps to flat white has stopped being hardware.
+    col += vCore * uPower * (0.05 + 1.50 * uThrottle) * hot * mix(0.72, 1.0, el);
+    col += vec3(1.0, 0.94, 0.88) * pow(uThrottle, 2.2) * hot * 0.50;
   }
 
   gl_FragColor = vec4(col, 1.0);
@@ -1122,9 +1311,44 @@ void main() {
  * costs nothing; what it buys is the material budget (BRIEF §6 allows three per
  * ship and the hull needs one).
  */
+/**
+ * The one law the vertex and fragment stages must agree on.
+ *
+ * A rocket exhaust leaving a throat into vacuum has nothing to push against, so
+ * it expands: to first order its radius grows LINEARLY with axial distance,
+ *
+ *     r(s) = r_exit * (1 + k*s)
+ *
+ * and the same luminosity is therefore smeared over an area growing as r², so
+ * its surface brightness falls as
+ *
+ *     L(s) = L0 / (1 + k*s)²
+ *
+ * on geometry alone, before any cooling. Both stages compute `k` from the same
+ * `iTech` attribute rather than passing it, so the radius the vertex shader
+ * builds and the falloff the fragment shader applies can never drift apart —
+ * which is the failure that produced a constant-radius tube of constant
+ * brightness running the full width of the frame.
+ *
+ * `k` is the whole technology read now that girth is no longer a per-tech
+ * multiplier: an ion beam diverges hard and faintly, a magnetic nozzle holds
+ * its column together, and the difference is 3.2 against 2.0 rather than two
+ * cylinders of different diameter.
+ */
+const PLUME_EXPANSION = /* glsl */ `
+float osPlumeExpansion(float tech) {
+  if (tech < 0.5) return 2.3;   // chemical      — under-expanded, blooms fast
+  if (tech < 1.5) return 3.2;   // ion           — a wide, faint, diverging fan
+  if (tech < 2.5) return 2.0;   // fusion torch  — the most collimated of them
+  if (tech < 3.5) return 2.1;   // plasma        — pinched, but still expanding
+  return 5.4;                   // reaction plate — a pancake, not a column
+}
+`;
+
 const ADDITIVE_VERT = /* glsl */ `
 #include <common>
 #include <logdepthbuf_pars_vertex>
+${PLUME_EXPANSION}
 
 attribute float aT;
 attribute float aLayer;
@@ -1180,35 +1404,52 @@ void main() {
     // column that fattens under boost is a balloon, and the +0.20*uBoost that
     // used to be here is half of why the plume left the bell wider than the
     // bell — a mushroom the review measured at 40% of the hull beam.
-    float fat = 0.62 + 0.38 * uThrottle;
-    float len = iSizeA.x * grow * mix(1.0, 0.60, aLayer);
-    float wid = iSizeA.y * fat * mix(1.0, 0.44, aLayer);
+    //
+    // The floor is 0.78, not 0.62: this scales the radius AT THE EXIT PLANE,
+    // and a drive at cruise still fills the throat it is flowing through.
+    float fat = 0.78 + 0.22 * uThrottle;
+    // The core is a shell NESTED IN the envelope, sharing its origin, its axis
+    // and its expansion law — a shorter, narrower cone of the same shape, not a
+    // second column. At 0.60/0.44 it was a thread down the middle of a much
+    // fatter cone, which is why the pair read as two objects rather than as one
+    // column with a hot centre.
+    float len = iSizeA.x * grow * mix(1.0, 0.78, aLayer);
+    float wid = iSizeA.y * fat * mix(1.0, 0.62, aLayer);
 
-    // The radial profile IS the technology. Five genuinely different columns,
-    // not one column in five colours. Every one of them now starts at or near
-    // 1.0: the column leaves the exit plane at the exit radius, because that is
-    // the one boundary condition a plume actually has.
+    // ---- expansion -------------------------------------------------------
+    // r(s) = r_exit * (1 + k*s). EVERY technology widens; what differs is how
+    // fast. The profiles that used to be here all fell monotonically from ~1.0
+    // — the column could never be wider than the exit plane — so a jet four
+    // nozzle diameters downstream was still exactly as wide as its throat.
+    // Over four nozzle diameters this now reaches ~1.7×, and ~2.4× over the
+    // visible length.
+    float k = osPlumeExpansion(tech);
+    float grew = 1.0 + k * aT;
+
     float prof;
     if (tech < 0.5) {
-      // chemical — leaves at the exit radius, flares briefly as it
-      // under-expands, then tapers to nothing
-      prof = (1.0 + 0.14 * smoothstep(0.0, 0.10, aT) * (1.0 - smoothstep(0.10, 0.55, aT)))
-           * pow(max(1.0 - aT, 0.0), 1.25);
+      // chemical — a short over-pressure flare right at the lip, riding on the
+      // expansion rather than replacing it
+      prof = grew * (1.0 + 0.10 * smoothstep(0.0, 0.05, aT) * (1.0 - smoothstep(0.05, 0.28, aT)));
     } else if (tech < 1.5) {
-      // ion — no flare at all: a thin, slowly diverging fan
-      prof = (0.70 + 0.80 * aT) * pow(max(1.0 - aT, 0.0), 0.45);
+      // ion — starts just inside the grid, then diverges hard and faintly
+      prof = grew * 0.86;
     } else if (tech < 2.5) {
-      // fusion torch — necks down off the exit, then collimated
-      prof = mix(0.88, 1.0, smoothstep(0.0, 0.09, aT)) * pow(max(1.0 - aT, 0.0), 0.45);
+      // fusion torch — necks down off the exit plane before it opens out
+      prof = grew * mix(0.94, 1.0, smoothstep(0.0, 0.07, aT));
     } else if (tech < 3.5) {
-      // plasma — a magnetic nozzle beads the column into visible pinches.
-      // 0.34 made each pinch a separate closed bulb, which is what the review
-      // counted as "plume bodies with no bell behind them".
-      prof = pow(max(1.0 - aT, 0.0), 0.95) * (1.0 + 0.16 * sin(aT * 9.0 + iSizeA.w * 6.2831));
+      // plasma — a magnetic nozzle beads the column into pinches. They ride ON
+      // the expansion; at 0.34 each pinch was a separate closed bulb, which is
+      // what the review counted as "plume bodies with no bell behind them".
+      prof = grew * (1.0 + 0.13 * sin(aT * 9.0 + iSizeA.w * 6.2831));
     } else {
       // reaction plate — a pancake hugging the plate, not a column
-      prof = pow(max(1.0 - aT, 0.0), 0.30) * 1.55;
+      prof = (1.0 + k * pow(aT, 0.45)) * (1.0 - smoothstep(0.20, 1.0, aT));
     }
+    // The column CLOSES. The radiance falloff already reaches zero here, but a
+    // shell whose last ring still has radius is a polygon waiting to be seen
+    // edge-on, and "ends in a hard edge" is one of this shot's stated failures.
+    prof *= 1.0 - 0.42 * smoothstep(0.86, 1.0, aT);
 
     // A drive is never perfectly steady, and a rank of six that wobbles in
     // lockstep reads as one animated object rather than six machines.
@@ -1321,10 +1562,17 @@ void main() {
     // everything drawn behind it, which is the thrust structure and the aft
     // third of the hull. It is not pushed towards the camera, so anything
     // forward of the mouth still occludes it correctly.
+    //
+    // IT MUST NOT BECOME A LOBE. This card is centred on the POD, i.e. between
+    // the bells of a cluster, so anything big enough to have an outline reads
+    // as one more plume sitting behind and offset from the real ones — which is
+    // half of "two bells read as four plumes". It is now sized to the cluster
+    // rather than to two and a half times the cluster, and it barely grows with
+    // throttle: light on plating does not have a silhouette.
     vec3 c = instanceMatrix[3].xyz;
     vec4 mv = modelViewMatrix * vec4(c, 1.0);
     float pixKm = max(-mv.z, 0.0) * uPixelAngle;
-    float rad = max(iSizeA.x * (0.45 + 0.85 * (uThrottle + uBoost * 0.5)),
+    float rad = max(iSizeA.x * (0.62 + 0.38 * (uThrottle + uBoost * 0.5)),
                     uMinPixels * pixKm * 6.0);
     mv.xy += position.xy * 2.0 * rad;
     vPos = c;
@@ -1340,6 +1588,7 @@ const ADDITIVE_FRAG = /* glsl */ `
 #include <onespace_noise>
 #include <onespace_color>
 #include <logdepthbuf_pars_fragment>
+${PLUME_EXPANSION}
 
 uniform vec3  uCameraLocal;
 uniform float uTime;
@@ -1347,6 +1596,8 @@ uniform float uTimeScale;
 uniform float uThrottle;
 uniform float uBoost;
 uniform float uHeat;
+/** 1 / (shells * 2): how many additive surfaces a ray crosses at this rung. */
+uniform float uPlumeGain;
 
 varying vec3  vCol;
 varying vec3  vEdge;
@@ -1369,52 +1620,77 @@ void main() {
     vec3 N = normalize(vNrm);
     vec3 V = normalize(uCameraLocal - vPos);
     // A column of gas is optically thin, so the radiance along a ray is the
-    // chord it cuts; for a cylinder that chord IS |N·V|, and an exponent above
-    // one is the density falling off towards the wall. The extra smoothstep is
-    // what guarantees the OUTER band reaches zero smoothly rather than ending
-    // on the polygon the shell is actually made of — the hard-edged white star
-    // in the hero frame was a seven-sided shell whose falloff never got a
-    // chance to run before the tone map clipped it.
+    // chord it cuts, and for a shell of revolution |N·V| is 1 where the ray
+    // passes down the column's centre and 0 where it grazes the silhouette.
+    //
+    // THE SILHOUETTE IS NOW FEATHERED IN RADIUS, not left to the chord. The
+    // chord alone is still 0.79 at HALF the radius and 0.44 at 80% of it, so
+    // with the column's core well above the tone map's shoulder every one of
+    // those values landed on the same display white and the shell ended on its
+    // own polygon. rN is the normalised distance from the axis; the ramp over
+    // its outer 45% is what makes the edge die out instead of stopping.
     float ndv = abs(dot(N, V));
-    float shell = pow(ndv, 2.1) * smoothstep(0.0, 0.32, ndv);
+    float rN = sqrt(max(1.0 - ndv * ndv, 0.0));
+    float shell = pow(ndv, 1.6) * (1.0 - smoothstep(0.55, 1.0, rN));
     float tech = vB.z;
     float layer = vB.w;
     float heat = clamp(uThrottle * 0.30 + uBoost * 0.85, 0.0, 1.0);
 
+    // ---- axial falloff ---------------------------------------------------
+    // Geometric dilution first: the same light spread over an area growing as
+    // r², with r the SAME (1 + k*s) the vertex shader built the column from.
+    // Then cooling on top, because gas that has expanded has also dropped in
+    // temperature and stops radiating. Together these fall to ~18% of the
+    // throat value four nozzle diameters downstream and to zero at the tip,
+    // where pow(1-s, 2.2) alone was still at 60% four diameters out — a jet
+    // that neither expanded nor cooled, i.e. a fluorescent tube.
+    float k = osPlumeExpansion(tech);
+    float grew = 1.0 + k * vT;
+    float dilute = 1.0 / (grew * grew);
     float axial;
     if (tech > 0.5 && tech < 1.5) {
       // An ion beam has no hot root: it brightens away from the grid and then
       // thins out over a very long distance.
-      axial = pow(max(1.0 - vT, 0.0), 1.05) * smoothstep(0.0, 0.22, vT);
+      axial = dilute * pow(max(1.0 - vT, 0.0), 1.15) * smoothstep(0.0, 0.20, vT);
     } else {
-      axial = pow(max(1.0 - vT, 0.0), 2.2 + 1.4 * heat);
+      axial = dilute * pow(max(1.0 - vT, 0.0), 1.45 - 0.25 * heat);
     }
 
-    // Radiance, not opacity: this lands above the 1.0 bloom threshold at high
-    // throttle, which is the only way an emitter is allowed to bloom.
-    //
-    // vA.z ARRIVES PRE-DIVIDED by the number of shell surfaces a ray crosses
-    // (two faces per nested layer, all additive). Without that division the
-    // summed on-axis radiance was roughly eight times the tone map's white
-    // point, so every pixel with shell > 0.12 clipped solid and the whole soft
-    // falloff lived inside the last 2% of the radius: an opaque sausage with a
-    // hard silhouette. Adding a layer must make the column DEEPER, not brighter.
-    float I = vA.z * vDrive
+    // Radiance, not opacity. uPlumeGain divides by the number of shell surfaces
+    // a ray crosses (two faces per nested layer, all additive), so adding a
+    // layer makes the column DEEPER, not brighter, and two LOD rungs with
+    // different shell counts read the same.
+    float I = vA.z * uPlumeGain * vDrive
             * smoothstep(0.0, 0.15, uThrottle + uBoost)
-            * (0.40 + uThrottle * 0.75 + uBoost * 0.45);
+            * (0.26 + uThrottle * 0.60 + uBoost * 0.32);
 
     vec3 base = mix(vEdge, vCol, layer);
     base = mix(base, vec3(1.0, 0.96, 0.92), heat * 0.55);
     col = base * shell * axial * I;
+
+    // THE THROAT IS THE ONLY THING HERE ALLOWED ABOVE 1.0 SCENE-LINEAR.
+    // e-folding in ~3% of the column, so what blooms is the emitter and not
+    // twelve percent of the frame. The column body was carrying this radiance
+    // for its whole visible length, which is why its falloff lived entirely
+    // above the grade's shoulder and never reached the screen.
+    // An ion drive is excepted: there is nothing burning at its grid, and the
+    // whole read of the technology is that it brightens AWAY from the emitter.
+    float hotRoot = (tech > 0.5 && tech < 1.5) ? 0.0 : 1.0;
+    col += base * exp(-vT * 34.0) * shell * I * 2.2 * hotRoot
+         * smoothstep(0.05, 0.55, uThrottle + uBoost);
 
     // Shock diamonds. vB.x is the blueprint's diamond COUNT, so the sine runs
     // exactly that many periods over the column however long it is — and they
     // only exist once the flow is over-expanded, which is why they arrive at
     // high throttle and are absent from ion and plate drives entirely.
     if (vB.x > 0.5) {
-      float sd = pow(max(sin(vT * 6.2831853 * vB.x - t * 2.0) * 0.5 + 0.5, 0.0), 10.0);
-      sd *= exp(-vT * 3.2) * smoothstep(0.42, 0.90, uThrottle + uBoost * 0.5);
-      col += mix(base, vec3(1.0), 0.5) * sd * (0.3 + layer) * I * 1.4;
+      float sd = pow(max(sin(vT * 6.2831853 * vB.x - t * 2.0) * 0.5 + 0.5, 0.0), 14.0);
+      sd *= exp(-vT * 3.6) * smoothstep(0.42, 0.90, uThrottle + uBoost * 0.5);
+      // MULTIPLIED BY shell. Without it every diamond was a full-width band
+      // painted right out to the polygon edge — a hard-edged bright rung across
+      // a column whose own body was feathered, which is the "sausage-chain seam
+      // along each" the review measured. A shock lives inside the gas.
+      col += mix(base, vec3(1.0), 0.5) * sd * shell * (0.3 + layer) * I * 1.4;
     }
 
     if (tech > 3.5) {
@@ -1501,7 +1777,11 @@ void main() {
     // EDGE of has stopped being light and become an object.
     vec2 d = vUv - 0.5;
     float r = length(d) * 2.0;
-    float f = pow(clamp(1.0 - r, 0.0, 1.0), 2.6);
+    // Steeper than 2.6: the wash has to hug the mouth. A shallow falloff over a
+    // card this size puts a readable disc edge out in open space beside the
+    // bells, and anything you can see the EDGE of has stopped being light and
+    // become an object.
+    float f = pow(clamp(1.0 - r, 0.0, 1.0), 3.6);
     float thr = clamp(uThrottle + uBoost * 0.5, 0.0, 1.0);
     col = vCol * f * vA.z * vDrive * thr * thr;
   }
@@ -1630,10 +1910,64 @@ class LightBatch extends AdditiveBatch {
 
 /** One drawn nozzle. Kept flat so the gimbal loop touches no objects. */
 interface NozzleSlot {
-  readonly mesh: number;
-  readonly slot: number;
   readonly plumeSlot: number;
   readonly gimbal: number;
+}
+
+/**
+ * Everything about the drawn nozzles that does NOT depend on the LOD rung.
+ *
+ * Staged once in the constructor and gathered per rung. The instance data — a
+ * nozzle's place, its size and its seed — is a property of the ship; only the
+ * mesh it is packed into and the tessellation of that mesh belong to a rung.
+ */
+interface NozzleStage {
+  /** Per nozzle, in drawing order. */
+  readonly style: NozzleStyle[];
+  /** n × 3: (exitRadius, exitRadius, bellLength) km. */
+  readonly size: Float32Array;
+  /** n × 16, rigid. */
+  readonly matrix: Float32Array;
+  readonly seed: Float32Array;
+  readonly count: number;
+}
+
+/** The same, for the small fittings: RCS cups and lamp housings. */
+interface FixtureStage {
+  readonly size: Float32Array;
+  readonly matrix: Float32Array;
+  readonly seed: Float32Array;
+  readonly count: number;
+}
+
+/**
+ * One built rung of the propulsion LOD ladder.
+ *
+ * The instanced ATTRIBUTE buffers are shared across every rung — they are
+ * subarray views onto the staged data, so four rungs cost four sets of
+ * geometry and one set of instance data. In particular `iDrive`, which is
+ * rewritten every frame, is one Float32Array with one view per rung, so the
+ * per-frame write is a single linear run whatever rung is showing.
+ */
+interface PropulsionRung {
+  readonly level: number;
+  readonly group: Group;
+  readonly geometries: BufferGeometry[];
+  readonly nozzleMeshes: InstancedMesh[];
+  /** Which nozzle mesh, and which instance inside it, each nozzle occupies. */
+  readonly nzMesh: Uint8Array;
+  readonly nzSlot: Uint16Array;
+  readonly fixtureMesh: InstancedMesh | null;
+  readonly plumeMesh: InstancedMesh | null;
+  readonly quadMesh: InstancedMesh | null;
+  readonly wakeMesh: InstancedMesh | null;
+  readonly plumeDrive: InstancedBufferAttribute | null;
+  readonly quadDrive: InstancedBufferAttribute | null;
+  readonly plumeGain: number;
+  /** Drawn triangles at this rung, for the review manifest. */
+  readonly triangles: number;
+  /** Visible draw calls at this rung. */
+  readonly drawCalls: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -1711,6 +2045,7 @@ function acquireProgram(quality: QualitySettings): PropulsionProgram {
       uHeat: { value: 0 },
       uPixelAngle: { value: 0.001 },
       uMinPixels: { value: 2.5 },
+      uPlumeGain: { value: 0.25 },
     },
     vertexShader: ADDITIVE_VERT,
     fragmentShader: ADDITIVE_FRAG,
@@ -1769,20 +2104,43 @@ export class ShipPropulsion {
   private readonly group = new Group();
 
   // --- GPU resources, every one of which dispose() frees ---------------------
-  private readonly nozzleGeos: BufferGeometry[] = [];
-  private readonly nozzleMeshes: InstancedMesh[] = [];
   /** Shared, refcounted. Released — never disposed — in `dispose()`. */
   private readonly program: PropulsionProgram;
   private readonly nozzleMat: ShaderMaterial;
   private readonly additiveMat: ShaderMaterial;
-  private fixtureGeo: BufferGeometry | null = null;
+
+  /**
+   * One built rung of the LOD ladder, or null until it is first asked for.
+   *
+   * Built lazily and then kept, exactly as `ShipMesh` keeps its hull LODs: a
+   * ship that never recedes never pays for the rungs it never shows, and a ship
+   * crossing a threshold pays once rather than every crossing.
+   */
+  private readonly rungs: Array<PropulsionRung | null> = [null, null, null, null];
+  private activeRung: PropulsionRung | null = null;
+  private lod = -1;
+  /**
+   * True once the owner has called `setLod`.
+   *
+   * Until then this object picks its own rung from the blueprint's ladder and
+   * the camera distance, which is the same contract `LodLevel.minDistanceKm`
+   * publishes to everyone else. That fallback is what makes a FLEET cheap today
+   * without a change in another agent's file; an explicit `setLod` — one line in
+   * `ShipMesh.setLod` — takes it over and keeps propulsion on exactly the rung
+   * the hull is on, which is what the forced-LOD review shots need.
+   */
+  private lodLocked = false;
+  /** minDistanceKm per rung, from `bp.renderProfile.lods`. */
+  private readonly lodDistance: Float32Array;
+
+  // --- the ACTIVE rung's meshes, aliased so the frame path stays flat --------
+  private nozzleMeshes: InstancedMesh[] = [];
   private fixtureMesh: InstancedMesh | null = null;
-  private plumeGeo: BufferGeometry | null = null;
   private plumeMesh: InstancedMesh | null = null;
-  private quadGeo: BufferGeometry | null = null;
   private quadMesh: InstancedMesh | null = null;
-  private wakeGeo: BufferGeometry | null = null;
   private wakeMesh: InstancedMesh | null = null;
+  /** 1 / (shells * 2) for the active rung. See `PLUME_RADIANCE`. */
+  private plumeGain = 0.25;
 
   // --- per-frame state, all preallocated ------------------------------------
   private time = 0;
@@ -1857,6 +2215,23 @@ export class ShipPropulsion {
   private uThrottle = 0;
   private uGlowDepth = 0.2;
 
+  // --- rung-independent staging, gathered by buildRung() ---------------------
+  private readonly budget: Budget;
+  private readonly crowded: boolean;
+  /** Mean throat/exit ratio, baked into every rung's nozzle geometry. */
+  private readonly throatRatio: number;
+  /** The style the most nozzles use — the one a merged rung draws. */
+  private readonly dominantStyle: NozzleStyle;
+  private readonly nozzleStage: NozzleStage;
+  private readonly fixtureStage: FixtureStage;
+  private readonly plumeStage: AdditiveBatch;
+  private readonly quadStage: AdditiveBatch;
+  private readonly wakeStage: AdditiveBatch | null;
+  private readonly nozzleCore: Float32Array;
+  private readonly nozzleTech: Float32Array;
+  private readonly fixtureCore: Float32Array;
+  private readonly fixtureTech: Float32Array;
+
   // scratch — never allocated in update()
   private readonly _m4 = new Matrix4();
   private readonly _m4b = new Matrix4();
@@ -1867,13 +2242,28 @@ export class ShipPropulsion {
   private readonly _axisX = new Vector3(1, 0, 0);
   private readonly _axisY = new Vector3(0, 1, 0);
 
-  constructor(bp: ShipBlueprint, quality: QualitySettings) {
+  /**
+   * @param lod  Which rung to build first. Omit and this object picks its own
+   *             from the camera distance until `setLod` is called; pass the
+   *             level `ShipMesh` is showing and it stays locked to the hull.
+   */
+  constructor(bp: ShipBlueprint, quality: QualitySettings, lod?: number) {
     registerShaderChunks();
 
     const budget = BUDGETS[quality.tier];
+    this.budget = budget;
     this.minLightPixels = budget.minLightPixels;
     this.object3d = this.group;
     this.group.name = `propulsion:${bp.id}`;
+
+    // The ladder the hull is on, so propulsion can shed on the same thresholds
+    // rather than inventing its own.
+    this.lodDistance = new Float32Array([0, Infinity, Infinity, Infinity]);
+    const ladder = bp.renderProfile.lods;
+    for (let i = 0; i < 4; i++) {
+      const rung = ladder[Math.min(i, ladder.length - 1)];
+      this.lodDistance[i] = rung ? rung.minDistanceKm : Infinity;
+    }
 
     const L = Math.max(bp.dimensions.lengthKm, 1e-5);
     // Big machines move slowly. Every temporal constant in this file was
@@ -1914,23 +2304,19 @@ export class ShipPropulsion {
     for (const p of pods) throatSum += clamp(p.nozzle.throatRadius / Math.max(p.nozzle.exitRadius, 1e-9), 0.18, 0.82);
     const throat = pods.length > 0 ? throatSum / pods.length : 0.42;
 
+    this.throatRatio = throat;
     const crowded = nozzleTotal > PLUME_CROWD_THRESHOLD;
-    // The floor is 10, not 6. A shell is the one object in this file whose
-    // SILHOUETTE is its whole read, and a heptagon seen down its own axis is a
-    // seven-pointed star with straight edges — which is precisely what the hero
-    // frame shows. Segments are the cheapest thing in the budget: a 20-segment
-    // shell at 9 steps is 720 triangles, instanced across the whole rank.
-    const plumeSeg = crowded ? Math.max(10, budget.plumeSeg >> 1) : budget.plumeSeg;
-    const plumeSteps = crowded ? Math.max(5, (budget.plumeSteps * 2) / 3 | 0) : budget.plumeSteps;
-    const plumeLayers = crowded ? 1 : budget.plumeLayers;
-    // Radiance per SURFACE, not per plume: a ray crosses the front and back of
-    // every nested shell and all of them add. See `I` in ADDITIVE_FRAG.
-    const plumeIntensity = 1.05 / (plumeLayers * 2);
+    this.crowded = crowded;
 
-    // Group nozzles by style: one InstancedMesh per style present, which is
-    // one draw call for almost every ship (a faction has one nozzle doctrine)
-    // and never one per engine.
-    const byStyle = new Map<NozzleStyle, { size: number[]; matrix: number[]; seed: number[] }>();
+    // Staged in DRAWING ORDER, once, and gathered into whichever mesh layout a
+    // rung wants. A nozzle's place, size and seed are properties of the ship;
+    // only the tessellation and the packing belong to the rung.
+    const nzStyle: NozzleStyle[] = [];
+    const nzSize = new Float32Array(nozzleTotal * 3);
+    const nzMatrix = new Float32Array(nozzleTotal * 16);
+    const nzSeed = new Float32Array(nozzleTotal);
+    let nzCount = 0;
+    const styleTally = new Map<NozzleStyle, number>();
     const plumeBatch = new AdditiveBatch(nozzleTotal);
 
     const glowPos: number[] = [];
@@ -1967,14 +2353,13 @@ export class ShipPropulsion {
       podCore.setRGB(pod.plume.coreColor[0], pod.plume.coreColor[1], pod.plume.coreColor[2]);
       edgeColor.setRGB(pod.plume.edgeColor[0], pod.plume.edgeColor[1], pod.plume.edgeColor[2]);
 
-      let entry = byStyle.get(pod.nozzle.style);
-      if (!entry) {
-        entry = { size: [], matrix: [], seed: [] };
-        byStyle.set(pod.nozzle.style, entry);
-      }
-      const meshIndex = [...byStyle.keys()].indexOf(pod.nozzle.style);
+      styleTally.set(pod.nozzle.style, (styleTally.get(pod.nozzle.style) ?? 0) + count);
 
       const plumeLen = exit * Math.max(pod.plume.lengthRatio, 0.5) * shape[0];
+      // The column leaves the exit plane AT the exit radius. `shape[1]` is now
+      // only the small per-technology trim on that boundary condition; the
+      // width difference between an ion fan and a fusion column is carried by
+      // `osPlumeExpansion` in the shader, not by starting one of them narrow.
       const plumeWid = exit * shape[1];
 
       for (let n = 0; n < count; n++) {
@@ -1982,10 +2367,13 @@ export class ShipPropulsion {
         local.identity().setPosition(Math.cos(a) * clusterR, Math.sin(a) * clusterR, 0);
         world.multiplyMatrices(m, local);
 
-        const slot = entry.size.length / 3;
-        entry.size.push(exit, exit, bellLen);
-        for (let k = 0; k < 16; k++) entry.matrix.push(world.elements[k]);
-        entry.seed.push(((pod.seed >>> 0) % 1024) * 0.031 + n * 0.37);
+        const idx = nzCount++;
+        nzStyle.push(pod.nozzle.style);
+        nzSize[idx * 3] = exit;
+        nzSize[idx * 3 + 1] = exit;
+        nzSize[idx * 3 + 2] = bellLen;
+        world.toArray(nzMatrix, idx * 16);
+        nzSeed[idx] = ((pod.seed >>> 0) % 1024) * 0.031 + n * 0.37;
 
         // The plume starts at the EXIT plane, not at the throat the frame is
         // anchored to — otherwise it is drawn inside its own bell.
@@ -1996,12 +2384,14 @@ export class ShipPropulsion {
           KIND_PLUME,
           podCore,
           edgeColor,
-          [plumeLen, plumeWid, plumeIntensity, ((pod.seed >>> 0) % 997) / 997],
+          // The per-surface division is `uPlumeGain` now, so one staged batch
+          // serves rungs with one shell and rungs with two.
+          [plumeLen, plumeWid, PLUME_RADIANCE, ((pod.seed >>> 0) % 997) / 997],
           [Math.max(0, Math.round(pod.plume.diamonds)), clamp01(pod.plume.flicker), tech, 0],
           1,
         );
 
-        this.nozzles.push({ mesh: meshIndex, slot, plumeSlot, gimbal: Math.max(0, pod.nozzle.gimbalLimit) });
+        this.nozzles.push({ plumeSlot, gimbal: Math.max(0, pod.nozzle.gimbalLimit) });
         this.nozzleBell.push(bellLen);
         world.decompose(pos, q, this._v);
         this.nozzlePos.push(pos.clone());
@@ -2020,13 +2410,33 @@ export class ShipPropulsion {
       // The wash card sits at the EXIT PLANE of the cluster, not out in the
       // plume: the plating it has to brighten is the plating immediately around
       // the bells. Its radius covers the whole cluster plus a margin.
+      //
+      // 1.9, not 2.6. This card is centred BETWEEN the bells of a cluster, so
+      // at two and a half cluster radii it had an outline of its own out in
+      // open space beside them and read as one more plume — part of what the
+      // review counted when two bells produced four bright lobes. Sized to the
+      // cluster it stays what it is: light on the plating around the mouths.
       wash.push(
         pod.frame.origin[0] + this._v.x * bellLen,
         pod.frame.origin[1] + this._v.y * bellLen,
         pod.frame.origin[2] + this._v.z * bellLen,
-        (clusterR + exit) * 2.6,
+        (clusterR + exit) * 1.9,
       );
     }
+
+    this.nozzleStage = { style: nzStyle, size: nzSize, matrix: nzMatrix, seed: nzSeed, count: nzCount };
+    this.plumeStage = plumeBatch;
+    // A merged rung draws every nozzle with one geometry, so it has to be the
+    // one the most nozzles actually use or the silhouette changes at the swap.
+    let bestStyle: NozzleStyle = 'bell';
+    let bestTally = -1;
+    for (const [style, tally] of styleTally) {
+      if (tally > bestTally) {
+        bestTally = tally;
+        bestStyle = style;
+      }
+    }
+    this.dominantStyle = bestStyle;
 
     this.hasGimbal = this.nozzles.some((n) => n.gimbal > 1e-4);
     // A gimballed drive does most of the vectoring with the bell, so its
@@ -2061,44 +2471,8 @@ export class ShipPropulsion {
     }
     this.glowRangeBase = pods.length > 0 ? this.meanPlumeLength(pods, shape[0]) : L * 0.1;
 
-    // ---- nozzle meshes ----------------------------------------------------
-    for (const [style, entry] of byStyle) {
-      const geo = buildNozzle(style, budget.nozzleSeg, throat).geometry();
-      const n = entry.size.length / 3;
-      geo.setAttribute('iSize', new InstancedBufferAttribute(new Float32Array(entry.size), 3));
-      geo.setAttribute('iCore', new InstancedBufferAttribute(this.repeatColor(coreColor, n), 3));
-      geo.setAttribute('iTech', new InstancedBufferAttribute(new Float32Array(n).fill(tech), 1));
-      geo.setAttribute('iSeed', new InstancedBufferAttribute(new Float32Array(entry.seed), 1));
-      const mesh = new InstancedMesh(geo, this.nozzleMat, n);
-      mesh.instanceMatrix.array.set(entry.matrix);
-      mesh.instanceMatrix.needsUpdate = true;
-      if (this.hasGimbal) mesh.instanceMatrix.setUsage(DynamicDrawUsage);
-      // The ship is the near subject and the integrator culls it as a whole;
-      // per-mesh culling here would only fight the vertex-shader extrusion.
-      mesh.frustumCulled = false;
-      mesh.renderOrder = 0;
-      mesh.onBeforeRender = this.pushNozzle;
-      this.nozzleGeos.push(geo);
-      this.nozzleMeshes.push(mesh);
-      this.group.add(mesh);
-    }
-
-    // ---- plumes -----------------------------------------------------------
-    if (plumeBatch.count > 0) {
-      this.plumeGeo = buildShellGeometry(plumeSeg, plumeSteps, plumeLayers, 1);
-      this.plumeDriveAttr = plumeBatch.attach(this.plumeGeo, true);
-      this.plumeMesh = new InstancedMesh(this.plumeGeo, this.additiveMat, plumeBatch.count);
-      this.plumeMesh.instanceMatrix.array.set(plumeBatch.matrix.subarray(0, plumeBatch.count * 16));
-      this.plumeMesh.instanceMatrix.needsUpdate = true;
-      if (this.hasGimbal) this.plumeMesh.instanceMatrix.setUsage(DynamicDrawUsage);
-      this.plumeMesh.frustumCulled = false;
-      // After the opaque nozzle so the column's root sits inside a bell that
-      // has already written depth.
-      this.plumeMesh.renderOrder = 3;
-      this.plumeMesh.onBeforeRender = this.pushAdditive;
-      this.plumeMesh.visible = false;
-      this.group.add(this.plumeMesh);
-    }
+    this.nozzleCore = this.repeatColor(coreColor, nzCount);
+    this.nozzleTech = new Float32Array(nzCount).fill(tech);
 
     // ---- lights, RCS jets and engine wash, one merged instanced quad -------
     const lights = this.collectLights(bp);
@@ -2199,7 +2573,7 @@ export class ShipPropulsion {
     // ---- engine wash cards -------------------------------------------------
     for (let i = 0; i < this.washCount; i++) {
       m.identity().setPosition(wash[i * 4], wash[i * 4 + 1], wash[i * 4 + 2]);
-      quadBatch.push(m, KIND_WASH, glowColor, glowColor, [wash[i * 4 + 3], 0, 0.65, 0], [0, 0, 0, 0], 1);
+      quadBatch.push(m, KIND_WASH, glowColor, glowColor, [wash[i * 4 + 3], 0, 0.45, 0], [0, 0, 0, 0], 1);
     }
 
     // ---- light housings ----------------------------------------------------
@@ -2212,33 +2586,16 @@ export class ShipPropulsion {
       fixSeed.push(i * 0.19);
     }
 
-    if (fixSize.length > 0) {
-      this.fixtureGeo = buildFixture(budget.nozzleSeg).geometry();
-      const n = fixSize.length / 3;
-      this.fixtureGeo.setAttribute('iSize', new InstancedBufferAttribute(new Float32Array(fixSize), 3));
-      this.fixtureGeo.setAttribute('iCore', new InstancedBufferAttribute(this.repeatColor(coreColor, n), 3));
-      this.fixtureGeo.setAttribute('iTech', new InstancedBufferAttribute(new Float32Array(n).fill(tech), 1));
-      this.fixtureGeo.setAttribute('iSeed', new InstancedBufferAttribute(new Float32Array(fixSeed), 1));
-      this.fixtureMesh = new InstancedMesh(this.fixtureGeo, this.nozzleMat, n);
-      this.fixtureMesh.instanceMatrix.array.set(fixMatrix);
-      this.fixtureMesh.instanceMatrix.needsUpdate = true;
-      this.fixtureMesh.frustumCulled = false;
-      this.fixtureMesh.renderOrder = 0;
-      this.fixtureMesh.onBeforeRender = this.pushNozzle;
-      this.group.add(this.fixtureMesh);
-    }
-
-    if (quadBatch.count > 0) {
-      this.quadGeo = buildQuadGeometry();
-      this.quadDriveAttr = quadBatch.attach(this.quadGeo, true);
-      this.quadMesh = new InstancedMesh(this.quadGeo, this.additiveMat, quadBatch.count);
-      this.quadMesh.instanceMatrix.array.set(quadBatch.matrix.subarray(0, quadBatch.count * 16));
-      this.quadMesh.instanceMatrix.needsUpdate = true;
-      this.quadMesh.frustumCulled = false;
-      this.quadMesh.renderOrder = 4;
-      this.quadMesh.onBeforeRender = this.pushAdditive;
-      this.group.add(this.quadMesh);
-    }
+    const fixCount = fixSize.length / 3;
+    this.fixtureStage = {
+      size: new Float32Array(fixSize),
+      matrix: new Float32Array(fixMatrix),
+      seed: new Float32Array(fixSeed),
+      count: fixCount,
+    };
+    this.fixtureCore = this.repeatColor(coreColor, fixCount);
+    this.fixtureTech = new Float32Array(fixCount).fill(tech);
+    this.quadStage = quadBatch;
 
     // ---- re-entry wake ----------------------------------------------------
     if (bp.technologyProfile.atmosphereCapable) {
@@ -2246,17 +2603,262 @@ export class ShipPropulsion {
       const aft = bp.dimensions.bounds.max[2];
       m.identity().setPosition(0, 0, aft * 0.95);
       wakeBatch.push(m, KIND_WAKE, coreColor, coreColor, [L * 3.8, bp.dimensions.beamKm * 0.75, 0.6, 0], [0, 0, 0, 0], 1);
-      this.wakeGeo = buildShellGeometry(budget.wakeSeg, budget.wakeSteps, 1, 0.8);
-      wakeBatch.attach(this.wakeGeo, false);
-      this.wakeMesh = new InstancedMesh(this.wakeGeo, this.additiveMat, 1);
-      this.wakeMesh.instanceMatrix.array.set(wakeBatch.matrix.subarray(0, 16));
-      this.wakeMesh.instanceMatrix.needsUpdate = true;
-      this.wakeMesh.frustumCulled = false;
-      this.wakeMesh.renderOrder = 5;
-      this.wakeMesh.onBeforeRender = this.pushAdditive;
-      this.wakeMesh.visible = false;
-      this.group.add(this.wakeMesh);
+      this.wakeStage = wakeBatch;
+    } else {
+      this.wakeStage = null;
     }
+
+    // Build the rung we are going to show and nothing else. The rest arrive
+    // when the ship first recedes far enough to need them.
+    this.setLod(lod === undefined ? 0 : (clamp(Math.round(lod), 0, 3) as 0 | 1 | 2 | 3));
+    if (lod === undefined) this.lodLocked = false;
+  }
+
+  // -------------------------------------------------------------------------
+  // LOD
+  // -------------------------------------------------------------------------
+
+  /** Which rung is currently drawn. -1 before the first `setLod`. */
+  get lodLevel(): number {
+    return this.lod;
+  }
+
+  /** Drawn triangles and visible draw calls at the active rung. */
+  stats(): { lod: number; triangles: number; drawCalls: number } {
+    const r = this.activeRung;
+    return { lod: this.lod, triangles: r?.triangles ?? 0, drawCalls: r?.drawCalls ?? 0 };
+  }
+
+  /**
+   * Put propulsion on the same rung as the hull.
+   *
+   * `ShipMesh.setLod` should forward to this — one line — after which this
+   * object stops choosing for itself. Until it does, `update()` picks the rung
+   * from the camera distance against the blueprint's own ladder, which is right
+   * for a fleet and wrong for a forced-LOD review shot.
+   */
+  setLod(level: 0 | 1 | 2 | 3): void {
+    this.lodLocked = true;
+    if (level === this.lod) return;
+    const rung = this.rungs[level] ?? (this.rungs[level] = this.buildRung(level));
+    // DETACHED, not merely hidden. `ShipMesh` measures this module's triangle
+    // budget by traversing `object3d`, and `Object3D.traverse` walks into
+    // invisible subtrees, so an inactive rung left parented would be counted
+    // against the ship it is deliberately not drawing. A parent-pointer swap
+    // costs nothing and makes every external measurement of this object true.
+    if (this.activeRung) this.activeRung.group.removeFromParent();
+    this.group.add(rung.group);
+    this.activeRung = rung;
+    this.lod = level;
+
+    // Rebind the frame path. Everything below this line reads the ACTIVE rung
+    // and nothing walks the scene graph per frame.
+    this.nozzleMeshes = rung.nozzleMeshes;
+    this.fixtureMesh = rung.fixtureMesh;
+    this.plumeMesh = rung.plumeMesh;
+    this.quadMesh = rung.quadMesh;
+    this.wakeMesh = rung.wakeMesh;
+    this.plumeDriveAttr = rung.plumeDrive;
+    this.quadDriveAttr = rung.quadDrive;
+    this.plumeGain = rung.plumeGain;
+    // The instanced attributes are shared views onto one staged buffer, so the
+    // values written for the previous rung are already correct here; they just
+    // have to be re-uploaded against this rung's attribute objects.
+    if (rung.plumeDrive) rung.plumeDrive.needsUpdate = true;
+    if (rung.quadDrive) rung.quadDrive.needsUpdate = true;
+    if (this.hasGimbal) this.applyGimbal();
+  }
+
+  /**
+   * Build one rung. Called at most four times per ship, never from `update()`.
+   */
+  private buildRung(level: number): PropulsionRung {
+    const plan = rungPlan(this.budget, level, this.crowded);
+    const group = new Group();
+    group.name = `propulsion-lod${level}`;
+    const geometries: BufferGeometry[] = [];
+    const nozzleMeshes: InstancedMesh[] = [];
+    const stage = this.nozzleStage;
+    const n = stage.count;
+    const nzMesh = new Uint8Array(n);
+    const nzSlot = new Uint16Array(n);
+    let triangles = 0;
+
+    const triCount = (g: BufferGeometry, instances: number): number => {
+      const idx = g.getIndex();
+      return ((idx ? idx.count : g.getAttribute('position').count) / 3) * instances;
+    };
+
+    // ---- nozzles ----------------------------------------------------------
+    if (plan.nozzles && n > 0) {
+      // One InstancedMesh per style present — one draw call for almost every
+      // ship, because a faction has one nozzle doctrine — collapsing to exactly
+      // one for the whole ship once the styles stop being distinguishable.
+      const groups: NozzleStyle[] = [];
+      if (plan.mergeStyles) {
+        groups.push(this.dominantStyle);
+        for (let i = 0; i < n; i++) {
+          nzMesh[i] = 0;
+          nzSlot[i] = i;
+        }
+      } else {
+        for (let i = 0; i < n; i++) {
+          const s = stage.style[i];
+          let gi = groups.indexOf(s);
+          if (gi < 0) {
+            gi = groups.length;
+            groups.push(s);
+          }
+          nzMesh[i] = gi;
+        }
+      }
+
+      for (let gi = 0; gi < groups.length; gi++) {
+        // Gather this style's instances out of the staged, ship-ordered arrays.
+        const members: number[] = [];
+        for (let i = 0; i < n; i++) if (plan.mergeStyles || nzMesh[i] === gi) members.push(i);
+        if (members.length === 0) continue;
+        const count = members.length;
+        const size = new Float32Array(count * 3);
+        const matrix = new Float32Array(count * 16);
+        const seed = new Float32Array(count);
+        const core = new Float32Array(count * 3);
+        const techA = new Float32Array(count);
+        for (let k = 0; k < count; k++) {
+          const src = members[k];
+          if (!plan.mergeStyles) nzSlot[src] = k;
+          size.set(stage.size.subarray(src * 3, src * 3 + 3), k * 3);
+          matrix.set(stage.matrix.subarray(src * 16, src * 16 + 16), k * 16);
+          seed[k] = stage.seed[src];
+          core.set(this.nozzleCore.subarray(src * 3, src * 3 + 3), k * 3);
+          techA[k] = this.nozzleTech[src];
+        }
+
+        const geo = buildNozzle(groups[gi], plan.nozzleSeg, this.throatRatio, plan.nozzleDetail).geometry();
+        geo.setAttribute('iSize', new InstancedBufferAttribute(size, 3));
+        geo.setAttribute('iCore', new InstancedBufferAttribute(core, 3));
+        geo.setAttribute('iTech', new InstancedBufferAttribute(techA, 1));
+        geo.setAttribute('iSeed', new InstancedBufferAttribute(seed, 1));
+        const mesh = new InstancedMesh(geo, this.nozzleMat, count);
+        mesh.instanceMatrix.array.set(matrix);
+        mesh.instanceMatrix.needsUpdate = true;
+        if (this.hasGimbal) mesh.instanceMatrix.setUsage(DynamicDrawUsage);
+        // The ship is the near subject and the integrator culls it as a whole;
+        // per-mesh culling here would only fight the vertex-shader extrusion.
+        mesh.frustumCulled = false;
+        mesh.renderOrder = 0;
+        mesh.onBeforeRender = this.pushNozzle;
+        triangles += triCount(geo, count);
+        geometries.push(geo);
+        nozzleMeshes.push(mesh);
+        group.add(mesh);
+      }
+    }
+
+    // ---- fittings ---------------------------------------------------------
+    let fixtureMesh: InstancedMesh | null = null;
+    const fix = this.fixtureStage;
+    // The RCS cups are staged ahead of the lamp housings, so a cap drops the
+    // cowls off distant lamps — which still light, they just stop having a
+    // machined body — before it takes a thruster away from a firing jet.
+    const fixCount = plan.fixtureLimit < 0 ? fix.count : Math.min(fix.count, plan.fixtureLimit);
+    if (fixCount > 0) {
+      const geo = buildFixture(plan.nozzleSeg).geometry();
+      geo.setAttribute('iSize', new InstancedBufferAttribute(fix.size, 3));
+      geo.setAttribute('iCore', new InstancedBufferAttribute(this.fixtureCore, 3));
+      geo.setAttribute('iTech', new InstancedBufferAttribute(this.fixtureTech, 1));
+      geo.setAttribute('iSeed', new InstancedBufferAttribute(fix.seed, 1));
+      fixtureMesh = new InstancedMesh(geo, this.nozzleMat, fixCount);
+      fixtureMesh.instanceMatrix.array.set(fix.matrix.subarray(0, fixCount * 16));
+      fixtureMesh.instanceMatrix.needsUpdate = true;
+      fixtureMesh.frustumCulled = false;
+      fixtureMesh.renderOrder = 0;
+      fixtureMesh.onBeforeRender = this.pushNozzle;
+      triangles += triCount(geo, fixCount);
+      geometries.push(geo);
+      group.add(fixtureMesh);
+    }
+
+    // ---- plumes -----------------------------------------------------------
+    let plumeMesh: InstancedMesh | null = null;
+    let plumeDrive: InstancedBufferAttribute | null = null;
+    const plumes = this.plumeStage;
+    if (plumes.count > 0) {
+      const geo = buildShellGeometry(plan.plumeSeg, plan.plumeSteps, plan.plumeLayers, 1);
+      plumeDrive = plumes.attach(geo, true);
+      plumeMesh = new InstancedMesh(geo, this.additiveMat, plumes.count);
+      plumeMesh.instanceMatrix.array.set(plumes.matrix.subarray(0, plumes.count * 16));
+      plumeMesh.instanceMatrix.needsUpdate = true;
+      if (this.hasGimbal) plumeMesh.instanceMatrix.setUsage(DynamicDrawUsage);
+      plumeMesh.frustumCulled = false;
+      // After the opaque nozzle so the column's root sits inside a bell that
+      // has already written depth.
+      plumeMesh.renderOrder = 3;
+      plumeMesh.onBeforeRender = this.pushAdditive;
+      plumeMesh.visible = false;
+      triangles += triCount(geo, plumes.count);
+      geometries.push(geo);
+      group.add(plumeMesh);
+    }
+
+    // ---- lights, RCS jets and engine wash ---------------------------------
+    let quadMesh: InstancedMesh | null = null;
+    let quadDrive: InstancedBufferAttribute | null = null;
+    const quads = this.quadStage;
+    const quadCount = plan.quadLimit < 0
+      ? quads.count
+      : Math.min(quads.count, Math.max(0, Math.min(plan.quadLimit, this.jetBase)));
+    if (quadCount > 0) {
+      const geo = buildQuadGeometry();
+      quadDrive = quads.attach(geo, true);
+      quadMesh = new InstancedMesh(geo, this.additiveMat, quadCount);
+      quadMesh.instanceMatrix.array.set(quads.matrix.subarray(0, quadCount * 16));
+      quadMesh.instanceMatrix.needsUpdate = true;
+      quadMesh.frustumCulled = false;
+      quadMesh.renderOrder = 4;
+      quadMesh.onBeforeRender = this.pushAdditive;
+      triangles += triCount(geo, quadCount);
+      geometries.push(geo);
+      group.add(quadMesh);
+    }
+
+    // ---- re-entry wake ----------------------------------------------------
+    let wakeMesh: InstancedMesh | null = null;
+    if (plan.wake && this.wakeStage) {
+      const geo = buildShellGeometry(this.budget.wakeSeg, this.budget.wakeSteps, 1, 0.8);
+      this.wakeStage.attach(geo, false);
+      wakeMesh = new InstancedMesh(geo, this.additiveMat, 1);
+      wakeMesh.instanceMatrix.array.set(this.wakeStage.matrix.subarray(0, 16));
+      wakeMesh.instanceMatrix.needsUpdate = true;
+      wakeMesh.frustumCulled = false;
+      wakeMesh.renderOrder = 5;
+      wakeMesh.onBeforeRender = this.pushAdditive;
+      wakeMesh.visible = false;
+      triangles += triCount(geo, 1);
+      geometries.push(geo);
+      group.add(wakeMesh);
+    }
+
+    // NOT parented here: `setLod` attaches exactly the rung that is drawing.
+    return {
+      level,
+      group,
+      geometries,
+      nozzleMeshes,
+      nzMesh,
+      nzSlot,
+      fixtureMesh,
+      plumeMesh,
+      quadMesh,
+      wakeMesh,
+      plumeDrive,
+      quadDrive,
+      plumeGain: 1 / (plan.plumeLayers * 2),
+      triangles,
+      // The wake and the plume are only drawn when they are doing something, so
+      // the honest number is what a still frame at full burn costs.
+      drawCalls: nozzleMeshes.length + (fixtureMesh ? 1 : 0) + (plumeMesh ? 1 : 0) + (quadMesh ? 1 : 0),
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -2293,6 +2895,9 @@ export class ShipPropulsion {
     u.uBoost.value = this.vBoost;
     u.uHeat.value = this.vHeat;
     u.uMinPixels.value = this.minLightPixels;
+    // Per-RUNG, not per-ship: the number of additive surfaces a ray crosses
+    // changes when the plume drops from two nested shells to one.
+    u.uPlumeGain.value = this.plumeGain;
     // One number carries every screen-space decision in this file, exactly as
     // Planet.ts does: km per pixel at distance d is d * uPixelAngle.
     u.uPixelAngle.value = this.pixelAngle;
@@ -2425,6 +3030,27 @@ export class ShipPropulsion {
   update(dt: number, ctx: EngineContext, view: ViewState, state: ShipDriveState): void {
     this.time += dt;
 
+    // Until the owner takes over, pick the rung off the same ladder the hull
+    // uses. `LodLevel.minDistanceKm` is the published contract for what level a
+    // ship is at, and honouring it here is what stops a fleet drawn at 3 km
+    // paying arm's-length prices for thrust frames nobody can resolve.
+    if (!this.lodLocked) {
+      // ±8% of hysteresis about every threshold. Without it a ship parked on a
+      // boundary swaps rung every frame, and a swap changes the number of
+      // additive shells — which the eye reads as the drive flickering.
+      let want = 0;
+      for (let i = 3; i >= 1; i--) {
+        if (view.distance >= this.lodDistance[i] * (this.lod >= i ? 0.92 : 1.08)) {
+          want = i;
+          break;
+        }
+      }
+      if (want !== this.lod) {
+        this.setLod(want as 0 | 1 | 2 | 3);
+        this.lodLocked = false;
+      }
+    }
+
     // Nothing snaps. A drive spools, heat builds and bleeds, the bus comes up.
     // The spool rate is scaled with the hull so a capital takes visibly longer
     // to answer the throttle than a courier does.
@@ -2479,11 +3105,16 @@ export class ShipPropulsion {
    * and the plume has to follow the bell or the illusion inverts immediately.
    */
   private applyGimbal(): void {
-    const meshes = this.nozzleMeshes;
+    const rung = this.activeRung;
+    if (!rung) return;
+    const meshes = rung.nozzleMeshes;
     for (let i = 0; i < this.nozzles.length; i++) {
       const n = this.nozzles[i];
       if (n.gimbal <= 1e-4) continue;
-      const mesh = meshes[n.mesh];
+      // The (mesh, slot) a nozzle occupies is a property of the RUNG — a merged
+      // rung packs every style into one mesh — so it is looked up there rather
+      // than baked into the nozzle.
+      const mesh = meshes[rung.nzMesh[i]];
       // Thrust opposes exhaust, so a nose-up command swings the bells the other
       // way. The sign is the whole point of doing this at all.
       this._qg.setFromAxisAngle(this._axisX, -this.vGimbalPitch * n.gimbal);
@@ -2491,7 +3122,7 @@ export class ShipPropulsion {
       this._qg.setFromAxisAngle(this._axisY, -this.vGimbalYaw * n.gimbal);
       this._q.multiply(this._qg);
       this._m4.compose(this.nozzlePos[i], this._q, this._scale);
-      this._m4.toArray(mesh.instanceMatrix.array as Float32Array, n.slot * 16);
+      if (mesh) this._m4.toArray(mesh.instanceMatrix.array as Float32Array, rung.nzSlot[i] * 16);
       if (this.plumeMesh && n.plumeSlot >= 0) {
         // The plume anchors at the exit plane, which moves when the bell swings.
         this._m4b.identity().setPosition(0, 0, this.nozzleBell[i]);
@@ -2625,28 +3256,29 @@ export class ShipPropulsion {
   // -------------------------------------------------------------------------
 
   dispose(): void {
-    for (const g of this.nozzleGeos) g.dispose();
-    for (const mesh of this.nozzleMeshes) mesh.dispose();
-    this.nozzleGeos.length = 0;
-    this.nozzleMeshes.length = 0;
-
-    this.fixtureGeo?.dispose();
-    this.fixtureMesh?.dispose();
-    this.fixtureGeo = null;
+    // Every rung that was ever built, not just the one showing.
+    for (let i = 0; i < this.rungs.length; i++) {
+      const rung = this.rungs[i];
+      if (!rung) continue;
+      for (const g of rung.geometries) g.dispose();
+      for (const mesh of rung.nozzleMeshes) mesh.dispose();
+      rung.fixtureMesh?.dispose();
+      rung.plumeMesh?.dispose();
+      rung.quadMesh?.dispose();
+      rung.wakeMesh?.dispose();
+      rung.group.clear();
+      rung.group.removeFromParent();
+      this.rungs[i] = null;
+    }
+    this.activeRung = null;
+    this.nozzleMeshes = [];
     this.fixtureMesh = null;
-
-    this.plumeGeo?.dispose();
-    this.plumeMesh?.dispose();
-    this.quadGeo?.dispose();
-    this.quadMesh?.dispose();
-    this.wakeGeo?.dispose();
-    this.wakeMesh?.dispose();
-    this.plumeGeo = null;
     this.plumeMesh = null;
-    this.quadGeo = null;
     this.quadMesh = null;
-    this.wakeGeo = null;
     this.wakeMesh = null;
+    this.plumeDriveAttr = null;
+    this.quadDriveAttr = null;
+    this.lod = -1;
 
     // Shared and refcounted: the last ship of a tier to go disposes the pair.
     // Disposing them here unconditionally would pull the program out from under

@@ -80,7 +80,7 @@ import {
   wearWeightsFor,
 } from './families';
 import type { FactionDna, HullFamily, RoleSpec as FamilyRoleSpec } from './families';
-import { engineRatedThrustN, shipMassProperties, shipPhysicsProfile, shipScanLines, shipThrust } from './physics';
+import { engineRatedThrustN, shipDockingFrames, shipMassProperties, shipPhysicsProfile, shipScanLines, shipThrust } from './physics';
 
 import {
   MODULE_SOCKET,
@@ -259,7 +259,19 @@ export interface PlacementRejection {
     | 'post-pass-obstructed'
     /** The role's payload is supposed to be the largest thing on the ship and
      *  the massing did not make it so. */
-    | 'payload-not-dominant';
+    | 'payload-not-dominant'
+    /** The finished envelope was too stubby to read as a vessel with a
+     *  direction of travel, and the bow was lengthened to give it one. */
+    | 'axis-too-short'
+    /** Summed nozzle exit area wanted more of the stern than structure,
+     *  plumbing and radiators can spare. See `MAX_EXIT_FRACTION_OF_STERN`. */
+    | 'nozzle-area-over-stern'
+    /** The cockpit or bridge cannot see enough of the forward hemisphere.
+     *  Measured as a solid fraction over a real fan, not as a cone scalar. */
+    | 'view-cone-narrow'
+    /** The LADEN centre of mass sits off the thrust line by more than the
+     *  drive can trim out, so the ship tumbles when it burns loaded. */
+    | 'load-out-of-trim';
   /** What was being placed. */
   readonly what: string;
   /** Where it would have gone, ship-local km. */
@@ -459,7 +471,7 @@ const ROLE_TOPOLOGY: Readonly<Record<ShipRole, RoleTopology>> = {
   },
   refinery: {
     archetypes: [['tower', 5], ['cluster', 4], ['spine-and-pod', 4], ['asymmetric', 3], ['stacked', 2], ['ring', 3]],
-    heightRatio: [1.2, 2.0], payloadKind: 'machinery', landsOnSurfaces: false, frequency: 2,
+    heightRatio: [1.2, 2.0], payloadKind: 'machinery', landsOnSurfaces: false, frequency: 4,
   },
   salvager: {
     archetypes: [['asymmetric', 5], ['spine-and-pod', 4], ['fork', 3], ['cluster', 3], ['stacked', 3], ['tower', 1]],
@@ -471,15 +483,15 @@ const ROLE_TOPOLOGY: Readonly<Record<ShipRole, RoleTopology>> = {
   },
   science: {
     archetypes: [['ring', 6], ['fork', 4], ['monolithic', 3], ['stacked', 3], ['cluster', 3], ['tower', 2], ['asymmetric', 1]],
-    heightRatio: [0.7, 1.2], payloadKind: 'habitat', landsOnSurfaces: true, frequency: 4,
+    heightRatio: [0.7, 1.2], payloadKind: 'habitat', landsOnSurfaces: true, frequency: 6,
   },
   liner: {
     archetypes: [['stacked', 4], ['monolithic', 4], ['ring', 6], ['spine-and-pod', 3], ['slab', 2], ['cluster', 2]],
-    heightRatio: [0.8, 1.25], payloadKind: 'habitat', landsOnSurfaces: false, frequency: 2,
+    heightRatio: [0.8, 1.25], payloadKind: 'habitat', landsOnSurfaces: false, frequency: 4,
   },
   colony: {
     archetypes: [['cluster', 5], ['ring', 7], ['spine-and-pod', 4], ['stacked', 3], ['tower', 2], ['asymmetric', 1]],
-    heightRatio: [0.95, 1.5], payloadKind: 'habitat', landsOnSurfaces: false, frequency: 1,
+    heightRatio: [0.95, 1.5], payloadKind: 'habitat', landsOnSurfaces: false, frequency: 3,
   },
   patrol: {
     archetypes: [['monolithic', 5], ['stacked', 4], ['fork', 3], ['slab', 3], ['asymmetric', 2], ['cluster', 1]],
@@ -495,7 +507,7 @@ const ROLE_TOPOLOGY: Readonly<Record<ShipRole, RoleTopology>> = {
   },
   'station-tender': {
     archetypes: [['tower', 5], ['asymmetric', 4], ['cluster', 4], ['spine-and-pod', 3], ['fork', 2], ['stacked', 2], ['ring', 2]],
-    heightRatio: [1.0, 1.7], payloadKind: 'machinery', landsOnSurfaces: true, frequency: 5,
+    heightRatio: [1.0, 1.7], payloadKind: 'machinery', landsOnSurfaces: true, frequency: 7,
   },
   derelict: {
     archetypes: [
@@ -534,6 +546,11 @@ const ROLE_TOPOLOGY: Readonly<Record<ShipRole, RoleTopology>> = {
  *             Asymmetry, clusters and forks are the native language; a single
  *             poured monolith is the one thing a breaker's yard cannot make.
  */
+/** No archetype a role permits may fall below this share of that role's table. */
+const ARCHETYPE_FLOOR_SHARE = 0.11;
+/** …and the role's own first choice keeps at least this share of it. */
+const ARCHETYPE_TOP_SHARE = 0.45;
+
 const FACTION_ARCHETYPE_BIAS: Readonly<Record<FactionId, Partial<Record<HullArchetype, number>>>> = {
   kessler: {
     monolithic: 1.6, stacked: 2.5, slab: 2.5, tower: 1.2, fork: 1.1,
@@ -555,16 +572,64 @@ function archetypesFor(
   factionId: FactionId,
 ): readonly (readonly [HullArchetype, number])[] {
   const bias = FACTION_ARCHETYPE_BIAS[factionId];
-  const out: (readonly [HullArchetype, number])[] = [];
+  const out: [HullArchetype, number][] = [];
   let total = 0;
   for (const [a, w] of role) {
     const v = w * (bias[a] ?? 1);
     total += v;
-    out.push([a, v] as const);
+    out.push([a, v]);
   }
   // A doctrine that zeroed everything the role allows would leave nothing to
   // draw from; fall back to the role's own table rather than to a default hull.
-  return total > 0 ? out : role;
+  if (total <= 0) return role;
+
+  // A FLOOR, because coverage a player never sees is not coverage.
+  //
+  // The generator used all nine archetypes and reported it as a pass, while
+  // over 200 seeds ring came out 9 times and tower 7 — 4.5% and 3.5%. Across a
+  // five-hull fleet the chance of meeting either is under one in five, so the
+  // two shapes with the strongest silhouette read appeared in none of the
+  // review captures in two consecutive rounds. Multiplying the role weight by
+  // the yard's doctrine is right, but a 0.4 and a 0.2 compounding on a weight
+  // of 1 puts an archetype below the noise floor of the draw.
+  //
+  // So a yard's dislike can make a shape UNUSUAL and cannot make it unseen: no
+  // entry the role permits falls under this share of its own table. The role's
+  // zeroes are untouched — a culture's habits cannot make it build a shape its
+  // trade forbids, and that stays the only way to reach zero.
+  // The role's OWN first choice is guaranteed, before the yard's habits are
+  // allowed to talk it out of it. This is what puts a ring on a colony ship
+  // and a tower on a refinery: those two archetypes are named as the top entry
+  // by exactly the roles whose trade calls for them, and nowhere else, so
+  // guaranteeing the role's first choice is the same statement as "gate ring
+  // and tower to the roles that need them, and then let those roles have them".
+  let topI = 0;
+  for (let i = 1; i < role.length; i++) if (role[i][1] > role[topI][1]) topI = i;
+  const guaranteed = total * ARCHETYPE_TOP_SHARE;
+  if (out[topI][1] < guaranteed) {
+    const need = guaranteed - out[topI][1];
+    let rest = total - out[topI][1];
+    if (rest > need) {
+      const k = 1 - need / rest;
+      for (let i = 0; i < out.length; i++) if (i !== topI) out[i][1] *= k;
+      out[topI][1] = guaranteed;
+    }
+  }
+
+  const floor = total * ARCHETYPE_FLOOR_SHARE;
+  let bumped = 0;
+  for (const e of out) if (e[1] > 0 && e[1] < floor) { bumped += floor - e[1]; e[1] = floor; }
+  if (bumped > 0) {
+    // Pay for the floor out of the entries that are above it, in proportion, so
+    // the shape of the yard's preference survives the correction.
+    let above = 0;
+    for (const e of out) if (e[1] > floor) above += e[1] - floor;
+    if (above > bumped) {
+      const k = 1 - bumped / above;
+      for (const e of out) if (e[1] > floor) e[1] = floor + (e[1] - floor) * k;
+    }
+  }
+  return out;
 }
 
 /** Threat band per `ThreatClass`, for the scan profile. */
@@ -974,7 +1039,24 @@ function surfaceNormal(v: PrimaryVolume, t: number, theta: number, out: MutVec3 
  * string hash per read is measurable there. Volumes are only ever appended and
  * replaced in place, so an index is stable for the life of the context.
  */
-function boundsAt(ctx: Ctx, i: number): Aabb {
+/**
+ * Everything the clearance sweeps read, and nothing else.
+ *
+ * `Ctx` satisfies this structurally, so the pipeline passes itself. The reason
+ * it is named separately is that `shipSelfTest` has to run the same sweeps
+ * against a FINISHED blueprint — the §5 verdicts have to be measured on the
+ * ship that shipped, not re-derived from a build context that no longer
+ * exists — and a reviewer measuring with a second implementation of the same
+ * test is how the reviewer and the generator come to disagree.
+ */
+interface ClearanceView {
+  readonly volumes: readonly PrimaryVolume[];
+  readonly modules: readonly ShipModule[];
+  readonly bounds: (Aabb | undefined)[];
+  readonly moduleBounds: (Aabb | undefined)[];
+}
+
+function boundsAt(ctx: ClearanceView, i: number): Aabb {
   const hit = ctx.bounds[i];
   if (hit !== undefined) return hit;
   const b = volumeBounds(ctx.volumes[i]);
@@ -982,7 +1064,7 @@ function boundsAt(ctx: Ctx, i: number): Aabb {
   return b;
 }
 
-function boundsOf(ctx: Ctx, v: PrimaryVolume): Aabb {
+function boundsOf(ctx: ClearanceView, v: PrimaryVolume): Aabb {
   const i = ctx.volumes.indexOf(v);
   return i >= 0 ? boundsAt(ctx, i) : volumeBounds(v);
 }
@@ -992,7 +1074,7 @@ function boundsOf(ctx: Ctx, v: PrimaryVolume): Aabb {
  * `ctx.modules`. Same contract as `boundsAt`: modules are only appended, and
  * `applyShift` translates the cache rather than dropping it.
  */
-function moduleBoundsAt(ctx: Ctx, i: number): Aabb {
+function moduleBoundsAt(ctx: ClearanceView, i: number): Aabb {
   const hit = ctx.moduleBounds[i];
   if (hit !== undefined) return hit;
   const m = ctx.modules[i];
@@ -1047,6 +1129,28 @@ const CLEARANCE_STEPS = 20;
  * has to climb. Without this bound the count read backwards against mass.
  */
 const MAX_BELL_FRACTION_OF_AFT = 0.6;
+
+/**
+ * How much of the stern the SUMMED exit area may take.
+ *
+ * `MAX_BELL_FRACTION_OF_AFT` bounds one bell; nothing bounded the battery, so a
+ * hull that could not make its role's acceleration answered by growing every
+ * bell at once until the tail was a wall of nozzle — 92% of beam × height on a
+ * heavy courier, 81% on a heavy shuttle, 70% on a heavy miner. Structure,
+ * plumbing, the thrust frame and the radiators that reject the drive's own
+ * waste heat all live in the same section; a third of it is a generous share
+ * and it is the difference between a ship with engines and an engine with a
+ * ship attached.
+ */
+const MAX_EXIT_FRACTION_OF_STERN = 0.35;
+
+/**
+ * Projected area one radiator slab must present, as a fraction of the hull's
+ * side profile, for a yard whose thermal doctrine is flat panels in mirrored
+ * pairs. Ten per cent of the profile per slab is what turns "there are
+ * radiators on it somewhere" into "that is the ship with the two slabs".
+ */
+const SLAB_FRACTION_OF_PROFILE = 0.055;
 
 /**
  * How much heavier a hull gets between stage 4 and the finished blueprint.
@@ -1115,7 +1219,7 @@ function raySlab(o: Vec3, d: Vec3, b: Aabb, maxDist: number): boolean {
  * port with a radiator across its corridor all passed. Modules that ARE swept
  * volumes are skipped here because the volume loop already has them.
  */
-function clearanceAlong(ctx: Ctx, origin: Vec3, dir: Vec3, maxDist: number, skip: VolumeId | null, skip2: string | null = null): number {
+function clearanceAlong(ctx: ClearanceView, origin: Vec3, dir: Vec3, maxDist: number, skip: VolumeId | null, skip2: string | null = null): number {
   const steps = CLEARANCE_STEPS;
   const step = maxDist / steps;
   // The first sample index at which anything is in the way. Searched part by
@@ -1189,7 +1293,7 @@ const _cd: MutVec3 = [0, 0, 0];
  * a wide azimuth range, so the failure is never subtle enough to slip between
  * 60° samples, and the cost is linear in the sample count.
  */
-function clearAngleAt(ctx: Ctx, origin: Vec3, dir: Vec3, testDist: number, skip: VolumeId | null, skip2: string | null = null, limit = Infinity): number {
+function clearAngleAt(ctx: ClearanceView, origin: Vec3, dir: Vec3, testDist: number, skip: VolumeId | null, skip2: string | null = null, limit = Infinity): number {
   if (clearanceAlong(ctx, origin, dir, testDist, skip, skip2) < testDist * 0.999) return 0;
   const e1 = perpendicular(dir, _c1);
   vNormalize(vCross(dir, e1, _c2), _c2);
@@ -1214,6 +1318,101 @@ function clearAngleAt(ctx: Ctx, origin: Vec3, dir: Vec3, testDist: number, skip:
     best = a;
   }
   return best;
+}
+
+/**
+ * What a pilot can actually SEE, as a solid fraction — not a cone scalar.
+ *
+ * `clearAngleAt` answers "how wide is the largest cone about this axis that is
+ * clear all the way out". For an exhaust plume that is exactly right: a plume
+ * is a cone and it either fits or it does not. For a canopy it is close to
+ * useless, and the numbers proved it: sampled over eight seeds, the
+ * cockpit/bridge socket came back 1.500 rad on seven and 0.000 on the eighth —
+ * 1.500 being the top of `CONE_ANGLES`, i.e. a saturated cap rather than a
+ * measurement. The check built on it therefore had exactly two reachable
+ * outcomes and could not tell a 30° slit from a 90° canopy.
+ *
+ * So this measures what BRIEF §5 actually asks for. A fan of 5 elevations ×
+ * 9 azimuths spanning ±60° about the socket normal, each ray weighted by the
+ * solid angle its cell subtends (cos of the elevation), returns the fraction
+ * of the forward hemisphere the crew can see out to `dist`. A single strut
+ * across one corner costs a few per cent; a cargo pod parked in front costs
+ * half. Both are things a reviewer can rank, which a saturating cap is not.
+ *
+ * `forwardDot` is the other half of the rule — "a view cone FORWARD" — and is
+ * reported separately, because a perfectly clear cone pointing at the tail is
+ * a gun position, not a bridge.
+ */
+const VIEW_ELEVATIONS: readonly number[] = [0, 0.262, 0.524, 0.785, 1.047];
+const _va: MutVec3 = [0, 0, 0];
+const _vb: MutVec3 = [0, 0, 0];
+const _vd: MutVec3 = [0, 0, 0];
+
+interface ViewCone {
+  /** Solid fraction of the ±60° fan that is unobstructed, 0..1. */
+  readonly fraction: number;
+  /** Dot of the cone axis with ship-forward (−Z). 1 = straight ahead. */
+  readonly forwardDot: number;
+}
+
+function viewCone(ctx: ClearanceView, origin: Vec3, dir: Vec3, dist: number, skip: VolumeId | null, skip2: string | null = null): ViewCone {
+  const e1 = perpendicular(dir, _va);
+  vNormalize(vCross(dir, e1, _vb), _vb);
+  let clear = 0;
+  let total = 0;
+  for (const el of VIEW_ELEVATIONS) {
+    const ce = Math.cos(el);
+    const se = Math.sin(el);
+    // One ray on the axis, nine round each ring: the weight is the ring's own
+    // share of the solid angle, so the axis is not counted nine times.
+    const n = el === 0 ? 1 : 9;
+    const w = (el === 0 ? 1 : ce) / n;
+    for (let j = 0; j < n; j++) {
+      const az = (j / n) * TAU;
+      const cz = Math.cos(az) * se;
+      const sz = Math.sin(az) * se;
+      _vd[0] = dir[0] * ce + e1[0] * cz + _vb[0] * sz;
+      _vd[1] = dir[1] * ce + e1[1] * cz + _vb[1] * sz;
+      _vd[2] = dir[2] * ce + e1[2] * cz + _vb[2] * sz;
+      total += w;
+      if (clearanceAlong(ctx, origin, _vd, dist, skip, skip2) >= dist * 0.999) clear += w;
+    }
+  }
+  return {
+    fraction: total > 0 ? clear / total : 0,
+    forwardDot: -dir[2] / Math.max(1e-9, vLength(dir)),
+  };
+}
+
+/** A bridge below this cannot fly the ship. BRIEF §5, made measurable. */
+const MIN_VIEW_FRACTION = 0.5;
+/** …and a bridge looking sideways is not looking forward. */
+const MIN_VIEW_FORWARD_DOT = 0.6;
+
+/**
+ * A finished blueprint, seen as the thing the clearance sweeps read.
+ *
+ * The point is that `shipSelfTest` and `reviewShipPhysics` measure the SAME
+ * geometry with the SAME code as the generator did, so a verdict can never be
+ * a restatement of a field the generator wrote. The caches start empty and
+ * fill on first use, exactly as they do during generation.
+ */
+function clearanceViewOf(bp: ShipBlueprint): ClearanceView {
+  return { volumes: bp.primaryVolumes, modules: bp.modules, bounds: [], moduleBounds: [] };
+}
+
+/** The command module's measured view, on the finished hull. */
+function commandView(bp: ShipBlueprint, cv: ClearanceView, m: ShipModule, sock: Socket): ViewCone {
+  const f = sock.frame;
+  const dist = Math.max(bp.dimensions.lengthKm * 2, 1e-5);
+  const eps = Math.max(1e-6, dist * 0.02);
+  const o: Vec3 = [
+    f.origin[0] + f.forward[0] * eps,
+    f.origin[1] + f.forward[1] * eps,
+    f.origin[2] + f.forward[2] * eps,
+  ];
+  const skip = sock.host.kind === 'volume' ? sock.host.volumeId : null;
+  return viewCone(cv, o, f.forward, dist, skip, m.volumeId ?? m.id);
 }
 
 // ===========================================================================
@@ -1298,6 +1497,8 @@ interface Ctx {
   plumeLengthKm: number;
   /** How many masses have been held off the hull on pylons. See `standoff`. */
   standoffs: number;
+  /** The forward termination from stage 3. `enforceLongitudinalAxis` grows it. */
+  bow: PrimaryVolume | null;
 }
 
 /** Monotonic, per-prefix ids. Deterministic because the call order is. */
@@ -1390,9 +1591,20 @@ function identity(params: ShipParams): Identity {
   // half of every class, which reads as "they are all the big one".
   const lengthKm = logBand(rng, SIZE_CLASS_LENGTH_KM[sizeClass]);
 
+  // The archetype's proportion modifier is a BAND, not a constant.
+  //
+  // `ARCHETYPE_PROPORTION` gave every stacked hull exactly ×0.95 fineness and
+  // ×1.05 height, so two stacked hulls of the same size class differed only in
+  // the role band's own draw and 39% of seeds duplicated another seed's
+  // proportion signature. A yard's stacked hull is a family of proportions,
+  // not one proportion — so the modifier is jittered per seed, which puts the
+  // variance in stage 3 where the silhouette is decided rather than in the
+  // detail layer where it cannot be seen from across a system.
   const mod = ARCHETYPE_PROPORTION[archetype];
-  const fineness = clamp(band(rng, spec.fineness) * mod.fineness, 1.05, 16);
-  const heightRatio = clamp(band(rng, spec.heightRatio) * mod.height, 0.18, 3.0);
+  const jf = rng.range(0.78, 1.3);
+  const jh = rng.range(0.78, 1.3);
+  const fineness = clamp(band(rng, spec.fineness) * mod.fineness * jf, 1.05, 16);
+  const heightRatio = clamp(band(rng, spec.heightRatio) * mod.height * jh, 0.18, 3.0);
   const beamKm = lengthKm / fineness;
   const heightKm = beamKm * heightRatio;
 
@@ -1428,8 +1640,20 @@ function identity(params: ShipParams): Identity {
   const noseDraw = rng.range(0.06, 0.72) * (spec.accelMs2[1] > 150 ? 0.55 : 1.0) + (archetype === 'slab' ? 0.2 : 0);
   const noseEnd = clamp01(Math.min(noseDraw, tailEnd * 0.62));
 
+  // The bow is part of the length BUDGET, not an extension of it.
+  //
+  // `buildBow` terminates the spine forward with a real volume, and if the
+  // archetype builders were handed the full class length the finished hull
+  // would overrun its own size class by whatever the bow ran to — the probe
+  // hull went from 326 m to 539 m and would have been published as a class
+  // larger than the one it was asked for. So the run the bow will take is
+  // reserved here and the archetype gets what is left. Same formula
+  // `buildBow` uses, without its jitter, so the two agree to a few per cent.
+  const bowFrac = lerp(0.085, 0.2, clamp01(1 - noseEnd));
+  const hullLengthKm = lengthKm / (1 + bowFrac);
+
   const prop: Proportions = {
-    lengthKm,
+    lengthKm: hullLengthKm,
     beamKm,
     heightKm,
     widestAt: rng.range(0.22, 0.72),
@@ -2415,6 +2639,82 @@ function buildPrimary(ctx: Ctx): void {
     case 'cluster': buildCluster(ctx, rng); break;
   }
   ensurePayloadMass(ctx, rng);
+  enforceSalvageMassing(ctx, rng);
+  // The bow closes stage 3, not stage 7.
+  //
+  // It is structure — the forward end of the load path the engines push on —
+  // and putting it in the accent pass meant it appeared AFTER the cockpit was
+  // mounted, so on three hulls in fourteen the bridge ended up looking into
+  // the back of a nose that had not existed when its site was chosen. Built
+  // here, every clearance sweep downstream measures against a hull that has
+  // its front end on. `enforceLongitudinalAxis` may still lengthen it in
+  // stage 7, once everything that can widen the envelope exists.
+  ctx.bow = buildBow(ctx, new Rng(sub(shipSubSeed(ctx.seed, 'volumes'), 'bow')));
+}
+
+/**
+ * A salvage yard does not build matched pairs.
+ *
+ * `families.ts:1358+` says it in numbers — `salvage-weld`, panel size variance
+ * 0.65 ("the single most legible 'this is a scavenger hull' cue"), tolerance
+ * jitter 0.75 ("nothing lines up, because nothing was cut to fit anything"),
+ * joint `torch-cut-graft` — and none of it reached the MASSING stage. Every
+ * one of those fields is a material or a surface property, and material
+ * variance is invisible at the range where a faction has to be identified: the
+ * rendered Ossuary hull was two tubes of identical diameter, identical length
+ * and identical cap in a clean mirrored pair. It looked like a tug from a
+ * competent yard, which is the inverse of the doctrine.
+ *
+ * So the doctrine reaches the primary volumes. The two largest structural
+ * masses on a salvage hull must differ in girth by at least 30% — that is the
+ * read: two hulls that came off two different ships and were welded together
+ * because they were what the yard had. The smaller one is taken in rather than
+ * the larger one grown, so the ship keeps the size class it was asked for.
+ */
+const SALVAGE_MASS_RATIO = 1.32;
+
+function enforceSalvageMassing(ctx: Ctx, rng: Rng): void {
+  if (ctx.faction.construction.primary !== 'salvage-weld') return;
+
+  const idx: number[] = [];
+  const girth: number[] = [];
+  for (let i = 0; i < ctx.volumes.length; i++) {
+    const v = ctx.volumes[i];
+    if (!isStructural(v.kind)) continue;
+    let r = 0;
+    for (const s of v.stations) r = Math.max(r, Math.max(s.halfWidth, s.halfHeight));
+    if (r <= 0) continue;
+    idx.push(i);
+    girth.push(r);
+  }
+  if (idx.length < 2) return;
+
+  // The two biggest, by girth.
+  let a = 0;
+  let b = 1;
+  if (girth[b] > girth[a]) { const t = a; a = b; b = t; }
+  for (let k = 2; k < idx.length; k++) {
+    if (girth[k] > girth[a]) { b = a; a = k; } else if (girth[k] > girth[b]) b = k;
+  }
+  const ratio = girth[a] / Math.max(1e-9, girth[b]);
+  if (ratio >= SALVAGE_MASS_RATIO) return;
+
+  const k = ratio / (SALVAGE_MASS_RATIO * rng.range(1.0, 1.25));
+  const i = idx[b];
+  const v = ctx.volumes[i];
+  ctx.volumes[i] = {
+    ...v,
+    stations: v.stations.map((s) => ({
+      ...s,
+      halfWidth: Math.max(1e-6, s.halfWidth * k),
+      halfHeight: Math.max(1e-6, s.halfHeight * k),
+    })),
+    // A graft, not a fillet: the join between two hulls that were never meant
+    // to meet is a torch-cut collar, and a hard station edge is how the loft
+    // says so.
+    capStart: v.capStart === 'open' ? 'open' : 'flat',
+  };
+  ctx.bounds[i] = undefined;
 }
 
 /**
@@ -3522,6 +3822,22 @@ function buildDrive(ctx: Ctx): DriveResult {
   }
   if (!Number.isFinite(aftZ)) aftZ = ctx.prop.lengthKm * 0.5;
 
+  // The stern the drive has to share, measured the way the review measured it:
+  // the hull's own BEAM × HEIGHT. A cluster may legitimately overhang the last
+  // volume — every real high-thrust vehicle's engines are wider than the tank
+  // above them — so the denominator is the ship, not the last frame. Structure,
+  // plumbing, the thrust frame and the radiators that reject the drive's waste
+  // heat all live back there too. See `MAX_EXIT_FRACTION_OF_STERN`.
+  let sx0 = Infinity, sx1 = -Infinity, sy0 = Infinity, sy1 = -Infinity;
+  for (const v of ctx.volumes) {
+    const b = boundsOf(ctx, v);
+    sx0 = Math.min(sx0, b.min[0]); sx1 = Math.max(sx1, b.max[0]);
+    sy0 = Math.min(sy0, b.min[1]); sy1 = Math.max(sy1, b.max[1]);
+  }
+  const sternAreaM2 = Number.isFinite(sx0)
+    ? Math.max(1e-9, (sx1 - sx0) * 1000 * (sy1 - sy0) * 1000)
+    : Math.max(1e-9, ctx.prop.beamKm * 1000 * ctx.prop.heightKm * 1000);
+
   const prop = ctx.faction.propulsion;
   let count = engineCountFor(rng, ctx);
   const style = nozzleStyleFor(ctx.dna, ctx.tech.drive);
@@ -3549,7 +3865,34 @@ function buildDrive(ctx: Ctx): DriveResult {
   // upkeep factor. Inverting is then exact rather than approximately calibrated.
   const unitNozzle = { style, exitRadius: 1e-3, throatRadius: 5e-4, length: 1e-3, count: 1, clusterRadius: 0, gimbalLimit: 0 };
   const thrustPerM2 = Math.max(1e-9, engineRatedThrustN(unitNozzle, ctx.tech) / Math.PI);
-  const areaTotalM2 = totalThrustN / thrustPerM2;
+  const areaWantedM2 = totalThrustN / thrustPerM2;
+
+  // The cap that was missing.
+  //
+  // Stage 4 was aft-area-limited and its answer to a thrust shortfall was to
+  // grow the bells until they filled the stern: summed exit area reached 92%
+  // of beam × height on a heavy courier — four bells of 15.9 m exit radius,
+  // 31.8 m across each, on a 60.6 m beam, so two side by side were already
+  // wider than the ship. That is not a spacecraft, it is a nozzle rack with a
+  // hull bolted to it, and it is what `ship-fleet-family`'s left-hand hull
+  // reads as. Thirty-five per cent is an industrial figure that still leaves
+  // room for the thrust frame, the plumbing and the radiators, and where the
+  // role's thrust band cannot be met inside it the shortfall is REPORTED
+  // rather than spent on a wider bell — the drive technology is the faction's
+  // and is not the generator's to escalate.
+  const areaCapM2 = sternAreaM2 * MAX_EXIT_FRACTION_OF_STERN;
+  const areaTotalM2 = Math.min(areaWantedM2, areaCapM2);
+  if (live && areaWantedM2 > areaCapM2 * 1.001) {
+    reject(ctx, {
+      stage: 'propulsion',
+      rule: 'nozzle-area-over-stern',
+      what: `the role's acceleration wants ${Math.round(areaWantedM2)} m² of exit area on a ${Math.round(sternAreaM2)} m² stern`,
+      at: [0, 0, aftZ],
+      measured: areaWantedM2 / sternAreaM2,
+      required: MAX_EXIT_FRACTION_OF_STERN,
+      attempt: 0,
+    });
+  }
 
   // Packing: for a ring of n bells at radius R the chord between neighbours is
   // 2R·sin(π/n), so R ≥ 1.05·r/sin(π/n). The cluster then spans R + r, and that
@@ -4024,6 +4367,10 @@ interface MountSpec {
   /** Accept the least-bad candidate instead of nothing. Used where a hull MUST
    *  have the fitting — a ship with no cockpit is not a variation. */
   readonly acceptBest?: boolean;
+  /** Also require a real forward view — see `viewCone`. Command mounts only:
+   *  it is 37 rays per candidate and nothing else needs the shape of the cone,
+   *  only its width. */
+  readonly viewFan?: boolean;
 }
 
 interface Mount {
@@ -4033,6 +4380,8 @@ interface Mount {
   readonly frame: Frame;
   readonly clearance: number;
   readonly clearAngle: number;
+  /** Measured only when `MountSpec.viewFan` is set. */
+  readonly view: ViewCone | null;
 }
 
 /**
@@ -4069,19 +4418,29 @@ function tryMount(ctx: Ctx, spec: MountSpec): Mount | null {
           ? clearAngleAt(ctx, o, dir, Math.min(spec.minClearance, ctx.prop.lengthKm * 0.25), host.id)
           : 0;
         const frame = frameAt([p[0], p[1], p[2]], dir, Math.abs(vDot(dir, UP_Y)) > 0.94 ? FWD_Z : UP_Y);
-        const m: Mount = { host, t, theta, frame, clearance, clearAngle: angle };
+        const coneOk = straightOk && angle >= spec.minAngle;
+        // Only worth 37 rays once the cheap tests have already passed.
+        const view = spec.viewFan === true && coneOk
+          ? viewCone(ctx, o, dir, Math.max(spec.minClearance, eps * 4), host.id)
+          : null;
+        const m: Mount = { host, t, theta, frame, clearance, clearAngle: angle, view };
+        const viewOk = spec.viewFan !== true || (view !== null
+          && view.fraction >= MIN_VIEW_FRACTION && view.forwardDot >= MIN_VIEW_FORWARD_DOT);
 
-        if (straightOk && angle >= spec.minAngle) return m;
+        if (coneOk && viewOk) return m;
 
-        const score = Math.min(1, clearance / Math.max(1e-9, spec.minClearance)) + Math.min(1, angle / Math.max(1e-9, spec.minAngle));
+        const score = Math.min(1, clearance / Math.max(1e-9, spec.minClearance))
+          + Math.min(1, angle / Math.max(1e-9, spec.minAngle))
+          + (view !== null ? view.fraction * 2 + Math.max(0, view.forwardDot) : 0);
         if (score > bestScore) { bestScore = score; best = m; }
+        const failedView = coneOk && !viewOk;
         reject(ctx, {
           stage: 'modules',
-          rule: spec.rule,
+          rule: failedView ? 'view-cone-narrow' : spec.rule,
           what: spec.what,
           at: [p[0], p[1], p[2]],
-          measured: clearance < spec.minClearance * 0.999 ? clearance : angle,
-          required: clearance < spec.minClearance * 0.999 ? spec.minClearance : spec.minAngle,
+          measured: failedView ? (view?.fraction ?? 0) : (clearance < spec.minClearance * 0.999 ? clearance : angle),
+          required: failedView ? MIN_VIEW_FRACTION : (clearance < spec.minClearance * 0.999 ? spec.minClearance : spec.minAngle),
           attempt: attempt++,
         });
       }
@@ -4118,7 +4477,11 @@ function moduleSize(ctx: Ctx, rng: Rng, kind: ModuleKind): { half: Vec3; massKg:
     case 'docking-collar':
       half = [B * 0.09, B * 0.09, B * 0.045]; density = 380; break;
     case 'cargo-container':
-      half = [CONTAINER_LENGTH_KM * 0.2, CONTAINER_LENGTH_KM * 0.2, CONTAINER_LENGTH_KM * 0.5]; density = 200; break;
+      // Lying DOWN, long axis along the face it is racked on: a container
+      // stood on end pointing away from the hull needed twelve metres of
+      // clearance to mount and was refused on every hull that had a rack,
+      // which is why the freighters came out with no visible cargo at all.
+      half = [CONTAINER_LENGTH_KM * 0.5, CONTAINER_LENGTH_KM * 0.2, CONTAINER_LENGTH_KM * 0.2]; density = 200; break;
     case 'cargo-pod': case 'ore-bin':
       half = [B * 0.14, B * 0.14, L * 0.09]; density = 220; break;
     case 'habitat-can':
@@ -4278,8 +4641,13 @@ function placeModules(ctx: Ctx): void {
     const hosts = hostsFor(ctx, wantsBridge ? ['bridge', 'forebody', 'hull', 'midbody'] : ['forebody', 'hull', 'boom']);
     const m = tryMount(ctx, {
       hosts,
-      ts: [0.1, 0.18, 0.28, 0.06, 0.4],
-      thetas: [DORSAL, DORSAL - 0.5, DORSAL + 0.5, 0, Math.PI],
+      // Sites are walked from the bow back and from the crown down. The extra
+      // dorsal-forward entries exist because the bow now terminates the hull
+      // (stage 3), so a bridge sitting low and far forward is looking into the
+      // back of its own nose — which is a real constraint on a real ship and
+      // the reason superstructures sit high and a little aft of the stem.
+      ts: [0.14, 0.22, 0.3, 0.09, 0.42, 0.55],
+      thetas: [DORSAL, DORSAL - 0.35, DORSAL + 0.35, DORSAL - 0.7, DORSAL + 0.7, 0, Math.PI],
       // The view has to reach: two ship lengths of clear space, and a cone wide
       // enough to fly by. A cockpit looking into a cargo pod is not a cockpit.
       minClearance: L * 2,
@@ -4289,6 +4657,7 @@ function placeModules(ctx: Ctx): void {
       aim: [0, 0, -1],
       aimWeight: 1.4,
       acceptBest: true,
+      viewFan: true,
     });
     if (m) {
       const mod = mountModule(ctx, rng, kind, m, { materialSlot: MAT_HULL, crewAccessible: true });
@@ -4337,17 +4706,43 @@ function placeModules(ctx: Ctx): void {
     const pairs = clamp(Math.round((wanted / 2) * heatRatio * doctrine), 1, 5);
     const hosts = hostsFor(ctx, ['afterbody', 'hull', 'midbody', 'keel', 'machinery']);
     const size = moduleSize(ctx, rng, 'radiator-panel');
-    const wantSpan = size.half[0] * 2;
+    // A NAMED silhouette accent is a requirement, not a probability.
+    //
+    // `families.ts:660` states the Kessler read as a black shape: "a
+    // rectangular block with visible ribbing, two enormous flat radiator slabs
+    // in a mirrored pair, and four bells standing clear of the tail". The
+    // generator drew radiators from a size band that had nothing to do with
+    // the outline, so the pair came out as small fins and the frame and the
+    // document had drifted apart — the only large flat plates anywhere in the
+    // faction plate belonged to a different faction's winglets.
+    //
+    // A yard whose thermal doctrine is FLAT PANELS IN MIRRORED PAIRS gets a
+    // pair sized against the hull's own side profile, so the slab reads at
+    // fleet range where the faction has to be identified. Everything else
+    // keeps the band it had: this is Kessler's accent, not everyone's.
+    const slabDoctrine = th.architecture === 'flat-panel' && th.mirrored;
+    const sideProfile = ctx.prop.lengthKm * ctx.prop.heightKm;
+    const slabSpan = Math.sqrt(Math.max(1e-12, sideProfile * SLAB_FRACTION_OF_PROFILE * sampleRange(th.aspect, rng)));
+    const wantSpan = slabDoctrine
+      ? clamp(Math.max(size.half[0] * 2, slabSpan), B * 0.25, Math.max(B * 0.25, Math.min(B * 1.1, ctx.prop.lengthKm * 0.2)))
+      : size.half[0] * 2;
     // Below this a panel is not a radiator, it is a fin. If the hull cannot
     // give it this much clear space the element is refused rather than buried.
     const minSpan = Math.max(HATCH_WIDTH_KM * 2, B * 0.12);
     for (let i = 0; i < pairs; i++) {
       const t = 0.35 + (i / Math.max(1, pairs)) * 0.5;
       const theta = rng.chance(0.6) ? 0.35 : DORSAL - 0.3;
+      // A slab pair wants the FLANKS: that is where a hull offers the longest
+      // uninterrupted span, and it is the only mounting that mirrors across X
+      // into a pair a viewer reads as a pair. Yards without the flat-panel
+      // doctrine keep the older search, which spreads panels round the hull.
+      const thetas = slabDoctrine
+        ? [0, 0.25, -0.25, theta, DORSAL]
+        : [theta, DORSAL, 0.15, -0.35];
       const m = tryMount(ctx, {
         hosts,
         ts: [t, t + 0.1, t - 0.12, 0.6],
-        thetas: [theta, DORSAL, 0.15, -0.35],
+        thetas,
         // A radiator must be able to see space along its whole span or it is a
         // heatsink bolted to the thing it is trying to cool. The panel extends
         // OUTWARD along the mount normal, so this really is a depth.
@@ -4361,44 +4756,47 @@ function placeModules(ctx: Ctx): void {
       // Sized to the space the hull actually left, not to a nominal figure —
       // which is what a thermal engineer would do, and it means a cluttered
       // hull grows short fat panels instead of long ones inside its own tanks.
-      const span = Math.min(wantSpan, m.clearance * 0.92);
-      if (span < minSpan) {
-        reject(ctx, {
-          stage: 'secondary', rule: 'radiator-buried', what: 'radiator-panel',
-          at: m.frame.origin, measured: m.clearance, required: minSpan, attempt: 9,
-        });
-        continue;
-      }
-      // Aspect ratio is the faction's; the span is the hull's.
-      const half: Vec3 = [span * 0.5, span * 0.5 / Math.max(0.2, sampleRange(th.aspect, rng)), size.half[2]];
-      const a = mountModule(ctx, rng, 'radiator-panel', m, { materialSlot: MAT_STRUCT, halfExtents: half });
-      if (!a) continue;
-      // `mirrored: false` licenses the salvage read — three panels at three
-      // different angles — and is a real cultural difference, not an oversight.
-      if (th.mirrored) {
-        // The mirrored panel gets its own measurement. It used to inherit its
-        // twin's `clearance`, which is a claim about the OTHER side of the
-        // ship: a hull with something bolted to port and nothing to starboard
-        // published a port radiator with the starboard side's clear space and
-        // then buried it. So the port side is swept, and the panel is either
-        // sized to what is actually there or refused.
-        const mf = mirrorFrameXLocal(m.frame);
+      // BOTH sides are measured BEFORE either is mounted, and a mirrored pair
+      // is sized to the smaller of the two.
+      //
+      // It used to mount the starboard slab at whatever starboard had room
+      // for and then measure port; where port came up short the port slab was
+      // simply refused, leaving one enormous panel on one side of the ship —
+      // which is not a mirrored pair, it is an unbalanced hull. With the slabs
+      // sized against the side profile (see `SLAB_FRACTION_OF_PROFILE`) that
+      // single panel was heavy enough to walk the balance point off the origin
+      // and to put a laden hull 44 m off its own thrust line. A pair is a
+      // pair: same span both sides, or neither.
+      let span = Math.min(wantSpan, m.clearance * 0.92);
+      const mf = th.mirrored ? mirrorFrameXLocal(m.frame) : null;
+      let mClear = 0;
+      if (mf) {
         const eps = Math.max(1e-6, wantSpan * 0.02);
         const mo: Vec3 = [
           mf.origin[0] + mf.forward[0] * eps, mf.origin[1] + mf.forward[1] * eps, mf.origin[2] + mf.forward[2] * eps,
         ];
-        const mClear = eps + clearanceAlong(ctx, mo, mf.forward, wantSpan, m.host.id);
-        const mSpan = Math.min(wantSpan, mClear * 0.92);
-        if (mSpan < minSpan) {
-          reject(ctx, {
-            stage: 'secondary', rule: 'radiator-buried', what: 'radiator-panel (mirrored)',
-            at: mf.origin, measured: mClear, required: minSpan, attempt: 9,
-          });
-        } else {
-          const mirrored: Mount = { ...m, frame: mf, theta: Math.PI - m.theta, clearance: mClear };
-          const mHalf: Vec3 = [mSpan * 0.5, mSpan * 0.5 / Math.max(0.2, sampleRange(th.aspect, rng)), size.half[2]];
-          mountModule(ctx, rng, 'radiator-panel', mirrored, { mirrorOf: a.id, materialSlot: MAT_STRUCT, halfExtents: mHalf });
-        }
+        mClear = eps + clearanceAlong(ctx, mo, mf.forward, wantSpan, m.host.id);
+        span = Math.min(span, mClear * 0.92);
+      }
+      if (span < minSpan) {
+        reject(ctx, {
+          stage: 'secondary', rule: 'radiator-buried', what: mf ? 'radiator-panel (pair)' : 'radiator-panel',
+          at: m.frame.origin, measured: mf ? Math.min(m.clearance, mClear) : m.clearance, required: minSpan, attempt: 9,
+        });
+        continue;
+      }
+      // Aspect ratio is the faction's; the span is the hull's. Drawn once and
+      // used on both slabs, because a pair whose two halves have different
+      // aspect ratios is two panels that happen to be opposite each other.
+      const aspect = Math.max(0.2, sampleRange(th.aspect, rng));
+      const half: Vec3 = [span * 0.5, span * 0.5 / aspect, size.half[2]];
+      const a = mountModule(ctx, rng, 'radiator-panel', m, { materialSlot: MAT_STRUCT, halfExtents: half });
+      if (!a) continue;
+      // `mirrored: false` licenses the salvage read — three panels at three
+      // different angles — and is a real cultural difference, not an oversight.
+      if (mf) {
+        const mirrored: Mount = { ...m, frame: mf, theta: Math.PI - m.theta, clearance: mClear };
+        mountModule(ctx, rng, 'radiator-panel', mirrored, { mirrorOf: a.id, materialSlot: MAT_STRUCT, halfExtents: half });
       }
       ctx.volumes.push(radiatorVolume(ctx, rng, a));
     }
@@ -4416,8 +4814,13 @@ function placeModules(ctx: Ctx): void {
         ts: [0.2 + (i / Math.max(1, n)) * 0.6, 0.3, 0.5, 0.7],
         thetas: dorsalSide ? [DORSAL, DORSAL - 0.5, DORSAL + 0.5] : [VENTRAL, VENTRAL + 0.5, VENTRAL - 0.5],
         minClearance: B * 0.9,
-        // A turret needs half a radian of sky or it can only shoot its own hull.
-        minAngle: 0.5,
+        // A TRAINABLE mount has to track a target that is moving, so it needs
+        // sky, not a gunport: 0.7 rad is 40° of clear cone, and below that a
+        // turret can only engage something that flies into its slit. A fixed
+        // gun aims by flying the ship and keeps the older, looser bar — it is
+        // the airframe that traverses. `remeasureClearances` holds the same
+        // two bars after stages 6–8 have placed things in front of them.
+        minAngle: kind === 'turret' || kind === 'point-defence' ? 0.7 : 0.4,
         rule: 'weapon-arc-obstructed',
         what: kind,
       });
@@ -4534,20 +4937,89 @@ function placeModules(ctx: Ctx): void {
     if (m) mountModule(ctx, rng, 'reactor-can', m, { materialSlot: MAT_STRUCT });
   }
 
-  // --- cargo handling on the payload volumes themselves --------------------
+  // --- the payload, expressed as HARDWARE (BRIEF §4) -----------------------
+  //
+  // "A freighter must look like it carries cargo." The generator knew the hero
+  // carried 3 710 m³ — `shipScan` printed it — and there was no bay, no rack,
+  // no hatch line and no external payload anywhere on the hull, because the
+  // volume was allocated internally and never expressed as form. Shown the
+  // three-faction contrast plate, which holds ROLE constant at freighter, the
+  // critic read tanker, gunship and carrier: nought for three.
+  //
+  // The old pass scattered one to eight singles through the generic mount grid,
+  // where they competed with every other fitting and lost — one container on
+  // the hero, two on the best of four sampled hulls. This lays a RACK: a row of
+  // whole standard units at container pitch along the payload mass, on the
+  // faces a gantry can reach, which is what a container rack is and what makes
+  // the scale shot's floating 12.2 m box correspond to something on the ship.
   if (needs.has('cargo')) {
-    const pods = ctx.volumes.filter((v) => v.kind === 'cargo-bay' || v.kind === 'cargo-rack' || v.kind === 'pod' || v.kind === 'tank');
-    const hosts = pods.length > 0 ? pods : hostsFor(ctx, ['hull', 'midbody']);
-    const n = clamp(Math.round(hosts.length * rng.range(0.8, 2.2)), 1, 8);
-    for (let i = 0; i < n; i++) {
-      const kind: ModuleKind = ctx.role === 'miner' || ctx.role === 'prospector' ? 'ore-bin' : rng.chance(0.5) ? 'cargo-container' : 'cargo-pod';
-      const m = tryMount(ctx, {
-        hosts: [hosts[i % hosts.length]],
-        ts: [0.25 + (i % 3) * 0.25, 0.5],
-        thetas: [DORSAL, 0, Math.PI, VENTRAL],
-        minClearance: B * 0.2, minAngle: 0.3, rule: 'overlaps-existing', what: kind,
+    const pods = ctx.volumes.filter((v) => v.kind === 'cargo-bay' || v.kind === 'cargo-rack');
+    const hosts = pods.length > 0 ? pods : ctx.volumes.filter((v) => v.kind === 'pod' || v.kind === 'tank');
+    // Ore comes out of the ground in bins, not in ISO boxes, and a bin scales
+    // with the rig that fills it. Everything else moves in the standard unit.
+    const ore = ctx.role === 'miner' || ctx.role === 'prospector' || ctx.role === 'salvager';
+    let placed = 0;
+    const MAX_UNITS = 20;
+    for (const host of hosts) {
+      if (placed >= MAX_UNITS) break;
+      const hb = boundsOf(ctx, host);
+      const runLen = hb.max[2] - hb.min[2];
+      const across = Math.max(hb.max[0] - hb.min[0], hb.max[1] - hb.min[1]) * 0.5;
+      // The unit follows the mass that carries it. A payload big enough to
+      // rack STANDARD containers gets standard containers — that is the whole
+      // point of a standard container, and it is what makes the docking-scale
+      // shot's floating 12.2 m box mean something. A payload smaller than one
+      // gets ship-scaled pods, because a 12 m box racked on a 5 m hold is a
+      // box with a ship attached and destroys the scale read it exists to give.
+      const bigEnough = across >= CONTAINER_LENGTH_KM * 0.26 && runLen >= CONTAINER_LENGTH_KM * 2;
+      // A yard that racks boxes racks boxes; one that ships in pressurised
+      // pods ships in pods. Both are legal answers on a hull big enough for
+      // either, and which one this yard uses is a fact about the yard.
+      const kind: ModuleKind = ore ? 'ore-bin'
+        : bigEnough && rng.chance(0.72) ? 'cargo-container' : 'cargo-pod';
+      const unitLen = kind === 'cargo-container' ? CONTAINER_LENGTH_KM : L * 0.18;
+      if (runLen < unitLen * 1.5 || across < unitLen * 0.2) continue;
+      const perRow = clamp(Math.floor(runLen / (unitLen * 1.18)), 1, 8);
+      // Both flanks and the crown: the three faces a gantry crane can reach.
+      // The belly is left clear for the undercarriage and the ground.
+      const faces = ROLE_TOPOLOGY[ctx.role].landsOnSurfaces ? [0, Math.PI] : [0, Math.PI, DORSAL];
+      for (const theta of faces) {
+        for (let i = 0; i < perRow && placed < MAX_UNITS; i++) {
+          const t = (i + 0.5) / perRow;
+          const p = volumeSurfacePoint(host, t, theta, [0, 0, 0]);
+          const n = surfaceNormal(host, t, theta, [0, 0, 0]);
+          const frame = frameAt([p[0], p[1], p[2]], [n[0], n[1], n[2]], Math.abs(n[1]) > 0.94 ? FWD_Z : UP_Y);
+          // Measured from a hair OFF the skin: the mount point is on the
+          // surface, so a sweep started exactly there reports the hull it is
+          // bolted to as the obstruction and every rack came out empty.
+          const depth = kind === 'cargo-container' ? CONTAINER_LENGTH_KM * 0.4 : L * 0.09 * 2;
+          const eps = depth * 0.05;
+          const o: Vec3 = [
+            frame.origin[0] + n[0] * eps,
+            frame.origin[1] + n[1] * eps,
+            frame.origin[2] + n[2] * eps,
+          ];
+          const clearance = eps + clearanceAlong(ctx, o, frame.forward, depth * 2.2, host.id);
+          // The unit stands proud of the skin, so it needs its own depth of
+          // daylight in front of the face it is racked on.
+          if (clearance < depth * 0.55) continue;
+          const mod = mountModule(ctx, rng, kind, {
+            host, t, theta, frame, clearance, clearAngle: 0.5, view: null,
+          }, { materialSlot: MAT_HULL });
+          if (mod) placed++;
+        }
+      }
+    }
+    if (placed === 0 && hosts.length > 0) {
+      reject(ctx, {
+        stage: 'modules',
+        rule: 'payload-not-dominant',
+        what: 'no payload mass could carry a cargo handling unit',
+        at: [0, 0, 0],
+        measured: 0,
+        required: 4,
+        attempt: 0,
       });
-      if (m) mountModule(ctx, rng, kind, m, { materialSlot: MAT_HULL });
     }
   }
 
@@ -4884,6 +5356,7 @@ function placeServiceAndLights(ctx: Ctx, rng: Rng): void {
       host, t, theta, frame,
       clearance: clearanceAlong(ctx, frame.origin, frame.forward, ctx.prop.beamKm * 0.2, host.id),
       clearAngle: 0.7,
+      view: null,
     }, { materialSlot: MAT_DETAIL });
   }
 
@@ -4903,7 +5376,7 @@ function placeServiceAndLights(ctx: Ctx, rng: Rng): void {
     const kind = pickWeighted(rng, [
       ['service-hatch', 4] as const, ['handrail', 4] as const, ['ladder', 2] as const, ['toolbox', 1] as const,
     ]);
-    mountModule(ctx, rng, kind, { host: v, t, theta, frame, clearance: ctx.prop.beamKm, clearAngle: 0.6 }, { crewAccessible: true });
+    mountModule(ctx, rng, kind, { host: v, t, theta, frame, clearance: ctx.prop.beamKm, clearAngle: 0.6, view: null }, { crewAccessible: true });
   }
 
   // The emblem goes on the largest flat the ship has, which is where a yard
@@ -4917,7 +5390,7 @@ function placeServiceAndLights(ctx: Ctx, rng: Rng): void {
     const n = surfaceNormal(flat, t, theta, [0, 0, 0]);
     const frame = frameAt([p[0], p[1], p[2]], [n[0], n[1], n[2]], UP_Y);
     mountModule(ctx, rng, rng.chance(0.5) ? 'emblem-plate' : 'registry-plate', {
-      host: flat, t, theta, frame, clearance: ctx.prop.beamKm, clearAngle: 0.8,
+      host: flat, t, theta, frame, clearance: ctx.prop.beamKm, clearAngle: 0.8, view: null,
     }, { materialSlot: MAT_HULL });
   }
 }
@@ -5022,10 +5495,23 @@ function buildSecondary(ctx: Ctx): void {
     const theta = rng.chance(0.6) ? DORSAL : VENTRAL;
     const sp = volumeSurfacePoint(host, t, theta, [0, 0, 0]);
     const sn = surfaceNormal(host, t, theta, [0, 0, 0]);
+    // Raked forward, not straight out sideways.
+    //
+    // A sensor mast exists to get the instrument away from the ship's own
+    // structure and emissions, and the cheapest direction to do that in is
+    // along the axis, past the bow — which is where every real spacecraft
+    // magnetometer boom points. Straight out it was up to 0.3 × LENGTH of
+    // pure beam: on a 279 m survey hull, an 84 m mast standing off a 68 m
+    // hull. That single volume was setting the height of the whole envelope,
+    // which is how a ship ends up measuring 1.8 : 1 on its long axis. Two
+    // thirds forward, one third radial, and a third of the length.
+    const rake = rng.range(0.55, 0.78);
+    const dir: Vec3 = [sn[0] * (1 - rake), sn[1] * (1 - rake), -rake];
+    vNormalize(dir as MutVec3, dir as MutVec3);
     ctx.volumes.push(sweptVolume(ctx, rng, {
       kind: 'boom',
-      frame: frameAt([sp[0], sp[1], sp[2]], [sn[0], sn[1], sn[2]], FWD_Z),
-      length: L * rng.range(0.12, 0.3),
+      frame: frameAt([sp[0], sp[1], sp[2]], dir, FWD_Z),
+      length: L * rng.range(0.1, 0.22),
       halfWidth: Math.max(HATCH_WIDTH_KM * 0.3, p.beamKm * 0.014),
       halfHeight: Math.max(HATCH_WIDTH_KM * 0.3, p.beamKm * 0.014),
       bias: 'boom',
@@ -5051,12 +5537,193 @@ function buildSecondary(ctx: Ctx): void {
 
 type Accent = 'dorsal-fin' | 'tail-flare' | 'bow-ram' | 'canards' | 'collar-ring' | 'ventral-strake' | 'shoulder-pods';
 
+/**
+ * How elongated the finished envelope has to be, by archetype.
+ *
+ * BRIEF §4 stage 2 asks for "the load path from engines to nose", and the
+ * side-silhouette shot's own FAILS IF is "you cannot tell which end is the
+ * front". Neither survives a cube: measured over sixty seeds the finished
+ * envelope was 1.83 : 1 on the long axis, with the hero freighter at 1.23 : 1
+ * — 62 m long and 50 m tall. The primary volumes were not the problem; the
+ * transverse stack of racks, drums, booms and radiators bolted to them was.
+ *
+ * So the ratio is a REQUIREMENT with a named remedy, not a hope. Two
+ * archetypes are exempt because being tall is the whole of what they are: a
+ * tower is a tower and a ring is a ring, and forcing 2.5 : 1 on those would
+ * undo the one part of the archetype table that is not cosmetic.
+ */
+const AXIS_TARGET: Readonly<Record<HullArchetype, number>> = {
+  monolithic: 2.6, stacked: 2.6, 'spine-and-pod': 2.8, fork: 2.3,
+  slab: 2.2, asymmetric: 2.2, cluster: 2.3, tower: 0.7, ring: 1.1,
+};
+
+/** Volumes that are hull rather than hardware hung off it. */
+function isStructural(kind: VolumeKind): boolean {
+  return kind === 'hull' || kind === 'forebody' || kind === 'midbody' || kind === 'afterbody'
+    || kind === 'keel' || kind === 'cargo-bay' || kind === 'bridge' || kind === 'habitat';
+}
+
+/** The ship's forward plane and the section it presents there. */
+function bowPlane(ctx: Ctx): { z: number; halfW: number; halfH: number; cx: number; cy: number } | null {
+  let z = Infinity;
+  for (let i = 0; i < ctx.volumes.length; i++) {
+    if (!isStructural(ctx.volumes[i].kind)) continue;
+    const b = boundsAt(ctx, i);
+    if (b.min[2] < z) z = b.min[2];
+  }
+  if (!Number.isFinite(z)) return null;
+  // The section at that plane, from every structural volume that reaches it.
+  const slab = z + Math.max(1e-6, ctx.prop.lengthKm * 0.02);
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  for (let i = 0; i < ctx.volumes.length; i++) {
+    if (!isStructural(ctx.volumes[i].kind)) continue;
+    const b = boundsAt(ctx, i);
+    if (b.min[2] > slab) continue;
+    x0 = Math.min(x0, b.min[0]); x1 = Math.max(x1, b.max[0]);
+    y0 = Math.min(y0, b.min[1]); y1 = Math.max(y1, b.max[1]);
+  }
+  if (!Number.isFinite(x0)) return null;
+  return { z, halfW: Math.max(1e-6, (x1 - x0) * 0.5), halfH: Math.max(1e-6, (y1 - y0) * 0.5), cx: (x0 + x1) * 0.5, cy: (y0 + y1) * 0.5 };
+}
+
+/**
+ * Terminate the spine forward. BRIEF §4 stage 7, and not optional.
+ *
+ * `bow-ram` existed as one of seven weighted accents at weight 1 for most
+ * roles, so five hulls in six had no forward termination at all: the load path
+ * ran out of ship, the outline stopped at the last cargo frame, and the
+ * silhouette critic could only find the stern by looking for the engines. A
+ * bow is not an accent — it is the other end of the structure the engines push
+ * on — so every hull now gets one, and the accent draw is what decorates it.
+ *
+ * The shape says what the ship is for, which is the point: a hull whose
+ * `noseEnd` is small resolves to a point over a long run (a courier), one
+ * whose `noseEnd` is large steps down to a flat bow face over a short one (a
+ * freighter, with a door in it). Either reads as the front; a cylinder does
+ * not. Returns the volume so `enforceLongitudinalAxis` can grow it.
+ */
+function buildBow(ctx: Ctx, rng: Rng): PrimaryVolume | null {
+  const bp = bowPlane(ctx);
+  if (!bp) return null;
+  const p = ctx.prop;
+  const L = p.lengthKm;
+
+  // A blunt bow is short and a fine bow is long: the run is what turns a
+  // tip-radius fraction into an angle, and an 8% run on a 0.1 nose is a spike
+  // while a 24% run on a 0.6 nose is a shoulder. Both are bows.
+  const fine = clamp01(1 - p.noseEnd);
+  const runFrac = lerp(0.085, 0.2, fine) * rng.range(0.85, 1.2);
+  const len = L * runFrac;
+  const tip = clamp(p.noseEnd, 0.16, 0.72);
+
+  // Held to the section it grows out of, minus the diameter step that makes
+  // the join read as a join rather than as more of the same tube.
+  const step = rng.range(0.82, 0.94);
+  const halfW = bp.halfW * step;
+  const halfH = bp.halfH * step;
+
+  const v = sweptVolume(ctx, rng, {
+    kind: 'forebody',
+    frame: axialFrame(bp.cx, bp.cy, bp.z - len),
+    length: len,
+    halfWidth: halfW,
+    halfHeight: halfH,
+    bias: 'hull',
+    capStart: noseCapFor(ctx, p.noseEnd),
+    capEnd: 'flat',
+    materialSlot: MAT_HULL,
+    detailDensity: rng.range(0.3, 0.6),
+    loadShare: 0.35,
+    // Runs tip-first: t=0 is the point of the bow, t=1 is the shoulder where
+    // it meets the hull, so the taper is a bow taper and not a tail one.
+    profile: (t) => lerp(tip, 1, Math.pow(smoothstep(t), p.noseSharp)),
+    profileY: (t) => lerp(tip * rng.range(0.9, 1.25), 1, Math.pow(smoothstep(t), p.noseSharp * 0.85)),
+    stations: clamp(Math.round(stationCount(len)), 4, 10),
+    frameEvery: 2,
+    anchor: { kind: 'spine', nodeId: ctx.spine.chains[0].nodes[0].id },
+  });
+  ctx.volumes.push(v);
+  return v;
+}
+
+/**
+ * Make the envelope longer than it is wide, by lengthening the bow.
+ *
+ * The remedy is deliberately additive. Shrinking the transverse masses instead
+ * would undo `ensurePayloadMass` (which exists because the payload was losing
+ * the argument about which mass is largest) and would close the daylight
+ * `ensureSpanningStructure` measures — two fixes from the previous round. A
+ * hull that carries a lot across its beam is simply a hull that needs more
+ * keel, which is what a naval architect would say and what this does.
+ *
+ * Bounded at 40% of the finished length: past that the bow stops being a bow
+ * and becomes a lance, and the ratio is better left unmet and reported.
+ */
+function enforceLongitudinalAxis(ctx: Ctx, bow: PrimaryVolume | null): void {
+  const target = AXIS_TARGET[ctx.archetype];
+  if (!bow || target <= 0) return;
+
+  const measure = (): { L: number; across: number } => {
+    let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+    for (let i = 0; i < ctx.volumes.length; i++) {
+      const b = boundsAt(ctx, i);
+      if (b.min[0] < x0) x0 = b.min[0];
+      if (b.max[0] > x1) x1 = b.max[0];
+      if (b.min[1] < y0) y0 = b.min[1];
+      if (b.max[1] > y1) y1 = b.max[1];
+      if (b.min[2] < z0) z0 = b.min[2];
+      if (b.max[2] > z1) z1 = b.max[2];
+    }
+    return { L: z1 - z0, across: Math.max(x1 - x0, y1 - y0) };
+  };
+
+  const m = measure();
+  if (m.across <= 0 || m.L / m.across >= target) return;
+
+  // How much more keel the ratio asks for. Extending forward by `d` lengthens
+  // the ship by `d` and leaves the beam alone, so (L+d)/across = target.
+  const want = target * m.across - m.L;
+  const bowLen = bow.path.kind === 'linear' ? bow.path.length : 0;
+  if (bowLen <= 0) return;
+  // Two bounds, and the ship keeps the tighter. A bow past 40% of the finished
+  // length stops being a bow; and a hull that grows more than a third beyond
+  // what its archetype built is no longer the size class it was asked for,
+  // which would make every fleet comparison shot a comparison of the wrong
+  // ships. Where both bind, the ratio is left unmet and logged.
+  const maxLen = Math.min(bowLen + want, (m.L + want) * 0.4, bowLen + m.L * 0.33);
+  if (maxLen <= bowLen * 1.02) return;
+
+  const k = maxLen / Math.max(1e-9, bowLen);
+  const i = ctx.volumes.indexOf(bow);
+  if (i < 0) return;
+  const f = bow.frame;
+  ctx.volumes[i] = {
+    ...bow,
+    // Grows forward from the shoulder, which stays welded where it was.
+    frame: { ...f, origin: [f.origin[0], f.origin[1], f.origin[2] - (maxLen - bowLen)] },
+    path: { kind: 'linear', length: maxLen },
+  };
+  ctx.bounds[i] = undefined;
+
+  reject(ctx, {
+    stage: 'accents',
+    rule: 'axis-too-short',
+    what: `envelope was ${fmt(m.L / m.across, 2)}:1 on the long axis; the bow was lengthened to ${fmtKm(maxLen)}`,
+    at: [f.origin[0], f.origin[1], f.origin[2]],
+    measured: m.L / m.across,
+    required: target,
+    attempt: 0,
+  });
+}
+
 function buildAccents(ctx: Ctx): void {
   const rng = new Rng(shipSubSeed(ctx.seed, 'accents'));
   const p = ctx.prop;
   const L = p.lengthKm;
+
+  const bow = ctx.bow;
   const host = hostsFor(ctx, ['hull', 'midbody', 'forebody', 'keel'])[0];
-  if (!host) return;
+  if (!host) { enforceLongitudinalAxis(ctx, bow); return; }
 
   const options: (readonly [Accent, number])[] = [
     ['dorsal-fin', ctx.dna.dorsalChance * 6],
@@ -5264,6 +5931,9 @@ function buildAccents(ctx: Ctx): void {
       }
     }
   }
+
+  // Last, once every mass that can widen the envelope exists.
+  enforceLongitudinalAxis(ctx, bow);
 }
 
 // ===========================================================================
@@ -5522,6 +6192,247 @@ function translateMass(
  * count matters because a full mass integration is the most expensive thing
  * this generator does, and the common case converges on the second pass.
  */
+/** What the load lives in: cargo holds and propellant tankage. */
+function carriesLoad(kind: VolumeKind): boolean {
+  return kind === 'cargo-bay' || kind === 'cargo-rack' || kind === 'tank';
+}
+function moduleCarriesLoad(kind: ModuleKind): boolean {
+  return kind === 'cargo-container' || kind === 'cargo-pod' || kind === 'ore-bin' || kind === 'fuel-drum';
+}
+
+/**
+ * Trim the load until the LADEN centre of mass sits on the thrust line.
+ *
+ * This is the fix for the finding that a laden miner tumbles at 2.85 rad/s²
+ * one second into a burn. The dry hull was balanced and the drive was aimed at
+ * the dry balance point, and neither operation had ever looked at where the
+ * cargo was: on an asymmetric hull the ore bins sit on one flank, so filling
+ * them walks the balance point ten metres sideways and the ship can no longer
+ * hold a heading under power. A cargo ship that only flies empty is the exact
+ * inverse of what a cargo ship is for.
+ *
+ * The mechanism is the one a chief officer would use: move the load, not the
+ * engines. Moving the holds and tanks by `t` moves the dry balance point by
+ * α·t and the laden one by β·t, where α and β are those masses' shares of the
+ * dry and loaded totals — both exactly known from the integration that has
+ * already run. Rebasing the origin by −α·t afterwards restores the dry balance
+ * point to zero and leaves the laden one at c + (β − α)·t, so the trim that
+ * nulls it is t = −c / (β − α). No second integration, and no guessing.
+ *
+ * Bounded by what the structure allows: the group is walked outward along the
+ * trim direction with the same clearance sweep everything else uses, so the
+ * load never trims itself into the hull. Where the bound binds, the residual
+ * is real and `auditThrustAxis` records it as `load-out-of-trim` rather than
+ * publishing a hull that claims a balance it does not have.
+ */
+function trimLoad(ctx: Ctx, m: ReturnType<typeof shipMassProperties>): { dx: number; dy: number; alpha: number } {
+  const cx = m.loadedCentreOfMass[0];
+  const cy = m.loadedCentreOfMass[1];
+  const off = Math.hypot(cx, cy);
+  const tol = Math.max(1e-6, ctx.prop.lengthKm * 0.002);
+  if (off <= tol) return { dx: 0, dy: 0, alpha: 0 };
+
+  const groupVols = new Set<string>();
+  for (const v of ctx.volumes) if (carriesLoad(v.kind)) groupVols.add(v.id);
+  const groupMods = new Set<string>();
+  for (const mo of ctx.modules) if (mo.present && mo.volumeId === null && moduleCarriesLoad(mo.kind)) groupMods.add(mo.id);
+  if (groupVols.size === 0 && groupMods.size === 0) return { dx: 0, dy: 0, alpha: 0 };
+
+  let dryGroup = 0;
+  for (const it of m.items) {
+    if (it.source === 'volume' && groupVols.has(it.id)) dryGroup += it.massKg;
+    if (it.source === 'module' && groupMods.has(it.id)) dryGroup += it.massKg;
+  }
+  const alpha = dryGroup / Math.max(1, m.dryMassKg);
+  const beta = (dryGroup + m.fuelMassKg + m.cargoMassKg) / Math.max(1, m.loadedMassKg);
+  const lever = beta - alpha;
+  // A hull whose load is spread exactly like its structure cannot be trimmed by
+  // moving the load: the two centres travel together. Nothing to do but say so.
+  if (lever <= 0.02) return { dx: 0, dy: 0, alpha: 0 };
+
+  // Bounded before it starts: a drum that trims itself half a hull-width into
+  // space has stopped being ballast and started being a silhouette problem.
+  const reach = Math.max(ctx.prop.beamKm, ctx.prop.heightKm) * 0.4;
+  const want = Math.min(off / lever, reach);
+  const ux = -cx / off;
+  const uy = -cy / off;
+  const dir: Vec3 = [ux, uy, 0];
+
+  // PER MEMBER, not as a rigid group.
+  //
+  // Trimming the whole load as one block is limited by whichever hold has the
+  // least room, and on the hulls that need it most that hold is the one
+  // already pressed against the hull — the heavy side. The light side is where
+  // the space is, which is exactly why the ship is out of trim. So each hold
+  // and drum moves as far along the trim direction as its own clearance sweep
+  // allows, and the balance point follows by the mass-weighted mean of what
+  // actually moved. This is a ballast transfer, and a ballast transfer is
+  // per-tank.
+  /**
+   * How far a box may slide along `u` before it enters an exhaust corridor.
+   *
+   * `clearanceAlong` only sees the volumes and modules; a plume is neither, so
+   * a drum trimmed toward the light side could slide straight into the fire of
+   * an outboard bell — which is exactly what happened on a cluster tanker, and
+   * it cost two of its four engines their cone. The corridor is the bell's
+   * mouth swept aft over the plume, and the trim stops at its edge.
+   */
+  const exhaustLimit = (b: Aabb): number => {
+    let cap = Infinity;
+    for (const e of ctx.engines) {
+      const n = e.nozzle;
+      const r = n.exitRadius * 2.2 + (n.count > 1 ? n.clusterRadius : 0);
+      const o = e.frame.origin;
+      const z0 = o[2] - n.length;
+      const z1 = o[2] + Math.max(ctx.plumeLengthKm, n.length * 3);
+      if (b.max[2] < z0 || b.min[2] > z1) continue;
+      // The box is inside the corridor only once BOTH lateral intervals
+      // overlap, so the travel it has is the later of the two crossings.
+      let along = 0;
+      for (let a = 0; a < 2; a++) {
+        const uu = a === 0 ? ux : uy;
+        const lo = o[a] - r;
+        const hi = o[a] + r;
+        if (b.max[a] > lo && b.min[a] < hi) continue; // already overlapping
+        let d = Infinity;
+        if (b.max[a] <= lo && uu > 1e-9) d = (lo - b.max[a]) / uu;
+        else if (b.min[a] >= hi && uu < -1e-9) d = (hi - b.min[a]) / uu;
+        along = Math.max(along, d);
+      }
+      cap = Math.min(cap, Math.max(0, along));
+    }
+    return cap;
+  };
+
+  const movedIdx: number[] = [];
+  const movedMod: number[] = [];
+  const dist: number[] = [];
+  const distMod: number[] = [];
+  let weighted = 0;
+  let groupKg = 0;
+  const massOf = new Map<string, number>();
+  for (const it of m.items) if (it.source === 'volume' || it.source === 'module') massOf.set(it.id, it.massKg);
+
+  for (let i = 0; i < ctx.volumes.length; i++) {
+    const v = ctx.volumes[i];
+    if (!groupVols.has(v.id)) continue;
+    const b = boundsAt(ctx, i);
+    const c: Vec3 = [(b.min[0] + b.max[0]) * 0.5, (b.min[1] + b.max[1]) * 0.5, (b.min[2] + b.max[2]) * 0.5];
+    const half = Math.max(b.max[0] - b.min[0], b.max[1] - b.min[1]) * 0.5;
+    const o: Vec3 = [c[0] + ux * half, c[1] + uy * half, c[2]];
+    const room = Math.max(0, Math.min(want, clearanceAlong(ctx, o, dir, want, v.id), exhaustLimit(b)));
+    movedIdx.push(i);
+    dist.push(room);
+    const kg = massOf.get(v.id) ?? 0;
+    groupKg += kg;
+    weighted += kg * room;
+  }
+  for (let i = 0; i < ctx.modules.length; i++) {
+    const mo = ctx.modules[i];
+    if (!groupMods.has(mo.id)) continue;
+    const half = Math.max(mo.halfExtents[0], mo.halfExtents[1]);
+    const o: Vec3 = [mo.frame.origin[0] + ux * half, mo.frame.origin[1] + uy * half, mo.frame.origin[2]];
+    const room = Math.max(0, Math.min(want, clearanceAlong(ctx, o, dir, want, null, mo.id), exhaustLimit(moduleBoundsAt(ctx, i))));
+    movedMod.push(i);
+    distMod.push(room);
+    const kg = massOf.get(mo.id) ?? 0;
+    groupKg += kg;
+    weighted += kg * room;
+  }
+  if (groupKg <= 0) return { dx: 0, dy: 0, alpha: 0 };
+  const mean = weighted / groupKg;
+  if (mean <= tol) return { dx: 0, dy: 0, alpha: 0 };
+
+  for (let k = 0; k < movedIdx.length; k++) {
+    const i = movedIdx[k];
+    const d: Vec3 = [ux * dist[k], uy * dist[k], 0];
+    ctx.volumes[i] = { ...ctx.volumes[i], frame: shiftFrame(ctx.volumes[i].frame, d) };
+    const b = ctx.bounds[i];
+    if (b !== undefined) ctx.bounds[i] = { min: shift(b.min, d), max: shift(b.max, d) };
+  }
+  for (let k = 0; k < movedMod.length; k++) {
+    const i = movedMod[k];
+    const d: Vec3 = [ux * distMod[k], uy * distMod[k], 0];
+    ctx.modules[i] = { ...ctx.modules[i], frame: shiftFrame(ctx.modules[i].frame, d) };
+    const b = ctx.moduleBounds[i];
+    if (b !== undefined) ctx.moduleBounds[i] = { min: shift(b.min, d), max: shift(b.max, d) };
+  }
+  // The equivalent rigid displacement, for the arithmetic the caller runs.
+  return { dx: ux * mean, dy: uy * mean, alpha };
+}
+
+/**
+ * Stand the cluster off aft until every bell has its cone back.
+ *
+ * `buildDrive` walks the cluster out until each throat is clear — and then
+ * `alignThrustAxis` slides the whole cluster sideways onto the thrust line and
+ * `trimLoad` slides the holds the other way, so a bell that was clear when it
+ * was placed can be looking at a drum by the time the hull is balanced. The
+ * §5 exhaust verdict only started reporting it once `remeasureClearances` was
+ * moved to the far side of the balance, where it belongs; the fault was
+ * already there and was being measured on a hull that no longer existed.
+ *
+ * The remedy is the one a yard would use: stand the drives further aft on the
+ * thrust frame. It is along the thrust axis, so it cannot introduce a couple,
+ * and the balance point follows by the drive's own mass fraction — exactly, as
+ * with every other correction in `balance`.
+ */
+function clearExhaust(ctx: Ctx): { dz: number; movedIds: string[] } | null {
+  if (ctx.engines.length === 0) return null;
+  const half = 0.16;
+  const fouled = (): boolean => {
+    for (const e of ctx.engines) {
+      const o = e.frame.origin;
+      const need = Math.max(ctx.plumeLengthKm * 0.35, e.nozzle.exitRadius * 3);
+      if (clearanceAlong(ctx, o, FWD_Z, need, null) < need * 0.999) return true;
+      if (clearAngleAt(ctx, o, FWD_Z, Math.min(need, e.nozzle.exitRadius * 4), null) < half) return true;
+    }
+    return false;
+  };
+  if (!fouled()) return null;
+
+  const step = Math.max(ctx.prop.lengthKm * 0.01, ctx.engines[0].nozzle.exitRadius * 0.5);
+  let dz = 0;
+  for (let attempt = 0; attempt < 5 && fouled(); attempt++) {
+    dz += step;
+    const d: Vec3 = [0, 0, step];
+    const moved = new Set<string>();
+    for (let i = 0; i < ctx.engines.length; i++) {
+      ctx.engines[i] = { ...ctx.engines[i], frame: shiftFrame(ctx.engines[i].frame, d) };
+      moved.add(ctx.engines[i].socketId);
+    }
+    for (let i = 0; i < ctx.sockets.length; i++) {
+      if (moved.has(ctx.sockets[i].id)) ctx.sockets[i] = { ...ctx.sockets[i], frame: shiftFrame(ctx.sockets[i].frame, d) };
+    }
+    for (let i = 0; i < ctx.volumes.length; i++) {
+      const a = ctx.volumes[i].anchor;
+      if (a?.kind !== 'socket' || !moved.has(a.socketId)) continue;
+      ctx.volumes[i] = { ...ctx.volumes[i], frame: shiftFrame(ctx.volumes[i].frame, d) };
+      const b = ctx.bounds[i];
+      if (b !== undefined) ctx.bounds[i] = { min: shift(b.min, d), max: shift(b.max, d) };
+    }
+  }
+  if (dz === 0) return null;
+  const ids: string[] = ctx.engines.map((e) => e.id);
+  const engineSockets = new Set(ctx.engines.map((e) => e.socketId as string));
+  for (const v of ctx.volumes) {
+    const a = v.anchor;
+    if (a?.kind === 'socket' && engineSockets.has(a.socketId)) ids.push(v.id);
+  }
+  if (fouled()) {
+    reject(ctx, {
+      stage: 'propulsion',
+      rule: 'exhaust-intersects-hull',
+      what: `the cluster still fouls after standing ${fmtKm(dz)} further aft`,
+      at: ctx.engines[0].frame.origin,
+      measured: 0,
+      required: half,
+      attempt: 9,
+    });
+  }
+  return { dz, movedIds: ids };
+}
+
 function balance(ctx: Ctx): ReturnType<typeof shipMassProperties> {
   // ONE integration, and the count matters: `shipMassProperties` is 4.9 ms on a
   // medium hull and BRIEF §6 gives the whole ship 25 ms. The pipeline used to
@@ -5544,6 +6455,23 @@ function balance(ctx: Ctx): ReturnType<typeof shipMassProperties> {
   const first = massPropertiesOf(ctx);
   const c0 = first.centreOfMass;
   applyShift(ctx, [-c0[0], -c0[1], -c0[2]]);
+
+  // Trim the load before aiming the drive, because trimming moves the balance
+  // point the drive is about to be aimed at. See `trimLoad`: the arithmetic is
+  // exact under a translation of a known subset, so this costs no integration.
+  const rebased = translateMass(first, [-c0[0], -c0[1], -c0[2]]);
+  const trim = trimLoad(ctx, rebased);
+  let lx = rebased.loadedCentreOfMass[0];
+  let ly = rebased.loadedCentreOfMass[1];
+  if (trim.dx !== 0 || trim.dy !== 0) {
+    const dryGroupShare = trim.alpha;
+    const beta = dryGroupShare + (first.fuelMassKg + first.cargoMassKg) / Math.max(1, first.loadedMassKg);
+    lx += (beta - dryGroupShare) * trim.dx;
+    ly += (beta - dryGroupShare) * trim.dy;
+    // Put the dry balance point back on the origin, which is what `types.ts`
+    // says the origin IS.
+    applyShift(ctx, [-dryGroupShare * trim.dx, -dryGroupShare * trim.dy, 0]);
+  }
 
   // Align, follow, repeat. Each round leaves a residual of the drive's mass
   // fraction times the last correction — a few percent of a few percent — so
@@ -5568,19 +6496,27 @@ function balance(ctx: Ctx): ReturnType<typeof shipMassProperties> {
     ay += (fLoaded - fDry) * mv.dy;
     applyShift(ctx, [-fDry * mv.dx, -fDry * mv.dy, 0]);
   }
-  if (!any) return translateMass(first, [-c0[0], -c0[1], -c0[2]]);
+  // The drives may still be looking at something the alignment or the trim put
+  // in front of them. Standing them off aft is a pure z translation, so it
+  // cannot introduce a couple; the balance point follows by the drive's own
+  // mass fraction, which the first integration already measured.
+  const clear = clearExhaust(ctx);
+  if (clear) {
+    const ids = new Set(clear.movedIds);
+    let movedKg = 0;
+    for (const it of first.items) if (ids.has(it.id)) movedKg += it.massKg;
+    const fz = movedKg / Math.max(1, first.dryMassKg);
+    applyShift(ctx, [0, 0, -fz * clear.dz]);
+  }
 
   // Everything the caller reads off this — `pressurisedVolumeM3` — is invariant
-  // under both operations, and the centre of mass is now zero by construction.
-  const shifted = translateMass(first, [-c0[0], -c0[1], -c0[2]]);
+  // under every operation above, and the dry centre of mass is now zero by
+  // construction. The laden one carries both corrections: the load trim and
+  // the drive's own share of the follow-up shifts.
   return {
-    ...shifted,
+    ...rebased,
     centreOfMass: [0, 0, 0],
-    loadedCentreOfMass: [
-      shifted.loadedCentreOfMass[0] + ax,
-      shifted.loadedCentreOfMass[1] + ay,
-      shifted.loadedCentreOfMass[2],
-    ],
+    loadedCentreOfMass: [lx + ax, ly + ay, rebased.loadedCentreOfMass[2]],
   };
 }
 
@@ -5912,13 +6848,54 @@ function buildHistory(ctx: Ctx, damageLevel: number): void {
 // Assembly — dimensions, surfaces, markings, scan, render profile
 // ===========================================================================
 
-function shipDimensions(ctx: Ctx, pressurisedVolumeM3: number): ShipDimensions {
+/**
+ * The box round every LOD0 PART — which is what `ShipDimensions.bounds` has
+ * always promised and what, until now, it did not deliver.
+ *
+ * It used to union the primary volumes and nothing else. That is not what the
+ * contract says and it is not what the renderer draws: a hull's modules, its
+ * bells and its undercarriage are all LOD0 geometry, and on the hero freighter
+ * the modules reached 3.2 m further forward than the box did while the engine
+ * bells hung entirely outside it, because the aft-most volume ENDS at the
+ * throat plane. Anything that fits a camera, a cull sphere or a HUD bracket to
+ * this box was therefore fitting to a hull five per cent shorter than the one
+ * on screen, and the error was worst exactly where it shows — off the ends.
+ *
+ * `lengthKm`, `beamKm`, `heightKm` and `boundingRadius` are all derived from
+ * this one box, so the sphere and the corners can never again describe
+ * different ships. `shipSelfTest` asserts that relation over every seed.
+ */
+function lod0Bounds(ctx: Ctx): Aabb {
   let box: Aabb | null = null;
-  for (let i = 0; i < ctx.volumes.length; i++) {
-    const b = boundsAt(ctx, i);
-    box = box ? unionAabb(box, b) : b;
+  const grow = (b: Aabb): void => { box = box ? unionAabb(box, b) : b; };
+
+  for (let i = 0; i < ctx.volumes.length; i++) grow(boundsAt(ctx, i));
+  for (let i = 0; i < ctx.modules.length; i++) {
+    // A torn-off module is not drawn, so it is not in the box. Its mounting
+    // stubs are greebles on a volume and are already covered.
+    if (!ctx.modules[i].present) continue;
+    grow(moduleBoundsAt(ctx, i));
   }
-  const b: Aabb = box ?? { min: [0, 0, 0], max: [0, 0, 0] };
+  for (const e of ctx.engines) {
+    // The bell itself: a disc of `exitRadius` about each throat in the pod's
+    // cluster, swept aft over the bell's length. The plume is NOT included —
+    // it is a billboard, not a part, and `Showroom.aimCorners` documents that
+    // it must stay outside this box or every shot reframes on the throttle.
+    const n = e.nozzle;
+    const r = n.exitRadius + (n.count > 1 ? n.clusterRadius : 0);
+    const o = e.frame.origin;
+    grow({ min: [o[0] - r, o[1] - r, o[2] - n.length * 0.2], max: [o[0] + r, o[1] + r, o[2] + n.length] });
+  }
+  for (const t of ctx.thrusters) {
+    const r = Math.max(t.radius, HATCH_WIDTH_KM * 0.2);
+    const o = t.frame.origin;
+    grow({ min: [o[0] - r, o[1] - r, o[2] - r], max: [o[0] + r, o[1] + r, o[2] + r] });
+  }
+  return box ?? { min: [0, 0, 0], max: [0, 0, 0] };
+}
+
+function shipDimensions(ctx: Ctx, pressurisedVolumeM3: number): ShipDimensions {
+  const b = lod0Bounds(ctx);
 
   return {
     lengthKm: b.max[2] - b.min[2],
@@ -6450,21 +7427,64 @@ function auditThrustDelivered(ctx: Ctx, physics: PhysicsProfile): void {
   });
 }
 
+/**
+ * Perpendicular distance from the resultant thrust line to the LOADED centre
+ * of mass, km. The same Σ (r − c) × F loop `physics.ts` runs, about the other
+ * centre — which is the one that matters, and the one nothing was checking.
+ *
+ * `shipThrust` evaluates only at `mass.centreOfMass`, and the generator's last
+ * act is to rebase the origin onto exactly that point, so the published
+ * `thrustOffset` was measured against a number the pipeline had just made
+ * zero. Recomputed about `loadedCentreOfMass` on the same seeds it came out
+ * seven to seventy times larger: a laden miner missing its own balance point
+ * by 9.4 m, five times further off axis than the case `physics.ts`'s own
+ * self-test calls a failure.
+ */
+function ladenThrustOffsetKm(bp: ShipBlueprint): number {
+  return thrustOffsetAbout(bp.engines, bp.physics.loadedCentreOfMass);
+}
+
+function thrustOffsetAbout(engines: readonly EnginePod[], c: Vec3): number {
+  let fx = 0, fy = 0, fz = 0, tx = 0, ty = 0, tz = 0;
+  for (const e of engines) {
+    const mag = e.thrustN;
+    if (mag <= 0) continue;
+    const a = e.thrustAxis;
+    const Fx = a[0] * mag, Fy = a[1] * mag, Fz = a[2] * mag;
+    fx += Fx; fy += Fy; fz += Fz;
+    const rx = e.frame.origin[0] - c[0];
+    const ry = e.frame.origin[1] - c[1];
+    const rz = e.frame.origin[2] - c[2];
+    tx += ry * Fz - rz * Fy;
+    ty += rz * Fx - rx * Fz;
+    tz += rx * Fy - ry * Fx;
+  }
+  const m = Math.hypot(fx, fy, fz);
+  return m > 0 ? Math.hypot(tx, ty, tz) / m : 0;
+}
+
 function auditThrustAxis(ctx: Ctx, physics: PhysicsProfile): void {
   if (ctx.engines.length === 0) return;
-  const tolerance = ctx.prop.beamKm * 0.01;
-  const final = { magnitudeN: physics.thrustN, offsetKm: physics.thrustOffset };
-  if (final.magnitudeN > 0 && final.offsetKm > tolerance) {
-    reject(ctx, {
-      stage: 'propulsion',
-      rule: 'thrust-off-axis',
-      what: 'resultant thrust line does not pass through the centre of mass',
-      at: [0, 0, 0],
-      measured: final.offsetKm,
-      required: tolerance,
-      attempt: 4,
-    });
-  }
+  // The reviewer's own bar, in both places, so the sweep and `reviewShipPhysics`
+  // cannot return different verdicts on the same hull. The old test here used
+  // 1% of BEAM and the §5 sweep used 5% of beam, while the reviewer used 0.4%
+  // of LENGTH — three tolerances for one rule.
+  const tolerance = Math.max(1e-5, ctx.prop.lengthKm * 0.004);
+  const dry = physics.thrustOffset;
+  const laden = thrustOffsetAbout(ctx.engines, physics.loadedCentreOfMass);
+  if (physics.thrustN <= 0) return;
+  if (Math.max(dry, laden) <= tolerance) return;
+  reject(ctx, {
+    stage: 'propulsion',
+    rule: laden > dry ? 'load-out-of-trim' : 'thrust-off-axis',
+    what: laden > dry
+      ? `laden centre of mass sits ${fmtKm(laden)} off the thrust line (dry ${fmtKm(dry)})`
+      : 'resultant thrust line does not pass through the centre of mass',
+    at: [0, 0, 0],
+    measured: Math.max(dry, laden),
+    required: tolerance,
+    attempt: 4,
+  });
 }
 
 /**
@@ -6485,15 +7505,21 @@ function auditThrustAxis(ctx: Ctx, physics: PhysicsProfile): void {
  * quietly overwritten — the point is not to make the numbers agree, it is to
  * make the disagreement visible.
  */
-function remeasureClearances(ctx: Ctx): void {
+function remeasureClearances(ctx: Ctx): readonly string[] {
   const WATCH: readonly SocketType[] = ['engine', 'cockpit', 'bridge', 'weapon', 'docking'];
   /** The rule each socket type has to keep, from the placement code above. */
   const MIN_CONE: Partial<Record<SocketType, number>> = {
-    engine: 0.09, cockpit: 0.3, bridge: 0.3, weapon: 0.3, docking: 0.3,
+    engine: 0.09, cockpit: 0.3, bridge: 0.3, weapon: 0.4, docking: 0.3,
   };
+  // A trainable mount that lost its sky to a radiator is refused outright, at
+  // the same 0.7 rad the placement pass accepted it against — the two bars
+  // have to be the same number or the post-pass silently publishes turrets the
+  // placement rule would never have fitted.
+  const TRAINABLE_ARC = 0.7;
   const bySocket = new Map<string, ShipModule>();
   for (const m of ctx.modules) if (m.present) bySocket.set(m.socketId, m);
   const lost = new Set<string>();
+  const removed: string[] = [];
   const newCone = new Map<string, number>();
   const newClear = new Map<string, number>();
 
@@ -6521,7 +7547,9 @@ function remeasureClearances(ctx: Ctx): void {
     const cone = clearAngleAt(
       ctx, o, f.forward, Math.min(probe, Math.max(sk.budget.radius * 3, ctx.prop.lengthKm * 0.05)), skip, skip2, sk.clearAngle,
     );
-    const floor = MIN_CONE[sk.type] ?? 0;
+    const trainable = sk.type === 'weapon' && occupant !== undefined
+      && (occupant.kind === 'turret' || occupant.kind === 'point-defence');
+    const floor = trainable ? TRAINABLE_ARC : (MIN_CONE[sk.type] ?? 0);
     if (cone < floor && sk.clearAngle >= floor) {
       reject(ctx, {
         stage: sk.type === 'engine' ? 'propulsion' : 'modules',
@@ -6554,10 +7582,20 @@ function remeasureClearances(ctx: Ctx): void {
         attempt: 9,
       });
     }
+    // A turret that was TORN OFF took its gun with it, and the hardpoint record
+    // has to go too. It did not: `bySocket` only holds present modules, so a
+    // wrecked mount fell through this branch entirely and the blueprint kept
+    // publishing a `Hardpoint` with a 0 rad field of fire on a socket with
+    // nothing in it — which is how a gunship came out of the §5 sweep with a
+    // turret that could not shoot and no explanation anywhere.
+    if (occupant === undefined && (sk.type === 'weapon' || sk.type === 'docking') && sk.occupiedBy !== null) {
+      lost.add(sk.id);
+      continue;
+    }
     if ((cone < floor || tooDeep) && occupant && (sk.type === 'weapon' || sk.type === 'docking')) {
       lost.add(sk.id);
       const mi = ctx.modules.indexOf(occupant);
-      if (mi >= 0) { ctx.modules.splice(mi, 1); ctx.moduleBounds.splice(mi, 1); }
+      if (mi >= 0) { ctx.modules.splice(mi, 1); ctx.moduleBounds.splice(mi, 1); removed.push(occupant.id); }
       // Not `present: false` — that means TORN OFF, and a yard that never
       // fitted the turret in the first place is a different fact about the ship.
       // The socket and its mounting stubs stay, empty.
@@ -6586,6 +7624,7 @@ function remeasureClearances(ctx: Ctx): void {
       ctx.docks[i] = { ...d, approachCone: c, approachClearance: l };
     }
   }
+  return removed;
 }
 
 /**
@@ -6701,6 +7740,7 @@ function newContext(params: ShipParams, id: Identity, spine: StructuralSpine): C
     landing: null,
     plumeLengthKm: 0,
     standoffs: 0,
+    bow: null,
   };
 }
 
@@ -6730,10 +7770,6 @@ export function generateShip(params: ShipParams): GeneratedShip {
   ensureSpanningStructure(ctx);
   buildGreebles(ctx); //                                   8  detail, last
 
-  // Everything that can obstruct anything now exists, so every clearance a
-  // BRIEF §5 rule turns on is measured again against the finished part list.
-  remeasureClearances(ctx);
-
   // History comes BEFORE the balance, not after. A torn-off module is a real
   // change to the mass distribution — that is the point of `present: false` —
   // so a hull balanced before its history is balanced for a ship that no longer
@@ -6746,6 +7782,39 @@ export function generateShip(params: ShipParams): GeneratedShip {
   settleLandingGear(ctx);
   // Origin to the centre of mass, thrust line through it. See `balance`.
   const mass = balance(ctx);
+
+  // Every clearance a BRIEF §5 rule turns on is measured again HERE, after the
+  // balance rather than before it — because the balance MOVES things. It
+  // rebases the origin, walks the engine cluster onto the thrust line and, as
+  // of this round, trims the load laterally, and a corridor measured before
+  // any of that is a corridor on a hull that no longer exists. Running the
+  // pass on the wrong side of the balance put three engines in sixteen behind
+  // a drum that the trim had slid into their exhaust.
+  const dropped = remeasureClearances(ctx);
+  // Anything this pass REFUSED took its mass off the ship after the balance
+  // had already been struck, and the origin is the dry centre of mass by
+  // contract. Removing mass `m` sitting at `c` moves the balance point to
+  // −m·c/(M−m); shifting the hull by the negative of that puts it back, and
+  // the relation is exact, so no second integration is needed. Two hulls in
+  // sixty — a 4.2 km carrier and a 3.1 km colony ship — were coming out with
+  // their origin 1.7 m and 2.8 m off, which `mass/CoM` duly reported.
+  if (dropped.length > 0) {
+    const ids = new Set(dropped);
+    let mk = 0;
+    const mc: MutVec3 = [0, 0, 0];
+    for (const it of mass.items) {
+      if (!ids.has(it.id)) continue;
+      mk += it.massKg;
+      mc[0] += it.massKg * it.centre[0];
+      mc[1] += it.massKg * it.centre[1];
+      mc[2] += it.massKg * it.centre[2];
+    }
+    const rest = mass.dryMassKg - mk;
+    if (mk > 0 && rest > 1) {
+      applyShift(ctx, [mc[0] / rest, mc[1] / rest, mc[2] / rest]);
+    }
+  }
+
   auditLandingFootprint(ctx);
   // The quads were placed in stage 4 against a hull that did not exist yet.
   retuneRcs(ctx, mass);
@@ -6973,16 +8042,82 @@ export function shipSelfTest(): string[] {
     out.push(`socket legality: ${bad === 0 && occupancyErrors === 0 ? 'OK' : `${bad + occupancyErrors} FAILURES`} — ${checked} module mounts over ${seeds.length} hulls (type, accept list, envelope, mass, measured clearance)`);
   }
 
-  // --- BRIEF §5 placement rules -------------------------------------------
+  // --- the framing contract: bounds and boundingRadius describe ONE ship ---
+  //
+  // A review harness fits its camera to the box corners on some shots and to
+  // the sphere on others. If the two disagree, half the review is framed for a
+  // different vessel than the other half — and that is not hypothetical: round
+  // three's silhouette frames were unusable, and the first thing anyone asked
+  // was whether these two numbers agreed. They must, by construction, and now
+  // that is asserted rather than assumed. `boundingRadius` is the corner of
+  // `bounds` furthest from the origin, so it can never be smaller than the
+  // furthest face and never larger than the furthest corner.
   {
+    let bad = 0;
+    let worstOut = 0;
+    for (let i = 0; i < 200; i++) {
+      const bp = generateShip({ seed: hashSeed(0xb0d1e5, `bounds/${i}`) });
+      const b = bp.dimensions.bounds;
+      const face = Math.max(
+        Math.abs(b.min[0]), Math.abs(b.max[0]),
+        Math.abs(b.min[1]), Math.abs(b.max[1]),
+        Math.abs(b.min[2]), Math.abs(b.max[2]),
+      );
+      const corner = aabbRadiusFromOrigin(b);
+      const r = bp.dimensions.boundingRadius;
+      if (!(r >= face - 1e-9 && r <= corner * 1.05 + 1e-9)) bad++;
+      // Every LOD0 part inside the box. Volumes are sampled by `volumeBounds`;
+      // modules and bells are exact, so a leak here is a part the box forgot.
+      let out = 0;
+      const test = (p: Vec3, pad: number): void => {
+        out = Math.max(out,
+          b.min[0] - p[0] - pad, p[0] - b.max[0] - pad,
+          b.min[1] - p[1] - pad, p[1] - b.max[1] - pad,
+          b.min[2] - p[2] - pad, p[2] - b.max[2] - pad);
+      };
+      for (const m of bp.modules) {
+        if (!m.present) continue;
+        const h = Math.hypot(m.halfExtents[0], m.halfExtents[1], m.halfExtents[2]);
+        test(m.frame.origin, h);
+      }
+      for (const e of bp.engines) test(e.frame.origin, e.nozzle.exitRadius + e.nozzle.clusterRadius);
+      const tol = Math.max(1e-9, bp.dimensions.lengthKm * 1e-3);
+      if (out > tol) bad++;
+      worstOut = Math.max(worstOut, out / Math.max(1e-9, bp.dimensions.lengthKm));
+    }
+    out.push(`framing contract: ${bad === 0 ? 'OK' : `FAIL ${bad}`}/200 seeds — boundingRadius is a corner of bounds, and bounds encloses every LOD0 part (worst leak ${fmt(worstOut * 100, 3)}% of length)`);
+  }
+
+  // --- BRIEF §5 placement rules -------------------------------------------
+  //
+  // Every verdict here is labelled `measured` or `declared`, and four of the
+  // seven changed sides this round. A reader could not previously tell
+  // `radiator-exposed` (which samples 40 surface points per panel) from
+  // `approach-corridor` (which compared one blueprint field against another
+  // and never fired a ray), and they were printed on the same line in the same
+  // format. A sweep that restates a field the generator wrote cannot fail.
+  {
+    // Armed roles are forced into the set, because the old seed list produced
+    // eight weapon hardpoints across sixteen hulls — half a gun per ship —
+    // and one bad hull could not have moved the count.
     const seeds = [7, 11, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73];
+    const cases: ShipParams[] = seeds.map((seed) => ({ seed }));
+    for (const r of ['patrol', 'gunship', 'carrier', 'salvager', 'miner'] as const) {
+      for (let i = 0; i < 3; i++) cases.push({ seed: hashSeed(0x5eed5, `${r}/${i}`), role: r });
+    }
+
     let exhaust = 0, cockpit = 0, gear = 0, radiator = 0, weapon = 0, docking = 0, thrust = 0;
     let cockpits = 0, radiators = 0, weapons = 0, dockings = 0, geared = 0;
     let logged = 0;
-    for (const s of seeds) {
-      const bp = generateShip({ seed: s });
+    const viewFractions: number[] = [];
+    let worstForwardDot = 1;
+    const ladenOffsets: number[] = [];
+
+    for (const c of cases) {
+      const bp = generateShip(c);
       logged += bp.placementLog.length;
       const byId = new Map(bp.sockets.map((k) => [k.id, k]));
+      const cv = clearanceViewOf(bp);
 
       for (const e of bp.engines) {
         const sock = byId.get(e.socketId);
@@ -6995,7 +8130,16 @@ export function shipSelfTest(): string[] {
         if (!sock) continue;
         if (m.kind === 'cockpit' || m.kind === 'bridge-tower') {
           cockpits++;
-          if (sock.clearAngle < 0.3) cockpit++;
+          // MEASURED, on the finished hull, with the same fan the generator
+          // accepted the site against. The old test read `sock.clearAngle`,
+          // which is a saturating cone scalar: it came back 1.500 (the top of
+          // `CONE_ANGLES`) on seven hulls in eight and 0.000 on the last, so
+          // it had two reachable outcomes and could not distinguish a slit
+          // from a canopy.
+          const v = commandView(bp, cv, m, sock);
+          viewFractions.push(v.fraction);
+          worstForwardDot = Math.min(worstForwardDot, v.forwardDot);
+          if (v.fraction < MIN_VIEW_FRACTION || v.forwardDot < MIN_VIEW_FORWARD_DOT) cockpit++;
         }
         if (m.kind === 'radiator-panel') {
           radiators++;
@@ -7005,11 +8149,21 @@ export function shipSelfTest(): string[] {
       for (const h of bp.hardpoints) {
         if (h.kind === 'mining-laser' || h.kind === 'cutter' || h.kind === 'grapple') continue;
         weapons++;
-        if (h.clearArc < 0.3) weapon++;
+        // A turret has to TRACK. 0.3 rad is 17°, which is a gunport, not a
+        // field of fire — so a trainable mount is held to 0.7 rad (40°) and
+        // only a fixed forward gun, which aims by flying the ship, keeps the
+        // old bar.
+        const trainable = h.kind === 'turret' || h.kind === 'point-defence' || h.kind === 'tractor';
+        if (h.clearArc < (trainable ? 0.7 : 0.3)) weapon++;
       }
-      for (const d of bp.dockingPoints) {
+      // MEASURED: `shipDockingFrames` marches a ray down each corridor and
+      // returns `reachable`. Comparing `approachClearance` against `diameter`
+      // — two fields of the same record — could not see a radiator that grew
+      // across the corridor after the port was placed, which is the entire
+      // reason `remeasureClearances` exists.
+      for (const d of shipDockingFrames(bp)) {
         dockings++;
-        if (d.approachClearance < d.diameter * 2) docking++;
+        if (!d.reachable) docking++;
       }
       if (bp.landingSystem) {
         geared++;
@@ -7017,21 +8171,46 @@ export function shipSelfTest(): string[] {
         // the ground below the lowest non-gear point on the hull.
         if (bp.landingSystem.staticHeight < -bp.landingSystem.lowestFixedPoint) gear++;
       }
-      // Thrust axis through the CoM, or an explicit reason why not.
-      if (bp.physics.thrustN > 0 && bp.physics.thrustOffset > bp.dimensions.beamKm * 0.05
-        && bp.physics.thrustOffsetReason === null) thrust++;
+      // Thrust axis through the centre of mass — the LADEN one.
+      //
+      // The dry centre of mass is the origin by construction (the hull is
+      // rebased onto it as the generator's last act), so checking the thrust
+      // line against it was close to self-fulfilling, and the tolerance it
+      // used — 5% of BEAM — was twelve times looser than the one
+      // `reviewShipPhysics` applies. A freighter that only flies straight when
+      // it is empty is the inverse of what a freighter is for, so the number
+      // that has to hold is the worse of the two conditions against the
+      // reviewer's own bar.
+      //
+      // BRIEF §5 allows the offset "or an explicit reason why not", so a hull
+      // that could not be trimmed inside its own structure and SAYS SO in the
+      // placement log is not a silent failure. `physics.ts` hard-codes
+      // `thrustOffsetReason` to null and is not this module's to change, so
+      // the reason lives where this generator's other refusals live.
+      if (bp.physics.thrustN > 0) {
+        const laden = ladenThrustOffsetKm(bp);
+        ladenOffsets.push(laden * 1000);
+        const off = Math.max(bp.physics.thrustOffset, laden);
+        const declared = bp.placementLog.some((r) => r.rule === 'load-out-of-trim' || r.rule === 'thrust-off-axis');
+        if (off > Math.max(1e-5, bp.dimensions.lengthKm * 0.004) && !declared) thrust++;
+      }
     }
     const rule = (n: number, of: number, label: string): string => `${label} ${n === 0 ? 'OK' : `FAIL ${n}`}/${of}`;
-    out.push(`BRIEF §5 over ${seeds.length} hulls: ${[
-      rule(exhaust, seeds.length, 'exhaust-clear'),
-      rule(cockpit, cockpits, 'view-cone'),
-      `${rule(gear, geared, 'gear-lowest')} (${geared} of ${seeds.length} hulls carry gear)`,
-      rule(radiator, radiators, 'radiator-exposed'),
-      rule(weapon, weapons, 'field-of-fire'),
-      rule(docking, dockings, 'approach-corridor'),
-      rule(thrust, seeds.length, 'thrust-through-CoM'),
+    out.push(`BRIEF §5 over ${cases.length} hulls: ${[
+      `${rule(exhaust, cases.length, 'exhaust-clear')} (measured)`,
+      `${rule(cockpit, cockpits, 'view-cone')} (measured)`,
+      `${rule(gear, geared, 'gear-lowest')} (declared, ${geared} of ${cases.length} hulls carry gear)`,
+      `${rule(radiator, radiators, 'radiator-exposed')} (measured)`,
+      `${rule(weapon, weapons, 'field-of-fire')} (measured, 0.7 rad on trainable mounts)`,
+      `${rule(docking, dockings, 'approach-corridor')} (measured)`,
+      `${rule(thrust, cases.length, 'thrust-through-CoM')} (measured, laden, 0.4% of length)`,
     ].join(', ')}`);
-    out.push(`placement log: ${logged} refusals recorded over ${seeds.length} hulls (${fmt(logged / seeds.length, 1)} per ship) — a generator that refuses nothing has not checked`);
+    const vf = statOf(viewFractions);
+    const distinct = new Set(viewFractions.map((v) => Math.round(v * 50))).size;
+    out.push(`  view cone: unobstructed fraction ${fmt(vf.min, 3)}–${fmt(vf.max, 3)} (mean ${fmt(vf.mean, 3)}, ${distinct} distinct values over ${viewFractions.length} bridges) — a measurement, not a cap; worst forward dot ${fmt(worstForwardDot, 3)}`);
+    const lo = statOf(ladenOffsets);
+    out.push(`  laden thrust offset: ${fmt(lo.min, 3)}–${fmt(lo.max, 3)} m (mean ${fmt(lo.mean, 3)}) about the LOADED centre of mass`);
+    out.push(`placement log: ${logged} refusals recorded over ${cases.length} hulls (${fmt(logged / cases.length, 1)} per ship) — a generator that refuses nothing has not checked`);
   }
 
   // --- mass, thrust and inertia sanity ------------------------------------
@@ -7132,7 +8311,14 @@ export function shipSelfTest(): string[] {
         bp.archetype,
         Math.round(Math.log(d.lengthKm / Math.max(1e-9, d.beamKm)) * 4),
         Math.round(Math.log(Math.max(1e-9, d.heightKm) / Math.max(1e-9, d.beamKm)) * 4),
-        Math.min(9, bp.primaryVolumes.length),
+        // A DEAD AXIS, until now. `Math.min(9, primaryVolumes.length)` was the
+        // fourth term of the signature and the volume count runs 10 to 29, so
+        // it evaluated to 9 on every seed ever generated: the metric that
+        // reports how many distinct silhouettes exist was three-dimensional
+        // and claimed to be four. The massing question it was reaching for is
+        // "how many KINDS of mass does this hull show", which is what an
+        // outline actually differs by, and that runs 5 to 13.
+        new Set(bp.primaryVolumes.map((v) => v.kind)).size,
       ].join('/'));
     }
     const ms = Date.now() - t0;
@@ -7216,6 +8402,21 @@ export function shipSelfTest(): string[] {
     }
     const physicsMs = profMs + massMs * integrations;
     out.push(`  of which physics.ts: ${fmt(profMs, 1)} ms for shipPhysicsProfile + ${integrations} × ${fmt(massMs, 1)} ms shipMassProperties (drive sizing, balance) = ${fmt(physicsMs, 1)} ms; this generator's own geometry work is ${fmt(Math.max(0, mediumMs - physicsMs), 1)} ms`);
+    // The two numbers in this output that measure the same thing, printed
+    // together so nobody has to notice the contradiction for themselves.
+    //
+    // `physics.ts`'s own self-test prints "physics fits the generation budget,
+    // 2.2 ms per medium hull" and it is measuring ONE isolated
+    // `shipMassProperties` on a stub — no modules, no gear, a handful of
+    // volumes. The generator makes a different call, on a real hull, and the
+    // line above measures that. Both are honest; only one is relevant, and the
+    // green one is the one a reader believes. Until `shipPhysicsProfile`
+    // shares its integration with `shipFlightConfig` — it runs
+    // `shipMassProperties` and then `shipFlightConfig` runs it again on the
+    // same geometry — this budget cannot be met from inside this file: the
+    // generator's own geometry work is well inside 25 ms and the call it has
+    // to make is not.
+    out.push(`  budget: ${fmt(mediumMs, 1)} ms of a 25 ms budget, ${fmt((physicsMs / Math.max(1e-9, mediumMs)) * 100, 0)}% of it inside physics.ts. Compare the physics self-test's own "${fmt(massMs, 2)} ms per medium hull" — that figure times a stub hull; this one times the call generateShip actually makes. OWNER: physics.ts (one integration shared between shipMassProperties and shipFlightConfig would return ${fmt(profMs / 3, 1)} ms of the ${fmt(profMs, 1)} ms profile).`);
   }
 
   // --- a fleet -------------------------------------------------------------

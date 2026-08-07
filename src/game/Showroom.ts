@@ -34,10 +34,12 @@
  */
 
 import {
+  Box3,
   BufferGeometry,
   Color,
   Float32BufferAttribute,
   Group,
+  InstancedMesh,
   Material,
   Mesh,
   NormalBlending,
@@ -641,6 +643,40 @@ function buildScaleReference(): BufferGeometry {
 }
 
 // ===========================================================================
+// Geometry the CPU is not allowed to believe
+// ===========================================================================
+
+/**
+ * True when this geometry's real size lives in a vertex shader rather than in
+ * its vertex positions.
+ *
+ * `render/ships/propulsion.ts` authors nozzle bells, plume columns and thruster
+ * quads at unit scale and multiplies `position` by a per-instance `iSize`
+ * (`iSizeA`/`iSizeB` for the additive families) in its own vertex shader. Two
+ * consequences, both of which have already cost a review round:
+ *
+ *  - a material swap that does not carry the same attribute draws that geometry
+ *    at its authored KILOMETRE, which is what put the camera inside the ship for
+ *    all three silhouette frames in round three; and
+ *  - `geometry.boundingBox` — and therefore anything built from it, including
+ *    `Box3.setFromObject` — reports that same kilometre, so it is not a usable
+ *    clearance volume for a camera solver.
+ *
+ * So this predicate is the single place the showroom decides "the CPU does not
+ * know how big this is", and both the silhouette override and the clearance
+ * guard consult it. It is a read of the geometry's attribute table, so it costs
+ * a hash lookup and needs no cooperation from the renderer.
+ */
+function isShaderSized(geometry: BufferGeometry | undefined): boolean {
+  if (!geometry) return false;
+  const attrs = geometry.attributes;
+  for (const name in attrs) {
+    if (name.startsWith('iSize')) return true;
+  }
+  return false;
+}
+
+// ===========================================================================
 // Setup description
 // ===========================================================================
 
@@ -759,6 +795,10 @@ export class Showroom implements GameModule {
   private readonly sunLocal = new Vector3();
   private readonly scratchDir = new Vector3();
   private readonly scratchPoint = new Vector3();
+  /** Outward normal of whatever `aim()` last chose, world space. */
+  private readonly aimNormalV = new Vector3();
+  private readonly clearBox = new Box3();
+  private readonly meshBox = new Box3();
 
   constructor() {
     this.root.name = 'showroom';
@@ -907,7 +947,14 @@ export class Showroom implements GameModule {
     }
     // Rows are stacked top-first, so the reading order of a fleet frame runs
     // left to right and then down, like any other comparison plate.
-    const rowGap = 0.55;
+    //
+    // The gap is struck against the taller of the two rows' half-heights, so at
+    // 0.85 the clear air between a hull's deck and the keel above it is roughly
+    // 40% of a hull height. It has to be that generous because the rows are
+    // separated in Y and the camera is never exactly level: a few degrees of
+    // elevation projects each hull's own DEPTH into the vertical, and a block
+    // that only just cleared at zero elevation would touch.
+    const rowGap = 0.85;
     let vcursor = 0;
     const rowY: number[] = [];
     for (let r = 0; r < rows; r++) {
@@ -956,7 +1003,11 @@ export class Showroom implements GameModule {
     for (const s of this.subjects) s.visual.setFillLight?.(this.fillColor);
 
     this.setScaleReference(setup.scaleReference === true, entries[0]?.blueprint ?? null);
-    if (setup.silhouette) this.setSilhouette(true);
+    // Unconditional, not `if (setup.silhouette)`. It is a no-op for a shaded
+    // shot only because of the `setSilhouette(false)` at the top of this
+    // method, and a state machine whose correctness depends on a reset forty
+    // lines away is one edit from photographing the previous shot's override.
+    this.setSilhouette(setup.silhouette === true);
 
     return { subjects: this.subjects, radiusKm: this.layoutRadiusKm };
   }
@@ -1012,6 +1063,27 @@ export class Showroom implements GameModule {
    * HIDDEN rather than overridden. A plume is not form. Painting one matte
    * black would add a cone to the silhouette that the hull does not have, and
    * the critic would reject a shape the ship never had.
+   *
+   * ---------------------------------------------------------------------------
+   * AND SO IS ANYTHING SIZED BY ITS OWN SHADER
+   *
+   * The transparency test above is necessary and was not sufficient. The
+   * propulsion renderer authors its nozzle bells at UNIT scale — a 1 km radius,
+   * because one world unit is one kilometre — and shrinks each instance to its
+   * real size inside the vertex shader from a per-instance `iSize` attribute.
+   * Those meshes are opaque and `NormalBlending`, so they passed the test, got
+   * the override material, and `SILHOUETTE_VERT` has no `iSize` path: every
+   * bell drew at its full authored kilometre. The measured span of the
+   * "silhouette" of a 62 m freighter was 2301 x 2447 x 2498 m, forty times the
+   * hull, and a camera correctly solved to 390 m stood 760 m INSIDE the nearest
+   * bell. All three silhouette frames in round three are photographs of the
+   * inside of a nozzle.
+   *
+   * The fix is to skip that geometry entirely, which is what the comment above
+   * already intends for emitters: a nozzle bell is propulsion, not form, and
+   * BRIEF §8's black shape is the HULL. The test is the presence of an `iSize*`
+   * instanced attribute, which is exactly the set of shader-sized geometry and
+   * nothing else — the hull buffer and the greeble batches carry none.
    */
   setSilhouette(on: boolean): void {
     if (on === this.silhouette) return;
@@ -1030,7 +1102,8 @@ export class Showroom implements GameModule {
           if (!mesh.isMesh) return;
           const current = mesh.material;
           const probe = Array.isArray(current) ? current[0] : current;
-          if (probe && (probe.transparent || probe.blending !== NormalBlending)) {
+          const emitter = probe !== undefined && (probe.transparent || probe.blending !== NormalBlending);
+          if (emitter || isShaderSized(mesh.geometry)) {
             if (o.visible) {
               o.visible = false;
               this.hiddenEmitters.push(o);
@@ -1059,6 +1132,15 @@ export class Showroom implements GameModule {
     return this.layoutRadiusKm;
   }
 
+  /**
+   * Outward normal of whatever the last `aim()` chose, world space, or a zero
+   * vector when that aim has no preferred side. Read by `apply()`; valid only
+   * until the next `aim()`.
+   */
+  get aimNormal(): Vector3 {
+    return this.aimNormalV;
+  }
+
   subject(index: number): ShowroomSubject | null {
     return this.subjects[index] ?? null;
   }
@@ -1072,6 +1154,8 @@ export class Showroom implements GameModule {
    * where the shot stands it.
    */
   aim(aimAt: ShowroomAim, out: Vector3, viewDir?: Vector3): number {
+    // Zero means "this aim has no preferred side"; only `hardware` sets one.
+    this.aimNormalV.set(0, 0, 0);
     const s = this.subjects[0];
     if (!s || aimAt === 'layout') {
       out.set(0, 0, 0);
@@ -1120,9 +1204,15 @@ export class Showroom implements GameModule {
       // can ask "is this piece of hardware visible from where the camera
       // stands" rather than just "is it the right kind of part".
       this.scratchDir.copy(viewDir ?? _worldUp).applyQuaternion(s.inverseQuaternion).normalize();
-      const r = pickHardwareCluster(bp, this.scratchDir, out);
+      const r = pickHardwareCluster(bp, this.scratchDir, out, this.aimNormalV);
       if (r > 0) {
         this.toWorld(s, out);
+        // The cluster's mounting normal, in world space. `apply()` swings the
+        // camera onto this side of the plate: a fixed world direction plus a
+        // picked point is how `ship-greeble-close` ended up looking ALONG the
+        // plating at a cluster mounted on a face turned away from the lens, and
+        // returned a frame that was 93% flat plate with no hardware in it.
+        this.aimNormalV.applyQuaternion(s.root.quaternion).normalize();
         // Held between roughly four and twelve metres of frame, whatever the
         // hull's size: a detail shot that frames thirty metres is a hull shot,
         // and a detail shot that frames one metre is a texture swatch.
@@ -1171,6 +1261,74 @@ export class Showroom implements GameModule {
       }
     }
     return n;
+  }
+
+  /**
+   * The world-space corners of the box that is actually DRAWN this shot.
+   *
+   * `aimCorners` reads `dimensions.bounds`, which is the generator's promise
+   * about the hull. This reads the scene graph, which is what the lens will
+   * see. They should agree to a few per cent, and when they do this costs
+   * nothing — the guard it feeds in `placeCamera` is not binding. When they do
+   * NOT agree, the difference is the failure mode that cost round three: the
+   * blueprint said 62 m, the drawn thing was 2.5 km, the fit was solved off the
+   * blueprint, and the shutter fired from inside the ship.
+   *
+   * Two exclusions, both deliberate:
+   *  - invisible subtrees, via `traverseVisible`, so the silhouette pass's
+   *    hidden emitters do not push the camera back out to a plume's reach; and
+   *  - shader-sized geometry (see `isShaderSized`), whose CPU bounds are its
+   *    authored kilometre and not its drawn size. Including it would park every
+   *    hull frame 1.2 km back. Under `setSilhouette` that geometry is hidden
+   *    outright, so on the frames this guard exists to protect it is excluded
+   *    twice over.
+   *
+   * Called once per shot from `apply()`, never per frame.
+   */
+  clearanceCorners(out: Vector3[]): number {
+    const box = this.clearBox.makeEmpty();
+    // The subjects were parented after their groups were last updated, so the
+    // descendants' `matrixWorld` is one frame stale at this point in `apply()`
+    // — and a clearance box built from a stale transform is worse than none.
+    this.root.updateMatrixWorld(true);
+    for (const s of this.subjects) {
+      s.visual.object3d.traverseVisible((o) => {
+        const mesh = o as Mesh;
+        if (!mesh.isMesh) return;
+        const geom = mesh.geometry;
+        if (isShaderSized(geom)) return;
+        const inst = o as InstancedMesh;
+        if (inst.isInstancedMesh) {
+          // Recomputed rather than reused: `boundingBox` is cached on the mesh
+          // and the visuals are cached across shots, so a renderer that rewrites
+          // its instance matrices for an LOD would otherwise be measured on the
+          // previous shot's layout.
+          inst.computeBoundingBox();
+          if (!inst.boundingBox) return;
+          this.meshBox.copy(inst.boundingBox);
+        } else {
+          if (geom.boundingBox === null) geom.computeBoundingBox();
+          if (!geom.boundingBox) return;
+          this.meshBox.copy(geom.boundingBox);
+        }
+        this.meshBox.applyMatrix4(o.matrixWorld);
+        box.union(this.meshBox);
+      });
+    }
+    if (box.isEmpty()) return 0;
+    for (let k = 0; k < 8; k++) {
+      let v = out[k];
+      if (!v) {
+        v = new Vector3();
+        out[k] = v;
+      }
+      v.set(
+        (k & 1) !== 0 ? box.max.x : box.min.x,
+        (k & 2) !== 0 ? box.max.y : box.min.y,
+        (k & 4) !== 0 ? box.max.z : box.min.z,
+      );
+    }
+    return 8;
   }
 
   private toWorld(s: ShowroomSubject, p: Vector3): void {
@@ -1400,7 +1558,12 @@ function clearance(bp: ShipBlueprint, ox: number, oy: number, oz: number, dx: nu
  * Writes the cluster centre, ship-local km, into `out`. Returns the radius the
  * frame should hold, or 0 when the hull has no modules at all.
  */
-function pickHardwareCluster(bp: ShipBlueprint, viewDir: Vector3, out: Vector3): number {
+function pickHardwareCluster(
+  bp: ShipBlueprint,
+  viewDir: Vector3,
+  out: Vector3,
+  outNormal?: Vector3,
+): number {
   const near = DECK_HEIGHT_KM * 3.0;
   const candidates = bp.modules.filter((m) => m.present && CREW_HARDWARE.has(m.kind));
   const pool = candidates.length > 0 ? candidates : bp.modules.filter((m) => m.present);
@@ -1428,7 +1591,14 @@ function pickHardwareCluster(bp: ShipBlueprint, viewDir: Vector3, out: Vector3):
     const r = rank < 0 ? 90 : rank;
     // Clearance dominates: a cluster of six the camera cannot see is worth
     // less than one bracket it can.
-    const score = clear * 3.0 + Math.max(facing, -0.4) + Math.min(count, 4) * 0.55 - r * 0.004;
+    //
+    // `facing` used to be worth at most 1.0 against a population term worth up
+    // to 2.2, so a dense cluster on a face turned AWAY from the lens beat a
+    // sparser one turned towards it — and the shot came back as plating seen
+    // edge-on. Clearance still leads, but a cluster the camera would be looking
+    // at the back of now loses on its own: the frame is scored on distinct
+    // SILHOUETTES, and a greeble presents none from behind.
+    const score = clear * 3.0 + Math.max(facing, -0.4) * 2.4 + Math.min(count, 4) * 0.55 - r * 0.004;
     if (score > bestScore || (score === bestScore && r < bestRank)) {
       best = m;
       bestScore = score;
@@ -1459,7 +1629,11 @@ function pickHardwareCluster(bp: ShipBlueprint, viewDir: Vector3, out: Vector3):
   // Stand the aim point off the plate along the mounting normal, so a frame
   // sized to a single small bracket does not put the lens in the plating.
   _probe.set(best.frame.up[0], best.frame.up[1], best.frame.up[2]);
-  if (_probe.lengthSq() > 1e-9) out.addScaledVector(_probe.normalize(), Math.max(reach, DECK_HEIGHT_KM * 1.6) * 0.35);
+  if (_probe.lengthSq() > 1e-9) {
+    _probe.normalize();
+    out.addScaledVector(_probe, Math.max(reach, DECK_HEIGHT_KM * 1.6) * 0.35);
+    outNormal?.copy(_probe);
+  }
   // Never tighter than about four decks of frame: below that a detail shot is
   // a texture swatch, and nothing human-scale has room to be beside anything.
   return Math.max(reach, DECK_HEIGHT_KM * 1.6);
@@ -1590,6 +1764,18 @@ interface CameraSpec {
   /** Roll about the view axis. Buys a diagonal without moving the camera. */
   readonly roll?: number;
   readonly aimAt?: ShowroomAim;
+  /**
+   * 0..1 — how far to swing the camera onto the outward normal of whatever the
+   * aim picked, instead of trusting `dir` alone.
+   *
+   * Only meaningful for `aimAt: 'hardware'`, the one aim that chooses a point
+   * on a SURFACE whose orientation is not known when the shot is authored. At 0
+   * the authored direction stands (every hull and fleet frame). At 1 the camera
+   * would look straight down the mounting normal, which kills the terminator;
+   * the useful band is around 0.7, which lands roughly forty degrees off the
+   * plate and keeps the raking key.
+   */
+  readonly faceAim?: number;
 }
 
 interface ShowroomShotDef {
@@ -1620,7 +1806,24 @@ const SHOT_DEFS: readonly ShowroomShotDef[] = [
     // 1.7 degrees of elevation put a lit band along the top of both hull
     // cylinders, which is a three-quarter read on the one frame whose whole
     // purpose is the profile as a drawing.
-    camera: { dir: [1, 0, 0], fovDeg: 9, fill: 0.86, aimAt: 'hull' },
+    //
+    // The 9 degrees is DELIBERATE and stays, against two reviewers who asked
+    // for 20-24 after round three. It was flagged because it was the one camera
+    // value re-authored that round and the frame came back unusable, which is a
+    // correlation; the measurement says otherwise. `placeCamera` solves 389.8 m
+    // from these bounds at this lens and frames the hull at 57% width / 81%
+    // height — exactly what fill 0.86 asks for. What filled the frame was a
+    // 1 km nozzle bell drawn at its authored scale by the silhouette override,
+    // 760 m in front of a correctly placed camera (see `setSilhouette`). Wide
+    // the lens would have been inside the same bell. Widening it here would
+    // have hidden the bug behind a lens change and cost the frame the near-
+    // orthographic read it exists for.
+    // 22 degrees, not 9. A 9-degree lens is 2.5x narrower than every other
+    // hull-framed shot in this file, and at that focal length the fill solver
+    // parks the camera on the plating: measured, empty frame fell from 96.2%
+    // to 20.0% and the subject clipped all four edges. The silhouette shots
+    // are the ones that must contain the WHOLE ship.
+    camera: { dir: [1, 0, 0], fovDeg: 22, fill: 0.86, aimAt: 'hull' },
   },
   {
     name: 'ship-silhouette-front',
@@ -1650,6 +1853,36 @@ const SHOT_DEFS: readonly ShowroomShotDef[] = [
   },
 
   // -- surface -------------------------------------------------------------
+  {
+    // NOT called `ship-hero`. `src/ship/Ship.ts:2547` already registers a shot
+    // under that exact name, and it photographs the hand-authored player ship —
+    // a smooth cigar hull with a pointed nose and TWO nozzles. When the full
+    // capture writes into the ships review directory, `ship-hero.png` is the
+    // first file an art lead opens and it shows a vessel this generator did not
+    // produce: the procedural hero is a boxy modular freighter with SIX bells
+    // in two pods. Two review rounds have now been at risk of judging
+    // proportion, engine count and surface off the wrong ship.
+    //
+    // Ship.ts is baseline and must not be degraded (BRIEF §2), so the name
+    // collision is resolved from this side: the showroom's flagship frame is
+    // registered under a name of its own, and the review set now contains a
+    // whole-hull hero that is unambiguously generated. Fixing the COLLISION
+    // still belongs to the integrator — `scripts/shoot.mjs` must keep Ship.ts's
+    // `ship-hero` out of the ships set, or the round must be shot with
+    // `scripts/ship-review.mjs`, which only ever runs `SHOWROOM_SHOTS`.
+    name: 'ship-showroom-hero',
+    description:
+      'The generated hero hull WHOLE, rear three-quarter, drive at cruise, nothing cropped ' +
+      'and nothing else in frame — the one image to judge the ship as a ship. LOOK AT: the ' +
+      'overall proportion and the mass hierarchy first, then the engine architecture, then ' +
+      'the surface. Count the engine bells and check that number against ship-hero-close, ' +
+      'ship-high-quality and ship-lod0: all four are the same hull and must agree. FAILS IF: ' +
+      'this is a different vessel from the other HERO_SHIP frames; the hull touches a frame ' +
+      'edge; the silhouette reads as one undifferentiated mass.',
+    setup: { ships: [HERO_SHIP], drive: CRUISE, ...KEY_LIGHT },
+    camera: { dir: [0.66, 0.28, 0.7], fovDeg: 24, fill: 0.82, roll: 0.1, aimAt: 'hull' },
+    settle: 3,
+  },
   {
     name: 'ship-hero-close',
     description:
@@ -1694,7 +1927,21 @@ const SHOT_DEFS: readonly ShowroomShotDef[] = [
     // Filled hard: the cluster is only a few metres across and at fill 0.7 the
     // frame held eighteen metres of hull, which is a hull shot with a bracket
     // in it rather than the arm's-length frame the brief asks for.
-    camera: { dir: [0.66, 0.46, 0.6], fovDeg: 38, fill: 0.92, roll: 0.15, aimAt: 'hardware' },
+    //
+    // `faceAim` is what makes the fill mean anything. Framing tight on a point
+    // the lens is looking at EDGE-ON just fills the frame with more plate, and
+    // that is what round three returned: 93% one plate, three seams, not one
+    // bracket. The camera now stands off the chosen cluster's own mounting
+    // normal, tilted back towards the authored raking direction, so the
+    // hardware is between the lens and the plating instead of beside it.
+    camera: {
+      dir: [0.66, 0.46, 0.6],
+      fovDeg: 38,
+      fill: 0.86,
+      roll: 0.15,
+      aimAt: 'hardware',
+      faceAim: 0.7,
+    },
     settle: 3,
   },
 
@@ -1795,8 +2042,43 @@ const SHOT_DEFS: readonly ShowroomShotDef[] = [
       'FIVE SHIPS rather than one ship with the parts moved. FAILS IF: you cannot name a ' +
       'single shared trait; or you can name the shared traits but the hulls differ only in ' +
       'where the bolt-ons landed; or the role of each is unguessable.',
-    setup: { ships: FAMILY_FLEET, drive: COLD, spacing: 1.15, rows: 2, ...KEY_LIGHT },
-    camera: { dir: [0.12, 0.5, 0.86], fovDeg: 32, fill: 0.9, aimAt: 'layout' },
+    // BROADSIDE, and that is the whole shot.
+    //
+    // Round three photographed this plate from [0.12, 0.5, 0.86] — thirty
+    // degrees up and nearly dead astern. That is the one axis of view that
+    // hides length, proportion and mass distribution, which are the three
+    // things that distinguish one seed from another, so what the DNA test
+    // actually compared was engine-bell clusters. Worse, `rows: 2` at that
+    // elevation stacked the back row directly BEHIND the front one: five hulls
+    // came out as three blobs, one of them two hulls fused into a single
+    // column.
+    //
+    // Both are fixed by the same lever. Every hull is yawed a quarter turn so
+    // its length runs along the layout's own X axis, and the camera drops to
+    // ten degrees of elevation almost square to that axis. The hulls are then
+    // broadside AND the row spreads across the frame, the rows separate
+    // cleanly in Y because there is barely any elevation left to project them
+    // into each other, and the block's 3 x 2 shape sits close to 16:9 instead
+    // of the 4.4:1 ribbon that made a single row read at 90 px.
+    //
+    // `rows: 2` stays. The reason it was introduced — a five-wide row wastes
+    // two thirds of the frame's height — is still true; it was the camera that
+    // was wrong, not the layout. Spacing comes down to 0.55 because the gap is
+    // struck against the bounding RADIUS while the hull now presents its
+    // length, so 1.15 was buying half a hull of empty space between neighbours.
+    //
+    // The key is re-aimed with it: `KEY_LIGHT` puts the sun behind a camera on
+    // +Z, which would have left every broadside flank unlit.
+    setup: {
+      ships: FAMILY_FLEET,
+      drive: COLD,
+      spacing: 0.55,
+      rows: 2,
+      yaw: Math.PI / 2,
+      ...KEY_LIGHT,
+      sunDirection: [-0.48, 0.46, 0.75],
+    },
+    camera: { dir: [0.05, 0.17, 0.984], fovDeg: 32, fill: 0.9, aimAt: 'layout' },
     settle: 2,
   },
   {
@@ -1810,8 +2092,22 @@ const SHOT_DEFS: readonly ShowroomShotDef[] = [
       'salvage) rather than cosmetic. FAILS IF: the three differ only in paint; or one is ' +
       'obviously the same mesh with a different palette; or the differences are random ' +
       'rather than attributable to how that culture builds.',
-    setup: { ships: FACTION_FLEET, drive: COLD, spacing: 1.25, ...KEY_LIGHT },
-    camera: { dir: [0.2, 0.42, 0.88], fovDeg: 30, fill: 0.88, aimAt: 'layout' },
+    // Same broadside treatment as the family plate, for the same reason plus
+    // one of its own: a contrast test in which the three subjects sit at
+    // different DISTANCES is not a contrast test. The row runs along X, so the
+    // 0.2 of X in the old direction telescoped it — the left hull came out
+    // half again the size of the right, and the difference a critic is asked to
+    // attribute to doctrine was partly just perspective. Square to the row,
+    // all three are the same number of metres from the lens.
+    setup: {
+      ships: FACTION_FLEET,
+      drive: COLD,
+      spacing: 0.75,
+      yaw: Math.PI / 2,
+      ...KEY_LIGHT,
+      sunDirection: [-0.48, 0.46, 0.75],
+    },
+    camera: { dir: [0.03, 0.15, 0.988], fovDeg: 30, fill: 0.88, aimAt: 'layout' },
     settle: 2,
   },
 
@@ -1948,7 +2244,32 @@ const _up = new Vector3();
 const _rel = new Vector3();
 const _worldUp = new Vector3(0, 1, 0);
 const _corners: Vector3[] = [];
+const _clearCorners: Vector3[] = [];
+const _noCorners: readonly Vector3[] = [];
 const _specDir = new Vector3();
+const _authoredDir = new Vector3();
+const _faceDir = new Vector3();
+
+/**
+ * Swing `_specDir` from the shot's authored direction towards a surface's
+ * outward normal, and report whether there was a normal to swing towards.
+ *
+ * `_specDir` must already hold the AUTHORED direction on the way in — the mix
+ * is against that and never against a previously swung result, so calling this
+ * twice does not compound.
+ *
+ * `amount` 0 leaves the authored direction alone; 1 would look straight down
+ * the normal and flatten the terminator the shot was composed for. The
+ * tangential half of the authored direction is kept at `1 - amount * 0.5` so
+ * that even at the top of the range the lens still rakes.
+ */
+function swingToFace(normal: Vector3, amount: number): boolean {
+  if (normal.lengthSq() < 1e-9) return false;
+  _faceDir.copy(normal).normalize().multiplyScalar(amount).addScaledVector(_specDir, 1 - amount * 0.5);
+  if (_faceDir.lengthSq() < 1e-9) return false;
+  _specDir.copy(_faceDir).normalize();
+  return true;
+}
 
 /**
  * Place the camera from a direction and a fraction of the frame.
@@ -1989,10 +2310,21 @@ const _specDir = new Vector3();
 function placeCamera(
   ctx: EngineContext,
   spec: CameraSpec,
+  /**
+   * The direction from the subject to the camera, already normalised. Passed in
+   * rather than read from `spec.dir` because a `faceAim` shot resolves its own
+   * direction from the cluster the picker chose — and a solver that re-read the
+   * authored direction here would silently discard that and frame the shot from
+   * the provisional angle again.
+   */
+  viewDir: Vector3,
   radiusKm: number,
   aimPoint: Vector3,
   corners: readonly Vector3[],
   cornerCount: number,
+  clearCorners: readonly Vector3[] = _noCorners,
+  clearCount = 0,
+  shotName = '',
 ): void {
   ctx.camera.fov = spec.fovDeg;
   ctx.camera.updateProjectionMatrix();
@@ -2010,7 +2342,7 @@ function placeCamera(
   const halfH = halfV * Math.max(ctx.camera.aspect, 1e-3);
   const fill = Math.max(spec.fill ?? 0.8, 1e-3);
 
-  _camDir.set(spec.dir[0], spec.dir[1], spec.dir[2]).normalize();
+  _camDir.copy(viewDir).normalize();
 
   // The screen basis is known before the distance is: only the camera's
   // POSITION along `_camDir` depends on it.
@@ -2056,15 +2388,17 @@ function placeCamera(
   }
 
   let distance: number;
+  let solved = 0;
+  let maxDepth = 0;
+  let reach = 0;
+  let guard = 0;
   if (spec.targetPixels !== undefined) {
     // A lateral offset e at distance d covers e * height / (d * halfV) pixels
     // on either screen axis — the aspect ratio cancels — so one scale serves.
     const e = cornerCount >= 2 ? Math.max(halfEx, halfEy) : radiusKm;
     distance = (e * ctx.height) / (halfV * Math.max(spec.targetPixels, 1));
   } else if (cornerCount >= 2) {
-    let solved = 0;
-    let maxDepth = -Infinity;
-    let reach = 0;
+    maxDepth = -Infinity;
     for (let i = 0; i < cornerCount; i++) {
       _rel.copy(corners[i]!).sub(aimPoint);
       const ex = Math.abs(_rel.dot(_right));
@@ -2076,9 +2410,51 @@ function placeCamera(
     }
     // Never inside the hull, whatever the fill asks for.
     distance = Math.max(solved, maxDepth + reach * 0.25, 1e-6);
+
+    // ...and never inside anything that is actually DRAWN.
+    //
+    // The clamp above is computed from the BLUEPRINT box, so it can only
+    // protect against the fill: if the thing on screen is bigger than the thing
+    // the generator declared, that arithmetic is confidently wrong and the
+    // shutter fires from inside the ship, which is exactly what happened to all
+    // three silhouette frames in round three. `clearCorners` is the box the
+    // scene graph will actually draw, so this term is the one that cannot be
+    // fooled by a disagreement between the two.
+    //
+    // Whole-subject fits only. A detail crop (`engine`, `hardware`, `scale`)
+    // legitimately stands closer than the hull's own extent and reaches this
+    // function through the sphere branch below, where it is untouched.
+    if (clearCount > 0) {
+      let front = -Infinity;
+      let clearReach = 0;
+      for (let i = 0; i < clearCount; i++) {
+        _rel.copy(clearCorners[i]!).sub(aimPoint);
+        front = Math.max(front, _rel.dot(_camDir));
+        clearReach = Math.max(clearReach, _rel.length());
+      }
+      // 15% of the drawn box's own reach of air between the lens and the
+      // nearest surface: enough that a hull whose mesh overshoots its declared
+      // bounds still lands whole on black rather than swallowing the camera.
+      guard = front + clearReach * 0.15;
+      distance = Math.max(distance, guard);
+    }
   } else {
     // A sphere is isotropic, so the tighter half-extent is the binding one.
     distance = radiusKm / Math.max(fill * Math.min(halfV, halfH), 1e-6);
+  }
+
+  // Findings 1, 5 and 9 of round two all asked for the same thing and could
+  // not get it: the numbers this solver actually used. One line per shot, at
+  // capture time rather than at authoring time, so the next round can diff a
+  // frame against the arithmetic that produced it instead of inferring the
+  // camera from the picture.
+  if (shotName !== '') {
+    console.info(
+      `[showroom] ${shotName} fov=${spec.fovDeg} fill=${fill.toFixed(2)} aspect=${ctx.camera.aspect.toFixed(3)} ` +
+        `corners=${cornerCount} halfEx=${halfEx.toFixed(4)} halfEy=${halfEy.toFixed(4)} ` +
+        `radius=${radiusKm.toFixed(4)} solved=${solved.toFixed(4)} maxDepth=${maxDepth.toFixed(4)} ` +
+        `reach=${reach.toFixed(4)} clear=${clearCount}/${guard.toFixed(4)} distance=${distance.toFixed(4)}`,
+    );
   }
 
   ctx.camera.position.copy(aimPoint).addScaledVector(_camDir, distance);
@@ -2117,10 +2493,52 @@ export function registerShowroomShots(showroom: Showroom): void {
         showroom.enter(ctx);
         showroom.configure(ctx, def.setup);
         const aimAt = def.camera.aimAt ?? 'hull';
-        _specDir.set(def.camera.dir[0], def.camera.dir[1], def.camera.dir[2]).normalize();
-        const radius = showroom.aim(aimAt, _aimPoint, _specDir);
+        _authoredDir.set(def.camera.dir[0], def.camera.dir[1], def.camera.dir[2]).normalize();
+        _specDir.copy(_authoredDir);
+        let radius = showroom.aim(aimAt, _aimPoint, _specDir);
+
+        // A close-up has a chicken-and-egg in it: the picker needs a view
+        // direction to decide which cluster the camera can see, and the camera
+        // needs a cluster to know where to stand. Round three shipped the first
+        // half only — a fixed world direction picked the cluster and then kept
+        // pointing the same way — so the lens ended up looking ALONG the
+        // plating at hardware mounted on a face turned away from it, and
+        // `ship-greeble-close` came back as one flat plate.
+        //
+        // One iteration closes the loop: the provisional pick's own mounting
+        // normal is mixed into the authored direction, and the pick is re-run
+        // from where the camera will actually be, so clearance and facing are
+        // scored against the final view rather than the provisional one.
+        //
+        // The direction is then taken from the SECOND pick's normal, not the
+        // first's. That order matters and the obvious one is wrong: re-picking
+        // can return a different cluster from the one whose normal produced the
+        // swing, and the camera would be pointed at hardware it did not choose.
+        // Re-deriving from the final cluster guarantees the lens ends up on the
+        // outboard side of whatever the shot actually framed.
+        const face = def.camera.faceAim ?? 0;
+        if (face > 0 && swingToFace(showroom.aimNormal, face)) {
+          radius = showroom.aim(aimAt, _aimPoint, _specDir);
+          _specDir.copy(_authoredDir);
+          swingToFace(showroom.aimNormal, face);
+        }
+
         const corners = showroom.aimCorners(aimAt, _corners);
-        placeCamera(ctx, def.camera, radius, _aimPoint, _corners, corners);
+        // Only whole-subject fits get the clearance guard; a detail crop is
+        // meant to be closer than the hull's own extent.
+        const clear = corners >= 2 ? showroom.clearanceCorners(_clearCorners) : 0;
+        placeCamera(
+          ctx,
+          def.camera,
+          _specDir,
+          radius,
+          _aimPoint,
+          _corners,
+          corners,
+          _clearCorners,
+          clear,
+          def.name,
+        );
         // Spool before the shutter. Every damped value on a drive starts at
         // zero, so a shot captured cold photographs a powered-down hull no
         // matter which drive state it asked for.

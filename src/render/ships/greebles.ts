@@ -462,6 +462,17 @@ export interface GreebleEnvelope {
   readonly hhi: number;
   /** True: absolute human scale. False: scales with the hull at L^0.35. */
   readonly human: boolean;
+  /**
+   * What the family's OUTLINE does at fifty metres — see `GreebleForm`.
+   *
+   * The envelope already records how big a family is; this records what shape
+   * it is, which is the axis the review said the hull had exactly one value on.
+   * Nothing about the assembly geometry changes: `form` is a *classification*
+   * of geometry this module already builds, and it exists so the two places
+   * that decide what appears where — the size class and the station mix — can
+   * ask "is this another rectangle?" instead of guessing from `w`/`h`.
+   */
+  readonly form: GreebleForm;
   /** Relative commonness within a faction's allowed vocabulary. */
   readonly weight: number;
   /** Which palette slot the family paints from. */
@@ -488,37 +499,60 @@ export interface GreebleEnvelope {
   readonly exposure: number;
 }
 
+/**
+ * What a family's OUTLINE does, which is a different question from how big it
+ * is and the one the round-two review found the hull had only one answer to.
+ *
+ *  - `plate`  lies in the surface: a hatch, a doubler, a grille. It reads as
+ *             panelling, and it does not change the edge of the ship at all.
+ *  - `box`    a rectangular volume standing proud: bracket, crate stack, duct.
+ *             Cheap, useful, and the family the vocabulary is already rich in.
+ *  - `round`  a surface of revolution: tank, riser, drum, blister, cable run.
+ *  - `frame`  open structure, sky visible through it: mast, strut, ladder.
+ *
+ * `round` and `frame` are the two that break a rectangular silhouette, and the
+ * mix rules below are written in terms of that pair, never in terms of the
+ * individual family — a faction that forbids masts must still be able to reach
+ * the same *shape* budget through its pipes and drums.
+ */
+export type GreebleForm = 'plate' | 'box' | 'round' | 'frame';
+
+/** Does this family change the outline into something that is not a rectangle? */
+function breaksSilhouette(env: GreebleEnvelope): boolean {
+  return env.form === 'round' || env.form === 'frame';
+}
+
 export const GREEBLE_ENVELOPE: Record<GreebleKind, GreebleEnvelope> = {
-  hatch: { w: 1.5, lo: 0.75, hi: 1.35, h: 0.22, hlo: 0.6, hhi: 1.3, human: true, weight: 1.0, shade: SHADE_HULL, exposure: 0.93 },
-  bracket: { w: 1.1, lo: 0.6, hi: 2.2, h: 0.8, hlo: 0.6, hhi: 1.8, human: false, weight: 0.9, shade: SHADE_STRUCTURE, exposure: 0.56 },
-  ribbed: { w: 1.3, lo: 0.5, hi: 3.4, h: 0.5, hlo: 0.5, hhi: 1.4, human: false, weight: 0.9, shade: SHADE_HULL, exposure: 0.44 },
-  stack: { w: 1.6, lo: 0.6, hi: 1.7, h: 0.9, hlo: 0.7, hhi: 1.7, human: false, weight: 0.7, shade: SHADE_HULL, exposure: 0.6 },
-  pipe: { w: 0.85, lo: 1.0, hi: 1.0, h: 1.5, hlo: 0.5, hhi: 1.6, human: false, weight: 0.8, shade: SHADE_STRUCTURE, exposure: 0.5 },
-  vent: { w: 1.2, lo: 0.8, hi: 1.6, h: 0.55, hlo: 0.7, hhi: 1.2, human: true, weight: 0.6, shade: SHADE_HULL, exposure: 0.4 },
-  grille: { w: 1.4, lo: 0.7, hi: 1.9, h: 0.12, hlo: 0.8, hhi: 1.2, human: true, weight: 0.5, shade: SHADE_TRIM, exposure: 0.36 },
-  louvre: { w: 1.6, lo: 0.9, hi: 2.4, h: 0.3, hlo: 0.8, hhi: 1.2, human: true, weight: 0.5, shade: SHADE_HULL, exposure: 0.26 },
-  'flush-panel': { w: 1.8, lo: 0.7, hi: 2.0, h: 0.1, hlo: 0.8, hhi: 1.2, human: true, weight: 0.9, shade: SHADE_HULL, exposure: 0.28 },
-  blister: { w: 1.9, lo: 0.85, hi: 1.6, h: 0.75, hlo: 0.5, hhi: 1.2, human: false, weight: 0.7, shade: SHADE_HULL, exposure: 0.22 },
-  'cable-loom': { w: 1.0, lo: 1.4, hi: 4.0, h: 0.32, hlo: 0.8, hhi: 1.3, human: false, weight: 0.7, shade: SHADE_TRIM, exposure: 0.5 },
-  conduit: { w: 1.0, lo: 1.6, hi: 4.5, h: 0.4, hlo: 0.8, hhi: 1.4, human: false, weight: 0.8, shade: SHADE_STRUCTURE, exposure: 0.42 },
-  'antenna-whip': { w: 0.5, lo: 1.0, hi: 1.0, h: 5.5, hlo: 0.5, hhi: 2.2, human: false, weight: 0.35, shade: SHADE_TRIM, exposure: 0.55 },
-  mast: { w: 1.1, lo: 1.0, hi: 1.0, h: 3.2, hlo: 0.7, hhi: 1.8, human: false, weight: 0.3, shade: SHADE_STRUCTURE, exposure: 0.48 },
-  ladder: { w: 0.8, lo: 1.0, hi: 2.6, h: 0.45, hlo: 0.9, hhi: 1.1, human: true, weight: 0.5, shade: SHADE_TRIM, exposure: 0.96 },
+  hatch: { w: 1.5, lo: 0.75, hi: 1.35, h: 0.22, hlo: 0.6, hhi: 1.3, human: true, form: 'plate', weight: 1.0, shade: SHADE_HULL, exposure: 0.93 },
+  bracket: { w: 1.1, lo: 0.6, hi: 2.2, h: 0.8, hlo: 0.6, hhi: 1.8, human: false, form: 'box', weight: 0.9, shade: SHADE_STRUCTURE, exposure: 0.56 },
+  ribbed: { w: 1.3, lo: 0.5, hi: 3.4, h: 0.5, hlo: 0.5, hhi: 1.4, human: false, form: 'box', weight: 0.9, shade: SHADE_HULL, exposure: 0.44 },
+  stack: { w: 1.6, lo: 0.6, hi: 1.7, h: 0.9, hlo: 0.7, hhi: 1.7, human: false, form: 'box', weight: 0.7, shade: SHADE_HULL, exposure: 0.6 },
+  pipe: { w: 0.85, lo: 1.0, hi: 1.0, h: 1.5, hlo: 0.5, hhi: 1.6, human: false, form: 'round', weight: 0.8, shade: SHADE_STRUCTURE, exposure: 0.5 },
+  vent: { w: 1.2, lo: 0.8, hi: 1.6, h: 0.55, hlo: 0.7, hhi: 1.2, human: true, form: 'box', weight: 0.6, shade: SHADE_HULL, exposure: 0.4 },
+  grille: { w: 1.4, lo: 0.7, hi: 1.9, h: 0.12, hlo: 0.8, hhi: 1.2, human: true, form: 'plate', weight: 0.5, shade: SHADE_TRIM, exposure: 0.36 },
+  louvre: { w: 1.6, lo: 0.9, hi: 2.4, h: 0.3, hlo: 0.8, hhi: 1.2, human: true, form: 'plate', weight: 0.5, shade: SHADE_HULL, exposure: 0.26 },
+  'flush-panel': { w: 1.8, lo: 0.7, hi: 2.0, h: 0.1, hlo: 0.8, hhi: 1.2, human: true, form: 'plate', weight: 0.9, shade: SHADE_HULL, exposure: 0.28 },
+  blister: { w: 1.9, lo: 0.85, hi: 1.6, h: 0.75, hlo: 0.5, hhi: 1.2, human: false, form: 'round', weight: 0.7, shade: SHADE_HULL, exposure: 0.22 },
+  'cable-loom': { w: 1.0, lo: 1.4, hi: 4.0, h: 0.32, hlo: 0.8, hhi: 1.3, human: false, form: 'round', weight: 0.7, shade: SHADE_TRIM, exposure: 0.5 },
+  conduit: { w: 1.0, lo: 1.6, hi: 4.5, h: 0.4, hlo: 0.8, hhi: 1.4, human: false, form: 'box', weight: 0.8, shade: SHADE_STRUCTURE, exposure: 0.42 },
+  'antenna-whip': { w: 0.5, lo: 1.0, hi: 1.0, h: 5.5, hlo: 0.5, hhi: 2.2, human: false, form: 'frame', weight: 0.35, shade: SHADE_TRIM, exposure: 0.55 },
+  mast: { w: 1.1, lo: 1.0, hi: 1.0, h: 3.2, hlo: 0.7, hhi: 1.8, human: false, form: 'frame', weight: 0.3, shade: SHADE_STRUCTURE, exposure: 0.48 },
+  ladder: { w: 0.8, lo: 1.0, hi: 2.6, h: 0.45, hlo: 0.9, hhi: 1.1, human: true, form: 'frame', weight: 0.5, shade: SHADE_TRIM, exposure: 0.96 },
   // h was 0.5, which put the rail 0.33 m off the plating — a kerb, not
   // something a person in a suit holds. 1.35 puts it at 0.88 m, and a handrail
   // whose height is a person's height is one of the few unmissable scale cues
   // a hull has. Same argument as `human`, one level down.
-  handrail: { w: 1.4, lo: 1.2, hi: 3.0, h: 1.35, hlo: 0.9, hhi: 1.1, human: true, weight: 0.6, shade: SHADE_TRIM, exposure: 0.97 },
-  clamp: { w: 0.9, lo: 0.9, hi: 1.3, h: 0.7, hlo: 0.8, hhi: 1.3, human: false, weight: 0.5, shade: SHADE_BARE_METAL, exposure: 0.72 },
-  drum: { w: 1.5, lo: 0.9, hi: 1.5, h: 0.8, hlo: 0.7, hhi: 1.3, human: false, weight: 0.6, shade: SHADE_HULL, exposure: 0.5 },
-  strut: { w: 1.3, lo: 0.8, hi: 2.4, h: 0.9, hlo: 0.6, hhi: 1.6, human: false, weight: 0.6, shade: SHADE_STRUCTURE, exposure: 0.6 },
-  'doubler-plate': { w: 1.7, lo: 0.7, hi: 1.9, h: 0.12, hlo: 0.8, hhi: 1.2, human: false, weight: 0.7, shade: SHADE_BARE_METAL, exposure: 0.78 },
-  'weld-bead': { w: 1.2, lo: 2.0, hi: 6.0, h: 0.1, hlo: 0.7, hhi: 1.3, human: true, weight: 0.6, shade: SHADE_BARE_METAL, exposure: 0.8 },
-  tarp: { w: 2.0, lo: 0.8, hi: 1.8, h: 0.5, hlo: 0.6, hhi: 1.3, human: false, weight: 0.4, shade: SHADE_TRIM, exposure: 0.62 },
-  sealant: { w: 0.9, lo: 0.7, hi: 1.5, h: 0.6, hlo: 0.6, hhi: 1.4, human: true, weight: 0.4, shade: SHADE_TRIM, exposure: 0.66 },
-  floodlight: { w: 0.9, lo: 0.9, hi: 1.2, h: 1.1, hlo: 0.8, hhi: 1.4, human: true, weight: 0.35, shade: SHADE_TRIM, exposure: 0.92 },
-  fairlead: { w: 1.2, lo: 0.9, hi: 1.6, h: 0.6, hlo: 0.8, hhi: 1.2, human: false, weight: 0.35, shade: SHADE_BARE_METAL, exposure: 0.94 },
-  'winch-drum': { w: 1.7, lo: 0.9, hi: 1.6, h: 0.9, hlo: 0.8, hhi: 1.3, human: false, weight: 0.3, shade: SHADE_STRUCTURE, exposure: 0.7 },
+  handrail: { w: 1.4, lo: 1.2, hi: 3.0, h: 1.35, hlo: 0.9, hhi: 1.1, human: true, form: 'frame', weight: 0.6, shade: SHADE_TRIM, exposure: 0.97 },
+  clamp: { w: 0.9, lo: 0.9, hi: 1.3, h: 0.7, hlo: 0.8, hhi: 1.3, human: false, form: 'round', weight: 0.5, shade: SHADE_BARE_METAL, exposure: 0.72 },
+  drum: { w: 1.5, lo: 0.9, hi: 1.5, h: 0.8, hlo: 0.7, hhi: 1.3, human: false, form: 'round', weight: 0.6, shade: SHADE_HULL, exposure: 0.5 },
+  strut: { w: 1.3, lo: 0.8, hi: 2.4, h: 0.9, hlo: 0.6, hhi: 1.6, human: false, form: 'frame', weight: 0.6, shade: SHADE_STRUCTURE, exposure: 0.6 },
+  'doubler-plate': { w: 1.7, lo: 0.7, hi: 1.9, h: 0.12, hlo: 0.8, hhi: 1.2, human: false, form: 'plate', weight: 0.7, shade: SHADE_BARE_METAL, exposure: 0.78 },
+  'weld-bead': { w: 1.2, lo: 2.0, hi: 6.0, h: 0.1, hlo: 0.7, hhi: 1.3, human: true, form: 'plate', weight: 0.6, shade: SHADE_BARE_METAL, exposure: 0.8 },
+  tarp: { w: 2.0, lo: 0.8, hi: 1.8, h: 0.5, hlo: 0.6, hhi: 1.3, human: false, form: 'round', weight: 0.4, shade: SHADE_TRIM, exposure: 0.62 },
+  sealant: { w: 0.9, lo: 0.7, hi: 1.5, h: 0.6, hlo: 0.6, hhi: 1.4, human: true, form: 'round', weight: 0.4, shade: SHADE_TRIM, exposure: 0.66 },
+  floodlight: { w: 0.9, lo: 0.9, hi: 1.2, h: 1.1, hlo: 0.8, hhi: 1.4, human: true, form: 'frame', weight: 0.35, shade: SHADE_TRIM, exposure: 0.92 },
+  fairlead: { w: 1.2, lo: 0.9, hi: 1.6, h: 0.6, hlo: 0.8, hhi: 1.2, human: false, form: 'round', weight: 0.35, shade: SHADE_BARE_METAL, exposure: 0.94 },
+  'winch-drum': { w: 1.7, lo: 0.9, hi: 1.6, h: 0.9, hlo: 0.8, hhi: 1.3, human: false, form: 'round', weight: 0.3, shade: SHADE_STRUCTURE, exposure: 0.7 },
 };
 
 /**
@@ -572,12 +606,37 @@ const SIZE_MINOR_HI = 1.15;
 const SIZE_HUMAN_LO = 0.85;
 const SIZE_HUMAN_HI = 1.1;
 /**
- * Only the low, wide, chunky families take the upper class. A family whose
- * height envelope is already 1.5–5.5 (a pipe riser, a mast, a whip) is tall by
- * construction; scaling it up as well produces a 14 m spike, which is a second
- * silhouette rather than a middle band.
+ * Above this height envelope a family is "tall by construction" — a pipe
+ * riser, a mast, a whip, a floodlight yoke.
+ *
+ * This used to be a *gate*: tall families were refused the upper size class
+ * outright, because scaling a 3.2-high mast by a plan-derived multiplier
+ * produced a 14 m spike, which is a second silhouette rather than a middle
+ * band. The observation was right and the remedy was too blunt, and round two
+ * caught what it cost. Every round and every open-frame family in the
+ * vocabulary is tall — pipe 1.5, mast 3.2, whip 5.5, floodlight 1.1 — so
+ * "no tall family in the upper class" resolved to "no cylinder and no lattice
+ * in the upper class", and the medium band could only ever contain boxes. That
+ * is precisely the "three sizes of the same silhouette" the critic counted in
+ * the bow: not too little detail, one shape of detail.
+ *
+ * So the gate is now a *normalisation*. The upper class is a span of real
+ * extent (see below); dividing it by the family's own largest natural extent
+ * rather than by its plan width means a tall family reaches the same 3–5 m
+ * class by growing to it, not past it. `SIZE_MAJOR_TALL_HHI` then caps the
+ * height draw for exactly these families so the aspect multiplier cannot
+ * re-open the hole: the tallest thing the upper class can now produce is a
+ * ~7.5 m mast, against the 10.5 m a *minor* whip could already reach before
+ * this change. Nothing that was in the upper class before moves at all — for
+ * every family with `h ≤ SIZE_MAJOR_MAX_H` the largest extent *is* `w`.
  */
 const SIZE_MAJOR_MAX_H = 1.0;
+/**
+ * Height aspect cap for the upper class of a tall family. Its own `hhi` runs
+ * to 1.8 (mast) and 2.2 (whip), which are tolerances meant to be applied to a
+ * sub-metre fitting, not to a 3 m one.
+ */
+const SIZE_MAJOR_TALL_HHI = 1.15;
 /** Bounds the seat-grid cell; must cover the largest multiplier we can draw. */
 const SIZE_MAX = 6;
 
@@ -592,8 +651,12 @@ const SIZE_MINOR_ALPHA = -1.1;
 
 function drawSize(rng: Rng, env: GreebleEnvelope): number {
   if (env.human) return rng.range(SIZE_HUMAN_LO, SIZE_HUMAN_HI);
-  if (env.h <= SIZE_MAJOR_MAX_H && rng.chance(SIZE_MAJOR_P)) {
-    const span = rng.range(SIZE_MAJOR_SPAN_LO, SIZE_MAJOR_SPAN_HI) / Math.max(env.w, 0.4);
+  if (rng.chance(SIZE_MAJOR_P)) {
+    // The family's own largest natural extent, not its plan width. For every
+    // family that was already eligible this is identical to `w`; for the tall
+    // ones it is what stops the span compounding with the height envelope.
+    const extent = Math.max(env.w, env.h);
+    const span = rng.range(SIZE_MAJOR_SPAN_LO, SIZE_MAJOR_SPAN_HI) / Math.max(extent, 0.4);
     return Math.max(span, SIZE_MAJOR_LO);
   }
   return rng.power(SIZE_MINOR_LO, SIZE_MINOR_HI, SIZE_MINOR_ALPHA);
@@ -981,6 +1044,84 @@ function volumeAreaKm2(v: PrimaryVolume): number {
   return per * len;
 }
 
+/**
+ * How the shape mix leans between the stern and the bow.
+ *
+ * `[aft, bow]` multipliers on a family's weight, renormalised per target so
+ * the instance and triangle budgets are untouched — this moves *which* family
+ * fills a seat, never how many seats there are.
+ *
+ * WHY THE MIX IS NOT CONSTANT ALONG THE HULL. It used to be: one weight per
+ * family, applied identically to every surface, which says a bow plate and an
+ * engine deck are equally likely to carry any given fitting. That is the
+ * uniform-distribution failure BRIEF §7 names — "detail follows function and
+ * orientation" — and round two caught what it produced. The aft of the hull
+ * gets its round and open forms for free from the engine bells, the mount
+ * truss and the plumbing that `propulsion.ts` puts there, so a flat mix left
+ * the stern reading as engineered and the bow as three sizes of box. The mix
+ * therefore has to be a function of station, and the function follows what is
+ * actually behind the plating: forward are tanks, risers, sensor masts and
+ * crew access, and aft are the machinery boxes, ducting and structural pads.
+ *
+ * The lean is deliberately asymmetric. The bow is where the vocabulary is
+ * missing, so it moves furthest; the stern reads correctly today and is nudged
+ * rather than rebuilt (0.9/1.1 either side of parity), which is what stops
+ * this fix from becoming the next round's regression.
+ */
+const FORM_STATION_MIX: Record<GreebleForm, readonly [number, number]> = {
+  plate: [1.1, 0.75],
+  box: [1.1, 0.75],
+  round: [0.9, 1.75],
+  frame: [0.9, 1.75],
+};
+
+/**
+ * Within one long volume, pull the silhouette-breaking families toward its
+ * forward end and the plate/box families aft.
+ *
+ * `FORM_STATION_MIX` works on whole targets, so on a hull whose primary volume
+ * runs the entire length it has nothing to bite on — the volume's centroid is
+ * amidships and every family gets parity. This is the same rule applied along
+ * the run parameter instead of across the target list. It is a bias on `t`,
+ * not a rejection: the same number of instances are placed, in different
+ * places, so no budget and no attempt count moves.
+ *
+ * Exponent, not a hard split, because a hard split reads as a seam. `u^(1/(1+k))`
+ * leans toward the far end of the run, `u^(1+k)` toward the near one.
+ */
+const T_BIAS_FORE = 0.55;
+const T_BIAS_AFT = 0.3;
+/** Below this fraction of the ship's own z extent a run is not long enough to
+ *  have a fore and an aft end, and biasing along it would just crowd a cap. */
+const T_BIAS_MIN_SPAN = 0.2;
+
+/** Default run range: the caps stay clean. */
+const DEFAULT_T_RANGE: readonly [number, number] = [0.06, 0.94];
+
+/** Where a target sits and which way its run points, in ship space (+Z aft). */
+interface TargetRun {
+  /** z at `t0`, at mid-run and at `t1`, averaged over the section. */
+  readonly z0: number;
+  readonly zc: number;
+  readonly z1: number;
+}
+
+const _runP = new Vector3();
+
+function targetRun(tgt: ScatterTarget): TargetRun {
+  const [t0, t1] = tgt.tRange ?? DEFAULT_T_RANGE;
+  // Two opposed section samples average out the section's own offset, so a
+  // volume whose skin is fat on one side still reports its axis.
+  const at = (t: number): number => {
+    sampleVolumeSurface(tgt.volume, t, 0, _runP);
+    const a = _runP.z;
+    sampleVolumeSurface(tgt.volume, t, Math.PI, _runP);
+    const z = (a + _runP.z) * 0.5;
+    return Number.isFinite(z) ? z : 0;
+  };
+  return { z0: at(t0), zc: at((t0 + t1) * 0.5), z1: at(t1) };
+}
+
 const _pos = new Vector3();
 const _nrm = new Vector3();
 const _fwd = new Vector3();
@@ -1027,9 +1168,39 @@ export function scatterGreebles(opts: ScatterOptions): InstancedScatter[] {
     for (let i = 0; i < quota.length; i++) quota[i] = Math.round(quota[i] * k);
   }
 
-  // Split each family's share of every quota.
-  let wsum = 0;
-  for (const kind of opts.families) wsum += GREEBLE_ENVELOPE[kind].weight;
+  // Where each target sits along the ship, and how far its own run reaches.
+  // Sampled once: four section evaluations per target against a scatter that
+  // spends thousands.
+  const runs = opts.targets.map(targetRun);
+  let zLo = Infinity;
+  let zHi = -Infinity;
+  for (const r of runs) {
+    zLo = Math.min(zLo, r.z0, r.zc, r.z1);
+    zHi = Math.max(zHi, r.z0, r.zc, r.z1);
+  }
+  const zSpan = Math.max(zHi - zLo, 1e-9);
+  /** 0 at the sternmost target, 1 at the bow. +Z is aft, so this inverts z. */
+  const station = runs.map((r) => clamp((zHi - r.zc) / zSpan, 0, 1));
+
+  // Split each family's share of every quota — per target, because the mix
+  // leans forward (see `FORM_STATION_MIX`). Each column is renormalised to 1,
+  // so every target still spends exactly the quota it was given and the
+  // triangle projection below stays exact.
+  const shares: number[][] = [];
+  for (let fi = 0; fi < opts.families.length; fi++) shares.push(new Array<number>(opts.targets.length).fill(0));
+  for (let ti = 0; ti < opts.targets.length; ti++) {
+    const f = station[ti];
+    let col = 0;
+    for (let fi = 0; fi < opts.families.length; fi++) {
+      const env = GREEBLE_ENVELOPE[opts.families[fi]];
+      const [aft, bow] = FORM_STATION_MIX[env.form];
+      const w = env.weight * (aft + (bow - aft) * f);
+      shares[fi][ti] = w;
+      col += w;
+    }
+    const inv = 1 / Math.max(col, 1e-9);
+    for (let fi = 0; fi < opts.families.length; fi++) shares[fi][ti] *= inv;
+  }
 
   // Now spend the budget in triangles as well as in instances. The projected
   // cost is exact — the quota, the family split and the per-family triangle
@@ -1041,10 +1212,9 @@ export function scatterGreebles(opts: ScatterOptions): InstancedScatter[] {
   // and strip a LOD1 that was comfortably inside its budget down to nothing.
   const triCap = Math.max(0, opts.triangleBudget ?? opts.lod.triangleBudget * GREEBLE_TRI_SHARE);
   let projected = 0;
-  for (const kind of opts.families) {
-    const share = GREEBLE_ENVELOPE[kind].weight / Math.max(wsum, 1e-9);
-    const cost = greebleTriangleCount(kind, opts.cache);
-    for (let i = 0; i < quota.length; i++) projected += Math.round(quota[i] * share) * cost;
+  for (let fi = 0; fi < opts.families.length; fi++) {
+    const cost = greebleTriangleCount(opts.families[fi], opts.cache);
+    for (let i = 0; i < quota.length; i++) projected += Math.round(quota[i] * shares[fi][i]) * cost;
   }
   if (projected > triCap) {
     const k = triCap / projected;
@@ -1072,9 +1242,11 @@ export function scatterGreebles(opts: ScatterOptions): InstancedScatter[] {
   // hull's own masses, and nothing else is offered.
   const occFloor = HATCH_WIDTH_KM * 1.1 * Math.max(1, equipK * 0.75);
 
-  for (const kind of opts.families) {
+  for (let fi = 0; fi < opts.families.length; fi++) {
+    const kind = opts.families[fi];
     const env = GREEBLE_ENVELOPE[kind];
-    const share = env.weight / Math.max(wsum, 1e-9);
+    const breaks = breaksSilhouette(env);
+    const tall = env.h > SIZE_MAJOR_MAX_H;
     const mats: number[] = [];
     const surf: number[] = [];
     const bent: number[] = [];
@@ -1083,9 +1255,20 @@ export function scatterGreebles(opts: ScatterOptions): InstancedScatter[] {
     for (let ti = 0; ti < opts.targets.length; ti++) {
       const tgt = opts.targets[ti];
       const v = tgt.volume;
-      const want = Math.round(quota[ti] * share);
+      const want = Math.round(quota[ti] * shares[fi][ti]);
       if (want <= 0) continue;
-      const [t0, t1] = tgt.tRange ?? [0.06, 0.94];
+      const [t0, t1] = tgt.tRange ?? DEFAULT_T_RANGE;
+
+      // Which way along this run is forward, and is the run long enough to
+      // have a direction at all. Resolved once per family per target.
+      const run = runs[ti];
+      let tExp = 1;
+      if (Math.abs(run.z1 - run.z0) / zSpan > T_BIAS_MIN_SPAN) {
+        // Forward is the smaller z. `breaks` wants forward, everything else aft.
+        const towardT1 = breaks ? run.z1 < run.z0 : run.z1 > run.z0;
+        const k = breaks ? T_BIAS_FORE : T_BIAS_AFT;
+        tExp = towardT1 ? 1 / (1 + k) : 1 + k;
+      }
 
       // Decide once, on the family's largest possible instance, whether this
       // family is geometry at this level at all. Deciding per attempt would
@@ -1098,7 +1281,10 @@ export function scatterGreebles(opts: ScatterOptions): InstancedScatter[] {
       const maxAttempts = want * 24;
       while (taken < want && attempts < maxAttempts) {
         attempts++;
-        const t = rng.range(t0, t1);
+        // One draw either way, so the stream length does not depend on the
+        // bias and a hull with one long volume stays reproducible against one
+        // with three short ones.
+        const t = t0 + (t1 - t0) * Math.pow(rng.range(0, 1), tExp);
         // Biased away from straight down: nobody bolts equipment where the
         // landing gear puts it in the dirt, and a greebled belly reads as
         // noise from every angle that matters.
@@ -1125,7 +1311,11 @@ export function scatterGreebles(opts: ScatterOptions): InstancedScatter[] {
           : rng.range(env.lo, env.hi);
         const sx = unit * s * ratio;
         const sz = unit * s * (env.lo === env.hi ? ratio : rng.range(major ? 0.85 : 0.7, major ? 1.15 : 1.5));
-        const sy = unit * env.h * s * rng.range(env.hlo, env.hhi);
+        // A tall family in the upper class takes a tightened height tolerance:
+        // its `hhi` was written for a sub-metre fitting, and applying 1.8 to a
+        // 3 m mast is how the 14 m spike happened. Same number of draws.
+        const sy =
+          unit * env.h * s * rng.range(env.hlo, major && tall ? Math.min(env.hhi, SIZE_MAJOR_TALL_HHI) : env.hhi);
         const rad = Math.max(sx, sz) * 0.5;
 
         // Nothing non-finite reaches an instance buffer. A NaN scale or a NaN

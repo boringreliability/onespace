@@ -31,12 +31,22 @@
  *      area is length × girth, and they refuse external fins, so their
  *      length/beam ratio has a *thermal* lower bound. A designer cannot make a
  *      stubby Sillane; the physics of their own design language forbids it.
- *      That bound is `proportion.slendernessBand`, it is enforced by
- *      `lengthBeamFor` after every other influence has had its say, and its
- *      floor rises with the acceleration the role demands — because the hull is
- *      long in order to shed heat, and more thrust is more heat. Sillane's floor
- *      is above Kessler's ceiling with no overlap, which is what makes the
- *      signature visible on ONE hull rather than in a histogram of a hundred.
+ *      That bound is the floor of `proportion.slendernessBand`, it is enforced
+ *      by `lengthBeamFor` after every other influence has had its say, and it
+ *      rises with the acceleration the role demands — because the hull is long
+ *      in order to shed heat, and more thrust is more heat.
+ *
+ *      The *comparative* half of that statement — a Sillane is finer than a
+ *      Kessler — is `proportion.slendernessGain`, and it is a MULTIPLIER on what
+ *      the role asked for rather than a band the role gets projected into. That
+ *      distinction is this round's correction and it matters: two signals do not
+ *      fit through one projection. Round two encoded the yard as a narrow
+ *      absolute band and the role as a position inside it, which made the yard
+ *      legible and flattened every role in it — eighteen roles inside a Kessler
+ *      window 1.77× wide, and a tug, a liner and a gunship from one seed came
+ *      out as the same box in three sizes. As a product, the yard ratio is 1.7×
+ *      on every role and the role ratio is 5× in every yard, and neither costs
+ *      the other anything.
  *
  *   2. Kessler engines stand off the hull on a visible thrust frame because a
  *      Kessler crew must be able to change one in the field with a gantry. That
@@ -327,24 +337,56 @@ export interface ConstructionDna {
 /** Proportion rules — the part of identity that survives at impostor range. */
 export interface ProportionDna {
   /**
-   * Overall length ÷ overall beam, as an ABSOLUTE and BINDING band.
+   * The culture's multiplier on the fleet-wide role fineness scale.
    *
-   * This is the single strongest silhouette number and it used to be the
-   * weakest field in the file. It was intersected with the role's band (role
-   * winning on disagreement), then scaled by the hull line's bias, then scaled
-   * again by the generator's archetype modifier — three multiplications, each
-   * defensible, which together turned "a Sillane cannot be stubby" into a 14%
-   * nudge on a mean while the three factions' distributions sat on top of one
-   * another. A signature you need a histogram to see is not a signature.
+   * THE TWO SIGNALS ARE INDEPENDENT AND BOTH MUST SURVIVE. Round two fixed "the
+   * three factions look alike" by making `slendernessBand` a narrow absolute
+   * interval per faction and reading the role's own `lengthBeam` as a *relative*
+   * position inside it. It worked, and it broke the other half: Kessler's whole
+   * band was 2.15–3.80, so every one of eighteen roles landed inside a 1.77×
+   * window and a Kessler tug, liner and gunship came out as the same box. That
+   * is BRIEF §4's "a role that is only a label on the same hull is a failure",
+   * caused by the fix for BRIEF §8's "the faction's DNA is recognisable".
    *
-   * So the contract changed. A role's `lengthBeam` band is read as a *relative*
-   * demand — where this role sits between the bluntest and the finest thing
-   * anyone builds — and that position is projected onto this band, which no
-   * role, family bias or archetype may leave. See `lengthBeamFor`.
+   * A projection cannot carry two signals; a product can. The role states an
+   * absolute fineness on one shared scale (`RoleSpec.lengthBeam` — a courier is
+   * 5–9 and a tug is 1.4–2.4, in every yard), the culture states a gain, and the
+   * two multiply. Both then read at full strength and neither compresses the
+   * other:
    *
-   * The bands do not overlap between Kessler and Sillane and that is the point:
-   * slenderness is the one proportion each culture holds as policy, and a
-   * policy that a role can talk you out of was never a policy.
+   *   - within a yard, courier ÷ tug is the ROLE ratio, about 3×, whatever the
+   *     gain is;
+   *   - on one role, Sillane ÷ Kessler is the GAIN ratio, about 2×, whatever the
+   *     role is.
+   *
+   * That second number is the faction signature and it is now visible on ONE
+   * hull rather than in a histogram, which is what the round-two note asked for
+   * and did not get.
+   */
+  readonly slendernessGain: number;
+  /**
+   * Length ÷ beam of the PRIMARY HULL: the envelope this culture is physically
+   * able to build in, whatever the role, the hull line or the topology asks for.
+   *
+   * An envelope, not an identity — the identity is `slendernessGain`. This band
+   * exists to stop the product of a gain and an extreme role band leaving what
+   * the yard can weld, cast or find: a Kessler hull finer than its floor is an
+   * unsupported span its own load table forbids, a Sillane hull below its floor
+   * cannot reject its drive heat through its own skin, and neither is a hull
+   * anybody would fly. `lengthBeamFor` slides into it rather than clamping to
+   * it, so a role pushed against the wall keeps its spread instead of collapsing
+   * to a point.
+   *
+   * MEASUREMENT NOTE, because it has bitten two rounds running. This is the
+   * fineness of the primary hull. The number a reviewer reads off a frame is
+   * `dimensions.beamKm`, which `types.ts` defines as "overall width including
+   * booms, radiators and gear", and which is additionally scaled by
+   * `ARCHETYPE_PROPORTION` in `blueprint.ts` (a ring is ×0.5, a tower ×0.55, a
+   * slab ×0.62 on fineness). Measured over 4 seeds × 7 roles × 3 factions the
+   * overall ratio comes out at 0.50–0.52 of what this band says. The bands below
+   * are authored honestly for the hull and carry a stated allowance for that
+   * factor; if anyone retunes `ARCHETYPE_PROPORTION` or the outboard gear, the
+   * gains here must come down by the same amount. See `lengthBeamFor`.
    */
   readonly slendernessBand: Range;
   /** Overall length ÷ overall height. */
@@ -378,6 +420,63 @@ export interface ProportionDna {
    * hardest of the three review angles to make interesting.
    */
   readonly overhang: Range;
+}
+
+/**
+ * How a hull of this culture ENDS at the front.
+ *
+ * A separate, mandatory field rather than a consequence of the loft, because it
+ * is the first thing a player sees on an approaching contact and it was carrying
+ * zero faction information: over two review rounds all three yards terminated in
+ * the same swept dome, because the cap was chosen per hull LINE, every line's
+ * choice was then rewritten by the nose-bluntness fallback in `blueprint.ts`
+ * (`noseCapFor`), and the three cultures' choices collapsed onto the two styles
+ * that fallback prefers. A faction-level declaration cannot collapse: whatever a
+ * hull line wants, the yard only knows one way to close a bow.
+ *
+ * The three styles are three *manufacturing* answers, which is the only kind of
+ * difference that survives a seed change:
+ *
+ *   - `bulkhead` — you cannot press a compound curve with a brake press, so the
+ *     bow is a flat plate with a ring frame standing proud of it and a load
+ *     table stencilled beside the door;
+ *   - `ogive` — the hull left the mould in one piece, so the bow is the same
+ *     surface as the flank with no break anywhere along it;
+ *   - `graft` — the nose came off a different ship. It is a torch-cut edge, a
+ *     visible diameter mismatch and a weld bead, and it is the honest read of a
+ *     culture that never started from zero.
+ */
+export type ForeEndStyle = 'bulkhead' | 'ogive' | 'graft';
+
+export interface ForeEndDna {
+  readonly style: ForeEndStyle;
+  /**
+   * The cap the forward-most volume must be lofted with.
+   *
+   * Chosen for what SURVIVES `blueprint.ts:noseCapFor`, not only for what reads
+   * best in isolation. That function rewrites `flat`→`ogive`/`taper` and
+   * `ogive`→`dome` depending on how blunt the loft came out, and since
+   * `noseEnd` is capped at `tailEnd * 0.62 ≤ 0.61` its last branch never fires.
+   * What is left: `taper` and `open` are fixed points, `blunt` survives ~82% of
+   * draws, `ogive` survives every draw on a role whose acceleration exceeds
+   * 150 m/s² (those never reach `noseEnd` 0.40), and `flat` survives under half.
+   * So a culture that wants a flat bow declares `blunt`, and a culture that
+   * wants a point declares `taper` on its slow lines and `ogive` on its fast
+   * ones. Nothing here declares `dome`.
+   */
+  readonly cap: CapStyle;
+  /**
+   * Diameter of the forward-most mass ÷ the mass immediately behind it.
+   *
+   * 1.0 is one continuous body. Ossuary's band is far from 1 in both directions
+   * because the donor nose was never sized for this keel, and that mismatch — not
+   * the cap — is what makes a graft read as a graft at 400%.
+   */
+  readonly graftRatio: Range;
+  /** An external frame or ring standing proud of the forward face. */
+  readonly ringFrame: boolean;
+  /** The sentence a reviewer checks a 400% crop of the forward 400 px against. */
+  readonly read: string;
 }
 
 /** Symmetry doctrine. */
@@ -571,11 +670,28 @@ export interface HullFamily {
   readonly roles: readonly ShipRole[];
   /** The one sentence that says what this line looks like. */
   readonly signature: string;
-  /** Multiplier on the faction's length/beam band. */
+  /**
+   * A small trim on the yard's `slendernessGain`, and deliberately small.
+   *
+   * These used to run 0.78–1.30, which double-counted the role: a Revenue only
+   * serves patrol, gunship and carrier, and those roles are already the fine end
+   * of `RoleSpec.lengthBeam`, so a 1.25 line bias on top multiplied the same
+   * statement twice and then had to be slid back inside the envelope, which
+   * dragged the whole band down and undid it. A hull line is a product decision
+   * worth a few per cent of proportion; what it is FOR is worth a factor of
+   * five, and that already lives in the role.
+   */
   readonly lengthBeamBias: number;
   /** Section family this line prefers over the faction default, or null. */
   readonly sectionFamily: SectionFamily | null;
-  /** Cap style this line prefers at the nose. */
+  /**
+   * Cap style this line prefers at the nose.
+   *
+   * Constrained by `FactionDna.foreEnd`: a line may pick a cap that expresses
+   * the yard's `foreEnd.style`, and may not pick one that contradicts it. Three
+   * lines with three different bows is a yard with no bow, which is how all
+   * three factions ended up terminating in the same dome.
+   */
   readonly noseCap: CapStyle;
   /** Replaces `palette.accent` for this line, or null to inherit. */
   readonly accentOverride: RGB | null;
@@ -605,6 +721,8 @@ export interface FactionDna {
 
   readonly construction: ConstructionDna;
   readonly proportion: ProportionDna;
+  /** How this yard closes a bow. Mandatory; see `ForeEndDna`. */
+  readonly foreEnd: ForeEndDna;
   readonly symmetry: SymmetryDna;
   readonly surface: SurfaceDna;
   readonly structure: StructureDna;
@@ -691,19 +809,28 @@ const KESSLER: FactionDna = {
   },
 
   proportion: {
-    // Blunt, and now bindingly so. A Kessler hull is a box that has been
-    // persuaded to have a front: nothing they build is finer than 3.8, because
-    // a slender hull is a long unsupported span and Kessler sizes members from
-    // a load table that punishes exactly that. This band's ceiling sits below
-    // Sillane's floor by design — see `ProportionDna.slendernessBand`.
-    slendernessBand: [2.15, 3.8],
-    // Deliberately much larger than the slenderness band, which is the same
-    // statement in the other axis: L/H well above L/B means H < B, so a Kessler
-    // section is a WIDE FLAT SLAB rather than a tube. That is the read the
-    // welded-plate story demands — rolled plate wants big flat faces — and it
-    // is what separates a Kessler from a Sillane in outline at 100 px, where
-    // surface detail has long since disappeared.
-    lengthHeight: [3.0, 6.0],
+    // The bluntest gain in the fleet. A Kessler hull is a box that has been
+    // persuaded to have a front, because a slender hull is a long unsupported
+    // span and Kessler sizes members from a load table that punishes exactly
+    // that. Sillane's gain is 1.7× this one, and that ratio holds on every role
+    // the two both build — which is the faction read on ONE hull.
+    slendernessGain: 0.95,
+    // The envelope, not the identity. Floor 2.0: a Kessler tug or station tender
+    // is a brick and the load table is happy about it. Ceiling 6.6: their finest
+    // product is a revenue cutter and even that is a plated box with a wedge on
+    // the front. Both ends are stated in HULL fineness — see the measurement
+    // note on `slendernessBand`; the outline a reviewer measures runs about half
+    // of this.
+    slendernessBand: [2.0, 6.6],
+    // Deliberately well above the slenderness band, which is the same statement
+    // in the other axis: L/H above L/B means H < B, so a Kessler section is a
+    // WIDE FLAT SLAB rather than a tube. That is the read the welded-plate story
+    // demands — rolled plate wants big flat faces — and it is what separates a
+    // Kessler from a Sillane in outline at 100 px, where surface detail has long
+    // since disappeared. Raised with the fineness band so the inequality still
+    // holds at the fine end: at the old [3.0, 6.0] a 5.5-fineness Kessler came
+    // out taller than it was wide, i.e. a tower, which is the Ossuary read.
+    lengthHeight: [4.2, 9.5],
     // Mass well aft: the reactor and the thrust frame are a solid block at the
     // tail and everything forward of the midships bulkhead is comparatively
     // empty. This is why a Kessler pitches slowly and looks like it is dragging.
@@ -713,6 +840,20 @@ const KESSLER: FactionDna = {
     diameterStep: [0.25, 0.5],
     taper: [0.1, 0.35],
     overhang: [0.35, 0.8],
+  },
+
+  // A brake press cannot make a compound curve and a roller cannot make a
+  // point, so a Kessler bow is the only thing those two tools can produce: a
+  // flat plate. The ring frame round it is the same frame that is at every
+  // other station on the hull, and the load table is stencilled beside the bow
+  // door because Kessler stencil everything.
+  foreEnd: {
+    style: 'bulkhead',
+    cap: 'blunt',
+    // One body: the bow plate is the same diameter as the section behind it.
+    graftRatio: [0.94, 1.0],
+    ringFrame: true,
+    read: 'A flat, broad forward face with a hard edge all the way round it and an external frame standing proud of that edge. There is no curve anywhere in the termination.',
   },
 
   symmetry: {
@@ -841,15 +982,36 @@ const KESSLER: FactionDna = {
   },
 
   palette: {
-    // Grey-green industrial primer. Sits at ~0.06 linear, well under the 0.2
-    // luminance ceiling ARCHITECTURE §6 sets for a lit hull.
-    hull: [0.058, 0.062, 0.05],
+    // Cold grey industrial primer. Sits at ~0.06 linear luminance, unchanged
+    // from the grey-green it replaces — this is a HUE rotation at constant
+    // value, not a brightness change.
+    //
+    // WHY IT ROTATED. The hero shot is a Kessler, and its lit plate measured
+    // R/B 1.43 with 0.30 saturation: a tan hull. Decompose that and the pigment
+    // is the culprit, not the exposure — the showroom key is (3.0, 2.79, 2.46),
+    // R/B 1.22, and 1.43 ÷ 1.22 is 1.16, which was exactly this line's old
+    // R/B. A hull that is itself a warm 0.30-saturation surface spends the
+    // whole frame's colour budget on its own base coat, which is why the oxide
+    // chevrons and the tail band barely separated from the plate they sit on.
+    // ARCHITECTURE §6 rations colour to amber instruments and one saturated
+    // accent, and it names the base as desaturated steel-blue.
+    //
+    // The number below is 0.821 R/B, which is the reciprocal of the key's own
+    // 1.22: a plate of this pigment comes back off the key neutral, and every
+    // degree of warmth left in the frame is then genuinely `uScorch`, `uOxide`
+    // and the bake term — the things that are supposed to be warm. The faction
+    // spread stays in hue, not in warmth: Sillane sits colder still at 0.64 and
+    // Ossuary just warm of neutral.
+    hull: [0.0558, 0.0609, 0.0679],
     hullShadow: [0.0055, 0.0062, 0.0072],
+    // Rotated onto the same hue at each shade's own original luminance, so the
+    // plate-to-plate drift that keeps a Kessler hull from looking painted is
+    // preserved exactly and only the tint moved. These feed uPlate0..3.
     plateShades: [
-      [0.052, 0.056, 0.046],
-      [0.061, 0.065, 0.052],
-      [0.056, 0.059, 0.051],
-      [0.065, 0.068, 0.054],
+      [0.0504, 0.0549, 0.0613],
+      [0.0585, 0.0638, 0.0712],
+      [0.0535, 0.0583, 0.0651],
+      [0.0614, 0.0670, 0.0748],
     ],
     // A Kessler patch is a Kessler plate from a different batch, plus the one
     // that never got its topcoat.
@@ -901,7 +1063,7 @@ const KESSLER: FactionDna = {
       roles: ['freighter', 'tanker', 'miner', 'refinery', 'station-tender', 'tug', 'prospector'],
       signature:
         'A parallel-sided hexagonal body with external ribs at every frame and a flat transom; the whole ship is a rectangle in profile and a hexagon head-on.',
-      lengthBeamBias: 1.0,
+      lengthBeamBias: 1,
       sectionFamily: 'polygon',
       noseCap: 'blunt',
       accentOverride: null,
@@ -911,10 +1073,15 @@ const KESSLER: FactionDna = {
       name: 'Revenue',
       roles: ['patrol', 'gunship', 'carrier'],
       signature:
-        'The same plate, stepped: the armour belt is a visible thickening amidships and the bow is a chined wedge rather than a box.',
-      lengthBeamBias: 1.25,
+        'The same plate, stepped: the armour belt is a visible thickening amidships and the bow plate is a narrow chined face rather than a broad one.',
+      lengthBeamBias: 1.1,
       sectionFamily: 'superellipse',
-      noseCap: 'taper',
+      // Was 'taper'. A hull line may not contradict `foreEnd.style`: three
+      // Kessler lines with three different bows meant the yard had no bow, and
+      // a taper is what Sillane do. The Revenue's difference from a Plateline
+      // now lives where the doctrine puts it — in the armour step and the chine
+      // — and not in the one feature that has to identify the builder.
+      noseCap: 'blunt',
       accentOverride: null,
     },
     {
@@ -925,9 +1092,13 @@ const KESSLER: FactionDna = {
       roles: ['colony', 'liner', 'science', 'survey'],
       signature:
         'Habitat cans on a spine with punched window rows at deck spacing, and unused mounting frames left on for the next module.',
-      lengthBeamBias: 0.8,
+      lengthBeamBias: 0.9,
       sectionFamily: 'polygon',
-      noseCap: 'flat',
+      // Was 'flat', which `noseCapFor` rewrites to an ogive or a taper on more
+      // than half of all draws — the exact mechanism that put a dome on the
+      // front of a welded-plate hull. 'blunt' survives 82% of draws and its
+      // fallback is the same ogive, so this is strictly the flatter of the two.
+      noseCap: 'blunt',
       accentOverride: null,
     },
   ],
@@ -1031,23 +1202,31 @@ const SILLANE: FactionDna = {
   },
 
   proportion: {
-    // THE THERMAL FLOOR, and now a real one. 5.4 is the shortest hull that can
-    // reject a plasma drive's heat through its own skin at a working
-    // acceleration; below it the flanks glow. No role, no hull line and no
-    // archetype may go under it — that is the whole difference between a
-    // doctrine and a preference, and it is why this is `slendernessBand` and
-    // not a habit to be averaged with somebody else's opinion.
+    // 1.7× Kessler's gain, and that ratio IS the faction signature. It applies
+    // to every role both yards build, so a Sillane freighter is 1.7× as fine as
+    // a Kessler freighter and a Sillane tug 1.7× as fine as a Kessler tug — a
+    // difference you can see on one hull without knowing what a Kessler looks
+    // like, which is what the previous non-overlapping-absolute-bands scheme was
+    // trying and failing to buy. Measured over the whole role table it comes out
+    // at 2.65 against 4.96 on the outline, because the Sillane thermal floor
+    // lifts the hot roles further still.
+    slendernessGain: 1.6,
+    // THE THERMAL FLOOR. 4.6 is the shortest hull that can reject a plasma
+    // drive's heat through its own skin at a working acceleration; below it the
+    // flanks glow. No role, no hull line and no archetype may go under it, which
+    // is why the floor of the envelope is the load-bearing half of this field
+    // and the ceiling is only a sanity stop.
     //
     // The floor is not even constant: `slendernessBandFor` raises it with the
     // role's design acceleration, because radiating area goes as L×B while the
     // heat to reject goes as mass×accel ≈ L×B²×a. Cancel L×B and the beam has a
     // hard ceiling of order 1/a — so a fast Sillane is not a stubby Sillane
     // with a bigger drive, it is a longer one.
-    slendernessBand: [5.4, 9.5],
+    slendernessBand: [4.4, 9.5],
     // Tracks the slenderness band closely, which makes H ≈ B: a Sillane section
     // is round. Kessler's L/H is far above its L/B and Sillane's sits on top of
     // its own, and that single difference is "slab" versus "spindle" in outline.
-    lengthHeight: [5.0, 9.5],
+    lengthHeight: [4.4, 9.5],
     // Just forward of centre. A Sillane carries its payload amidships-forward
     // and trails a long, nearly empty tail, which is what produces the read of a
     // ship falling forward rather than pushing.
@@ -1058,6 +1237,24 @@ const SILLANE: FactionDna = {
     diameterStep: [0.02, 0.12],
     taper: [0.45, 0.75],
     overhang: [0.02, 0.15],
+  },
+
+  // The hull left the mould in one piece, so there is no forward *joint* to
+  // detail — the bow is the flank, continued until it closes. That is the whole
+  // statement, and it is why the graft ratio is pinned at 1: a step in diameter
+  // anywhere on a Sillane, including at the nose, would be a seam, and a seam is
+  // an admission.
+  foreEnd: {
+    style: 'ogive',
+    // 'ogive' and not 'dome'. A dome is the shape all three yards were arriving
+    // at and it is therefore the one shape this field exists to forbid; see the
+    // survival note on `ForeEndDna.cap`. The Needle line carries fast roles and
+    // holds a true ogive on every draw; the slower lines declare 'taper', which
+    // `noseCapFor` never rewrites at all.
+    cap: 'ogive',
+    graftRatio: [1.0, 1.0],
+    ringFrame: false,
+    read: 'One unbroken curve that leaves the flank tangentially and closes to a point, with no edge, no step and no fastener anywhere along it. You cannot say where the bow starts.',
   },
 
   symmetry: {
@@ -1109,7 +1306,9 @@ const SILLANE: FactionDna = {
     lobeCount: [0, 1],
     lobeWidth: [0.5, 1.0],
     lobeDepth: [0.04, 0.12],
-    caps: ['ogive', 'taper', 'dome'],
+    // No 'dome'. It was the only cap all three yards shared and it is now
+    // declared out of the Sillane vocabulary entirely — see `foreEnd`.
+    caps: ['ogive', 'taper'],
     greebles: ['flush-panel', 'louvre', 'vent', 'grille', 'blister'],
     // The longest forbidden list in the fleet, and that is the character. Every
     // one of these implies either a fastener, a person outside, or a part.
@@ -1256,8 +1455,8 @@ const SILLANE: FactionDna = {
       name: 'Needle',
       roles: ['courier', 'shuttle', 'patrol', 'gunship'],
       signature:
-        'A single ogive spindle with a 3-lobe chine and a recessed throat; the beam never exceeds a tenth of the length.',
-      lengthBeamBias: 1.2,
+        'A single ogive spindle with a 3-lobe chine and a recessed throat; the beam never exceeds a seventh of the length.',
+      lengthBeamBias: 1.08,
       sectionFamily: 'superellipse',
       noseCap: 'ogive',
       accentOverride: null,
@@ -1273,9 +1472,14 @@ const SILLANE: FactionDna = {
       // still no seam anywhere on it.
       signature:
         'One continuous fairing swollen amidships and drawn out again aft, with a moulded waist rather than a joint; the fattest thing Sillane build and still finer than anything Kessler do.',
-      lengthBeamBias: 0.78,
+      lengthBeamBias: 0.92,
       sectionFamily: 'superellipse',
-      noseCap: 'dome',
+      // Was 'dome', and this single line is why the fleet-contrast shot showed
+      // three identical rounded caps: the Carapace serves 'freighter', the role
+      // that shot pins, and 'dome' is the one style `noseCapFor` never rewrites
+      // — so a hundred per cent of Sillane freighters arrived as a hemisphere.
+      // 'taper' is the other fixed point and it is a point, not a ball.
+      noseCap: 'taper',
       accentOverride: null,
     },
     {
@@ -1284,7 +1488,7 @@ const SILLANE: FactionDna = {
       roles: ['survey', 'science', 'salvager', 'miner', 'prospector', 'tug', 'refinery', 'station-tender', 'derelict'],
       signature:
         'The Needle body with a dorsal instrument spine faired into it, so the sensors read as a swelling in the hull rather than as hardware bolted on top.',
-      lengthBeamBias: 1.0,
+      lengthBeamBias: 1,
       sectionFamily: 'superellipse',
       noseCap: 'taper',
       accentOverride: null,
@@ -1390,17 +1594,22 @@ const OSSUARY: FactionDna = {
   },
 
   proportion: {
-    // The widest slenderness band in the fleet, and the only one that is wide
-    // because the culture has NO POLICY rather than because the number was
-    // hedged. Ossuary keels come off other people's ships; whatever the donor
-    // was, that is what this hull is. The band therefore straddles both of the
-    // other two and overlapping them is correct — the Ossuary read is never
-    // "the long one" or "the short one", it is "you cannot tell what it was".
-    slendernessBand: [1.8, 5.6],
+    // Between the other two and nearer Kessler, because a scavenger inherits the
+    // fleet's average rather than a doctrine. The gain is what a found keel
+    // brings; everything Ossuary themselves decide is in the envelope, which is
+    // the widest in the fleet by a long way.
+    slendernessGain: 1.3,
+    // The widest envelope in the fleet, and the only one that is wide because
+    // the culture has NO POLICY rather than because the number was hedged.
+    // Ossuary keels come off other people's ships; whatever the donor was, that
+    // is what this hull is. It therefore straddles both of the other two and
+    // overlapping them is correct — the Ossuary read is never "the long one" or
+    // "the short one", it is "you cannot tell what it was".
+    slendernessBand: [1.9, 9.5],
     // Far below the slenderness band, which is the inverse of Kessler: an
     // Ossuary hull is TALLER than it is wide, because things got welded on top
     // of the keel where there was room and nothing was ever faired back in.
-    lengthHeight: [1.8, 3.6],
+    lengthHeight: [1.9, 5.5],
     // The widest band in the fleet, and deliberately so: the mass sits wherever
     // the found keel put it. This is the value the counterweight and the canted
     // engine exist to compensate for.
@@ -1415,6 +1624,27 @@ const OSSUARY: FactionDna = {
     taper: [0.0, 0.2],
     // Everything sticks out. Head-on, an Ossuary is twice the width of its hull.
     overhang: [0.9, 1.9],
+  },
+
+  // Nobody at the anchorage has ever built a bow. What is on the front of an
+  // Ossuary hull is the front of a different ship, cut off with a torch where
+  // the plate was still sound and welded onto this keel — which means the one
+  // dimension that never matched is the one you see head-on. The graft ratio is
+  // the whole read: a nose visibly fatter or visibly thinner than the body
+  // behind it, with a bead round the join and a collar of filler plate where the
+  // two circles did not.
+  foreEnd: {
+    style: 'graft',
+    // 'open' is a fixed point under `noseCapFor` and it is also the literal
+    // truth: a torch cut leaves a hole, and what closes it is a plate somebody
+    // welded across afterwards, not a moulded cap. The Threadline and Scrapjack
+    // lines carry it too, so all three read the same way.
+    cap: 'open',
+    // Both directions, and never 1. A donor nose that happened to match would
+    // not be a graft.
+    graftRatio: [0.45, 1.75],
+    ringFrame: true,
+    read: 'A forward mass of obviously the wrong diameter for the body behind it, meeting it at an irregular cut line with a weld bead and filler plate round the step. The termination itself is a flat cut, not a shape.',
   },
 
   symmetry: {
@@ -1458,7 +1688,9 @@ const OSSUARY: FactionDna = {
     lobeCount: [1, 4],
     lobeWidth: [0.2, 0.9],
     lobeDepth: [0.1, 0.35],
-    caps: ['flat', 'blunt', 'open', 'dome'],
+    // 'dome' is gone. Nothing at the anchorage can press one, and it was the
+    // shape all three yards were converging on — see `foreEnd`.
+    caps: ['open', 'flat', 'blunt'],
     // Everything. The accumulation is the point.
     greebles: [
       'hatch', 'bracket', 'ribbed', 'stack', 'pipe', 'vent', 'grille', 'blister',
@@ -1552,17 +1784,32 @@ const OSSUARY: FactionDna = {
   },
 
   palette: {
-    // Brown-black: iron oxide over three greys, none of which was the plan.
-    hull: [0.046, 0.035, 0.026],
-    hullShadow: [0.005, 0.0042, 0.0035],
+    // Grey-black with the warmth taken out of the BASE and left in the rust.
+    //
+    // The old value was R/B 1.77 at 0.43 saturation — a hull that was itself
+    // brown, which under the showroom key lands at R/B 2.16 and spends the
+    // frame's entire colour ration on its own primer before a single oxide
+    // streak is drawn. ARCHITECTURE §6 allows one saturated accent per location
+    // and Ossuary's is the acid green.
+    //
+    // Losing the brown costs the rust story nothing, and in fact buys it: the
+    // rust lives in `primer`, `oxide` and a corrosion wear weight of 1.0 — all
+    // still as warm as they ever were — and those now read AGAINST the plate
+    // instead of being the plate. Ossuary stays the warm end of the fleet's hue
+    // spread (Sillane 0.64, Kessler 0.82, Ossuary 1.05 R/B) at a fraction of
+    // the chroma.
+    hull: [0.0385, 0.0370, 0.0367],
+    hullShadow: [0.0042, 0.004, 0.004],
     // Wide, not tight: these are genuinely different plates from different
-    // yards, so the drift is large enough to see across the hull.
+    // yards, so the drift is large enough to see across the hull. The SPREAD is
+    // the identity here, so it is preserved in full — only the mean hue moved,
+    // and the one entry that is a Sillane plate stays cold.
     plateShades: [
-      [0.032, 0.028, 0.024],
-      [0.055, 0.04, 0.028],
-      [0.04, 0.04, 0.036],
-      [0.062, 0.046, 0.03],
-      [0.026, 0.026, 0.028],
+      [0.0300, 0.0286, 0.0282],
+      [0.0455, 0.0400, 0.0356],
+      [0.0392, 0.0398, 0.0410],
+      [0.0510, 0.0458, 0.0400],
+      [0.0255, 0.0262, 0.0284],
     ],
     patchShades: [
       [0.115, 0.04, 0.02],
@@ -1574,8 +1821,16 @@ const OSSUARY: FactionDna = {
     // Sillane module on an Ossuary hull is the best story in the palette, and it
     // costs one line.
     mismatch: [
-      [0.058, 0.062, 0.05],
+      // Kessler's hull colour exactly, tracking `KESSLER.palette.hull`: a
+      // Kessler plate on an Ossuary keel is the best story in the palette and it
+      // costs one line. Keep the two in step if either moves.
+      [0.0558, 0.0609, 0.0679],
+      // Sillane's hull colour exactly.
       [0.036, 0.043, 0.056],
+      // Bare red primer off something that never got a topcoat, and a yard grey.
+      // These two are allowed to be warm and saturated: a mismatch panel is the
+      // ONE place a hue is supposed to shout, which only works because the plate
+      // around it no longer does.
       [0.1, 0.038, 0.018],
       [0.07, 0.066, 0.058],
       [0.022, 0.024, 0.026],
@@ -1621,9 +1876,15 @@ const OSSUARY: FactionDna = {
       roles: ['freighter', 'tanker', 'tug', 'station-tender', 'colony', 'liner', 'carrier'],
       signature:
         'An exposed box-truss keel with four to six mismatched cans threaded onto it at arbitrary clock angles, and the gaps between them left open.',
-      lengthBeamBias: 1.15,
+      lengthBeamBias: 1.05,
       sectionFamily: null,
-      noseCap: 'flat',
+      // Was 'flat', which `noseCapFor` rewrites to a taper or an ogive on more
+      // than half of all draws — this line carries 'freighter', the role the
+      // faction-contrast shot pins, so half of that shot's Ossuary bows were a
+      // point. 'open' is a fixed point under that function and it is the graft
+      // itself: a torch cut, with the next can visible through it at a
+      // different diameter. See `foreEnd`.
+      noseCap: 'open',
       accentOverride: null,
     },
     {
@@ -1632,7 +1893,7 @@ const OSSUARY: FactionDna = {
       roles: ['salvager', 'miner', 'prospector', 'refinery'],
       signature:
         'A short keel almost buried under working machinery, with two jointed arms that can fold back past the drives and a floodlit open working bay amidships.',
-      lengthBeamBias: 0.85,
+      lengthBeamBias: 0.88,
       sectionFamily: 'polygon',
       noseCap: 'open',
       // A working hull gets more of the acid green than a hauler does: the
@@ -1645,9 +1906,12 @@ const OSSUARY: FactionDna = {
       roles: ['courier', 'shuttle', 'patrol', 'gunship', 'survey', 'science', 'derelict'],
       signature:
         'One donor hull with everything non-essential cut off and a drive far too large for it bolted to the transom on a field-welded frame.',
-      lengthBeamBias: 1.3,
+      lengthBeamBias: 1.12,
       sectionFamily: 'superellipse',
-      noseCap: 'blunt',
+      // Was 'blunt', which is Kessler's bow: a scavenger line and a plate yard
+      // arriving at the same broad flat face is the failure this whole field
+      // exists to stop. "Everything non-essential cut off" includes the nose.
+      noseCap: 'open',
       accentOverride: null,
     },
   ],
@@ -1756,6 +2020,27 @@ export interface RoleSpec {
    */
   readonly loadedCentroidShift: Range;
   readonly massConcentration: Range;
+  /**
+   * Length ÷ beam this role wants, on ONE absolute scale shared by every role
+   * in the fleet, before the builder's `slendernessGain` is applied.
+   *
+   * The scale runs from a station tender at 1.3 to a courier at 9, and the
+   * ORDERING is the contract — a reviewer holding two renders checks the order,
+   * not the numbers. Read it as a single sentence: a courier and a gunship are
+   * lances, a patrol is nearly one, a liner and a freighter are long boxes, a
+   * tanker and a carrier are shorter boxes, and a tug, a miner and a tender are
+   * bricks with the machinery on the outside.
+   *
+   * Two entries were previously the wrong way round against their own
+   * `distinguishFrom` prose and both showed up in the r3 review as roles that
+   * had collapsed into their neighbours: a gunship was BLUNTER than a freighter
+   * (2.4–4.2 against 3.0–6.0) and a liner was FINER than a patrol boat
+   * (4.0–7.0 against 3.2–5.5). Ordering errors here are invisible in a table
+   * and unmissable in a fleet shot.
+   *
+   * These numbers are not a hull's final fineness. They are multiplied by the
+   * yard's gain and then held inside its envelope; see `lengthBeamFor`.
+   */
   readonly lengthBeam: Range;
   readonly sizeClasses: readonly SizeClass[];
   readonly crew: Range;
@@ -1868,7 +2153,7 @@ const ROLE_TABLE: Record<ShipRole, RoleSpec> = {
     massCentroid: [0.58, 0.7],
     loadedCentroidShift: [-0.02, 0.01],
     massConcentration: [0.65, 0.9],
-    lengthBeam: [5.0, 10.0],
+    lengthBeam: [5.0, 9.0],
     sizeClasses: ['shuttle', 'light', 'medium'],
     crew: [1, 3],
     // The fastest thing in the game after a gunship, and the only role allowed
@@ -1893,7 +2178,7 @@ const ROLE_TABLE: Record<ShipRole, RoleSpec> = {
     distinguishFrom: [
       { role: 'survey', by: 'a courier carries one small flush sensor; a survey ship\'s instruments are the largest objects on it and are held clear of the hull on booms.' },
       { role: 'patrol', by: 'a courier has no weapon socket and no armour stepping; a patrol\'s beam is visibly thickened amidships to carry barbettes.' },
-      { role: 'shuttle', by: 'a shuttle is blunt and short (L/B under 3); a courier\'s L/B is never below 5.' },
+      { role: 'shuttle', by: 'from the same yard, a shuttle is the blunt one and a courier the fine one — the courier\'s length/beam is at least twice the shuttle\'s, whoever built them.' },
       { role: 'gunship', by: 'a gunship trades range for weapons — its delta-v is a third of a courier\'s and its tanks are armoured, not the whole hull.' },
     ],
     detailDensity: [0.1, 0.35],
@@ -1953,7 +2238,7 @@ const ROLE_TABLE: Record<ShipRole, RoleSpec> = {
     // tanks and the RCS quads are where they are.
     loadedCentroidShift: [-0.2, -0.09],
     massConcentration: [0.25, 0.5],
-    lengthBeam: [3.0, 6.0],
+    lengthBeam: [3.0, 5.0],
     sizeClasses: ['medium', 'heavy', 'capital', 'super-capital'],
     crew: [2, 9],
     accelMs2: [18, 70],
@@ -2034,7 +2319,7 @@ const ROLE_TABLE: Record<ShipRole, RoleSpec> = {
     massCentroid: [0.48, 0.62],
     loadedCentroidShift: [-0.12, -0.04],
     massConcentration: [0.15, 0.4],
-    lengthBeam: [2.2, 4.0],
+    lengthBeam: [1.5, 2.6],
     sizeClasses: ['medium', 'heavy', 'capital'],
     crew: [4, 14],
     accelMs2: [25, 90],
@@ -2118,7 +2403,7 @@ const ROLE_TABLE: Record<ShipRole, RoleSpec> = {
     massConcentration: [0.2, 0.45],
     // Modest, because the booms eat the beam. A survey ship is the only role
     // whose *overall* proportions are set by things that are not hull.
-    lengthBeam: [2.6, 4.5],
+    lengthBeam: [2.8, 4.4],
     sizeClasses: ['light', 'medium', 'heavy'],
     crew: [3, 9],
     // Straddles the player's 200 m/s², because this is the player's class and
@@ -2202,7 +2487,7 @@ const ROLE_TABLE: Record<ShipRole, RoleSpec> = {
     // The most concentrated hull in the fleet: armour and magazine amidships,
     // which is also why it out-turns everything its size.
     massConcentration: [0.7, 0.95],
-    lengthBeam: [3.2, 5.5],
+    lengthBeam: [4.0, 6.5],
     sizeClasses: ['light', 'medium', 'heavy'],
     crew: [4, 14],
     accelMs2: [180, 400],
@@ -2225,7 +2510,7 @@ const ROLE_TABLE: Record<ShipRole, RoleSpec> = {
     ],
     distinguishFrom: [
       { role: 'gunship', by: 'a patrol carries a boarding airlock and a docking collar and spends under 30% of dry mass on weapons; a gunship carries neither and spends over half, and its armour steps are the silhouette.' },
-      { role: 'courier', by: 'a patrol\'s beam carries barbettes and its L/B never exceeds 5.5; a courier is a smooth line with nothing on it.' },
+      { role: 'courier', by: 'a patrol\'s beam carries barbettes and its L/B never exceeds 6.5; a courier is a smooth line with nothing on it and never below 5.' },
       { role: 'survey', by: 'a patrol\'s sensors are flush and armoured; a survey ship\'s are the largest thing on it and stand clear on booms.' },
     ],
     detailDensity: [0.3, 0.55],
@@ -2280,7 +2565,7 @@ const ROLE_TABLE: Record<ShipRole, RoleSpec> = {
     massCentroid: [0.42, 0.68],
     loadedCentroidShift: [-0.14, 0.1],
     massConcentration: [0.15, 0.45],
-    lengthBeam: [2.0, 3.8],
+    lengthBeam: [1.8, 3.0],
     sizeClasses: ['light', 'medium', 'heavy'],
     crew: [3, 12],
     accelMs2: [30, 110],
@@ -2361,7 +2646,7 @@ const ROLE_TABLE: Record<ShipRole, RoleSpec> = {
     massCentroid: [0.45, 0.6],
     loadedCentroidShift: [-0.05, 0.02],
     massConcentration: [0.1, 0.35],
-    lengthBeam: [1.4, 3.0],
+    lengthBeam: [1.6, 2.8],
     sizeClasses: ['heavy', 'capital', 'super-capital'],
     crew: [40, 2000],
     // Slowest powered role in the game by an order of magnitude. It is not a
@@ -2441,7 +2726,7 @@ const ROLE_TABLE: Record<ShipRole, RoleSpec> = {
     // The only role in the fleet allowed below 2. A shuttle is a room with an
     // engine, and its blunt proportions are exactly what separates it from a
     // courier.
-    lengthBeam: [1.6, 3.0],
+    lengthBeam: [1.8, 3.0],
     sizeClasses: ['shuttle', 'light'],
     crew: [1, 2],
     accelMs2: [90, 220],
@@ -2456,7 +2741,7 @@ const ROLE_TABLE: Record<ShipRole, RoleSpec> = {
     ],
     silhouetteMustNot: ['look long-ranged', 'look streamlined', 'carry anything outside'],
     distinguishFrom: [
-      { role: 'courier', by: 'a shuttle\'s L/B is under 3 and its delta-v under 15 km/s; a courier is over 5 and over 90.' },
+      { role: 'courier', by: 'a shuttle\'s delta-v is under 15 km/s and a courier\'s over 90; and from the same yard the courier is at least twice the shuttle\'s length/beam.' },
     ],
     detailDensity: [0.3, 0.55],
     wearBias: { ...NEUTRAL_WEAR, hatches: 1.7, edges: 1.3, corrosion: 1.2, pitting: 0.6 },
@@ -2492,7 +2777,7 @@ const ROLE_TABLE: Record<ShipRole, RoleSpec> = {
     massCentroid: [0.5, 0.66],
     loadedCentroidShift: [-0.18, -0.06],
     massConcentration: [0.35, 0.6],
-    lengthBeam: [3.0, 5.5],
+    lengthBeam: [2.5, 4.2],
     sizeClasses: ['medium', 'heavy', 'capital'],
     crew: [2, 8],
     accelMs2: [15, 55],
@@ -2546,7 +2831,7 @@ const ROLE_TABLE: Record<ShipRole, RoleSpec> = {
     massCentroid: [0.5, 0.64],
     loadedCentroidShift: [-0.1, -0.02],
     massConcentration: [0.35, 0.6],
-    lengthBeam: [2.2, 3.6],
+    lengthBeam: [2.0, 3.2],
     sizeClasses: ['light', 'medium'],
     crew: [2, 5],
     accelMs2: [60, 160],
@@ -2601,7 +2886,7 @@ const ROLE_TABLE: Record<ShipRole, RoleSpec> = {
     massCentroid: [0.48, 0.64],
     loadedCentroidShift: [-0.1, -0.02],
     massConcentration: [0.2, 0.45],
-    lengthBeam: [1.8, 3.4],
+    lengthBeam: [1.6, 2.8],
     sizeClasses: ['heavy', 'capital'],
     crew: [20, 200],
     accelMs2: [8, 35],
@@ -2655,7 +2940,7 @@ const ROLE_TABLE: Record<ShipRole, RoleSpec> = {
     massCentroid: [0.68, 0.84],
     loadedCentroidShift: [0.0, 0.02],
     massConcentration: [0.75, 0.95],
-    lengthBeam: [1.4, 2.6],
+    lengthBeam: [1.4, 2.4],
     sizeClasses: ['light', 'medium', 'heavy'],
     crew: [2, 6],
     accelMs2: [200, 500],
@@ -2708,7 +2993,7 @@ const ROLE_TABLE: Record<ShipRole, RoleSpec> = {
     massCentroid: [0.45, 0.58],
     loadedCentroidShift: [-0.03, 0.0],
     massConcentration: [0.35, 0.6],
-    lengthBeam: [3.0, 5.5],
+    lengthBeam: [3.0, 4.8],
     sizeClasses: ['medium', 'heavy'],
     crew: [10, 60],
     accelMs2: [60, 150],
@@ -2761,7 +3046,7 @@ const ROLE_TABLE: Record<ShipRole, RoleSpec> = {
     massCentroid: [0.5, 0.64],
     loadedCentroidShift: [-0.05, 0.0],
     massConcentration: [0.4, 0.65],
-    lengthBeam: [4.0, 7.0],
+    lengthBeam: [3.2, 5.2],
     sizeClasses: ['heavy', 'capital'],
     crew: [60, 900],
     accelMs2: [25, 80],
@@ -2815,7 +3100,7 @@ const ROLE_TABLE: Record<ShipRole, RoleSpec> = {
     massCentroid: [0.5, 0.62],
     loadedCentroidShift: [-0.02, 0.03],
     massConcentration: [0.75, 1.0],
-    lengthBeam: [2.4, 4.2],
+    lengthBeam: [4.0, 7.0],
     sizeClasses: ['light', 'medium', 'heavy'],
     crew: [2, 20],
     accelMs2: [280, 700],
@@ -2869,7 +3154,7 @@ const ROLE_TABLE: Record<ShipRole, RoleSpec> = {
     massCentroid: [0.42, 0.56],
     loadedCentroidShift: [-0.08, 0.0],
     massConcentration: [0.35, 0.6],
-    lengthBeam: [2.6, 4.6],
+    lengthBeam: [2.2, 3.6],
     sizeClasses: ['capital', 'super-capital'],
     crew: [200, 3000],
     accelMs2: [40, 110],
@@ -2924,7 +3209,7 @@ const ROLE_TABLE: Record<ShipRole, RoleSpec> = {
     massConcentration: [0.25, 0.5],
     // Almost square in plan. A tender has no reason to be long — it never
     // cruises anywhere.
-    lengthBeam: [1.2, 2.4],
+    lengthBeam: [1.3, 2.4],
     sizeClasses: ['light', 'medium'],
     crew: [3, 12],
     accelMs2: [30, 90],
@@ -2970,7 +3255,7 @@ const ROLE_TABLE: Record<ShipRole, RoleSpec> = {
     massCentroid: [0.3, 0.8],
     loadedCentroidShift: [0.0, 0.0],
     massConcentration: [0.1, 0.9],
-    lengthBeam: [1.2, 9.0],
+    lengthBeam: [1.6, 6.0],
     sizeClasses: ['shuttle', 'light', 'medium', 'heavy', 'capital', 'super-capital'],
     crew: [0, 0],
     accelMs2: [0, 0],
@@ -3111,22 +3396,36 @@ export function factionsBuilding(role: ShipRole): readonly FactionDna[] {
 }
 
 /**
- * The span every role's `lengthBeam` band is read against.
+ * How much of the declared hull fineness survives to the measured outline.
  *
- * Derived from the role table rather than written down, so adding a role or
- * retuning one cannot silently put the scale out of date. It is the bluntest
- * and the finest thing anybody in the fleet builds, and a role's own band is
- * located inside it as a fraction — a freighter sits low, a courier sits high.
+ * NOT a fudge factor, and it is written down here rather than folded silently
+ * into the bands so that whoever fixes the two causes can delete it.
+ *
+ * `ProportionDna.slendernessBand` and `RoleSpec.lengthBeam` describe the primary
+ * hull. What a reviewer measures off a frame is `ShipDimensions.beamKm`, which
+ * `types.ts` defines as "overall width including booms, radiators and gear", and
+ * which `blueprint.ts` additionally scales through `ARCHETYPE_PROPORTION` — a
+ * ring hull is ×0.5 on fineness, a tower ×0.55, a slab ×0.62, a cluster ×0.78.
+ * Measured over 4 seeds × 7 roles × 3 factions, the ratio of outline fineness to
+ * declared hull fineness is 0.50–0.52 and it is remarkably stable across all
+ * three yards.
+ *
+ * Two thirds of that is legitimate — a slab-topology hull with two radiator
+ * slabs really is wider than its own hull tube — and one third is the archetype
+ * multiplier leaving a band the doc comment says nothing may leave. So the bands
+ * carry a stated allowance of 1.35, not the full 2.0 it would take to make the
+ * measured numbers hit a target: inflating a declared band to cancel a
+ * downstream multiply is how the number stops meaning anything, and if anyone
+ * repairs `ARCHETYPE_PROPORTION` while this is set to 2.0 the whole fleet turns
+ * into needles overnight.
+ *
+ * Applied ONCE, at the end of `lengthBeamFor`, after the envelope has had its
+ * say — so every band above stays authored in hull fineness and only the value
+ * handed to the generator is in outline fineness. That is a unit conversion at a
+ * boundary, which is a thing you can delete; a band inflated to cancel a
+ * downstream multiply is not.
  */
-const ROLE_FINENESS_SPAN: Range = (() => {
-  let lo = Infinity;
-  let hi = -Infinity;
-  for (const r of ROLES) {
-    if (r.lengthBeam[0] < lo) lo = r.lengthBeam[0];
-    if (r.lengthBeam[1] > hi) hi = r.lengthBeam[1];
-  }
-  return [lo, hi];
-})();
+const OUTLINE_ALLOWANCE = 1.35;
 
 /**
  * The acceleration a skin-radiator hull is proportioned against, m/s².
@@ -3148,29 +3447,6 @@ const SKIN_RADIATOR_REFERENCE_ACCEL_MS2 = 100;
  * actually be built in, which is the honest version of a heroic engine.
  */
 const SKIN_RADIATOR_SLENDERNESS_EXP = 0.25;
-
-/**
- * Where `inner` sits inside `span`, as a 0..1 sub-range.
- *
- * This is the operation that turns a role's absolute L/B numbers into what they
- * always actually meant: a *relative* demand. "A freighter is 3–6" is not a
- * measurement of any real hull, it is the statement "a freighter is towards the
- * blunt end of what gets built" — and read that way it composes with a faction's
- * own absolute band instead of fighting it.
- */
-function normaliseInto(inner: Range, span: Range): Range {
-  const w = span[1] - span[0];
-  if (w <= 1e-9) return [0, 1];
-  const c = (x: number): number => (x < 0 ? 0 : x > 1 ? 1 : x);
-  const a = c((inner[0] - span[0]) / w);
-  const b = c((inner[1] - span[0]) / w);
-  return a <= b ? [a, b] : [b, a];
-}
-
-/** Project a 0..1 sub-range onto a target band. */
-function projectRange(k: Range, target: Range): Range {
-  return [rangeAt(target, k[0]), rangeAt(target, k[1])];
-}
 
 /**
  * Slide `inner` until it lies inside `hard`, keeping its WIDTH.
@@ -3219,31 +3495,48 @@ export function slendernessBandFor(faction: FactionDna, role: RoleSpec): Range {
 /**
  * The length/beam band for a specific (faction, role, family).
  *
- * Three constraints meet here and the order matters:
+ * A PRODUCT, not a projection, and that is the whole of this round's change.
  *
- *   1. the FACTION states an absolute band it will not leave (`slendernessBand`),
- *      raised at the floor by the role's drive heat where the skin is the
- *      radiator;
- *   2. the ROLE states where inside the fleet's whole range of fineness it
- *      belongs, and that *relative* position is projected onto the faction's
- *      band — so a freighter is the blunt end of whatever this yard builds and a
- *      courier is the fine end of it, in every yard;
- *   3. the FAMILY biases the result, and is then slid back inside the band,
- *      because a hull line is a product decision and the band is a physical one.
+ * Round two composed the two signals by reading the role's band as a *relative*
+ * position and projecting it onto the faction's absolute band. Two signals do
+ * not fit through one projection: whichever band is narrow wins and the other
+ * one is compressed into it. With Kessler's band at 2.15–3.80, every one of
+ * eighteen roles landed inside a 1.77× window, and the r3 fleet came back with a
+ * tug, a liner and a gunship built from the same seed as the same box in three
+ * sizes — BRIEF §4's stated failure, produced by the fix for BRIEF §8's.
  *
- * This replaces an intersection in which the role won. That version was correct
- * about function deciding form and wrong about which of the two numbers was a
- * *fact*: a role's L/B band is an opinion about proportion, a faction's is a
- * consequence of how it sheds heat and how it sizes structure. Under the old
- * rule Sillane's declared 5.5–11.0 came out as 4.3–4.7 for a freighter and then
- * got multiplied down to 3.4 by the generator's archetype modifier, landing on
- * top of Kessler. Function still decides form — it decides it *within* the band.
+ * A product carries both at full strength and neither compresses the other:
+ *
+ *   1. the ROLE states an absolute fineness on the fleet's one shared scale, and
+ *      that number is the same in every yard — this is "function decides form",
+ *      and it is now the term with the largest dynamic range (1.3 to 9, about
+ *      5×, where it used to have about 1.5×);
+ *   2. the FACTION states a gain, and the gain is the same for every role it
+ *      builds — so the Sillane-to-Kessler ratio is 1.7× on a freighter, on a
+ *      tug and on a patrol alike, which is what makes the yard readable off ONE
+ *      hull instead of off a histogram;
+ *   3. the FAMILY biases the product, because a hull line is a product decision;
+ *   4. the ENVELOPE has the last word, because it is the only physical
+ *      constraint of the four — a Kessler span its load table will not carry, or
+ *      a Sillane too short to shed its own drive heat, is not a ship. It is
+ *      applied by SLIDING, so a role pushed against a wall keeps its spread
+ *      instead of collapsing to a point and giving every seed the same hull.
+ *
+ * The Sillane thermal floor survives intact and is still the strongest statement
+ * in the file, because a floor composes with a product without distorting it:
+ * `slendernessBandFor` raises the envelope's lower wall with the role's drive
+ * heat, and step 4 slides the whole band above it.
  */
 export function lengthBeamFor(faction: FactionDna, role: RoleSpec, family: HullFamily): Range {
-  const hard = slendernessBandFor(faction, role);
-  const placed = projectRange(normaliseInto(role.lengthBeam, ROLE_FINENESS_SPAN), hard);
-  const biased: Range = [placed[0] * family.lengthBeamBias, placed[1] * family.lengthBeamBias];
-  return slideIntoBand(biased, hard);
+  const envelope = slendernessBandFor(faction, role);
+  const gain = faction.proportion.slendernessGain * family.lengthBeamBias;
+  const wanted: Range = [role.lengthBeam[0] * gain, role.lengthBeam[1] * gain];
+  // Everything to here is in HULL fineness, which is the unit every band in this
+  // file is authored in and the unit the envelope means. The generator wants the
+  // number that makes the OUTLINE come out at that fineness, so the conversion
+  // happens once, here, at the boundary — and never by quietly inflating a band.
+  const hull = slideIntoBand(wanted, envelope);
+  return [hull[0] * OUTLINE_ALLOWANCE, hull[1] * OUTLINE_ALLOWANCE];
 }
 
 /** Where the dry centre of mass sits along the hull, role ∩ faction. */
