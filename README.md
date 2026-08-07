@@ -122,5 +122,18 @@ node scripts/shoot.mjs planet-orbit --out review/mine --width 2560 --height 1440
   ground haze is not. `AtmosphereRenderer.setDepthTexture()` is waiting for it.
 - `Planet.ts` still applies its own cheap limb and haze terms, which
   double-count against the real scattering shell on worlds that have one.
-- Landing is implemented in the flight model but has no dedicated camera or
-  surface-mode UI.
+- **Landing does not work yet, and it is not only a missing camera.** A ship
+  brought to 1.5 km above terrain with a 30 m/s descent *rises*, accelerating:
+  36.9 km, then 198.7, then 490.4 above ground over a minute. One cause is
+  fixed — `Universe` was handing `FlightModel.setGroundSampler` the terrain's
+  RADIUS (~11,000 km) where the contract wants the ship's ALTITUDE above it, so
+  the ship saw clearance everywhere and flew through the ground. Something
+  still adds energy. The two untested suspects, in order:
+  1. `Universe.updateNearest` passes `density * pressure` to `setAtmosphere`,
+     and pressure is in bar — a 90 bar world therefore feeds ~70 to a drag
+     model whose coefficient is tuned for a relative density around 1.
+  2. The ground sampler converts the world position to a direction and passes
+     it to `PlanetRenderer.surfaceRadius`, which expects a direction in the
+     planet's own rotating frame. The planet's spin is not applied, so the
+     terrain queried drifts under the ship as the world turns.
+  Diagnose before changing either: the measurement above is reproducible.

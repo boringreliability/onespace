@@ -194,6 +194,14 @@ export interface GravitySource {
  * Negative means the ship is inside the ground. Sampling terrain is expensive,
  * so this is only called when the ship is plausibly near a surface.
  */
+/**
+ * Terrain query for collision.
+ *
+ * Returns the ship's ALTITUDE ABOVE THE SURFACE in km at that world position —
+ * negative when penetrating. NOT the surface radius: this was wired to
+ * PlanetRenderer.surfaceRadius() once, which returns ~11,000, so the ship was
+ * never in contact with anything and simply flew through the ground.
+ */
 export type GroundSampler = (worldPos: Vector3) => number;
 
 export type ImpactKind = 'landing' | 'hard' | 'crash';

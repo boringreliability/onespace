@@ -669,9 +669,15 @@ export class Universe implements GameModule {
         const renderer = best.planet;
         const body = best;
         this.flight.setGroundSampler((worldPos: Vector3) => {
-          // Height above the body's centre, in the body's own frame.
-          this.tmpDir.copy(worldPos).sub(body.world).normalize();
-          return renderer.surfaceRadius(this.tmpDir);
+          // ALTITUDE above the terrain, not the terrain's radius. The flight
+          // model treats a negative return as penetration and pushes out along
+          // the surface normal; handing it a radius meant it saw ~11,000 km of
+          // clearance everywhere and the ship flew straight through the ground.
+          this.tmpDir.copy(worldPos).sub(body.world);
+          const dist = this.tmpDir.length();
+          if (dist < 1e-9) return -body.spec.radius;
+          this.tmpDir.divideScalar(dist);
+          return dist - renderer.surfaceRadius(this.tmpDir);
         });
       } else {
         this.flight.setGroundSampler(null);
