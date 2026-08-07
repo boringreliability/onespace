@@ -1102,9 +1102,48 @@ function rowParams(v: PrimaryVolume, ctx: Ctx): Float64Array {
   // Row ceiling by level. Three rows still carry one interior extremum, which
   // is the difference between a hull that keeps its shoulder in silhouette and
   // a frustum; two rows would not, and one more row costs `cols` triangles.
-  const ceiling = lod.level >= 3 ? 3 : lod.level === 2 ? 5 : MAX_ROWS;
+  //
+  // The floor outranks it: a level cap is a statement about how much DETAIL a
+  // rung may carry, and on a curved run the rows are not detail, they are the
+  // run. See `curvatureRowFloor`.
+  const ceiling = Math.max(lod.level >= 3 ? 3 : lod.level === 2 ? 5 : MAX_ROWS, curvatureRowFloor(v));
   const ts = Float64Array.from(out);
   return ts.length > ceiling ? decimateRows(v, ts, ceiling) : ts;
+}
+
+/**
+ * The largest angle a single row-to-row chord may span on a curved run.
+ *
+ * The chord of an arc of angle θ sits `1 − cos(θ/2)` of the radius inside the
+ * true centreline, and that error is the whole width of the volume's own
+ * silhouette on a run that bends: it is not a shading artefact, it is the run
+ * being somewhere else. 0.45 rad holds it at 2.5 %.
+ */
+const MAX_ROW_TURN = 0.45;
+
+/**
+ * The fewest rows a volume's OWN CURVATURE can be drawn with, at any level.
+ *
+ * A row ceiling is the right instrument for a straight run, where the rows are
+ * profile samples and dropping them costs the shoulder a fraction of a pixel.
+ * It is the wrong instrument for an arc, where the rows ARE the path: the
+ * salvager's hull ring sweeps a full 2π, and five rows make that four chords —
+ * a square. Measured from the bow with the ring's own plane square to camera,
+ * that took LOD0-vs-LOD2 outline XOR to 40.3 %, the single worst number on the
+ * fleet, and what the picture shows is not a simplified ring but no ring at
+ * all: a red annulus where the mass used to be and a blue bar where a chord
+ * cut straight across the middle of it. BRIEF §4 and the LOD2 brief both say a
+ * primary mass may not collapse, and this is a primary mass collapsing.
+ *
+ * So the sweep buys its own rows before any level or any budget is consulted,
+ * and the budget clamp in `buildLoft` takes what it needs out of the columns
+ * instead — which is the right side to take it from, because on a ring it is
+ * the loop and not the tube section that the eye is reading.
+ */
+function curvatureRowFloor(v: PrimaryVolume): number {
+  if (v.path.kind !== 'arc') return 2;
+  const segments = Math.ceil(Math.abs(v.path.sweep) / MAX_ROW_TURN);
+  return clamp(segments + 1, 2, MAX_ROWS);
 }
 
 /**
@@ -1192,8 +1231,19 @@ function buildLoft(v: PrimaryVolume, ctx: Ctx): Loft {
     const cells = ts.length * angles.length * 2;
     if (cells > allow) {
       const k = Math.sqrt(allow / cells);
-      const wantRows = clamp(Math.round(ts.length * k), 2, ts.length);
-      const wantCols = clamp(Math.round(angles.length * k), 4, angles.length);
+      // An even cut across both axes is right only while both axes may be cut.
+      // On a bent run the rows may not — see `curvatureRowFloor` — and when the
+      // floor bites, the columns absorb what the rows refused to give up rather
+      // than the volume quietly going over its allowance. That is the right
+      // side to take it from: on a ring it is the loop the eye reads, not the
+      // tube section.
+      const floor = Math.min(curvatureRowFloor(v), ts.length);
+      const even = Math.round(ts.length * k);
+      const wantRows = Math.max(even, floor);
+      const wantCols =
+        even >= floor
+          ? clamp(Math.round(angles.length * k), 4, angles.length)
+          : clamp(Math.round(allow / (wantRows * 2)), 4, angles.length);
       // Rows go through the silhouette-weighted decimator, never uniformly,
       // and columns through `columnAngles`, whose pinned corners are a floor —
       // so a budget cut takes tessellation away and never a corner.
@@ -2765,11 +2815,26 @@ export function panelBands(lengthKm: number, panelSizeKm: number, minFeatureKm =
  * without any texture at all.
  */
 export interface ImpostorDescription {
-  /** Bounding sphere radius about the ship origin, km. */
+  /** Bounding sphere radius about `centreKm`, km. */
   readonly radiusKm: number;
   /** Half-extents of the whole ship, km. */
   readonly halfExtentsKm: [number, number, number];
-  /** 16 samples of half-height along the hull's long axis (the side view). */
+  /**
+   * Centre of the measured bounds, ship-local km.
+   *
+   * NOT the ship's origin. A hull is built round its spine and its spine is
+   * not the origin: on the hero the mass sits between y −4.9 m and y +8.8 m,
+   * so anything the impostor centres on the origin is 2 m low and, because the
+   * profiles used to be `max |q.y|` about that same origin, 28 % too tall as
+   * well. Both errors are in the same direction for every hull the generator
+   * makes, because a keel with a deck over it is never symmetric about it.
+   */
+  readonly centreKm: [number, number, number];
+  /**
+   * 16 samples of half-HEIGHT along the hull's long axis (the side view),
+   * measured as half the station's true extent rather than as its distance
+   * from the origin plane.
+   */
   readonly sideProfile: Float32Array;
   /** 16 samples of half-width along the same axis (the plan view). */
   readonly planProfile: Float32Array;
@@ -2782,14 +2847,56 @@ export interface ImpostorDescription {
 const IMPOSTOR_SAMPLES = 16;
 
 /**
+ * Half the total length covered by a set of [lo, hi] pairs, overlaps counted
+ * once. `flat` is 2n numbers, sorted in place; it is scratch, not a result.
+ */
+function unionHalfLength(flat: number[]): number {
+  const n = flat.length / 2;
+  if (n === 0) return 0;
+  const order: number[] = [];
+  for (let i = 0; i < n; i++) order.push(i);
+  order.sort((a, b) => flat[a * 2]! - flat[b * 2]!);
+  let total = 0;
+  let lo = flat[order[0]! * 2]!;
+  let hi = flat[order[0]! * 2 + 1]!;
+  for (let k = 1; k < n; k++) {
+    const a = flat[order[k]! * 2]!;
+    const b = flat[order[k]! * 2 + 1]!;
+    if (a > hi) {
+      total += hi - lo;
+      lo = a;
+      hi = b;
+    } else if (b > hi) {
+      hi = b;
+    }
+  }
+  return (total + hi - lo) * 0.5;
+}
+
+/**
  * Measure a silhouette from the volumes themselves rather than from a render.
  *
  * A tower archetype's long axis is +Y, not +Z, so the axis is chosen from the
  * bounds instead of assumed — an impostor built along the wrong axis is a ship
  * that changes shape at the LOD boundary, which is the one artefact a distant
  * fleet cannot hide.
+ *
+ * THE SPINE IS PART OF THE SILHOUETTE. This used to measure `primaryVolumes`
+ * and nothing else, which is a defensible reading of "the primary volumes ARE
+ * the silhouette" right up until the hull is a spine-and-pod: the hero's whole
+ * dorsal boom is `structuralSpine`, and an impostor that has never heard of it
+ * is the wrong shape and 10 % too short in the one view the boom dominates.
+ * Rasterised against LOD0 from the side, the hero's impostor came out 353 px
+ * tall against the ship's 388 and displaced 73 px down the frame.
+ *
+ * AND IT IS MEASURED ABOUT THE HULL, NOT ABOUT THE ORIGIN. See
+ * `ImpostorDescription.centreKm` — the profiles are half-extents of each
+ * station now, not distances from the ship's own y = 0 plane.
  */
-export function impostorFor(volumes: readonly PrimaryVolume[]): ImpostorDescription {
+export function impostorFor(
+  volumes: readonly PrimaryVolume[],
+  spine?: StructuralSpine,
+): ImpostorDescription {
   let minX = Infinity;
   let minY = Infinity;
   let minZ = Infinity;
@@ -2797,25 +2904,55 @@ export function impostorFor(volumes: readonly PrimaryVolume[]): ImpostorDescript
   let maxY = -Infinity;
   let maxZ = -Infinity;
   const p = new Vector3();
-  const pts: Vector3[] = [];
+  // One entry per part — every volume, and every exposed spine chain. Kept
+  // separate rather than merged because the impostor needs to know how much of
+  // its own bounding box a hull actually FILLS, and that is a question no
+  // merged point cloud can answer. See `coverage` below.
+  const parts: Vector3[][] = [];
+  const take = (into: Vector3[], x: number, y: number, z: number): void => {
+    into.push(new Vector3(x, y, z));
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (z < minZ) minZ = z;
+    if (x > maxX) maxX = x;
+    if (y > maxY) maxY = y;
+    if (z > maxZ) maxZ = z;
+  };
   for (const v of volumes) {
+    const pts: Vector3[] = [];
     for (let i = 0; i <= 8; i++) {
       for (let j = 0; j < 12; j++) {
         sampleVolumeSurface(v, i / 8, (j / 12) * TAU, p);
-        pts.push(p.clone());
-        if (p.x < minX) minX = p.x;
-        if (p.y < minY) minY = p.y;
-        if (p.z < minZ) minZ = p.z;
-        if (p.x > maxX) maxX = p.x;
-        if (p.y > maxY) maxY = p.y;
-        if (p.z > maxZ) maxZ = p.z;
+        take(pts, p.x, p.y, p.z);
       }
     }
+    parts.push(pts);
   }
+  for (const chain of spine?.chains ?? []) {
+    // A buried chain is inside a volume that has already been sampled, so it
+    // can only inflate the bounds with structure nobody can see.
+    if (chain.exposure === 'buried') continue;
+    const pts: Vector3[] = [];
+    for (const node of chain.nodes) {
+      // The corners of the node's own section, not its centreline: a box-truss
+      // is as wide as its longerons and they stand at the section radius.
+      const r = Math.max(node.radius, 0);
+      for (const dx of [-r, r]) {
+        for (const dy of [-r, r]) {
+          for (const dz of [-r, r]) {
+            take(pts, node.position[0] + dx, node.position[1] + dy, node.position[2] + dz);
+          }
+        }
+      }
+    }
+    parts.push(pts);
+  }
+  const pts = parts.flat();
   if (pts.length === 0) {
     return {
       radiusKm: 0,
       halfExtentsKm: [0, 0, 0],
+      centreKm: [0, 0, 0],
       sideProfile: new Float32Array(IMPOSTOR_SAMPLES),
       planProfile: new Float32Array(IMPOSTOR_SAMPLES),
       axisRangeKm: [0, 0],
@@ -2825,25 +2962,81 @@ export function impostorFor(volumes: readonly PrimaryVolume[]): ImpostorDescript
   const ex = (maxX - minX) * 0.5;
   const ey = (maxY - minY) * 0.5;
   const ez = (maxZ - minZ) * 0.5;
+  const cx = (minX + maxX) * 0.5;
+  const cy = (minY + maxY) * 0.5;
+  const cz = (minZ + maxZ) * 0.5;
   const axis: 0 | 1 | 2 = ez >= ex && ez >= ey ? 2 : ey >= ex ? 1 : 0;
   const lo = axis === 2 ? minZ : axis === 1 ? minY : minX;
   const hi = axis === 2 ? maxZ : axis === 1 ? maxY : maxX;
+  const span = Math.max(1e-9, hi - lo);
+  const binOf = (q: Vector3): number =>
+    clamp(
+      Math.floor((((axis === 2 ? q.z : axis === 1 ? q.y : q.x) - lo) / span) * IMPOSTOR_SAMPLES),
+      0,
+      IMPOSTOR_SAMPLES - 1,
+    );
+  let radius = 0;
+  for (const q of pts) {
+    const d = Math.hypot(q.x - cx, q.y - cy, q.z - cz);
+    if (d > radius) radius = d;
+  }
+  /**
+   * The profiles, as COVERAGE and not as extent.
+   *
+   * The impostor is a solid strip and the ship is not solid: a spine-and-pod
+   * hull at one station is two pods with a bay of open sky between them, and a
+   * strip drawn to the station's full extent fills that sky in. Measured
+   * against LOD2's own outline at the 30 px the impostor is actually used at,
+   * that is 61 % symmetric difference on the fleet and 101 % on the salvager —
+   * an impostor with twice the ship's area, which at that size is not a shape
+   * error but a BRIGHTNESS error, and `ship-extreme-distance`'s brief fails a
+   * hull that reads as a grey smear.
+   *
+   * So each part is measured on its own and their intervals are UNIONED, not
+   * merged into one bound and not summed either: two overlapping pods count
+   * once, two separated pods count as the metal and not as the bay between
+   * them, and nineteen volumes stacked round a keel do not add up to more ship
+   * than there is. What comes out is how much of the station is actually
+   * metal — the projected thickness — which is the quantity a solid strip has
+   * to reproduce if a receding hull is to keep its brightness.
+   */
   const side = new Float32Array(IMPOSTOR_SAMPLES);
   const plan = new Float32Array(IMPOSTOR_SAMPLES);
-  const span = Math.max(1e-9, hi - lo);
-  for (const q of pts) {
-    const a = axis === 2 ? q.z : axis === 1 ? q.y : q.x;
-    const i = clamp(Math.floor(((a - lo) / span) * IMPOSTOR_SAMPLES), 0, IMPOSTOR_SAMPLES - 1);
-    // "Side" is the vertical extent for a normal hull and the Z extent for a
-    // tower; "plan" is always the remaining axis.
-    const s = axis === 1 ? Math.abs(q.z) : Math.abs(q.y);
-    const w = axis === 0 ? Math.abs(q.z) : Math.abs(q.x);
-    if (s > side[i]) side[i] = s;
-    if (w > plan[i]) plan[i] = w;
+  // [lo, hi] per part, per bin, per cross axis. Built once and reused.
+  const spans: number[][] = [];
+  for (let i = 0; i < IMPOSTOR_SAMPLES * 2; i++) spans.push([]);
+  const partLo = new Float32Array(IMPOSTOR_SAMPLES * 2);
+  const partHi = new Float32Array(IMPOSTOR_SAMPLES * 2);
+  for (const part of parts) {
+    partLo.fill(Infinity);
+    partHi.fill(-Infinity);
+    for (const q of part) {
+      const i = binOf(q);
+      // "Side" is the vertical extent for a normal hull and the Z extent for a
+      // tower; "plan" is always the remaining axis.
+      const s = axis === 1 ? q.z : q.y;
+      const w = axis === 0 ? q.z : q.x;
+      if (s < partLo[i * 2]) partLo[i * 2] = s;
+      if (s > partHi[i * 2]) partHi[i * 2] = s;
+      if (w < partLo[i * 2 + 1]) partLo[i * 2 + 1] = w;
+      if (w > partHi[i * 2 + 1]) partHi[i * 2 + 1] = w;
+    }
+    for (let i = 0; i < IMPOSTOR_SAMPLES * 2; i++) {
+      if (partHi[i] < partLo[i]) continue;
+      spans[i]!.push(partLo[i]!, partHi[i]!);
+    }
+  }
+  for (let i = 0; i < IMPOSTOR_SAMPLES * 2; i++) {
+    const half = unionHalfLength(spans[i]!);
+    // An empty bin — the gap between two pods on the long axis — stays zero;
+    // `buildImpostorQuad` floors the strip so it still never pinches shut.
+    if ((i & 1) === 0) side[i >> 1] = half;
+    else plan[i >> 1] = half;
   }
   return {
-    radiusKm: Math.max(Math.hypot(minX, minY, minZ), Math.hypot(maxX, maxY, maxZ)),
+    radiusKm: radius,
     halfExtentsKm: [ex, ey, ez],
+    centreKm: [cx, cy, cz],
     sideProfile: side,
     planProfile: plan,
     axisRangeKm: [lo, hi],

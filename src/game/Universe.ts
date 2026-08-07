@@ -44,6 +44,7 @@ import { CloudRenderer } from '@/render/Clouds';
 import { RingRenderer } from '@/render/Rings';
 import { StarRenderer } from '@/render/Star';
 import { AtmosphereRenderer } from '@/render/Atmosphere';
+import { sceneDepthTexture } from '@/render/PostFX';
 
 import { DEFAULT_SHIP_CONFIG, FlightModel, type GravitySource } from '@/ship/FlightModel';
 
@@ -532,6 +533,11 @@ export class Universe implements GameModule {
     if (b.spec.atmosphere) {
       b.atmosphere = new AtmosphereRenderer(b.spec, q);
       b.planet.object3d.add(b.atmosphere.object3d);
+      // The surface shader carries a cheap limb glow, Mie crescent, sunset band
+      // and aerial haze of its own. With a real scattering shell attached they
+      // are the same light computed twice, and the limb comes out blown. The
+      // cheap path stays on by default so a world nobody wired still has air.
+      b.planet.setAtmosphereShell(true);
     }
 
     bus.emit('planet:approached', {
@@ -555,6 +561,7 @@ export class Universe implements GameModule {
       b.atmosphere.object3d.removeFromParent();
       b.atmosphere.dispose();
       b.atmosphere = null;
+      b.planet?.setAtmosphereShell(false);
     }
     if (b.planet) {
       this.root.remove(b.planet.object3d);
@@ -568,6 +575,16 @@ export class Universe implements GameModule {
   private updateBodies(dt: number, ctx: EngineContext): void {
     const primary = this.system.stars[0]!;
     this.star?.lightColor(this.sunColor);
+
+    // Scene depth is what turns an atmosphere from a shell around a smooth
+    // sphere into aerial perspective over real terrain, and it is also what
+    // stops the sky drawing over the cockpit once the ship is in the air.
+    // Re-published every frame rather than once at acquisition: renderers are
+    // streamed in and out by distance, and the texture itself is replaced
+    // whenever the drawing buffer is resized. Null when no pipeline owns the
+    // frame (the ship-review host, tests) — the shell degrades to its analytic
+    // fallback and nothing breaks.
+    const sceneDepth = sceneDepthTexture();
 
     for (const b of this.bodies) {
       if (!b.planet) continue;
@@ -599,7 +616,10 @@ export class Universe implements GameModule {
       b.planet.update(dt, ctx, b.view);
       b.clouds?.update(dt, ctx, b.view);
       b.rings?.update(dt, ctx, b.view);
-      b.atmosphere?.update(dt, ctx, b.view);
+      if (b.atmosphere) {
+        b.atmosphere.setDepthTexture(sceneDepth);
+        b.atmosphere.update(dt, ctx, b.view);
+      }
     }
   }
 

@@ -1223,6 +1223,46 @@ class FinalPass extends Pass {
 }
 
 // ---------------------------------------------------------------------------
+// Scene depth, published for the modules that sample it from *inside* the scene
+// ---------------------------------------------------------------------------
+
+/**
+ * The depth attachment of the buffer the scene was last rendered into.
+ *
+ * `Atmosphere` needs scene depth while it is itself drawing inside the scene —
+ * which is the one moment the current frame's depth attachment is bound for
+ * writing, and sampling a texture that is attached to the bound framebuffer is
+ * undefined behaviour, not a slightly wrong number. What *is* safe is the other
+ * half of the composer's ping-pong pair: the chain swaps the two HDR targets an
+ * odd number of times per frame, so the buffer that holds frame N's depth is
+ * untouched for the whole of frame N+1. That is what this publishes.
+ *
+ * The consequence is that aerial perspective is keyed on depth one frame old.
+ * On a field as smooth as haze that is invisible, and it has one property that
+ * matters more than currency: the march, the extinction and the bilateral
+ * upsample all read the *same* buffer, so they cannot disagree about where the
+ * terrain is — a disagreement of one pixel there is a bright seam along a whole
+ * ridge line. The alternative is a depth prepass, which would mean submitting
+ * every planet's terrain quadtree twice.
+ *
+ * Null when no pipeline is live, on the first frame, and for one frame after a
+ * resize — the attachments are reallocated there and their contents are
+ * undefined until the next scene render fills them.
+ */
+let publishedSceneDepth: Texture | null = null;
+
+/**
+ * Full-resolution scene depth for modules that cannot use the composer
+ * themselves. Logarithmic (`Engine` sets `logarithmicDepthBuffer`), so decode it
+ * as `w = exp2(d * log2(camera.far + 1)) - 1`; `w` is then distance along the
+ * camera axis in kilometres. Read it every frame — it is replaced on resize and
+ * goes null when the pipeline is torn down.
+ */
+export function sceneDepthTexture(): Texture | null {
+  return publishedSceneDepth;
+}
+
+// ---------------------------------------------------------------------------
 // The pipeline
 // ---------------------------------------------------------------------------
 
@@ -1275,7 +1315,6 @@ export class PostFX implements RenderPipeline {
     renderer.info.autoReset = false;
 
     const budget = budgetFor(quality);
-    const needsDepth = quality.ambientOcclusion || quality.motionBlur;
 
     this.renderer.getDrawingBufferSize(this.size);
     this.hdrTarget = new WebGLRenderTarget(this.size.x, this.size.y, {
@@ -1288,16 +1327,23 @@ export class PostFX implements RenderPipeline {
       generateMipmaps: false,
     });
     this.hdrTarget.texture.name = 'os.hdr';
-    if (needsDepth) {
-      // The composer clones this target for its second buffer, and
-      // RenderTarget.copy() *clones* the depth texture rather than sharing it.
-      // Both buffers therefore own a private depth attachment, which is what
-      // makes it safe for SceneSpacePass to read one while writing the other.
-      const depth = new DepthTexture(this.size.x, this.size.y, UnsignedIntType);
-      depth.minFilter = NearestFilter;
-      depth.magFilter = NearestFilter;
-      this.hdrTarget.depthTexture = depth;
-    }
+
+    // A depth *texture* rather than the implicit renderbuffer, on every tier —
+    // it is the same storage, and it is no longer only AO and motion blur that
+    // want it. Every atmosphere in the game reads scene depth to stop its march
+    // at the terrain, and on a tier without one a landscape has no distance
+    // haze and the sky draws straight over the cockpit.
+    //
+    // The composer clones this target for its second buffer, and
+    // RenderTarget.copy() *clones* the depth texture rather than sharing it.
+    // Both buffers therefore own a private depth attachment, which is what
+    // makes it safe for SceneSpacePass to read one while writing the other, and
+    // what `sceneDepthTexture()` hands out.
+    const depth = new DepthTexture(this.size.x, this.size.y, UnsignedIntType);
+    depth.name = 'os.depth';
+    depth.minFilter = NearestFilter;
+    depth.magFilter = NearestFilter;
+    this.hdrTarget.depthTexture = depth;
 
     this.composer = new EffectComposer(renderer, this.hdrTarget);
     // The engine already folded devicePixelRatio into the drawing buffer size;
@@ -1307,9 +1353,10 @@ export class PostFX implements RenderPipeline {
     this.renderPass = new RenderPass(scene, camera);
     this.composer.addPass(this.renderPass);
 
-    this.scenePass = needsDepth
-      ? new SceneSpacePass(this.quad, budget, quality.ambientOcclusion, quality.motionBlur)
-      : null;
+    this.scenePass =
+      quality.ambientOcclusion || quality.motionBlur
+        ? new SceneSpacePass(this.quad, budget, quality.ambientOcclusion, quality.motionBlur)
+        : null;
     if (this.scenePass) this.composer.addPass(this.scenePass);
 
     this.lumPass = new LuminancePass(this.quad);
@@ -1412,7 +1459,20 @@ export class PostFX implements RenderPipeline {
     }
     if (shotRig) shotRig.root.visible = mine;
 
+    // RenderPass draws into whichever target the composer currently calls its
+    // read buffer. Note it *before* the chain runs, because the passes swap the
+    // pair around underneath us as they go.
+    const sceneTarget = this.composer.readBuffer;
+
     this.composer.render(dt);
+
+    // After the chain, `readBuffer` names the target the next frame's scene will
+    // be drawn into. Handing out the depth we just filled is only safe when that
+    // is the other buffer; if the enabled passes ever swap an even number of
+    // times, the texture would be the one bound for writing while the atmosphere
+    // shell samples it, so degrade to null rather than publish a feedback loop.
+    publishedSceneDepth =
+      this.composer.readBuffer !== sceneTarget ? sceneTarget.depthTexture : null;
   }
 
   private updateSceneSpaceUniforms(ctx: EngineContext): void {
@@ -1460,11 +1520,17 @@ export class PostFX implements RenderPipeline {
     const h = Math.max(1, Math.floor(this.size.y));
     this.composer.setSize(w, h);
     this.hasPrevFrame = false;
+    // Both attachments were just reallocated at the new size and hold nothing.
+    // The adaptive resolution scaler comes through here every thirty frames, so
+    // this is a real case, not a boot-time nicety.
+    publishedSceneDepth = null;
   }
 
   dispose(): void {
     // Hand the frame counter back to whoever renders next.
     this.renderer.info.autoReset = true;
+    // The targets go with the composer below; nobody may keep sampling them.
+    publishedSceneDepth = null;
     this.renderPass.dispose();
     this.scenePass?.dispose();
     this.lumPass.dispose();

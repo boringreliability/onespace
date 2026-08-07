@@ -103,6 +103,15 @@
  * right, mountains just get sea-level haze. See the method for the wiring rules
  * — in particular, it must not be the depth buffer currently being rendered
  * into.
+ *
+ * In flight `game/Universe.ts` supplies `render/PostFX.ts`'s `sceneDepthTexture()`
+ * every frame. That is the other half of the composer's ping-pong pair, so it is
+ * one frame old; the shots below render their own depth and are exact. Both the
+ * march and the two composite draws read whatever one texture is bound, so they
+ * always agree with each other about where the terrain is, which is the property
+ * that actually matters — a one-pixel disagreement between the extinction and
+ * the in-scatter is a bright seam along a whole ridge line, whereas a frame of
+ * lag on a field this smooth is not visible.
  */
 
 import {
@@ -1064,11 +1073,18 @@ export class AtmosphereRenderer {
    *  - It must be the depth attachment of the buffer the scene was rendered
    *    into, at full drawing-buffer resolution, addressed in normalised uv.
    *  - It must NOT be the depth buffer currently bound for writing — that is a
-   *    feedback loop. Use a depth prepass, or the read buffer of a ping-pong
-   *    pair (this is what `PostFX`'s two HDR targets already give you).
-   *  - The decoder assumes `logarithmicDepthBuffer: true`, which `Engine` sets.
+   *    feedback loop. The two composite draws happen *inside* the scene render,
+   *    which is the one moment this frame's attachment is bound, so in practice
+   *    it must be a depth prepass or the idle half of a ping-pong pair.
+   *    `PostFX.sceneDepthTexture()` is the latter and is what Universe passes.
+   *  - The decoder assumes `logarithmicDepthBuffer: true`, which `Engine` sets:
+   *    three writes `gl_FragDepth = log2(1 + w) / log2(far + 1)` and `at_span`
+   *    inverts exactly that. Every material that writes depth must therefore
+   *    keep three's logdepthbuf chunks, or its pixels decode as garbage
+   *    distances and the haze in front of them is wrong.
    *    `camera.far` is read from the context every frame, so changing it is
    *    free.
+   *  - Safe to call every frame; it is two uniform writes and no allocation.
    *
    * Pass `null` to go back to the analytic fallback.
    */
@@ -1436,12 +1452,14 @@ function makeFixture(ctx: EngineContext, spec: PlanetSpec): AtmoFixture {
  * without it the march and the extinction both run to the analytic sea-level
  * sphere, so a ridge silhouetted on the horizon is given the haze of the
  * hundreds of kilometres of air *behind* it as well as in front, and the whole
- * lower third of the sunset frame goes to sky colour. The pipeline's own depth
- * buffer is inside `PostFX` and there is no public route to it from here, so
- * the fixture renders its own — one extra full-resolution pass over the planet,
- * in review captures only, never in the game. It is deliberately not on the
- * `AtmosphereRenderer` itself: in flight the integrator supplies the depth it
- * already has, and paying for a second one would be waste.
+ * lower third of the sunset frame goes to sky colour. `PostFX` does publish its
+ * scene depth now (`sceneDepthTexture()`), but that is the previous frame's and
+ * it contains whatever else is on stage, whereas a shot is a fixture rendered
+ * for a single deterministic capture — so the fixture keeps rendering its own,
+ * one extra full-resolution pass over the planet, in review captures only and
+ * never in the game. It is deliberately not on the `AtmosphereRenderer` itself:
+ * in flight Universe supplies the depth the pipeline already has, and paying for
+ * a second one would be waste.
  */
 function renderShotDepth(ctx: EngineContext, f: AtmoFixture): void {
   const r = ctx.renderer;

@@ -97,8 +97,22 @@ const INSTANCE_MIN = 20;
  * does not need, and this is where that goes. On the hero that turns LOD2's
  * detail allowance from 125 triangles into 852 — nine of its twelve
  * support-owning fittings — for a rung that still draws 2,888 in total.
+ *
+ * WHY IT IS 0.6 AND NOT 0.3. The other half of the reserve's job is the gap
+ * between the blueprint's ladder and the brief. `LodLevel.triangleBudget` is
+ * derived from the hull's size class, and on the hero it says 21,971 for a
+ * rung BRIEF §6 caps at 25,000 — so LOD1 was stopping 4,383 triangles short of
+ * its own contract while its outline was still missing hardware. Raising the
+ * reserve until it stops binding takes the fleet's LOD0-vs-LOD1 outline XOR
+ * from 2.31 % to 2.06 % and its worst case from 4.11 % to 3.43 %, and
+ * LOD0-vs-LOD2 from 9.25 % to 8.33 %.
+ *
+ * 0.6 rather than the 0.7 where the curve flattens, for one reason that is not
+ * about pixels: at 0.7 the hero's LOD1 lands on 24,561 of its 25,000, and a
+ * rung sitting 1.8 % under its cap fails the moment `greebles` or `propulsion`
+ * adds a triangle. 0.6 keeps 6 % of headroom and gives up 0.16 points.
  */
-const SILHOUETTE_RESERVE = 0.3;
+const SILHOUETTE_RESERVE = 0.6;
 
 /**
  * How much a fitting NEAR one of the ship's supports outranks one that is not.
@@ -109,9 +123,10 @@ const SILHOUETTE_RESERVE = 0.3;
  * measured going missing between LOD1 and LOD2. Extent is what the eye reads
  * as "the ship changed shape", so a fitting standing at the end of the ship
  * competes at 33× its honest value per triangle, and the ones that actually
- * OWN a support (see `EXTREME_DIRS`) do not compete at all — they sort above
- * the whole field. On the hero that second set is 12 fittings out of 429, and
- * 1,240 triangles out of LOD0's 28,694.
+ * OWN a support (see `EXTENT_DIRS` and `RIM_DIRS`) do not compete at all —
+ * they sort above the whole field. On the hero the extent tier is 12 fittings
+ * out of 401 and the rim tier adds 16 more: 28 held fittings, 2,422 triangles
+ * out of the detail layer's 32,104, which is 7.5 % of it.
  */
 const EXTREME_BONUS = 32;
 
@@ -126,7 +141,7 @@ const EXTREME_BONUS = 32;
 const EXTREME_BAND_FRACTION = 0.06;
 
 /**
- * The directions a silhouette extreme is measured along.
+ * The directions the ship's GROSS EXTENT is measured along — the coarse tier.
  *
  * Six axes are not enough, and the review camera is the proof: it looks down
  * (0.7, 0.3, 0.65), so the leftmost pixel of the hero's outline is the tip
@@ -139,8 +154,12 @@ const EXTREME_BAND_FRACTION = 0.06;
  * is held. Fourteen directions do NOT mean fourteen fittings — on the hero
  * they resolve to twelve, because a mast at the top of the ship owns +y and
  * the diagonals either side of it at once.
+ *
+ * Fourteen is deliberately FEW, and that is this tier's whole job: LOD2 can
+ * afford about nine fittings in total, so the set it must never be allowed to
+ * miss has to be about that size. See `RIM_DIRS` for the other half.
  */
-const EXTREME_DIRS = ((): Float32Array => {
+const EXTENT_DIRS = ((): Float32Array => {
   const d: number[] = [];
   for (let a = 0; a < 3; a++) {
     for (const s of [1, -1]) d.push(a === 0 ? s : 0, a === 1 ? s : 0, a === 2 ? s : 0);
@@ -152,8 +171,66 @@ const EXTREME_DIRS = ((): Float32Array => {
   return Float32Array.from(d);
 })();
 
-/** How many of them there are. `EXTREME_DIRS` is three floats each. */
-const EXTREME_DIR_COUNT = EXTREME_DIRS.length / 3;
+/** How many of them there are. `EXTENT_DIRS` is three floats each. */
+const EXTENT_DIR_COUNT = EXTENT_DIRS.length / 3;
+
+/**
+ * The directions the ship's RIM is measured along — the fine tier.
+ *
+ * Fifty-five degrees is a good enough net to catch the four or five fittings
+ * that make a ship's length, beam and height, and far too coarse to be a
+ * SUPPORT: measured on the 478 m miner, LOD1 lost 10 px of dorsal extent while
+ * every one of the fourteen extent owners was bought and drawn, because the
+ * fitting that is topmost from that camera is not the fitting that maximises
+ * +y and nothing was holding it.
+ *
+ * Sixty-four directions off a Fibonacci sphere put no view further than ~13°
+ * from a held one, which bounds by cos 13° = 2.6 % how far the support in any
+ * direction can fall below the nearest one that is held — the difference
+ * between "a tip may go missing" and "a tip may recede by a pixel". They are
+ * evenly spread by construction, which axes-plus-diagonals is not: that set
+ * puts eight of its fourteen on the cube corners and leaves the faces bare.
+ *
+ * WHY THIS IS A SECOND TIER AND NOT A REPLACEMENT. Sixty-four directions
+ * resolve to 28 fittings on the hero, and LOD2's whole detail allowance buys
+ * nine. Ranking one flat protected set of 28 by how many directions each owns
+ * put the hero's dorsal mast outside the nine, and LOD2's outline lost 11 px
+ * off the top that the fourteen-direction set had been holding. So gross
+ * extent is bought first and the rim second: a rung that can afford nine
+ * fittings spends them on the ship's overall shape, and a rung that can afford
+ * a hundred goes on to buy the rim. Both sets are bought out of the budget and
+ * neither is exempt from it.
+ *
+ * Nothing here is free of the count either: a fitting is tested against every
+ * direction in both tiers once, at build time, so 78 dot products per fitting
+ * and none per frame.
+ */
+const RIM_DIR_COUNT = 64;
+
+/**
+ * Those directions, as a Fibonacci (golden-angle) spiral on the unit sphere.
+ *
+ * The construction is the cheapest one that is *even* — the points are a
+ * spherical lattice, not a random sample, so the worst gap is bounded rather
+ * than merely unlikely — and it is deterministic, which the rest of the
+ * ranking relies on: two ships of the same blueprint must protect the same
+ * fittings on every machine.
+ */
+const RIM_DIRS = ((): Float32Array => {
+  const d = new Float32Array(RIM_DIR_COUNT * 3);
+  const golden = Math.PI * (3 - Math.sqrt(5));
+  for (let i = 0; i < RIM_DIR_COUNT; i++) {
+    // z walks the interval evenly; equal steps in z are equal steps in area on
+    // a sphere, so the spiral does not crowd the poles.
+    const z = 1 - (2 * i + 1) / RIM_DIR_COUNT;
+    const r = Math.sqrt(Math.max(0, 1 - z * z));
+    const a = golden * i;
+    d[i * 3] = Math.cos(a) * r;
+    d[i * 3 + 1] = Math.sin(a) * r;
+    d[i * 3 + 2] = z;
+  }
+  return d;
+})();
 
 /**
  * The offset that lifts a held fitting clear of every unheld one.
@@ -161,7 +238,9 @@ const EXTREME_DIR_COUNT = EXTREME_DIRS.length / 3;
  * Scores are value-per-triangle in square kilometres, which on a 62 m hull is
  * of order 1e-5; 1 is nine orders of magnitude above the largest of them and
  * still exactly representable, so the sort can never interleave the two sets
- * and "held" stays a prefix.
+ * and "held" stays a prefix. Two clear multiples of it stack the two tiers the
+ * same way — a rim owner outranks the whole unheld field, and an extent owner
+ * outranks the whole rim.
  */
 const PROTECT_RANK = 1;
 
@@ -257,10 +336,13 @@ export class ShipMesh implements ShipVisual {
   private readonly capped: boolean[] = [];
   /** cx, cy, cz, hx, hy, hz of the blueprint's bounds. Set once, in `detail`. */
   private readonly detailBox = new Float32Array(6);
-  /** The detail layer's own supports, one per `EXTREME_DIRS`. Set in `detail`. */
-  private readonly detailExtremes = new Float32Array(EXTREME_DIR_COUNT);
+  /** The detail layer's own supports, one per `EXTENT_DIRS`. Set in `detail`. */
+  private readonly detailExtremes = new Float32Array(EXTENT_DIR_COUNT);
   /** Which (family, instance) owns each of them. Set once, in `detail`. */
-  private readonly detailExtremeOwner = new Int32Array(EXTREME_DIR_COUNT * 2);
+  private readonly detailExtremeOwner = new Int32Array(EXTENT_DIR_COUNT * 2);
+  /** The same, for the fine tier. One per `RIM_DIRS`. Set once, in `detail`. */
+  private readonly detailRim = new Float32Array(RIM_DIR_COUNT);
+  private readonly detailRimOwner = new Int32Array(RIM_DIR_COUNT * 2);
 
   /** Impostor state. All of it is set once, in `buildImpostor`. */
   private impostor: Mesh | null = null;
@@ -489,7 +571,10 @@ export class ShipMesh implements ShipVisual {
    * above, rather than the bounding sphere both times.
    */
   private buildImpostor(): BuiltLod {
-    const desc = impostorFor(this.blueprint.primaryVolumes);
+    // The spine goes in with the volumes: on a spine-and-pod hull the dorsal
+    // boom is structure, not a volume, and an impostor that cannot see it is
+    // the wrong shape. See `impostorFor`.
+    const desc = impostorFor(this.blueprint.primaryVolumes, this.blueprint.structuralSpine);
     const geometry = buildImpostorQuad(desc);
     const group = new Group();
     const quad = new Mesh(geometry, this.materials.hull);
@@ -517,7 +602,14 @@ export class ShipMesh implements ShipVisual {
     }
     this.impostorPlanHalf = maxOf(desc.planProfile);
     this.impostorSideHalf = maxOf(desc.sideProfile);
-    quad.position.copy(this.impostorAxis).multiplyScalar((lo + hi) * 0.5);
+    // The hull's own centre, all three axes — not a point on the ship's Z axis.
+    // A keel with a deck over it is never symmetric about the origin, so a quad
+    // pinned to the axis hangs below the ship it is standing in for: measured
+    // on the hero from the side, 73 px of a 388 px hull. `orientImpostor` spins
+    // the quad about this point, so it is also the point the billboard pivots
+    // on, which is what stops the ship sliding sideways as the camera comes
+    // round.
+    quad.position.set(desc.centreKm[0], desc.centreKm[1], desc.centreKm[2]);
     quad.scale.set(
       this.impostorHalfLength / this.impostorQuadRadius,
       Math.max(this.impostorSideHalf, 1e-6) / this.impostorQuadRadius,
@@ -592,7 +684,8 @@ export class ShipMesh implements ShipVisual {
     // per-family ranking that answered it from its own instances alone would
     // protect the lowest hatch on the ship as if it were the keel.
     const band = bp.dimensions.lengthKm * EXTREME_BAND_FRACTION;
-    measureExtremes(scatters, this.detailExtremes, this.detailExtremeOwner);
+    measureExtremes(scatters, EXTENT_DIRS, this.detailExtremes, this.detailExtremeOwner);
+    measureExtremes(scatters, RIM_DIRS, this.detailRim, this.detailRimOwner);
     const bnd = bp.dimensions.bounds;
     this.detailBox[0] = (bnd.min[0] + bnd.max[0]) * 0.5;
     this.detailBox[1] = (bnd.min[1] + bnd.max[1]) * 0.5;
@@ -612,6 +705,8 @@ export class ShipMesh implements ShipVisual {
         this.detailBox,
         this.detailExtremes,
         this.detailExtremeOwner,
+        this.detailRim,
+        this.detailRimOwner,
         band,
         Math.max(bp.dimensions.lengthKm, 1e-9),
       );
@@ -680,7 +775,16 @@ export class ShipMesh implements ShipVisual {
     // hero's LOD2 having 265 triangles for its silhouette hardware and having
     // 632 — the difference between holding two of its nine support-owning
     // fittings and holding five.
-    const reserve = Math.min(brief * SILHOUETTE_RESERVE, Math.max(0, brief - spent));
+    //
+    // LOD0 is excluded, and not as an optimisation: at LOD0 the ordinary share
+    // already buys every fitting the scatter placed, so a reserve there cannot
+    // protect an outline that is not at risk — all it can do is licence the
+    // rung to spend against the brief instead of against its own ladder. On
+    // the 478 m miner that took LOD0 from 102,654 triangles to 116,458 for a
+    // silhouette nobody was going to lose. The reserve is for the rungs that
+    // are cutting.
+    const reserve =
+      level < 1 ? 0 : Math.min(brief * SILHOUETTE_RESERVE, Math.max(0, brief - spent));
     return Math.max(share, reserve);
   }
 
@@ -741,9 +845,10 @@ export class ShipMesh implements ShipVisual {
    * construction (`PROTECT_RANK`), so a rung buys its outline before it buys
    * anything else and gives it up last. That is what a rung that drops them
    * loses: not detail, but length — which is what `ship-lod2`'s brief calls a
-   * whole mass collapsing. On the hero, LOD2 buys nine of the twelve for 852
-   * of its 2,888 triangles, and its outline then spans exactly the pixels
-   * LOD0's does on both screen axes.
+   * whole mass collapsing. On the hero, LOD2 buys nine of the twelve extent
+   * owners for 852 of its 2,892 triangles, and its outline then spans exactly
+   * the pixels LOD0's does on both screen axes; LOD1, which can afford the rim
+   * tier as well, buys all of both.
    */
   private detailKeep(budget: number): void {
     const details = this.details;
@@ -914,6 +1019,17 @@ export class ShipMesh implements ShipVisual {
     // nothing, which is what starved the detail layer that carries the
     // outline; and hiding them at LOD2 deleted a mass the module's own ladder
     // had already decided to keep.
+    //
+    // AND THE DRIVE IS NOT HELD BACK A RUNG. Its own ladder does cull a whole
+    // family — LOD0 draws three nozzles and thirty fixtures, LOD1 draws the
+    // nozzles and none of the fixtures, 5,067 triangles gone in one step — and
+    // that reads like the mass `ship-lod1` forbids losing. It is not: with the
+    // drive's instance sizing replayed off `iSize` and rasterised alongside
+    // the hull, holding it at rung 0 through rung 1 moved LOD0-vs-LOD1 outline
+    // XOR from 2.27 % to 2.32 % on the fleet and from 4.18 % to 6.94 % at
+    // worst, because the fixtures sit INSIDE the hull's own outline and the
+    // 4,133 greeble triangles the budget takes back to pay for them do not.
+    // The drive follows the hull's rung. Measured, not assumed.
     this.propulsion.setLod(level);
     if (level >= IMPOSTOR_LEVEL && this.lastView) this.orientImpostor(this.lastView);
 
@@ -1034,20 +1150,26 @@ function trimmed(s: InstancedScatter, count: number): InstancedScatter {
 }
 
 /**
- * The six axis-aligned supports of everything the detail layer placed, as the
- * *tips* of the fittings rather than their mounting points: +x, +y, +z, −x,
- * −y, −z. A fitting is only an extreme if the end that sticks out is.
+ * The support of everything the detail layer placed, in each of `dirs`, taken
+ * at the *tips* of the fittings rather than at their mounting points — a
+ * fitting is only an extreme if the end that sticks out is.
  *
- * `owner` is filled alongside them with the family and instance that holds
- * each one — 12 integers, six (family, instance) pairs. Those six fittings,
- * and only those six, are what the ship's drawn length, beam and height are
- * made of, so they are the set `detailKeep` refuses to spend.
+ * `owner` is filled alongside with the family and instance that holds each
+ * one, two integers per direction. Those fittings, and only those, are what
+ * the ship's drawn length, beam and height are made of, which is why
+ * `detailKeep` buys them before it buys anything else.
+ *
+ * Called once per tier — see `EXTENT_DIRS` and `RIM_DIRS` — because the answer
+ * depends on how finely the sphere is sampled and the two tiers sample it very
+ * differently on purpose.
  */
 function measureExtremes(
   scatters: readonly InstancedScatter[],
+  dirs: Float32Array,
   out: Float32Array,
   owner: Int32Array,
 ): void {
+  const count = out.length;
   out.fill(-Infinity);
   owner.fill(-1);
   for (let f = 0; f < scatters.length; f++) {
@@ -1060,9 +1182,8 @@ function measureExtremes(
       const tx = s.matrices[o + 12]! + s.matrices[o + 4]!;
       const ty = s.matrices[o + 13]! + s.matrices[o + 5]!;
       const tz = s.matrices[o + 14]! + s.matrices[o + 6]!;
-      for (let d = 0; d < EXTREME_DIR_COUNT; d++) {
-        const p =
-          tx * EXTREME_DIRS[d * 3]! + ty * EXTREME_DIRS[d * 3 + 1]! + tz * EXTREME_DIRS[d * 3 + 2]!;
+      for (let d = 0; d < count; d++) {
+        const p = tx * dirs[d * 3]! + ty * dirs[d * 3 + 1]! + tz * dirs[d * 3 + 2]!;
         if (p > out[d]!) {
           out[d] = p;
           owner[d * 2] = f;
@@ -1099,12 +1220,16 @@ function measureExtremes(
  * hardware pointing into a gap is discounted and hardware on the outer skin is
  * not; the result is divided by the triangles it costs, which makes the
  * greedy in `detailKeep` a real value-density knapsack; and finally anything
- * standing at one of the ship's six extremes is lifted clear of the ranking
- * altogether, because losing an extreme is losing a shape and not losing a
+ * standing at one of the ship's supports is lifted clear of the ranking
+ * altogether, because losing a support is losing a shape and not losing a
  * detail.
  *
- * @param box    cx, cy, cz, hx, hy, hz — the blueprint's declared bounds.
- * @param band   how close to an extreme still counts as owning it, km.
+ * @param box       cx, cy, cz, hx, hy, hz — the blueprint's declared bounds.
+ * @param extremes  the gross-extent supports, one per `EXTENT_DIRS`.
+ * @param owner     which (family, instance) holds each of them.
+ * @param rim       the rim supports, one per `RIM_DIRS`.
+ * @param rimOwner  which (family, instance) holds each of those.
+ * @param band      how close to an extreme still counts as owning it, km.
  */
 function rankDetail(
   s: InstancedScatter,
@@ -1113,6 +1238,8 @@ function rankDetail(
   box: Float32Array,
   extremes: Float32Array,
   owner: Int32Array,
+  rim: Float32Array,
+  rimOwner: Int32Array,
   band: number,
   hullLengthKm: number,
 ): { score: Float32Array; protect: number } {
@@ -1147,11 +1274,11 @@ function rankDetail(
     // footprint.
     const value =
       sy * (Math.max(sx, sz) * 0.75 + sy * 0.25) * (0.12 + 0.88 * exposure * exposure);
-    // Does it own one of the ship's six extremes?
+    // Is it standing at one of the ship's fourteen gross extremes?
     let edge = 0;
-    for (let d = 0; d < EXTREME_DIR_COUNT; d++) {
+    for (let d = 0; d < EXTENT_DIR_COUNT; d++) {
       const p =
-        tx * EXTREME_DIRS[d * 3]! + ty * EXTREME_DIRS[d * 3 + 1]! + tz * EXTREME_DIRS[d * 3 + 2]!;
+        tx * EXTENT_DIRS[d * 3]! + ty * EXTENT_DIRS[d * 3 + 1]! + tz * EXTENT_DIRS[d * 3 + 2]!;
       const near = 1 - (extremes[d]! - p) * inv;
       if (near > edge) edge = near;
     }
@@ -1161,10 +1288,14 @@ function rankDetail(
     // ship. Everything merely *near* an extreme competes for budget like
     // everything else — it just competes well.
     let owned = 0;
-    for (let d = 0; d < EXTREME_DIR_COUNT; d++) {
+    for (let d = 0; d < EXTENT_DIR_COUNT; d++) {
       if (owner[d * 2] === family && owner[d * 2 + 1] === i) owned++;
     }
-    if (owned > 0) protect++;
+    let ownedRim = 0;
+    for (let d = 0; d < RIM_DIR_COUNT; d++) {
+      if (rimOwner[d * 2] === family && rimOwner[d * 2 + 1] === i) ownedRim++;
+    }
+    if (owned > 0 || ownedRim > 0) protect++;
     // Held instances are offset clear of every unheld score so the sort below
     // cannot interleave them, which is what keeps "held" a prefix and
     // therefore expressible as a count.
@@ -1175,12 +1306,19 @@ function rankDetail(
     // triangle on the ship and it is also four metres of ship; a hatch at the
     // same extreme is 36 triangles and thirty centimetres. When a rung can
     // only afford two held fittings it has to buy the metres, not the count.
-    // Both terms are below 1, so neither can reorder the one above it, and
-    // density remains the final tiebreak.
+    //
+    // Dividing by the tier's direction count is what keeps each tier's whole
+    // ordering inside one unit of `PROTECT_RANK`, so an extent owner outranks
+    // every rim owner outright and a rim owner outranks the whole unheld
+    // field — a rung spends on the ship's overall shape first, its rim second
+    // and ordinary detail last, however little of the three it can afford.
+    // Density stays the final tiebreak in every tier.
     score[i] =
       owned > 0
-        ? PROTECT_RANK + owned + Math.min(sy / hullLengthKm, 0.9) + density
-        : density;
+        ? 2 * PROTECT_RANK + (owned + Math.min(sy / hullLengthKm, 0.9)) / (EXTENT_DIR_COUNT + 1) + density
+        : ownedRim > 0
+          ? PROTECT_RANK + (ownedRim + Math.min(sy / hullLengthKm, 0.9)) / (RIM_DIR_COUNT + 1) + density
+          : density;
     order.push(i);
   }
   // Placement index breaks ties, so the ranking is byte-identical on every

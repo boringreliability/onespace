@@ -293,7 +293,29 @@ uniform vec3  uCamLocal;
 uniform vec3  uSunDir;
 uniform vec3  uSunColor;
 uniform vec3  uAtmosTint;
+// Two air strengths, because two different renderers own two different halves
+// of "atmosphere" and only one of them can be present.
+//
+//   uAtmos      — air the SURFACE owns and nothing else can supply. The sun's
+//                 reddening along the star->ground slant path, the softened
+//                 terminator, the blue skylight that keeps a cast shadow from
+//                 being a hole. All three are *illumination of the ground*;
+//                 Atmosphere.ts integrates camera->scene radiance and never
+//                 lights anything, so these have no double anywhere.
+//   uAtmosOuter — air seen AT or THROUGH, from outside the ground: the limb
+//                 ring, the Mie forward crescent, the sunset band, aerial
+//                 perspective. Every one of these is exactly what the
+//                 scattering shell marches and composites, so when a shell is
+//                 attached this is set to zero by setAtmosphereShell() and the
+//                 shell is the only thing drawing them. Left equal to uAtmos on
+//                 a planet with no shell — a low tier that skips the shell, or
+//                 the review fixtures — where the cheap path is all there is.
+//
+// Rendering both at once is what blew the day side of review/final/
+// planet-orbit.png out to flat white: the limb ring and the haze were being
+// integrated twice over the same column of air.
 uniform float uAtmos;
+uniform float uAtmosOuter;
 uniform float uNightLights;
 uniform float uRoughness;
 uniform float uPolarLat;
@@ -604,49 +626,64 @@ void main() {
   }
 
   // --- the air, seen from outside ------------------------------------------
-  // The limb ring: the silver lining that tells the frame where the star is.
-  //
-  // This existed before at exponent 3.5 and strength 0.11, which is why the
-  // last review found "a razor-hard 1px edge against black with zero atmosphere
-  // glow" on every limb in the set. Both numbers were wrong for a physical
-  // reason. A shell one seven-hundredth of the planet's radius deep presents a
-  // slant path ~sqrt(2R/H) ~ 40x its own depth at grazing incidence, so it is a
-  // *ring* tens of pixels wide, not a line; pow(.,2.0) puts half the term
-  // inside the outer 10% of the disc radius, which is where that path actually
-  // is. And a ring that scatters a tenth of the key light is invisible next to
-  // ground lit by all of it — 0.5 puts the sunward edge just over 1.0, i.e. in
-  // the bloom, which is what "light has presence" means in §6.
-  float grz  = 1.0 - clamp(dot(up, V), 0.0, 1.0);
-  float limb = grz * grz;
-  // Blue looking down through it, sodium-orange along the terminator: the same
-  // slant-path filter as sun, seen edge-on.
-  vec3  air  = mix(uAtmosTint.bgr, uAtmosTint, smoothstep(0.35, -0.05, ndlGeo));
-  col += air * uSunColor * limb * uAtmos * 0.50 * above * smoothstep(-0.30, 0.45, ndlGeo);
+  // THIS BLOCK AND THE AERIAL PERSPECTIVE BELOW ARE THE CHEAP STAND-IN FOR
+  // Atmosphere.ts, AND THEY RUN ONLY WHEN NO SHELL IS ATTACHED. See uAtmosOuter
+  // at the top of this shader. The branch is coherent across the whole draw —
+  // uAtmosOuter is a per-planet constant — so on a world that does carry a
+  // scattering shell this is not merely neutralised arithmetic, it is skipped.
+  if (uAtmosOuter > 0.002) {
+    // The limb ring: the silver lining that tells the frame where the star is.
+    //
+    // This existed before at exponent 3.5 and strength 0.11, which is why the
+    // last review found "a razor-hard 1px edge against black with zero
+    // atmosphere glow" on every limb in the set. Both numbers were wrong for a
+    // physical reason. A shell one seven-hundredth of the planet's radius deep
+    // presents a slant path ~sqrt(2R/H) ~ 40x its own depth at grazing
+    // incidence, so it is a *ring* tens of pixels wide, not a line; pow(.,2.0)
+    // puts half the term inside the outer 10% of the disc radius, which is
+    // where that path actually is. And a ring that scatters a tenth of the key
+    // light is invisible next to ground lit by all of it — 0.5 puts the sunward
+    // edge just over 1.0, i.e. in the bloom, which is what "light has presence"
+    // means in §6.
+    float grz  = 1.0 - clamp(dot(up, V), 0.0, 1.0);
+    float limb = grz * grz;
+    // Blue looking down through it, sodium-orange along the terminator: the
+    // same slant-path filter as sun, seen edge-on.
+    vec3  air  = mix(uAtmosTint.bgr, uAtmosTint, smoothstep(0.35, -0.05, ndlGeo));
+    col += air * uSunColor * limb * uAtmosOuter * 0.50 * above * smoothstep(-0.30, 0.45, ndlGeo);
 
-  // Mie forward lobe. When the star is behind the body from the camera's point
-  // of view the whole sunward limb lights up in a hard, bright crescent — the
-  // one lens-flare-grade highlight this module can honestly produce. Separate
-  // from the ring above because it is a *phase function*, not a path length.
-  float fwd = max(dot(-V, uSunDir), 0.0);
-  fwd = fwd * fwd; fwd = fwd * fwd; fwd = fwd * fwd;   // ^8, no pow() call
-  col += uSunColor * uAtmosTint * limb * uAtmos * fwd * above * 1.60;
+    // Mie forward lobe. When the star is behind the body from the camera's
+    // point of view the whole sunward limb lights up in a hard, bright crescent
+    // — the one lens-flare-grade highlight this module can honestly produce.
+    // Separate from the ring above because it is a *phase function*, not a path
+    // length.
+    float fwd = max(dot(-V, uSunDir), 0.0);
+    fwd = fwd * fwd; fwd = fwd * fwd; fwd = fwd * fwd;   // ^8, no pow() call
+    col += uSunColor * uAtmosTint * limb * uAtmosOuter * fwd * above * 1.60;
 
-  // Sunset band. This is where the terminator width went. A planet with enough
-  // air to soften the shadow edge has, by exactly the same optical depth, a
-  // band of reddened forward scattering a few degrees wide along that edge —
-  // so the softness reads as a sodium-orange ring (one of §6's two rationed
-  // hues) instead of grey mush. Driven by the geometric ndl so surface relief
-  // cannot stipple it.
-  col += uAtmosTint * uSunColor * uAtmos * 0.55 * mix(0.25, 1.0, above)
-       * exp(-(ndlGeo / 0.055) * (ndlGeo / 0.055))
-       * (0.35 + 0.65 * limb);
+    // Sunset band. This is where the terminator width went. A planet with
+    // enough air to soften the shadow edge has, by exactly the same optical
+    // depth, a band of reddened forward scattering a few degrees wide along
+    // that edge — so the softness reads as a sodium-orange ring (one of §6's
+    // two rationed hues) instead of grey mush. Driven by the geometric ndl so
+    // surface relief cannot stipple it.
+    //
+    // The terminator SOFTENING itself stays outside this branch (see 'soft'):
+    // that is the ground's own shading, which the shell never touches. Only the
+    // glow that stands in front of it is the shell's to draw.
+    col += uAtmosTint * uSunColor * uAtmosOuter * 0.55 * mix(0.25, 1.0, above)
+         * exp(-(ndlGeo / 0.055) * (ndlGeo / 0.055))
+         * (0.35 + 0.65 * limb);
+  }
 
   // --- aerial perspective -------------------------------------------------
-  // PLACEHOLDER, the same as the limb term above: Atmosphere.ts owns
-  // scattering properly and should take both of these over when it lands.
-  // But without *some* depth cue a low pass renders a ridge 300 km away at
-  // exactly the contrast of one 3 km away, and the frame reads as a flat matte
-  // painting — there is no air in front of the far mountains.
+  // The cheap stand-in for the shell's extinction + inscatter composite, and it
+  // is gated the same way. Without a shell there is no other depth cue at all:
+  // a low pass renders a ridge 300 km away at exactly the contrast of one 3 km
+  // away, and the frame reads as a flat matte painting. With one, this is the
+  // same photons a second time — the shell clips every view ray to the analytic
+  // planet sphere whether or not it has been handed a depth texture, so it
+  // already carries the horizon-distance gradient this term exists to fake.
   //
   // Scale: Rayleigh at ~0.013/km times the ~6% relative density found 24 km up
   // is about 8e-4 per km. The coefficient here lands near 1.2e-3 — deliberately
@@ -656,8 +693,20 @@ void main() {
   // depth on a 2000 km moon and a 12000 km world, whose horizons sit at very
   // different ranges. It also buys the frame its second hue: cool haze in front
   // of warm rock is exactly the two-colour contrast §6 asks for.
-  if (uAtmos > 0.01) {
-    float haze  = 1.0 - exp(-vDist * uAtmos * 14.0 / max(uRadius, 1.0));
+  //
+  // It is also fenced against the LIMB terms above by 'above', which this file
+  // computes for that purpose and — until now — never spent. The note beside it
+  // says it plainly: outside the shell the air is a ring you look *at*, inside
+  // it is haze you look *through*, and running both at once double-counts the
+  // same photons. The ring was gated and the haze was not, so from orbit vDist
+  // is several planet radii of pure vacuum, the exponential saturates at 1.0,
+  // and mix(col, ins, 0.80) repaints four fifths of the lit disc in flat
+  // inscatter colour. That is the blown-out white day side in
+  // review/final/planet-orbit.png, and it is present with or without a shell —
+  // a separate fault from the double-count, in the same three lines.
+  float inAir = 1.0 - above;
+  if (uAtmosOuter > 0.01 && inAir > 0.002) {
+    float haze  = (1.0 - exp(-vDist * uAtmosOuter * 14.0 / max(uRadius, 1.0))) * inAir;
     // Warm looking into the star, cold looking away: the same slant-path
     // filter that reddens the terminator, seen end-on.
     float toSun = clamp(dot(-V, uSunDir), 0.0, 1.0);
@@ -743,7 +792,11 @@ uniform vec3  uCamLocal;
 uniform vec3  uSunDir;
 uniform vec3  uSunColor;
 uniform vec3  uAtmosTint;
+// See surfaceFragmentShader for the split. uAtmos lights the water (sun
+// reddening, terminator width, the sky it mirrors); uAtmosOuter draws the air
+// in front of it and is zeroed when Atmosphere.ts is drawing that air instead.
 uniform float uAtmos;
+uniform float uAtmosOuter;
 uniform vec3  uShallow;
 uniform vec3  uDeep;
 uniform vec3  uEmissive;
@@ -851,21 +904,23 @@ void main() {
   float night = 1.0 - shade;
   col += body * uSunColor * 0.004 * night;
 
-  // The same limb ring and sunset band the land carries. Without them the ring
-  // is present over continents and absent over sea, which on an ocean world is
-  // a dotted limb — and the sea is most of the disc, so this is where most of
-  // the silver lining actually lives. See surfaceFragmentShader for the
-  // derivation of the exponents and levels.
-  float grz  = 1.0 - clamp(dot(d, V), 0.0, 1.0);
-  float limb = grz * grz;
-  vec3  air  = mix(uAtmosTint.bgr, uAtmosTint, smoothstep(0.35, -0.05, ndlGeo));
-  col += air * uSunColor * limb * uAtmos * 0.50 * above * smoothstep(-0.30, 0.45, ndlGeo);
-  float fwd = max(dot(-V, uSunDir), 0.0);
-  fwd = fwd * fwd; fwd = fwd * fwd; fwd = fwd * fwd;
-  col += uSunColor * uAtmosTint * limb * uAtmos * fwd * above * 1.60;
-  col += uAtmosTint * uSunColor * uAtmos * 0.55 * mix(0.25, 1.0, above)
-       * exp(-(ndlGeo / 0.055) * (ndlGeo / 0.055))
-       * (0.35 + 0.65 * limb);
+  // The same limb ring and sunset band the land carries, and it has to switch
+  // off on exactly the same condition — the shell covers the whole disc, so a
+  // sea that kept its cheap ring while the land dropped its own would put a
+  // brighter rim over every ocean and a dotted limb round the coastlines.
+  // See surfaceFragmentShader for the derivation of the exponents and levels.
+  if (uAtmosOuter > 0.002) {
+    float grz  = 1.0 - clamp(dot(d, V), 0.0, 1.0);
+    float limb = grz * grz;
+    vec3  air  = mix(uAtmosTint.bgr, uAtmosTint, smoothstep(0.35, -0.05, ndlGeo));
+    col += air * uSunColor * limb * uAtmosOuter * 0.50 * above * smoothstep(-0.30, 0.45, ndlGeo);
+    float fwd = max(dot(-V, uSunDir), 0.0);
+    fwd = fwd * fwd; fwd = fwd * fwd; fwd = fwd * fwd;
+    col += uSunColor * uAtmosTint * limb * uAtmosOuter * fwd * above * 1.60;
+    col += uAtmosTint * uSunColor * uAtmosOuter * 0.55 * mix(0.25, 1.0, above)
+         * exp(-(ndlGeo / 0.055) * (ndlGeo / 0.055))
+         * (0.35 + 0.65 * limb);
+  }
 
   // Feather the shoreline so the sphere never shows a hard analytic edge.
   //
@@ -1294,6 +1349,8 @@ export class PlanetRenderer {
   private readonly amplitude: number;
   private readonly seaLevel: number;
   private readonly isGasGiant: boolean;
+  /** uAtmos as derived from the spec — the value uAtmosOuter returns to. */
+  private atmosStrength = 0;
 
   // --- LOD configuration ---------------------------------------------------
   private readonly res: number;
@@ -1428,6 +1485,13 @@ export class PlanetRenderer {
     u.uSunColor = { value: new Color(1, 0.97, 0.92) };
     u.uAtmosTint = { value: tint };
     u.uAtmos = { value: atmos };
+    this.atmosStrength = atmos;
+    // Starts equal to uAtmos: a planet is responsible for its own air until
+    // something tells it otherwise. setAtmosphereShell(true) is what tells it.
+    // Defaulting the other way would strip the limb off every world the
+    // integrator forgot to wire, which is a silent, invisible failure; this way
+    // the worst case is the double-count we already have.
+    u.uAtmosOuter = { value: atmos };
     u.uNightLights = { value: clamp01((s.interest - 0.5) / 0.5) };
     u.uRoughness = { value: rough };
     u.uPolarLat = { value: polarLat };
@@ -1938,6 +2002,38 @@ export class PlanetRenderer {
   // -------------------------------------------------------------------------
   // Public queries
   // -------------------------------------------------------------------------
+
+  /**
+   * Tell the surface whether an `AtmosphereRenderer` is drawing this planet's
+   * air. Call it once, right after attaching (or detaching) the shell.
+   *
+   * The surface shader carries a cheap analytic atmosphere: a limb ring, a Mie
+   * forward crescent, a sunset band and a distance haze. Those are the same
+   * four things the scattering shell marches and composites, so with both
+   * present every one of them is integrated twice over the same column of air —
+   * which is why the day side of `review/final/planet-orbit.png` reads as
+   * blown-out flat white and the limb as a wide milky band rather than a rim.
+   *
+   * This is a switch and not a deletion because the cheap path is still the
+   * only path in three cases: a planet whose renderer is built without a shell
+   * (the review fixtures in this file, `game/registry.ts`'s gallery), a quality
+   * tier that decides a scattering march is not affordable, and any future
+   * distance LOD that drops the shell before it drops the planet. In all three
+   * the terms are the difference between air and a hard-edged ball.
+   *
+   * What it does NOT switch off, because the shell cannot supply it: everything
+   * that *lights the ground*. `AtmosphereRenderer` integrates radiance along
+   * the camera ray and composites it over the frame; it never contributes to
+   * the surface's own shading. So the reddening of the key light along the
+   * star-to-ground slant path, the atmospheric widening of the terminator, the
+   * blue skylight that keeps a cast shadow from being a hole, and the sky
+   * colour the ocean mirrors all stay on and stay driven by `uAtmos`.
+   */
+  setAtmosphereShell(present: boolean): void {
+    const u = this.uniforms.uAtmosOuter;
+    if (!u) return;
+    u.value = present ? 0 : this.atmosStrength;
+  }
 
   /**
    * Elevation in kilometres, signed about sea level, at a unit direction in
