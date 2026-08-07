@@ -1830,7 +1830,7 @@ function station(
   halfWidth: number,
   halfHeight: number,
   s: SectionScalars,
-  opts?: { readonly offset?: Vec2; readonly isFrame?: boolean; readonly hardEdge?: boolean; readonly exponent?: number },
+  opts?: { readonly offset?: Vec2; readonly isFrame?: boolean; readonly hardEdge?: boolean; readonly exponent?: number; readonly twist?: number },
 ): VolumeStation {
   return {
     t,
@@ -1841,7 +1841,7 @@ function station(
     halfWidth: Math.max(1e-6, halfWidth),
     halfHeight: Math.max(1e-6, halfHeight),
     offset: opts?.offset ?? [0, 0],
-    twist: 0,
+    twist: opts?.twist ?? 0,
     isFrame: opts?.isFrame ?? false,
     hardEdge: opts?.hardEdge ?? false,
   };
@@ -2179,6 +2179,18 @@ function sweptVolume(ctx: Ctx, rng: Rng, a: SweptArgs): PrimaryVolume {
   const profY = a.profileY ?? prof;
   const frameEvery = a.frameEvery ?? 2;
 
+  // A twist along the run, rationed like colour.
+  //
+  // The parameter existed from the start but was inert — volumeSurfacePoint
+  // rotated theta before the anisotropic scale, which only re-parameterises
+  // the same outline — so this was pinned to zero. With the contract fixed it
+  // is the cheapest source of a silhouette you have not seen before: a hull
+  // whose section rolls along its length reads as forged rather than extruded.
+  // Most hulls still get none; a quarter of load-bearing volumes get a little.
+  // Closed arcs are excluded — a twisted ring is a mistake, not a design.
+  const twistTotal =
+    a.arc || !rng.chance(0.25) ? 0 : rng.range(-0.42, 0.42);
+
   const stations: VolumeStation[] = [];
   for (let i = 0; i < n; i++) {
     const t = i / (n - 1);
@@ -2186,6 +2198,8 @@ function sweptVolume(ctx: Ctx, rng: Rng, a: SweptArgs): PrimaryVolume {
       offset: a.offsetFn ? a.offsetFn(t) : [0, 0],
       isFrame: i % frameEvery === 0,
       hardEdge: (i === 0 && a.hardStart === true) || false,
+      // Eased rather than linear: a constant rate looks like a screw thread.
+      twist: twistTotal * (t * t * (3 - 2 * t)),
     }));
   }
   // A closed arc must end where it began or the ring shows a seam.

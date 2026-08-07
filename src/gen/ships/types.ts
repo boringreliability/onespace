@@ -2176,9 +2176,19 @@ export function volumeSurfacePoint(
   frame: MutFrame = newMutFrame(),
 ): MutVec3 {
   sampleStation(v.stations, t, sample);
-  sectionPoint(v.shape, sample, theta - sample.twist, _p2);
-  const lx = sample.offsetX + _p2[0] * sample.halfWidth;
-  const ly = sample.offsetY + _p2[1] * sample.halfHeight;
+  // Twist rotates the SECTION, and a section is only a shape once it has been
+  // scaled. Rotating theta before sampling — sectionPoint(..., theta - twist)
+  // — merely re-parameterises the same outline: on an 8 x 2 m box section a
+  // quarter turn left max-y at 1.000 m where a real twist gives 3.536. The
+  // whole axis was therefore inert, and blueprint.ts pinned twist to 0 to work
+  // around it. Scale first, then rotate about the station centre.
+  sectionPoint(v.shape, sample, theta, _p2);
+  const px = _p2[0] * sample.halfWidth;
+  const py = _p2[1] * sample.halfHeight;
+  const ct = Math.cos(sample.twist);
+  const st = Math.sin(sample.twist);
+  const lx = sample.offsetX + px * ct - py * st;
+  const ly = sample.offsetY + px * st + py * ct;
   volumePathFrame(v, t, frame);
   const right = frameRight(frame, _r);
   out[0] = frame.origin[0] + right[0] * lx + frame.up[0] * ly;
