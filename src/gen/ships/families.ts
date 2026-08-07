@@ -31,6 +31,12 @@
  *      area is length × girth, and they refuse external fins, so their
  *      length/beam ratio has a *thermal* lower bound. A designer cannot make a
  *      stubby Sillane; the physics of their own design language forbids it.
+ *      That bound is `proportion.slendernessBand`, it is enforced by
+ *      `lengthBeamFor` after every other influence has had its say, and its
+ *      floor rises with the acceleration the role demands — because the hull is
+ *      long in order to shed heat, and more thrust is more heat. Sillane's floor
+ *      is above Kessler's ceiling with no overlap, which is what makes the
+ *      signature visible on ONE hull rather than in a histogram of a hundred.
  *
  *   2. Kessler engines stand off the hull on a visible thrust frame because a
  *      Kessler crew must be able to change one in the field with a gantry. That
@@ -123,9 +129,16 @@ export function sampleRange(r: Range, rng: Rng): number {
  *
  * Where the bands overlap, the overlap is the answer. Where they do not, the
  * ROLE wins and the faction is pulled to the nearest edge of the role's band:
- * function decides form (BRIEF §4), so a Sillane freighter is a stubby Sillane
- * before it is a freighter that cannot carry anything. The result is always
- * non-empty, which matters because the generator has no fallback path.
+ * function decides form (BRIEF §4), so a Sillane freighter carries its mass
+ * where a freighter must carry it before it carries it where Sillane like to.
+ * The result is always non-empty, which matters because the generator has no
+ * fallback path.
+ *
+ * NOT used for slenderness. That was the mistake this rule made everywhere it
+ * was applied to `lengthBeam`: where a role's mass centroid and a faction's are
+ * two opinions about the same quantity, a role's L/B band and a faction's are
+ * not — one is a preference and the other is a thermal and structural limit, and
+ * averaging a limit with a preference deletes the limit. See `lengthBeamFor`.
  */
 export function intersectRange(role: Range, faction: Range): Range {
   const lo = Math.max(role[0], faction[0]);
@@ -313,8 +326,27 @@ export interface ConstructionDna {
 
 /** Proportion rules — the part of identity that survives at impostor range. */
 export interface ProportionDna {
-  /** Overall length ÷ overall beam. The single strongest silhouette number. */
-  readonly lengthBeam: Range;
+  /**
+   * Overall length ÷ overall beam, as an ABSOLUTE and BINDING band.
+   *
+   * This is the single strongest silhouette number and it used to be the
+   * weakest field in the file. It was intersected with the role's band (role
+   * winning on disagreement), then scaled by the hull line's bias, then scaled
+   * again by the generator's archetype modifier — three multiplications, each
+   * defensible, which together turned "a Sillane cannot be stubby" into a 14%
+   * nudge on a mean while the three factions' distributions sat on top of one
+   * another. A signature you need a histogram to see is not a signature.
+   *
+   * So the contract changed. A role's `lengthBeam` band is read as a *relative*
+   * demand — where this role sits between the bluntest and the finest thing
+   * anyone builds — and that position is projected onto this band, which no
+   * role, family bias or archetype may leave. See `lengthBeamFor`.
+   *
+   * The bands do not overlap between Kessler and Sillane and that is the point:
+   * slenderness is the one proportion each culture holds as policy, and a
+   * policy that a role can talk you out of was never a policy.
+   */
+  readonly slendernessBand: Range;
   /** Overall length ÷ overall height. */
   readonly lengthHeight: Range;
   /**
@@ -659,9 +691,19 @@ const KESSLER: FactionDna = {
   },
 
   proportion: {
-    // Blunt. A Kessler hull is a box that has been persuaded to have a front.
-    lengthBeam: [2.6, 5.2],
-    lengthHeight: [2.4, 4.4],
+    // Blunt, and now bindingly so. A Kessler hull is a box that has been
+    // persuaded to have a front: nothing they build is finer than 3.8, because
+    // a slender hull is a long unsupported span and Kessler sizes members from
+    // a load table that punishes exactly that. This band's ceiling sits below
+    // Sillane's floor by design — see `ProportionDna.slendernessBand`.
+    slendernessBand: [2.15, 3.8],
+    // Deliberately much larger than the slenderness band, which is the same
+    // statement in the other axis: L/H well above L/B means H < B, so a Kessler
+    // section is a WIDE FLAT SLAB rather than a tube. That is the read the
+    // welded-plate story demands — rolled plate wants big flat faces — and it
+    // is what separates a Kessler from a Sillane in outline at 100 px, where
+    // surface detail has long since disappeared.
+    lengthHeight: [3.0, 6.0],
     // Mass well aft: the reactor and the thrust frame are a solid block at the
     // tail and everything forward of the midships bulkhead is comparatively
     // empty. This is why a Kessler pitches slowly and looks like it is dragging.
@@ -687,15 +729,24 @@ const KESSLER: FactionDna = {
 
   surface: {
     curvature: 'faceted',
+    // Overwhelmingly polygon. The generator draws a section family PER VOLUME,
+    // so a 6:4 split does not mean "mostly boxy" — it means adjacent masses on
+    // the same hull disagree about what shape they are, which is the Ossuary
+    // read, not the Kessler one. A yard with one brake press and one roller
+    // builds every section the same way, so the weight is 9:1 and the odd
+    // superellipse is the pressure vessel they bought in.
     sectionFamilies: [
-      ['polygon', 6],
-      ['superellipse', 4],
+      ['polygon', 9],
+      ['superellipse', 1],
       ['twin-lobe', 0],
     ],
     // High exponents only: a Kessler superellipse is a box with the corners
     // taken off, never an ellipse.
     exponent: [4, 8],
-    polygonSides: [4, 6, 8],
+    // Four and six sides only. An octagon is a circle at any range where the
+    // silhouette is what you are reading, and the whole point of the faceted
+    // culture is that you can count its flats.
+    polygonSides: [4, 6],
     chamfer: [0.15, 0.45],
     ventralFlatten: [0.7, 0.88],
     // One or two chines, low frequency, running the full length as continuous
@@ -980,9 +1031,22 @@ const SILLANE: FactionDna = {
   },
 
   proportion: {
-    // The thermal floor. 5.5 is the shortest hull that can reject a plasma
-    // drive's heat through its own skin; below it the flanks glow.
-    lengthBeam: [5.5, 11.0],
+    // THE THERMAL FLOOR, and now a real one. 5.4 is the shortest hull that can
+    // reject a plasma drive's heat through its own skin at a working
+    // acceleration; below it the flanks glow. No role, no hull line and no
+    // archetype may go under it — that is the whole difference between a
+    // doctrine and a preference, and it is why this is `slendernessBand` and
+    // not a habit to be averaged with somebody else's opinion.
+    //
+    // The floor is not even constant: `slendernessBandFor` raises it with the
+    // role's design acceleration, because radiating area goes as L×B while the
+    // heat to reject goes as mass×accel ≈ L×B²×a. Cancel L×B and the beam has a
+    // hard ceiling of order 1/a — so a fast Sillane is not a stubby Sillane
+    // with a bigger drive, it is a longer one.
+    slendernessBand: [5.4, 9.5],
+    // Tracks the slenderness band closely, which makes H ≈ B: a Sillane section
+    // is round. Kessler's L/H is far above its L/B and Sillane's sits on top of
+    // its own, and that single difference is "slab" versus "spindle" in outline.
     lengthHeight: [5.0, 9.5],
     // Just forward of centre. A Sillane carries its payload amidships-forward
     // and trails a long, nearly empty tail, which is what produces the read of a
@@ -1011,15 +1075,28 @@ const SILLANE: FactionDna = {
 
   surface: {
     curvature: 'continuous',
+    // ONE family, at weight 1, and the other two at zero on purpose.
+    //
+    // This used to be 7 superellipse / 3 twin-lobe, and that was the single
+    // worst line in the file. The generator draws a family per volume, so three
+    // in ten Sillane masses came out as a twin lobe with a visible separation
+    // between them — a hull whose entire identity is "poured in one piece" was
+    // arriving as two parallel tubes with a valley down the middle, which is
+    // also exactly what an Ossuary hull looks like from the front. A monocoque
+    // culture cannot have a section vocabulary; it has a section.
+    //
+    // Twin-lobe now belongs to Ossuary alone, where two mismatched pressure
+    // hulls welded side by side is the true story rather than a contradiction.
     sectionFamilies: [
-      ['superellipse', 7],
-      ['twin-lobe', 3],
+      ['superellipse', 1],
+      ['twin-lobe', 0],
       ['polygon', 0],
     ],
-    // Low exponents: an ellipse or barely more. The opposite end of the same
-    // parameter family Kessler lives at, which is exactly why one family spans
-    // the fleet.
-    exponent: [2.0, 3.2],
+    // Low exponents, and a narrow band: an ellipse or barely more. Narrow
+    // matters as much as low, because the exponent is drawn per volume too — a
+    // band of [2, 3.2] lets one mass be an ellipse and the next a rounded box,
+    // and the step between them reads as a joint. There are no joints.
+    exponent: [2.0, 2.7],
     polygonSides: [],
     chamfer: [0.6, 1.0],
     ventralFlatten: [0.9, 1.0],
@@ -1189,10 +1266,15 @@ const SILLANE: FactionDna = {
       id: 'sillane/carapace',
       name: 'Carapace',
       roles: ['freighter', 'tanker', 'liner', 'carrier', 'colony'],
+      // Was described as a twin-lobe body, which contradicted the culture and
+      // in practice arrived as two parallel tubes. The volume it needs comes
+      // from girth inside one fairing, not from a second lobe: a Carapace is a
+      // Needle that has swallowed something, with a moulded waist amidships and
+      // still no seam anywhere on it.
       signature:
-        'A twin-lobe body — two fused pressure hulls under one continuous skin, with a waist you can see from head-on and nowhere else.',
+        'One continuous fairing swollen amidships and drawn out again aft, with a moulded waist rather than a joint; the fattest thing Sillane build and still finer than anything Kessler do.',
       lengthBeamBias: 0.78,
-      sectionFamily: 'twin-lobe',
+      sectionFamily: 'superellipse',
       noseCap: 'dome',
       accentOverride: null,
     },
@@ -1308,7 +1390,16 @@ const OSSUARY: FactionDna = {
   },
 
   proportion: {
-    lengthBeam: [2.2, 4.6],
+    // The widest slenderness band in the fleet, and the only one that is wide
+    // because the culture has NO POLICY rather than because the number was
+    // hedged. Ossuary keels come off other people's ships; whatever the donor
+    // was, that is what this hull is. The band therefore straddles both of the
+    // other two and overlapping them is correct — the Ossuary read is never
+    // "the long one" or "the short one", it is "you cannot tell what it was".
+    slendernessBand: [1.8, 5.6],
+    // Far below the slenderness band, which is the inverse of Kessler: an
+    // Ossuary hull is TALLER than it is wide, because things got welded on top
+    // of the keel where there was room and nothing was ever faired back in.
     lengthHeight: [1.8, 3.6],
     // The widest band in the fleet, and deliberately so: the mass sits wherever
     // the found keel put it. This is the value the counterweight and the canted
@@ -1345,10 +1436,15 @@ const OSSUARY: FactionDna = {
     // All three families in play, and adjacent volumes are allowed to differ —
     // legal because `SectionShape` is per-volume, and the resulting welded
     // collar between a hexagon and a circle is the shape of this faction.
+    // Twin-lobe is now theirs alone, and its weight goes up accordingly: two
+    // pressure hulls welded side by side with a valley between them is a true
+    // Ossuary story (nobody poured that; somebody butted two donors together)
+    // and a false Sillane one. It is also the only place in the fleet where a
+    // head-on outline is two circles, so it is worth a third of the vocabulary.
     sectionFamilies: [
       ['polygon', 4],
       ['superellipse', 4],
-      ['twin-lobe', 2],
+      ['twin-lobe', 3],
     ],
     exponent: [2.2, 7.0],
     polygonSides: [3, 4, 6, 8],
@@ -3015,18 +3111,139 @@ export function factionsBuilding(role: ShipRole): readonly FactionDna[] {
 }
 
 /**
+ * The span every role's `lengthBeam` band is read against.
+ *
+ * Derived from the role table rather than written down, so adding a role or
+ * retuning one cannot silently put the scale out of date. It is the bluntest
+ * and the finest thing anybody in the fleet builds, and a role's own band is
+ * located inside it as a fraction — a freighter sits low, a courier sits high.
+ */
+const ROLE_FINENESS_SPAN: Range = (() => {
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const r of ROLES) {
+    if (r.lengthBeam[0] < lo) lo = r.lengthBeam[0];
+    if (r.lengthBeam[1] > hi) hi = r.lengthBeam[1];
+  }
+  return [lo, hi];
+})();
+
+/**
+ * The acceleration a skin-radiator hull is proportioned against, m/s².
+ *
+ * Half the player's own 200 (`DEFAULT_SHIP_CONFIG`) — a working hull rather than
+ * a fast one. Below this the culture's baseline floor already sheds the heat, so
+ * the term does nothing; above it the floor climbs.
+ */
+const SKIN_RADIATOR_REFERENCE_ACCEL_MS2 = 100;
+
+/**
+ * How hard the floor climbs with acceleration.
+ *
+ * The physics wants 1: radiating area goes as L·B, heat to reject as m·a ≈
+ * ρ·L·B²·a, so B ≤ k/a and L/B ≥ L·a/k — linear. Linear over the 30× spread of
+ * `accelMs2` across the role table would put a Sillane gunship at L/B 40, which
+ * is not a ship. A quarter power keeps the ORDER exactly right (every hotter
+ * role is forced longer than every cooler one) inside a band a hull can
+ * actually be built in, which is the honest version of a heroic engine.
+ */
+const SKIN_RADIATOR_SLENDERNESS_EXP = 0.25;
+
+/**
+ * Where `inner` sits inside `span`, as a 0..1 sub-range.
+ *
+ * This is the operation that turns a role's absolute L/B numbers into what they
+ * always actually meant: a *relative* demand. "A freighter is 3–6" is not a
+ * measurement of any real hull, it is the statement "a freighter is towards the
+ * blunt end of what gets built" — and read that way it composes with a faction's
+ * own absolute band instead of fighting it.
+ */
+function normaliseInto(inner: Range, span: Range): Range {
+  const w = span[1] - span[0];
+  if (w <= 1e-9) return [0, 1];
+  const c = (x: number): number => (x < 0 ? 0 : x > 1 ? 1 : x);
+  const a = c((inner[0] - span[0]) / w);
+  const b = c((inner[1] - span[0]) / w);
+  return a <= b ? [a, b] : [b, a];
+}
+
+/** Project a 0..1 sub-range onto a target band. */
+function projectRange(k: Range, target: Range): Range {
+  return [rangeAt(target, k[0]), rangeAt(target, k[1])];
+}
+
+/**
+ * Slide `inner` until it lies inside `hard`, keeping its WIDTH.
+ *
+ * A plain clamp collapses a band that falls outside onto a point, and a point
+ * means every seed of that (faction, role) comes out with the same proportion —
+ * trading one BRIEF §8 failure ("the faction's DNA is not recognisable") for the
+ * other ("different seeds are the same ship redressed"). Sliding keeps the
+ * variation the role and the hull line asked for and moves it somewhere legal.
+ */
+function slideIntoBand(inner: Range, hard: Range): Range {
+  const hw = hard[1] - hard[0];
+  if (hw <= 0) return [hard[0], hard[0]];
+  const w = Math.min(Math.max(inner[1] - inner[0], 0), hw);
+  let lo = inner[0];
+  if (lo < hard[0]) lo = hard[0];
+  if (lo + w > hard[1]) lo = hard[1] - w;
+  return [lo, lo + w];
+}
+
+/**
+ * The faction's binding slenderness band for one role.
+ *
+ * For every culture but one this is simply `proportion.slendernessBand`. For a
+ * culture whose radiator IS its skin, the floor is a function of the drive it
+ * is asked to carry, because that is what the doctrine actually says: the hull
+ * is long *in order to* reject its own heat, so a hull asked to reject more of
+ * it has to be longer. A Sillane gunship is not a stubby Sillane with a big
+ * drive; there is no such object.
+ *
+ * The rise is capped at three quarters of the band so a hot role still has room
+ * to vary — a floor that swallows the band would make every Sillane courier
+ * identical.
+ */
+export function slendernessBandFor(faction: FactionDna, role: RoleSpec): Range {
+  const hard = faction.proportion.slendernessBand;
+  if (faction.thermal.architecture !== 'skin') return hard;
+  const a = rangeMid(role.accelMs2);
+  if (!(a > SKIN_RADIATOR_REFERENCE_ACCEL_MS2)) return hard;
+  const rise = Math.pow(a / SKIN_RADIATOR_REFERENCE_ACCEL_MS2, SKIN_RADIATOR_SLENDERNESS_EXP);
+  const ceiling = hard[0] + 0.75 * (hard[1] - hard[0]);
+  const floor = Math.min(hard[0] * rise, ceiling);
+  return [floor, hard[1]];
+}
+
+/**
  * The length/beam band for a specific (faction, role, family).
  *
- * Three constraints meet here and the order matters: the role's requirement is
- * intersected with the faction's habit (role wins on disagreement, per
- * `intersectRange`), and the family's bias then scales the result — a bias is a
- * product line's emphasis, not a veto, so it is applied last and cannot pull the
- * hull back outside the role's requirement.
+ * Three constraints meet here and the order matters:
+ *
+ *   1. the FACTION states an absolute band it will not leave (`slendernessBand`),
+ *      raised at the floor by the role's drive heat where the skin is the
+ *      radiator;
+ *   2. the ROLE states where inside the fleet's whole range of fineness it
+ *      belongs, and that *relative* position is projected onto the faction's
+ *      band — so a freighter is the blunt end of whatever this yard builds and a
+ *      courier is the fine end of it, in every yard;
+ *   3. the FAMILY biases the result, and is then slid back inside the band,
+ *      because a hull line is a product decision and the band is a physical one.
+ *
+ * This replaces an intersection in which the role won. That version was correct
+ * about function deciding form and wrong about which of the two numbers was a
+ * *fact*: a role's L/B band is an opinion about proportion, a faction's is a
+ * consequence of how it sheds heat and how it sizes structure. Under the old
+ * rule Sillane's declared 5.5–11.0 came out as 4.3–4.7 for a freighter and then
+ * got multiplied down to 3.4 by the generator's archetype modifier, landing on
+ * top of Kessler. Function still decides form — it decides it *within* the band.
  */
 export function lengthBeamFor(faction: FactionDna, role: RoleSpec, family: HullFamily): Range {
-  const base = intersectRange(role.lengthBeam, faction.proportion.lengthBeam);
-  const biased: Range = [base[0] * family.lengthBeamBias, base[1] * family.lengthBeamBias];
-  return intersectRange(role.lengthBeam, biased);
+  const hard = slendernessBandFor(faction, role);
+  const placed = projectRange(normaliseInto(role.lengthBeam, ROLE_FINENESS_SPAN), hard);
+  const biased: Range = [placed[0] * family.lengthBeamBias, placed[1] * family.lengthBeamBias];
+  return slideIntoBand(biased, hard);
 }
 
 /** Where the dry centre of mass sits along the hull, role ∩ faction. */

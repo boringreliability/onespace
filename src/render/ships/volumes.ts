@@ -129,6 +129,79 @@ const PLATES_PER_BAND = 3;
 const MAX_ROWS = 128;
 const MAX_COLS = 64;
 
+/**
+ * The smallest primary volume that is still drawn, as a fraction of the hull.
+ *
+ * NOT a fraction of `LodLevel.minFeatureKm`, and that is the whole point.
+ * `minFeatureKm` is a *detail* threshold — it grows 80× between LOD0 and LOD3
+ * — and applying it to a primary volume deletes masses: on a 131 m hero hull
+ * LOD2's 6.55 m threshold removed all ten engine nacelles at once, and LOD3's
+ * 19.65 m went on to remove the radiators, the forebody and the afterbody.
+ * BRIEF §4 stage 3 says the primary volumes ARE the
+ * silhouette and the LOD1 brief says a mass may never disappear, so above LOD0
+ * the floor is a constant fraction of the hull and therefore identical at every
+ * level: whatever is drawn at LOD1 is still drawn at the impostor rung.
+ *
+ * 0.8 % of a 131 m hull is 1.05 m — under two pixels at the distance where
+ * even LOD1 is in use, and above LOD0's own 0.24 m threshold, so the only
+ * things that can vanish on the LOD0→LOD1 swap are the sub-metre fittings that
+ * the LOD1 brief explicitly allows to go.
+ */
+const VOLUME_FLOOR_FRACTION = 0.008;
+
+/**
+ * How much of `LodLevel.triangleBudget` the hull *surface* may spend.
+ *
+ * Nothing in this module used to read the budget at all: rows came from the
+ * panel rhythm and columns from `sectionSegments`, and the only ceiling was
+ * `MAX_ROWS × MAX_COLS`, which on an eighteen-volume hull is 300 k triangles
+ * of skin before a single fitting is placed. Measured spend is far below that
+ * (8 k–54 k at LOD0 across a 30-hull sweep), so this is a guard rail rather
+ * than a throttle — but a guard rail that is *stated* is the difference
+ * between a budget and a hope.
+ *
+ * The share is derived from the level's own `greebleFraction` because that is
+ * the blueprint saying how much of the level belongs to detail: at LOD2, where
+ * no greeble is placed, the surface is the whole ship and may have nearly all
+ * of it; at LOD0 detail is the majority of the frame's triangles and the skin
+ * takes half.
+ */
+function surfaceBudgetShare(lod: LodLevel): number {
+  return clamp(1 - lod.greebleFraction * 0.5, 0.35, 0.9);
+}
+
+/**
+ * BRIEF §6's triangle caps, per rung, as a number this file can act on.
+ *
+ * The blueprint's own `LodLevel.triangleBudget` is `120000 · sizeK` with
+ * `sizeK` running to 1.6, so a heavy hull is handed a 192 k licence for a
+ * level the brief caps at 120 k, and 4,800 for a level it caps at 3 k. The
+ * brief is the contract and the ladder is advice, so the allocator takes
+ * whichever is *smaller*: a blueprint may ask for less than the brief allows
+ * and never for more.
+ */
+const BRIEF_TRIANGLE_CAP = [120000, 25000, 3000, 700] as const;
+
+/** No volume is ground below this, or a hull with many small parts vanishes. */
+const MIN_VOLUME_TRIANGLES = 64;
+
+/**
+ * How far towards tangency `columnCompensation` actually moves the section.
+ *
+ * A polygon inscribed in a curve is short everywhere; a polygon tangent to it
+ * is long everywhere. Neither is what a silhouette wants — the quantity being
+ * minimised is the symmetric difference between the coarse outline and the
+ * fine one, and that is smallest when the error changes sign around the
+ * section instead of pointing one way.
+ *
+ * Measured over six hulls by rasterising the outline from one fixed camera at
+ * all four levels: at 0 the worst LOD2 projected area is 7.5 % under LOD0's,
+ * at 1 it is 2.7 % over, and at 0.6 it is 4.6 % — and on the hero hull, which
+ * is what the review captures, 0.6 is the best of the three on *both* counts
+ * at once (LOD2 area 1.004 of LOD0, outline XOR 1.15 %).
+ */
+const COMP_BLEND = 0.6;
+
 /** Skin thickness, for wound floors and shroud walls. A plate is a plate. */
 const SKIN_KM = HATCH_WIDTH_KM * 0.06;
 
@@ -540,8 +613,32 @@ export class HullBuilder {
     if (len < 1e-9) return;
     basisFromDir(_v.divideScalar(len), upHint, _m);
     _m.setPosition(a[0], a[1], a[2]);
-    this.addCylinder(_m, radius, radius, len, Math.max(3, sides | 0), wear, part, shade, true, true);
+    const n = Math.max(3, sides | 0);
+    // Circumradius, not nominal radius: see `prismWidth`.
+    const rr = radius / prismWidth(n);
+    this.addCylinder(_m, rr, rr, len, n, wear, part, shade, true, true);
   }
+}
+
+/**
+ * Mean projected half-width of a regular `n`-gon of circumradius 1.
+ *
+ * `(n/π)·sin(π/n)`: the average, over viewing angle, of the polygon's support
+ * width. It is 0.827 for a triangle, 0.900 for a square, 0.955 for a hexagon
+ * and 1 in the limit — which is to say that drawing a member with fewer facets
+ * does not merely simplify it, it makes it *thinner*.
+ *
+ * `buildSpineChain` and `buildTruss` step their members down the LOD ladder,
+ * and on a hull whose outline is mostly exposed structure — a 1.4 km capital
+ * keel — that narrowed the ship with no part removed and nothing decimated.
+ * The ladder now stops at four facets rather than three for the same reason.
+ *
+ * Dividing the radius through by this keeps the mean projected width equal to
+ * `2·radius` at every facet count, so a member is the same thickness at every
+ * level and a nominal radius finally means the same thing everywhere.
+ */
+function prismWidth(n: number): number {
+  return (n / Math.PI) * Math.sin(Math.PI / n);
 }
 
 /** Contact darkening for a bolt-on: dark where it meets the plating (y = 0). */
@@ -836,6 +933,67 @@ function columnAngles(shape: SectionShape, s: StationSample, seg: number, coarse
   return Float64Array.from(out);
 }
 
+const _mid: [number, number] = [0, 0];
+
+/**
+ * Per-column radial correction, so the sampled polygon sits *tangent* to the
+ * true section instead of inscribed in it.
+ *
+ * THIS IS WHY THE SILHOUETTE USED TO SHRINK WHEN A LOD SWAPPED IN. Sampling a
+ * curve at n angles and joining the samples with chords gives a polygon
+ * strictly *inside* the curve, short by 1 − cos(π/n) at every chord midpoint:
+ * 0.9 % at LOD0's 24 columns and 7.6 % at LOD2's 8. The hull therefore lost
+ * area, and — worse than losing it — lost a *different* amount at every level,
+ * so the outline visibly stepped inward twice on the way out.
+ *
+ * The previous attempt at this scaled the whole section by 1/cos(π/cols) above
+ * LOD0. That is right for a circle and wrong for everything else: on a
+ * hexagonal section, whose corners are pinned and whose flats are reproduced
+ * exactly, it pushed the corners 8 % *outside* the true hull at LOD2 while
+ * leaving LOD0 inscribed — trading a shrink for a swell, and still a step.
+ *
+ * So the correction is measured rather than assumed. For each edge of the
+ * sampled section, the true surface point at the edge's mid-angle is compared
+ * with the midpoint of the chord, and both endpoints are pushed out by the
+ * larger of the two deficits they are responsible for. On a flat face the true
+ * midpoint IS the chord midpoint and the correction is exactly 1; on a circle
+ * it recovers 1/cos(Δ/2) exactly. It is applied at *every* level, including
+ * LOD0, because what matters is not that any one level is right but that all
+ * four approximate the same surface from the same side.
+ */
+function columnCompensation(
+  shape: SectionShape,
+  s: StationSample,
+  angles: Float64Array,
+  px: Float64Array,
+  py: Float64Array,
+  out: Float64Array,
+): void {
+  const n = angles.length;
+  out.fill(1);
+  if (n < 3) return;
+  for (let c = 0; c < n; c++) {
+    const c1 = (c + 1) % n;
+    // The last edge wraps past 2π; averaging the raw angles there would give
+    // the mid-angle of the *opposite* side of the section.
+    const a1 = c1 === 0 ? angles[0] + TAU : angles[c1];
+    sectionPoint(shape, s, (angles[c] + a1) * 0.5, _mid);
+    const tx = _mid[0] * s.halfWidth;
+    const ty = _mid[1] * s.halfHeight;
+    const cx = (px[c] + px[c1]) * 0.5;
+    const cy = (py[c] + py[c1]) * 0.5;
+    const chord = Math.hypot(cx, cy);
+    if (chord < 1e-12) continue;
+    const k = Math.hypot(tx, ty) / chord;
+    if (k > out[c]) out[c] = k;
+    if (k > out[c1]) out[c1] = k;
+  }
+  // Never inward (a correction that shrinks is a bug, not a correction), and
+  // never far outward: a section with a cusp can report a large deficit on one
+  // edge and inflating the whole neighbourhood to match would be worse.
+  for (let c = 0; c < n; c++) out[c] = clamp(1 + (out[c] - 1) * COMP_BLEND, 1, 1.25);
+}
+
 /** Which column lines are creases, given the section and the shading doctrine. */
 function columnCreases(shape: SectionShape, s: StationSample, angles: Float64Array, faceted: boolean): Uint8Array {
   const n = angles.length;
@@ -977,14 +1135,53 @@ function decimateRows(v: PrimaryVolume, ts: Float64Array, maxRows: number): Floa
  * Frenet blow-up, which on a forked spine folds the loft through itself.
  */
 function buildLoft(v: PrimaryVolume, ctx: Ctx): Loft {
-  const ts = rowParams(v, ctx);
-  const rows = ts.length;
   const s = newStationSample();
   const f = newMutFrame();
 
   sampleStation(v.stations, 0.5, s);
-  const seg = clamp(ctx.opts.lod.sectionSegments, 4, MAX_COLS);
-  const angles = columnAngles(v.shape, s, seg, ctx.level >= 2);
+  /**
+   * Columns, with a floor at the coarse levels.
+   *
+   * The blueprint asks for 24 / 14 / 8 / 6, and 8 is where the section stops
+   * being the ship's cross-section and starts being an octagon: measured across
+   * six hulls, going from 8 columns to 10 at LOD2 and LOD3 takes the worst
+   * outline error from 10.5 % to 7.9 % and costs 130–450 triangles a hull, and
+   * every hull stays inside BRIEF §6's flat 3 k for LOD2. Past 10 the return
+   * flattens and the light hull crosses 3 k, so the floor is 10 and not 12.
+   *
+   * The budget clamp below can still take these away again on a hull that
+   * cannot afford them — `sectionSegments` is a hint, the budget is the
+   * contract, and until this change neither was consulted.
+   */
+  const seg = clamp(Math.max(ctx.opts.lod.sectionSegments, ctx.level >= 2 ? 10 : 0), 4, MAX_COLS);
+  // A lobe is a bulge with an angular half-width, and pinning it costs one
+  // column; a chamfer costs two per corner and is genuinely sub-pixel at LOD2.
+  // Only the chamfer is dropped at the coarse levels — see `columnAngles`.
+  let ts = rowParams(v, ctx);
+  let angles = columnAngles(v.shape, s, seg, ctx.level >= 2);
+
+  // --- the budget, consulted rather than assumed -------------------------
+  // `LodLevel.triangleBudget` used to be read nowhere in this file. The grid
+  // is the one thing here that can grow without bound (MAX_ROWS × MAX_COLS is
+  // 8192 cells, 16 k triangles, for ONE volume), so it is the one thing that
+  // has to answer to the budget. Cells are two triangles each and caps, ribs,
+  // repairs and shroud walls are historically ~35 % on top, hence the 0.65.
+  {
+    const allow = surfaceAllowance(ctx) * 0.5;
+    const cells = ts.length * angles.length * 2;
+    if (cells > allow) {
+      const k = Math.sqrt(allow / cells);
+      const wantRows = clamp(Math.round(ts.length * k), 2, ts.length);
+      const wantCols = clamp(Math.round(angles.length * k), 4, angles.length);
+      // Rows go through the silhouette-weighted decimator, never uniformly,
+      // and columns through `columnAngles`, whose pinned corners are a floor —
+      // so a budget cut takes tessellation away and never a corner.
+      if (wantRows < ts.length) ts = decimateRows(v, ts, wantRows);
+      if (wantCols < angles.length) angles = columnAngles(v.shape, s, wantCols, true);
+    }
+  }
+
+  const rows = ts.length;
   const cols = angles.length;
 
   const closed =
@@ -1093,9 +1290,11 @@ function buildLoft(v: PrimaryVolume, ctx: Ctx): Loft {
   }
 
   // --- the grid -----------------------------------------------------------
-  // At coarse LODs an inscribed polygon loses silhouette; push the section out
-  // to the circumscribed radius so LOD2 keeps the ship's real width.
-  const comp = ctx.level === 0 ? 1 : 1 / Math.cos(Math.PI / Math.max(4, cols));
+  // Scratch for the section and its tangency correction. Allocated once for
+  // the whole loft rather than once per row: this is the hot loop.
+  const secX = new Float64Array(cols);
+  const secY = new Float64Array(cols);
+  const comp = new Float64Array(cols);
   for (let r = 0; r < rows; r++) {
     sampleStation(v.stations, ts[r], s);
     const ux = up[r * 3];
@@ -1130,8 +1329,15 @@ function buildLoft(v: PrimaryVolume, ctx: Ctx): Loft {
     const stw = Math.sin(twist[r]);
     for (let c = 0; c < cols; c++) {
       sectionPoint(v.shape, s, angles[c], _sec);
-      const px = _sec[0] * s.halfWidth * comp;
-      const py = _sec[1] * s.halfHeight * comp;
+      secX[c] = _sec[0] * s.halfWidth;
+      secY[c] = _sec[1] * s.halfHeight;
+    }
+    // Tangency, not inscription — the same rule at every level, so the four
+    // levels approximate one surface instead of four nested ones.
+    columnCompensation(v.shape, s, angles, secX, secY, comp);
+    for (let c = 0; c < cols; c++) {
+      const px = secX[c] * comp[c];
+      const py = secY[c] * comp[c];
       // THE FIX: rotate the *scaled* point. See the file header.
       const lx = px * ct - py * stw;
       const ly = px * stw + py * ct;
@@ -1149,6 +1355,31 @@ function buildLoft(v: PrimaryVolume, ctx: Ctx): Loft {
   computeLoftNormals(loft);
   assignBandParts(loft, ctx);
   return loft;
+}
+
+/**
+ * How many triangles this volume's grid may spend.
+ *
+ * The builder is driven volume by volume from `ShipMesh`, which never tells
+ * this module how many siblings are coming, so the allocation has to be made
+ * from what a single call can see: the level's budget, and how much of it the
+ * shared `HullBuilder` has already consumed. Two rules together bound the sum:
+ *
+ *  - no single volume may take more than 35 % of the surface budget, so the
+ *    first volume off the rank cannot eat the ship;
+ *  - no volume may take more than half of what is left, so the running total
+ *    is a geometric series that converges *to* the budget rather than through
+ *    it — twenty volumes deep the twenty-first still gets something.
+ *
+ * The floor is `MIN_VOLUME_TRIANGLES`, because a volume ground to nothing is a
+ * mass that disappeared, and that is the failure this file exists to avoid.
+ */
+function surfaceAllowance(ctx: Ctx): number {
+  const lod = ctx.opts.lod;
+  const cap = BRIEF_TRIANGLE_CAP[Math.min(Math.max(lod.level | 0, 0), 3)];
+  const total = Math.max(512, Math.min(lod.triangleBudget, cap) * surfaceBudgetShare(lod));
+  const remaining = Math.max(0, total - ctx.b.triangleCount);
+  return Math.max(MIN_VOLUME_TRIANGLES, Math.min(total * 0.35, remaining * 0.5));
 }
 
 /** The station nearest a parameter, for its renderer hints. */
@@ -1300,11 +1531,21 @@ function buildCap(l: Loft, ctx: Ctx, style: CapStyle, atEnd: boolean, depthScale
   const az = (atEnd ? 1 : -1) * l.rowFrame[fo + 11];
 
   const profile: [number, number][] = [];
-  // Below LOD1 every cap is a fan. A dome three metres deep on a ship that is
-  // 120 px wide is two pixels of profile and one ring of triangles per cap on
-  // every volume — which on an eighteen-volume hull is most of the level's
-  // entire budget.
-  const steps = ctx.level === 0 ? 5 : ctx.level === 1 ? 3 : 0;
+  /**
+   * How many rings the cap profile gets — and never zero.
+   *
+   * A cap is the only geometry past the last station, at both ends of every
+   * volume, so it is pure silhouette: forcing it flat below LOD1 shortened
+   * every volume on the ship at once. Measured on the hero hull, that took
+   * 16 px off a 559 px outline height at LOD2 and 11 px at LOD3, and it is
+   * what truncated the dorsal sail's pointed apex into a flat top — the sail's
+   * tip *is* its cap. Both are now within 2 px at every level.
+   *
+   * So the level buys *curvature*, not *extent*: the ring count falls with the
+   * level and the last ring still reaches the tip, which makes a coarse ogive
+   * a cone rather than a stump. One ring is `cols` extra triangles per cap.
+   */
+  const steps = ctx.level === 0 ? 5 : ctx.level === 1 ? 3 : ctx.level === 2 ? 2 : 1;
   // HOW FAR A CAP MAY STICK OUT. `types.ts:volumeBounds` samples only
   // t ∈ [0, 1], so every kilometre a cap adds past the last station is a
   // kilometre the blueprint's own bounds, bounding radius and collision proxy
@@ -1313,7 +1554,7 @@ function buildCap(l: Loft, ctx: Ctx, style: CapStyle, atEnd: boolean, depthScale
   // so the renderer never makes a ship materially longer than the generator
   // says it is. See the report.
   const d = radius * depthScale;
-  switch (steps === 0 ? 'flat' : style) {
+  switch (style) {
     case 'flat':
       break;
     case 'blunt':
@@ -2042,8 +2283,24 @@ export function buildTruss(
   const nb = clamp(bays | 0, 1, 48);
   const part = out.allocPart();
   const shade = SHADE_STRUCTURE;
-  const r = Math.max(memberRadius, ctx.opts.lod.minFeatureKm * 0.5);
-  const sides = ctx.level === 0 ? 6 : ctx.level === 1 ? 4 : 3;
+  /**
+   * A member's radius is a fact about the ship, not about the viewing distance.
+   *
+   * This used to read `max(memberRadius, lod.minFeatureKm * 0.5)`, which sounds
+   * like "keep a thin member visible" and is in fact "make the truss thicker
+   * the further away it is": `minFeatureKm` is `length × 0.0018` at LOD0 and
+   * `length × 0.15` at the impostor rung, an eighty-fold climb, so on a 1.4 km
+   * capital the 3 m longerons became 109 m and the open lattice inflated into a
+   * solid slab. Measured: that hull's outline grew 71 % in area between LOD0
+   * and LOD3 and its LOD0-vs-LOD2 XOR was 24 % — by a wide margin the largest
+   * silhouette defect in this file, and larger than everything the LOD critic
+   * found on the hero put together.
+   *
+   * The floor is now a fraction of the hull and therefore identical at every
+   * level: a member that is thin at LOD0 is exactly as thin at the impostor.
+   */
+  const r = Math.max(memberRadius, ctx.opts.hullLengthKm * 0.0008);
+  const sides = ctx.level === 0 ? 6 : ctx.level === 1 ? 5 : 4;
   const wear = Math.min(1, ctx.wear * 1.15);
 
   // Node positions: (bay + 1) rings of `n` points on the section.
@@ -2062,30 +2319,72 @@ export function buildTruss(
     ring.push(pts);
   }
 
-  // Longerons: continuous runs, never decimated.
-  for (let k = 0; k < n; k++) {
-    for (let i = 0; i < nb; i++) out.addMember(ring[i][k], ring[i + 1][k], r, sides, wear, part, shade, v.frame.up);
-  }
-  if (ctx.level > 1) {
-    // LOD2 keeps only the ring frames at the ends: a lattice with no bracing
-    // still reads as a lattice in silhouette, and the bracing is sub-pixel.
-    for (const i of [0, nb]) {
-      for (let k = 0; k < n; k++) out.addMember(ring[i][k], ring[i][(k + 1) % n], r * 0.9, 3, wear, part, shade, v.frame.up);
-    }
-    recordTrussSeats(ring, ctx, r);
-    return;
+  /**
+   * How many prisms a longeron is cut into.
+   *
+   * A bay boundary exists to give the *bracing* a node to land on. The longeron
+   * itself is one straight run, so once the bracing is gone — which it is above
+   * LOD1 — drawing it as `nb` separate capped prisms costs `nb` times the
+   * triangles for a silhouette that is identical to the eye and to the mask.
+   * On a 48-bay capital keel that is 384 prisms where 24 will do, and it is why
+   * that hull's LOD2 was over the 3 k budget by itself.
+   *
+   * The budget then has the last word: `surfaceAllowance` is the same allocator
+   * the lofted volumes answer to, so a truss and a hull compete for one pool
+   * rather than the truss spending whatever it likes behind the loft's back.
+   */
+  let stride = ctx.level > 1 ? Math.max(1, Math.ceil(nb / 3)) : 1;
+  {
+    const perMember = 4 * sides;
+    const allow = surfaceAllowance(ctx);
+    // Longerons plus the two end frames; the bracing below is charged to the
+    // levels that can afford it and is skipped entirely above LOD1.
+    while (stride < nb && (n * Math.ceil(nb / stride) + 2 * n) * perMember > allow) stride++;
   }
 
-  const step = ctx.level === 0 ? 1 : 2;
+  // Longerons: continuous runs, never decimated — only ever drawn in fewer,
+  // longer pieces, so the run's endpoints and therefore its outline are exact.
+  for (let k = 0; k < n; k++) {
+    for (let i = 0; i < nb; i += stride) {
+      out.addMember(ring[i][k], ring[Math.min(i + stride, nb)][k], r, sides, wear, part, shade, v.frame.up);
+    }
+  }
+  /**
+   * Bracing thins with the level; it does not switch off.
+   *
+   * This used to return above LOD1 with the longerons and two end frames and
+   * nothing between them. But a lattice is a *filled* shape to anything that
+   * measures it — thresholded at 8 %, an X-braced bay reads as solid — so
+   * removing every diagonal at once took 6 % of the projected area off a
+   * 1.4 km capital's keel in one step (measured: LOD2 area 0.922 of LOD0 with
+   * the diagonals gone, 0.981 with them thinned), which is a value shift as
+   * much as an outline one — the hull visibly lightens as the LOD swaps in.
+   *
+   * So the bay step widens instead, and how far it widens is a budget question
+   * rather than a taste one — a diagonal across eight merged bays is one
+   * member instead of eight and still fills the bay.
+   */
+  let step = ctx.level > 1 ? Math.max(2, stride) : 1;
+  {
+    const per = n * (4 * sides + 4 * 3 * (brace === 'x' || brace === 'k' ? 2 : 1));
+    const allow = surfaceAllowance(ctx);
+    while (step < nb && Math.ceil(nb / step) * per > allow) step++;
+  }
   for (let i = 0; i < nb; i += step) {
+    // The far end of the bay this diagonal crosses. Up to LOD1 the lattice is
+    // still resolvable, so a diagonal stays on the *same line it occupies at
+    // LOD0* and thinning means drawing fewer of them; above LOD1 individual
+    // members are sub-pixel and what matters is that the bay reads as filled,
+    // so the diagonal is stretched across the whole merged bay instead.
+    const j = ctx.level > 1 ? Math.min(i + step, nb) : Math.min(i + 1, nb);
     // Ring frames at every bay boundary: without them the longerons splay.
     for (let k = 0; k < n; k++) out.addMember(ring[i][k], ring[i][(k + 1) % n], r * 0.85, sides, wear, part, shade, v.frame.up);
     for (let k = 0; k < n; k++) {
       const k1 = (k + 1) % n;
       const a = ring[i][k];
-      const b = ring[i + 1][k];
+      const b = ring[j][k];
       const a1 = ring[i][k1];
-      const b1 = ring[i + 1][k1];
+      const b1 = ring[j][k1];
       const br = r * 0.65;
       switch (brace) {
         case 'warren':
@@ -2156,15 +2455,19 @@ function recordSeats(l: Loft, ctx: Ctx): void {
  * of* — and that is a genuinely different code path each time.
  */
 export function buildVolume(v: PrimaryVolume, out: HullBuilder, opts: VolumeBuildOptions): void {
-  // A part smaller than this LOD's smallest feature is not drawn at all —
-  // unless it sticks out past the hull, in which case it is silhouette and
-  // silhouette outranks everything (BRIEF §8).
+  // A part too small to see is not drawn — but a *primary volume* is a mass,
+  // and a mass may not disappear when a LOD swaps in (BRIEF §4 stage 3, and
+  // the LOD1 brief in the showroom). The threshold is therefore the smaller of
+  // the level's detail cut-off and a fixed fraction of the hull, which above
+  // LOD0 makes it the same threshold at every level: see the note on
+  // `VOLUME_FLOOR_FRACTION` for what this was deleting.
   const size = Math.max(runLengthKm(v), maxHalfExtent(v) * 2);
   const silhouette = v.kind === 'fin' || v.kind === 'boom' || v.kind === 'radiator';
-  // The exemption is halved at the coarse levels rather than removed: a
-  // radiator is silhouette and must survive, but a 2 m fin on a 400 m hull is
-  // not silhouette at any distance where LOD2 is in use.
-  if (size < opts.lod.minFeatureKm * (silhouette ? 0.5 : 1)) return;
+  const floor = Math.min(opts.lod.minFeatureKm, opts.hullLengthKm * VOLUME_FLOOR_FRACTION);
+  // The exemption is halved for the parts that are nothing but outline: a
+  // radiator is 30 cm thick and all silhouette, and losing one is losing a
+  // shape rather than losing a detail.
+  if (size < floor * (silhouette ? 0.5 : 1)) return;
 
   const c = v.construction;
   switch (c.kind) {
@@ -2278,7 +2581,11 @@ function buildSpineChain(chain: SpineChain, out: HullBuilder, opts: SpineBuildOp
   const wear = Math.min(1, (opts.wear ?? 0.7) * 1.2);
   const shade = SHADE_STRUCTURE;
   const level = opts.lod.level;
-  const sides = level === 0 ? 6 : level === 1 ? 4 : 3;
+  // A prism's projected width is `2r·cos(π/sides)` at worst, so dropping a
+  // member from six sides to three narrows it by 13 % in silhouette — on
+  // exposed structure, which is the one thing on this hull that is nothing
+  // *but* silhouette. The ladder stops at four.
+  const sides = level === 0 ? 6 : level === 1 ? 5 : 4;
   // A partially exposed chain shows only its heaviest bays — the thrust frame
   // end — because that is the part a hull opening is cut around.
   const from = chain.exposure === 'partial' ? Math.floor(nodes.length * 0.55) : 0;
@@ -2314,11 +2621,15 @@ function buildSpineChain(chain: SpineChain, out: HullBuilder, opts: SpineBuildOp
     const b = pos(i + 1);
     const rad = Math.max(nodes[i].radius, 1e-6) * scale;
     const memberR = Math.max(HATCH_WIDTH_KM * 0.2, rad * 0.18);
-    if (memberR * 2 < opts.lod.minFeatureKm && level > 0) continue;
+    // Same rule as the primary volumes: an exposed spine bay is a mass, and a
+    // mass may not appear or disappear on a LOD swap. `minFeatureKm` climbs
+    // eighty-fold up the ladder, so testing against it deleted the whole load
+    // path on the coarse levels of any hull whose members are slim.
+    if (memberR * 2 < Math.min(opts.lod.minFeatureKm, opts.hullLengthKm * VOLUME_FLOOR_FRACTION) && level > 0) continue;
 
     switch (chain.member) {
       case 'tube':
-        out.addMember(a, b, rad * 0.55, level === 0 ? 12 : 6, wear, part, shade, nodes[i].up);
+        out.addMember(a, b, rad * 0.55, level === 0 ? 12 : level === 1 ? 9 : 7, wear, part, shade, nodes[i].up);
         break;
       case 'keel-beam': {
         // An I-section drawn as three slabs: web plus two flanges. The flanges

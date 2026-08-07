@@ -187,6 +187,18 @@ export interface ShipSurfaceState {
    * deep-space value stands.
    */
   readonly fill?: { readonly r: number; readonly g: number; readonly b: number };
+  /**
+   * Unit vector pointing TOWARDS the fill source, same convention as
+   * `ViewState.sunDirection`. Planetshine from a world below the ship is
+   * `(0, -1, 0)`, which is the default when this is omitted.
+   *
+   * This exists because the fill hemisphere used to be hard-coded to `-N.y` and
+   * therefore ignored the direction the scene actually placed the world in.
+   * Every shot in `Showroom.ts` already carries a `fillDirection`; nothing
+   * forwarded it. Pass it through and a hull lit from beneath by a planet on the
+   * port quarter fills on its port belly rather than on its whole underside.
+   */
+  readonly fillDirection?: { readonly x: number; readonly y: number; readonly z: number };
 }
 
 export interface ShipMaterialSet {
@@ -277,25 +289,40 @@ export const SHIP_LAMP_MAX_HIGH = 8;
 export const SHIP_STAIN_MAX_HIGH = 6;
 /** Projected marking decals: registry, hazard zones, stripes, emblem. */
 export const SHIP_MARK_MAX_HIGH = 4;
+/**
+ * Dated, directional damage events shaded analytically from `bp.damageHistory`.
+ *
+ * Four, and only four, because a wound has to be *legible as an event*. BRIEF §7
+ * and the damage shot's own fail list both reject "every wound is the same age"
+ * and "wounds are radially uniform instead of directional"; the way you get both
+ * failures at once is a noise field, and the way you avoid both is a small
+ * number of real strikes carrying their own `incidence` vector and `ageSeconds`.
+ * Sixteen scattered marks are a texture. Four with a direction and a date are a
+ * history. Cost is 8 uniform vectors and ~40 ALU with the jitter field hoisted
+ * out of the loop.
+ */
+export const SHIP_WOUND_MAX_HIGH = 4;
 
 interface TierBudget {
   readonly occ: number;
   readonly lamp: number;
   readonly stain: number;
   readonly mark: number;
+  readonly wound: number;
   readonly grimeOctaves: number;
   readonly rivets: boolean;
   readonly bump: boolean;
 }
 
 const TIER_BUDGETS: Record<QualityTier, TierBudget> = {
-  low: { occ: 4, lamp: 4, stain: 3, mark: 2, grimeOctaves: 2, rivets: false, bump: false },
-  medium: { occ: 6, lamp: 6, stain: 4, mark: 3, grimeOctaves: 3, rivets: true, bump: true },
+  low: { occ: 4, lamp: 4, stain: 3, mark: 2, wound: 2, grimeOctaves: 2, rivets: false, bump: false },
+  medium: { occ: 6, lamp: 6, stain: 4, mark: 3, wound: 3, grimeOctaves: 3, rivets: true, bump: true },
   high: {
     occ: SHIP_OCC_MAX_HIGH,
     lamp: SHIP_LAMP_MAX_HIGH,
     stain: SHIP_STAIN_MAX_HIGH,
     mark: SHIP_MARK_MAX_HIGH,
+    wound: SHIP_WOUND_MAX_HIGH,
     grimeOctaves: 4,
     rivets: true,
     bump: true,
@@ -305,6 +332,7 @@ const TIER_BUDGETS: Record<QualityTier, TierBudget> = {
     lamp: SHIP_LAMP_MAX_HIGH + 2,
     stain: SHIP_STAIN_MAX_HIGH,
     mark: SHIP_MARK_MAX_HIGH,
+    wound: SHIP_WOUND_MAX_HIGH,
     grimeOctaves: 4,
     rivets: true,
     bump: true,
@@ -328,6 +356,43 @@ const CURV_SCALE = 1 / 2600;
 /** Seam relief depth ceiling, km. 2.5 cm — deep enough to make a lit/shadowed
  *  edge pair at hero distance, shallow enough not to read as dirt on the lens. */
 const SEAM_RELIEF_MAX_KM = 2.5e-5;
+
+/**
+ * How much brighter a close world fills a hull than its own radiance.
+ *
+ * `ShipSurfaceState.fill` is a *radiance* — the brightness of the lit face of
+ * the planet — and integrating it against a cosine lobe over a unit hemisphere
+ * returns exactly that radiance back, which is what the shader used to do. But
+ * planetshine only exists at all when the world is close enough to subtend a
+ * large fraction of the sky, and at that range it is not a hemisphere of that
+ * radiance, it is most of one. Against a 0.55-intensity key the honest unit
+ * integral loses to the star on every surface including the belly, which is the
+ * exact inversion the planetshine frame was marked down for. 3.4 is the ratio
+ * that lets an unoccluded underside beat a key-lit upper flank at the
+ * intensities the shot configures, and it is scaled by `uFill`, so in deep space
+ * — where the reference fill is 0.011 — it changes nothing.
+ */
+const FILL_GAIN = 3.4;
+
+/**
+ * The grime film's chromaticity, normalised to unit luminance.
+ *
+ * Taken from `palette.scorch`, which every faction authors, then pulled 35%
+ * towards neutral because dirt is a mixture and mixtures desaturate. Kessler's
+ * comes out at R/B = 1.14 and Sillane's at 0.94 — warm and cold respectively,
+ * which is the whole point. The constant this replaces was 1.40 for everyone.
+ */
+function grimeTint(palette: ShipPalette): Float32Array {
+  const s = palette.scorch ?? [0.011, 0.0095, 0.0088];
+  const lum = Math.max(0.3 * s[0] + 0.59 * s[1] + 0.11 * s[2], 1e-6);
+  const out = new Float32Array(3);
+  for (let i = 0; i < 3; i++) {
+    // Normalise to unit luminance, desaturate, and bound so a pathological
+    // palette entry cannot become a colour multiplier.
+    out[i] = Math.min(Math.max(((s[i] ?? lum) / lum) * 0.65 + 0.35, 0.5), 1.6);
+  }
+  return out;
+}
 
 // ===========================================================================
 // The agreed panel rule
@@ -461,6 +526,19 @@ uniform vec3  uSunDir;
 uniform vec3  uSunColor;
 uniform vec3  uCameraLocal;
 uniform vec3  uFill;
+// Unit vector pointing TOWARDS the fill source — the same convention as
+// uSunDir, so planetshine from a world below the ship is (0,-1,0), which is
+// exactly what every shot in Showroom.ts already sets as its fillDirection and
+// what nothing forwarded. ARCHITECTURE §6 allows no ambient constant in space,
+// so this is the only thing deciding which surfaces the fill reaches, and
+// hard-coding it to -N.y made the fill land top-down on the one frame whose
+// entire subject is light arriving from underneath.
+uniform vec3  uFillDir;
+// How much brighter than its own radiance a planet fills a hull. A world close
+// enough to light a ship subtends far more than the cosine lobe a unit
+// hemisphere integrates to, so 1.0 under-counts it by roughly the ratio of the
+// disc to the lobe. Only matters when uFill is large, which is only in orbit.
+uniform float uFillGain;
 uniform float uTime;
 uniform float uThrottle;
 uniform float uHeat;
@@ -475,6 +553,9 @@ uniform float uPixelAngle;   // 2*tan(fovY/2) / viewportHeight
 uniform float uCoverage;     // ship length in pixels, for the curvature gate
 uniform float uMicroDetail;  // faction multiplier on the finest band
 uniform vec3  uSeed;         // per-ship decorrelation offset
+// (alongNose, alongTail) in the flow coordinate, km. Everything the ship emits
+// travels one way along the hull, so grime has a gradient and not a mean.
+uniform vec2  uAftSpan;
 
 // --- palette (linear RGB) ---------------------------------------------------
 uniform vec3 uPlate0;
@@ -493,6 +574,20 @@ uniform vec3 uOxide;
 uniform vec3 uScorch;
 uniform vec3 uAmber;
 uniform vec3 uPlumeColor;
+/**
+ * Chromaticity of the grime film, normalised to unit luminance.
+ *
+ * Derived from palette.scorch — the one colour every faction authors for
+ * "what burnt residue looks like on our steel" — instead of the hard-coded warm
+ * grey this used to be. That constant was a (0.42, 0.36, 0.30) multiply on the
+ * plate luminance, i.e. R/B = 1.4, applied at up to full strength over the whole
+ * hull; it repainted Sillane's cold blue-grey hull warmer than Kessler's and
+ * erased the one faction read that families.ts says the hue alone should
+ * carry. Grime is a FILM. It may lower value and pull chroma; it may not invert
+ * the base's R-B ordering, which is why it is blended with the plate's own
+ * chroma below rather than substituted for it.
+ */
+uniform vec3 uGrimeTint;
 
 // --- surface response -------------------------------------------------------
 uniform float uRough;
@@ -526,6 +621,13 @@ uniform vec4  uStain[SHIP_STAIN_MAX];
 // xyz unit axis the deposit travels along, w = kind + strength:
 // floor(w) is 0 soot / 1 heat / 2 frost, fract(w) is 0..1 strength.
 uniform vec4  uStainAxis[SHIP_STAIN_MAX];
+// xyz wound centre in ship space, w surface radius in km (0 = empty slot).
+uniform vec4  uWound[SHIP_WOUND_MAX];
+// xyz the unit vector the strike ARRIVED along (DamageEvent.incidence), which is
+// what makes a wound an event rather than a stamp: spall and soot run
+// downstream of it and the everted lip is on the far side. w packs severity and
+// age — floor(w)/15 is severity, fract(w) is 0 fresh .. 1 old.
+uniform vec4  uWoundAxis[SHIP_WOUND_MAX];
 
 #ifdef SHIP_MARKINGS
 // xyz centre, w kind: 0 text, 1 hazard chevrons, 2 stripe band, 3 emblem
@@ -635,15 +737,38 @@ void main() {
   albedo *= 1.0 + (pid * 2.0 - 1.0) * 0.07 * kPlate;
   // Macro variation at section scale so no two square metres match. Faded to
   // zero rather than to a random value, so distance converges to the mean.
+  // Widened from +/-10% to +/-17%. This is the ONLY band that survives to fleet
+  // range — at 120 px of coverage the plate, bay and fastener tiers have all
+  // faded out and the section tier plus the grime gradient are the entire
+  // signal — so it is also the only thing standing between a distant hull and
+  // one flat value. The fleet frame that came back as three white cut-outs with
+  // no midtone anywhere was three hulls converging to their own mean, correctly,
+  // with nothing authored at that scale for them to converge to.
   float macro = os_fbm(P / wSect * 3.0 + uSeed.yzx, 3, 2.1, 0.55) * 0.5 + 0.5;
-  albedo *= 1.0 + (macro - 0.5) * 0.20 * kSect;
+  albedo *= 1.0 + (macro - 0.5) * 0.34 * kSect;
 
-  // Sun-bleached paint: chalky and slightly lighter, and it happens to the
-  // dorsal surfaces that face out, not uniformly. Keyed to hull orientation
-  // rather than to uSunDir, or the fade would rotate with the star.
+  // The FINEST band, on the albedo and not only on the pitting mask.
+  //
+  // The header promises four bands and the cascade computed five fade weights,
+  // but nothing below wPlate ever reached the base colour: kMicro gated one
+  // pitting mask and that was all. At arm's length — the greeble frame, the
+  // docking frame — a plate therefore had literally no value texture and read
+  // as a flat painted gradient, which is the "one projected texture" failure
+  // BRIEF §7 rejects arrived at from the near end. Rolling scale, paint tooth,
+  // weld shadow and walked-on film all live at this wavelength.
+  float micro = os_fbm(P / max(wMicro, 1e-7) * 0.5 + uSeed.zyx, 2, 2.3, 0.5);
+  albedo *= 1.0 + micro * 0.17 * kMicro;
+
+  // Sun-bleached paint: chalky, and it happens to the dorsal surfaces that face
+  // out, not uniformly. Keyed to hull orientation rather than to uSunDir, or the
+  // fade would rotate with the star. It does NOT get brighter: chalking scatters
+  // more but it also holds more dirt, and a +6% value lift applied over the
+  // whole upper hemisphere of every ship is a lift with no light source behind
+  // it — exactly what ARCHITECTURE §6 forbids, spent on the largest area on the
+  // ship.
   float bleach = uPaintFade * (0.35 + 0.65 * (N.y * 0.5 + 0.5));
   albedo = mix(albedo,
-               mix(albedo, vec3(dot(albedo, vec3(0.30, 0.59, 0.11))), 0.35) * 1.06,
+               mix(albedo, vec3(dot(albedo, vec3(0.30, 0.59, 0.11))), 0.30),
                bleach);
 
   // --- replaced panels ---------------------------------------------------
@@ -657,6 +782,29 @@ void main() {
   // Squared fade: a wrong-shade plate is a high-contrast dot, so it has to
   // drop out well before the seams do or a hull at 150 px reads as peppered.
   albedo = mix(albedo, patchCol, replaced * kPlate * kPlate * 0.72);
+
+  // ...and a refit plate is not a swatch that fills its grid cell exactly.
+  // BRIEF §7: "a replaced panel sits slightly proud and in the wrong shade".
+  // Colour alone put a flat rectangle inside the plating grid with no offset,
+  // no lip and no fastener ring, which is the one thing the hero and damage
+  // frames both got marked down for. Three things fix it and all three key off
+  // dom.x, the distance to the plate's own seam:
+  //   patchSign  half the patches stand proud and half sit sunk, so the set
+  //                cannot read as one stamped pattern;
+  //   patchRim   the plate's own edge, which catches the key on one side and
+  //                shadows on the other once it is displaced (see the relief
+  //                block, where this is what actually moves the normal);
+  //   patchRing  the bolt line that put it there, resolvable at PLATE scale
+  //                rather than at fastener scale — a 0.75 m fastener pitch is
+  //                sub-pixel at hero distance but the ring it forms is not.
+  float patchSign = sm_hash21(vec2(pid * 23.0, partId * 3.1 + 0.7)) * 2.0 - 1.0;
+  float patchRim  = (1.0 - smoothstep(0.008, 0.060, dom.x)) * replaced * kPlate;
+  float patchRing = (1.0 - smoothstep(0.028, 0.050, abs(dom.x - 0.039)))
+                  * step(0.42, fract(dom.z * clamp(wPlate / wRivet, 3.0, 16.0)))
+                  * replaced * kPlate;
+  // The cut edge of new plate is bare and brighter than either shade; the bolt
+  // heads are proud steel. Both are small areas, so neither lifts the mean.
+  albedo = mix(albedo, uMetal * 0.8, max(patchRim * 0.28, patchRing * 0.45));
 
   // --- fasteners ---------------------------------------------------------
   float rivet = 0.0;
@@ -704,7 +852,20 @@ void main() {
   // It runs aft, it pools on downward faces, and it collects in the gaps.
   float dirt = streak * (0.45 + 0.55 * clamp(-N.y * 0.6 + 0.55, 0.0, 1.0));
   dirt = mix(dirt, 1.0, 0.30 * plateSeam);
-  dirt = clamp(dirt * uGrime * uWearA.z * 1.6, 0.0, 1.0);
+  // A HULL-LONG GRADIENT, not a mean. Everything a ship emits — propellant
+  // residue, radiator plume, vented atmosphere, its own dust — travels one way
+  // along the flow axis, so the plating aft of the drive is filthy and the nose
+  // is comparatively clean. Without this the streak field has the same expected
+  // value at the nose as at the tail, which is the "uniform noise laid evenly
+  // over everything" BRIEF §7 says will be rejected, and it is why no frame in
+  // the set could show soot aft of the thrusters against clean plate forward.
+  // uAftSpan is the real flow extent of the hull, so the gradient is anchored to
+  // the ship rather than to the origin of the bounding box.
+  float aftT = clamp((along - uAftSpan.x) / max(uAftSpan.y - uAftSpan.x, 1e-6), 0.0, 1.0);
+  dirt *= mix(0.58, 1.45, aftT * aftT);
+  // ARCHITECTURE §6: everything is dirty. Ribbons over clean paint is a model of
+  // a hull; the film is a floor with ribbons on top of it.
+  dirt = clamp((0.26 + 0.74 * dirt) * uGrime * uWearA.z * 1.9, 0.0, 1.0);
 
   // Analytic stain sources. Soot from the exhaust axes, heat staining off the
   // radiators, frost off cryogenic vents — three masks from one loop, because
@@ -759,10 +920,75 @@ void main() {
   bake = clamp(bake * uWearB.x, 0.0, 1.0);
   rime = clamp(rime * uWearB.w, 0.0, 1.0);
 
+  // --- damage history: dated, directional wounds --------------------------
+  //
+  // bp.damageHistory has carried an incidence vector and an ageSeconds
+  // per event since the contract was published and this file was reading
+  // neither, so every mark on the hull came out of the same noise field: same
+  // size, same density, radially symmetric, and all exactly the same age. That
+  // is all four bullets of the damage shot's own fail list at once, and no
+  // amount of geometry underneath can rescue it — the mesh punches the hole,
+  // but whether the hull around it reads as last month or as thirty years ago
+  // is a surface decision and it is this one.
+  //
+  // Three masks come out of the loop and they are what a timeline looks like:
+  //   scarBright  torn metal at the rim. FRESH ONLY. Bare, sharp, specular.
+  //   scarOxide   oxide and packed dirt. OLD ONLY. Soft, matte, spreading.
+  //   scarDark    the depression itself, at every age, and CLAMPED — see below.
+  // The elongation along incidence is what stops them being stamps: a strike
+  // at a shallow angle gouges downstream, and only the downstream side gets the
+  // spall tail.
+  float scarBright = 0.0;
+  float scarOxide  = 0.0;
+  float scarDark   = 0.0;
+  // One jitter field for the whole set, hoisted out of the loop: four wounds
+  // times a 2-octave fbm inside the loop would be the most expensive thing in
+  // the shader, and the wounds do not need decorrelated edges — they need
+  // ragged ones.
+  float jag = 0.74 + 0.52 * (os_fbm(P * (300.0 / L) + uSeed.yzx, 2, 2.4, 0.5) * 0.5 + 0.5);
+  for (int i = 0; i < SHIP_WOUND_MAX; i++) {
+    vec4 wd = uWound[i];
+    vec4 wa = uWoundAxis[i];
+    float live = step(1e-9, wd.w);
+    vec3  d    = P - wd.xyz;
+    float t    = dot(d, wa.xyz);
+    float perp = length(d - wa.xyz * t);
+    // Downstream of the impact the wound is up to three times as long as it is
+    // wide; upstream it is barely wider than the entry. Radially uniform damage
+    // is the tell.
+    // Guarded on a fraction of the hull rather than on 1e-9: an empty slot has
+    // radius 0, and dividing a hull-scale offset by an epsilon puts 1e8 through
+    // a length() on hardware that is not obliged to carry it.
+    float wr     = max(wd.w, L * 1e-3);
+    float reachW = wr * (1.0 + 2.0 * smoothstep(0.0, wr * 1.5, t));
+    float rr = length(vec2(perp / wr, t / reachW));
+    float age = fract(wa.w);
+    float sev = 0.35 + 0.65 * clamp(floor(wa.w) / 15.0, 0.0, 1.0);
+    float core = (1.0 - smoothstep(0.52 * jag, 1.00 * jag, rr)) * live * sev;
+    float lip  = smoothstep(0.78 * jag, 1.02 * jag, rr)
+               * (1.0 - smoothstep(1.02 * jag, 1.48 * jag, rr)) * live * sev;
+    // Spall, soot and the dirt that later fills it, all on the far side only.
+    float tail = (1.0 - smoothstep(1.0, 3.6, rr)) * smoothstep(0.0, wr * 0.8, t) * live * sev;
+    // An old wound has no bright metal left anywhere; a fresh one has no oxide.
+    scarBright = max(scarBright, lip * (1.0 - age) * (1.0 - age));
+    scarOxide  = max(scarOxide,  max(lip * 0.8, tail * 0.55) * age);
+    scarDark   = max(scarDark,   core * mix(1.0, 0.62, age));
+  }
+
   // Edge wear. The curvature estimate saturates on anything small in screen
   // space, so ungated it turns every greeble into bare steel; it is gated by
   // noise, by the part's own exposure, and by the ship's pixel coverage.
   float edge = clamp(curv * uCurvScale, 0.0, 1.0) * kEdge;
+  // A hull's dominant edge wear is not on its silhouette, it is on the
+  // perimeter of every single plate: the lip is what gets knocked by a
+  // handling frame, and the topcoat cracks at the seam before it cracks
+  // anywhere else. A screen-space curvature estimate cannot see that — it only
+  // spikes where the *geometry* turns — which is why the critic could find no
+  // frame in the set where the edge of a plate differed from its centre. This
+  // is a real feature of the surface, so it rides kPlate and disappears with
+  // the plating rather than with the silhouette.
+  float plateEdge = (1.0 - smoothstep(0.010, 0.085, dom.x)) * kPlate;
+  edge = clamp(max(edge, plateEdge * 0.45), 0.0, 1.0);
   float wearNoise = os_fbm(P * (46.0 / L) + uSeed.yxz, 3, 2.2, 0.55) * 0.5 + 0.5;
   float wear = smoothstep(0.55, 0.95,
                  edge * (0.25 + 1.05 * wearNoise) * (0.4 + 0.8 * vSurf.x)) * uWearA.x;
@@ -850,7 +1076,7 @@ void main() {
   // Never 1.0 metalness: a fully metallic fragment has no diffuse, and with no
   // environment to reflect every worn edge renders as a black fleck. Oxidised
   // steel is not a perfect conductor.
-  float metalness = mix(uMetalness, 0.88, bare);
+  float metalness = mix(uMetalness, 0.88, max(bare, scarBright * 0.9));
   // Undirtied paint stays under ~0.6 or the specular lobe is too wide to lift
   // anything off the silhouette.
   // Worn oxidised steel is not polished: 0.30 is a near-gloss and it puts a
@@ -858,6 +1084,11 @@ void main() {
   float rough = mix(mix(uRough, 0.44, bare), 0.90, max(dirt, soot));
   // Scuffed paint loses its tooth without losing its pigment.
   rough = mix(rough, rough * 0.82, scuff);
+  // Torn metal is sharp and shiny; a wound that has had thirty years of dust in
+  // it is the roughest thing on the ship. This is half of how the two ages read
+  // apart even before the colours differ.
+  rough = mix(rough, 0.32, scarBright * 0.75);
+  rough = mix(rough, 0.97, scarOxide * 0.65);
 
   albedo = mix(albedo, uPrimer, chip * 0.55);          // primer under the topcoat
   albedo = mix(albedo, uMetal, bare);                  // then bare steel
@@ -867,7 +1098,31 @@ void main() {
   // Heat staining is temper colour, not dirt: it shifts hue before it darkens.
   albedo = mix(albedo, albedo * vec3(1.28, 0.98, 0.70) + uOxide * 0.30, bake * 0.6);
   albedo = mix(albedo, vec3(0.42, 0.47, 0.55), rime * 0.6);
-  albedo = mix(albedo, vec3(dot(albedo, vec3(0.30, 0.59, 0.11))) * vec3(0.42, 0.36, 0.30), dirt);
+
+  // The wound timeline, in order of age. Oldest first so a fresh strike through
+  // an old scar still shows its bright rim.
+  albedo = mix(albedo, uOxide * 0.85, scarOxide * 0.80);
+  albedo = mix(albedo, uMetal * 1.10, scarBright * 0.72);
+  // A dent is not a hole. The depression is darker and dirtier than the plate,
+  // but it is still plate and it still faces the star, so its value is CLAMPED
+  // to a fraction of the surrounding albedo rather than driven to a palette
+  // constant. Un-clamped, every wound bottomed out at the scorch colour on a
+  // lit surface and the hull histogram went bimodal: cream plate, black blobs,
+  // and nothing in between.
+  albedo = mix(albedo, max(albedo * 0.34, uScorch * 1.6), scarDark * 0.85);
+
+  // Grime last, because it settles on top of everything above it — including
+  // the wounds, which is what makes an old one read as old.
+  //
+  // Palette-derived and CHROMA-PRESERVING. The film keeps 45% of the plate's own
+  // colour and takes the rest from the faction's own soot hue; both halves are
+  // then darkened, because dirt only ever removes light. The two bounds are the
+  // point: mix at 0.45 means the base's R-B ordering survives at any dirt
+  // level, and the 0.86 cap means grime can never fully repaint a hull. The
+  // constant this replaces could, and did.
+  float albLum = dot(albedo, vec3(0.30, 0.59, 0.11));
+  vec3  grimeCol = mix(albedo, vec3(albLum) * uGrimeTint, 0.55) * 0.46;
+  albedo = mix(albedo, grimeCol, dirt * 0.86);
   // Trim, and only on the handful of fittings the crew actually grab. Applied
   // across everything merely "exposed" it stops being trim and becomes a second
   // hull colour.
@@ -885,7 +1140,8 @@ void main() {
   // O(1) in part count. uAoStrength is rationed on capitals, where PostFX's
   // 0.05 km SSAO radius is doing the same job in screen space.
   float ao = 1.0 - clamp(vBent.w, 0.0, 1.0) * uAoStrength;
-  ao *= (1.0 - 0.38 * plateSeam) * (1.0 - 0.22 * bayGroove) * (1.0 - 0.22 * dirt);
+  ao *= (1.0 - 0.38 * plateSeam) * (1.0 - 0.22 * bayGroove) * (1.0 - 0.22 * dirt)
+      * (1.0 - 0.45 * scarDark);
 
   vec3  bentDir = vBent.xyz;
   float bentLen = length(bentDir);
@@ -926,11 +1182,37 @@ void main() {
     // difference between a joint and a decal.
     float lip = sm_seam(abs(dom.x - 0.017), 0.006)
               * (step(0.5, sm_hash21(vec2(pid * 19.0, 4.4))) * 2.0 - 1.0);
-    float h = (-plateSeam * 0.9 - bayGroove * 1.6 + lip * 0.5 + rivet * 0.5
-               + replaced * kPlate * 1.3)
-            * clamp(uSeamDepth, 0.0, SEAM_RELIEF_MAX);
-    float dhx = dFdx(h);
-    float dhy = dFdy(h);
+    float depth = clamp(uSeamDepth, 0.0, SEAM_RELIEF_MAX);
+
+    // TWO relief scales, because they need two different gradient treatments.
+    //
+    // Fine: seams, lips, fastener heads, patch rims. A seam is ~2 cm wide on a
+    // 2.5 m plate. At hero distance one pixel spans ~30 cm of hull, so dFdx of
+    // its height averages a 2.5 cm step over fifteen times its own width and
+    // reports a slope of 0.03 — a two-degree tilt, which under any key produces
+    // no lit edge and no shadowed edge and therefore a PAINTED LINE. That is
+    // the single reason the plating in the hero frame read as a projected
+    // texture rather than as sheet metal, and it is a sampling artefact, not a
+    // depth problem: the bevel really is about 50 degrees, the pixel just cannot
+    // see it. recover reconstructs the sub-pixel slope by renormalising the
+    // screen derivative from the pixel footprint back to the seam's own physical
+    // width. It is gated on kPlate, so once the plating itself stops being
+    // resolvable the amplification switches off rather than turning into
+    // aliasing at fleet range.
+    float hFine = (-plateSeam * 0.9 + lip * 0.5 + rivet * 0.5
+                   + patchSign * patchRim * 1.9 + patchRing * 0.8) * depth;
+    // Coarse: bay grooves, whole plates standing proud or sunk, crater floors.
+    // Many pixels across, so their screen derivative is already honest and
+    // amplifying it would only wreck them.
+    float hCoarse = (-bayGroove * 1.6 + patchSign * replaced * kPlate * 1.2
+                     + scarBright * 0.6 - scarDark * 2.2) * depth;
+
+    float pxFoot   = max(length(dPx), length(dPy)) * 1.5;
+    float seamPhys = max(wPlate * 0.020, 1e-9);
+    float recover  = mix(1.0, clamp(pxFoot / seamPhys, 1.0, 9.0), kPlate);
+
+    float dhx = dFdx(hFine) * recover + dFdx(hCoarse);
+    float dhy = dFdy(hFine) * recover + dFdy(hCoarse);
     vec3  r1  = cross(dPy, N);
     vec3  r2  = cross(N, dPx);
     float det = dot(dPx, r1);
@@ -960,42 +1242,103 @@ void main() {
   vec3  F0 = mix(vec3(0.04), albedo, metalness);
   vec3  F  = F0 + (1.0 - F0) * pow(1.0 - VoH, 5.0);
 
-  vec3 spec = (D * G / max(4.0 * NoV * NoL, 1e-4)) * F * NoL;
+  // Dust does not only broaden the specular lobe, it ABSORBS it: a film of it
+  // over paint scatters the coherent reflection away and swallows the rest,
+  // which is why a dirty car has almost no highlight rather than a wide one.
+  //
+  // This is the term that decides whether the palette can be seen at all. A
+  // dielectric's specular is achromatic, so it arrives on screen wearing the
+  // STAR's colour; on a hull whose albedo is 0.04 that lobe is as large as the
+  // diffuse, and the sum of the two is the star's hue with a faint memory of the
+  // paint in it. That is the whole mechanism behind three factions with
+  // genuinely different authored hull hues — one of them explicitly cold blue —
+  // measuring within three percentage points of each other and all warm. Only
+  // raising the roughness with dirt (which is all this did) redistributes that
+  // energy without removing any of it. Removing it hands the ratio back to the
+  // paint.
+  float filmed = 1.0 - 0.55 * max(dirt, soot);
+
+  vec3 spec = (D * G / max(4.0 * NoV * NoL, 1e-4)) * F * NoL * filmed;
   // No 1/PI on diffuse: uSunColor is authored as irradiance with PI already
   // folded in, matching every other renderer in the project. Divide here and
   // the ship comes out PI times darker than the hero hull.
-  vec3 diff = albedo * (1.0 - metalness) * NoL;
+  //
+  // (1 - F) is the energy the specular lobe already took. Without it the two
+  // lobes together return more than arrives, and they do it worst at grazing
+  // angles — which on a hull is the silhouette, i.e. exactly where the eye
+  // reads the value.
+  vec3 diff = albedo * (1.0 - metalness) * (vec3(1.0) - F) * NoL;
   vec3 col = (diff + spec * PI) * uSunColor * ao;
 
   // Environment. Its absence is not a "too dark" problem, it is a missing
   // integral: a metallic fragment reflects only what is around it, and with
   // nothing around it every worn edge and anti-sun face renders pure black.
-  vec3 Rv = reflect(-V, N);
-  vec3 envCol = uFill * (0.30 + 1.05 * clamp(-Rv.y * 0.5 + 0.5, 0.0, 1.0))
-              + uSunColor * 0.010 * pow(max(dot(Rv, uSunDir), 0.0), 5.0) * sunVis;
+  //
+  // But it is not an ambient constant either. ARCHITECTURE §6 is explicit that
+  // a surface facing away from the star is black, lit only by planetshine, and
+  // the 0.30 that used to sit in front of this hemisphere was an ambient
+  // constant by another name: it put a floor under every fragment on the ship
+  // regardless of where the fill was coming from, which is what turned the
+  // backlit frame's camera-facing hemisphere into an even glow with no rim.
+  // Purely directional now, about the fill axis the shot actually set.
+  vec3  Rv   = reflect(-V, N);
+  float envW = clamp(dot(Rv, uFillDir) * 0.5 + 0.5, 0.0, 1.0);
+  vec3  envCol = uFill * uFillGain * envW * envW
+               + uSunColor * 0.010 * pow(max(dot(Rv, uSunDir), 0.0), 5.0) * sunVis;
   // Split-sum-ish: the horizon of the specular lobe never falls below F0.
-  vec3 Fenv = F0 + (max(vec3(1.0 - rough), F0) - F0) * pow(1.0 - NoV, 5.0);
+  vec3 Fenv = (F0 + (max(vec3(1.0 - rough), F0) - F0) * pow(1.0 - NoV, 5.0)) * filmed;
   col += envCol * Fenv * ao;
 
-  // Planetshine, not ambient: it arrives from the world *below*, so it fills
-  // the belly and leaves the shadowed upper flank properly black.
-  col += albedo * (1.0 - metalness) * uFill * ao * (0.25 + 0.75 * (-N.y * 0.5 + 0.5));
+  // Planetshine, not ambient: it arrives from one side — the world below — so
+  // it fills the belly and leaves the shadowed upper flank properly black.
+  //
+  // Three things were wrong with this and all three pointed the same way. The
+  // 0.25 constant floor was four times the directional term at the top of the
+  // hull, so the fill landed top-down. The direction was hard-coded to -N.y
+  // instead of the shot's own fillDirection. And it was measured on the
+  // geometric normal, so a belly plate with a high baked occlusion — which is
+  // most of a belly, since that is where the gear and the pods are — lost the
+  // very light the frame exists to show. Now: hemisphere about uFillDir,
+  // squared into a disc because a planet has an edge, measured on the BENT
+  // normal so a surface that is open downward fills and a crevice does not, and
+  // scaled by uFillGain, which is the ratio between a close world's solid angle
+  // and the unit cosine lobe this integral would otherwise assume.
+  float fillW = clamp(dot(bn, uFillDir) * 0.5 + 0.5, 0.0, 1.0);
+  col += albedo * (1.0 - metalness) * uFill * uFillGain * fillW * fillW
+       * mix(1.0, ao, 0.6);
 
   // Grazing sheen. Fresnel guarantees a reflectance spike at the silhouette, so
   // an edge seen edge-on against black cannot fade to nothing. This is the
   // silver lining, and it is the cheapest thing that stops a hull reading as
   // unfired clay. Rationed by dirt: soot has no lining.
-  float graze = pow(1.0 - NoV, 4.0);
-  float sheen = smoothstep(-0.30, 0.30, dot(N, uSunDir)) * sunVis;
-  col += uSunColor * graze * sheen * (0.018 + 0.050 * (1.0 - rough))
+  //
+  // It has to be a RIM: thin, hard, and only where the surface turns away from
+  // the eye AND still sees the star. A 4th-power Fresnel is not thin — it is
+  // still at 13% of peak when the surface is 65 degrees off edge-on — and a
+  // smoothstep opening at N.L = -0.30 fires on surfaces the star cannot even
+  // reach. Together they made a soft even halo over the whole camera-facing
+  // hemisphere, which is the named fail condition of the backlit shot. 7th
+  // power narrows the band to roughly a sixth of its width, and the gate now
+  // starts above zero so a fragment must actually face the star; the
+  // coefficient goes up to keep the rim itself bright while the body it wraps
+  // goes dark.
+  float graze = pow(1.0 - NoV, 7.0);
+  float sheen = smoothstep(0.02, 0.34, dot(N, uSunDir)) * sunVis;
+  col += uSunColor * graze * sheen * (0.05 + 0.16 * (1.0 - rough))
        * (1.0 - 0.65 * max(dirt, soot)) * ao;
 
   // --- self illumination ---------------------------------------------------
   // Amber leaking from a badly seated panel. Rationed hard — a handful of seams,
   // broken along their length — or the hull reads as a neon sign.
-  float leak = plateSeam * step(0.955, sm_hash21(vec2(pid * 57.0, 7.3)));
+  // One seam in forty-five, not one in twenty-two, and at a fifth of the
+  // radiance: uAmber is the interior light colour and it arrives here at up to
+  // 0.95 linear against plating authored around 0.1, so at the old gain a leak
+  // was nine times the value of the hull it was leaking out of. On the dorsal
+  // sail that put a scatter of saturated orange dashes across the plating and
+  // took the frame straight into "more than one saturated hue competing".
+  float leak = plateSeam * step(0.978, sm_hash21(vec2(pid * 57.0, 7.3)));
   leak *= smoothstep(0.5, 0.8, sm_hash21(vec2(floor(dom.z * 5.0), pid * 13.0)));
-  col += uAmber * leak * (0.55 + 0.45 * sin(uTime * 2.1 + pid * 40.0)) * 0.5;
+  col += uAmber * leak * (0.55 + 0.45 * sin(uTime * 2.1 + pid * 40.0)) * 0.11;
 
   // Every lit aperture pools light on the plating around it. An emitter that
   // lights nothing is a sticker; these pools are also the only second light
@@ -1011,7 +1354,17 @@ void main() {
     col += lt.rgb * lt.a * albedo * fall * ao * step(1e-9, lp.w);
   }
 
-  col += uPlumeColor * wash * uThrottle * 2.6;
+  // The plume lighting the plating around the nozzles. This is a LIGHT falling
+  // on dark steel, so it goes through the albedo like every other light on the
+  // ship — and it is bounded, because wash accumulates once per nozzle with
+  // no normalisation and a six-nozzle cluster drove it past 3.0. Multiplied by
+  // 2.6 that reached ~8 scene-linear on plating authored for 0.1: five to eight
+  // times over the top of the band this file's own header sets, which is what
+  // blew the thrust structure to flat white in every drive-on frame. It also
+  // stole the exposure — a subject-weighted meter reads that as the ship's
+  // level and stops the iris down on everything else.
+  col += uPlumeColor * albedo * (1.0 - metalness) * clamp(wash, 0.0, 1.0)
+       * uThrottle * 6.0 * ao;
 
   // --- re-entry ------------------------------------------------------------
   if (uHeat > 0.002) {
@@ -1274,6 +1627,11 @@ function cacheKeyFor(bp: ShipBlueprint, tier: QualityTier, markRows: number): st
     rgbHex(p.interiorLight),
     rgbHex(p.plateShades[0]),
     rgbHex(p.patchShades[0]),
+    // The grime film's chromaticity is derived from this, and grime covers more
+    // of the hull than anything else does. Two yards that share a hull colour
+    // but not a soot colour must not share a program.
+    rgbHex(p.scorch),
+    rgbHex(p.oxide),
   ].join('|');
 }
 
@@ -1288,6 +1646,8 @@ function makeUniforms(budget: TierBudget, palette: ShipPalette, markRows: number
     uSunColor: { value: new Float32Array([1, 0.95, 0.88]) },
     uCameraLocal: { value: new Float32Array([0, 0, 1]) },
     uFill: { value: new Float32Array([0.01, 0.014, 0.022]) },
+    uFillDir: { value: new Float32Array([0, -1, 0]) },
+    uFillGain: { value: FILL_GAIN },
     uTime: { value: 0 },
     uThrottle: { value: 0 },
     uHeat: { value: 0 },
@@ -1301,6 +1661,7 @@ function makeUniforms(budget: TierBudget, palette: ShipPalette, markRows: number
     uCoverage: { value: 1000 },
     uMicroDetail: { value: 1 },
     uSeed: { value: new Float32Array([0, 0, 0]) },
+    uAftSpan: { value: new Float32Array([-0.015, 0.015]) },
 
     uPlate0: { value: v3(palette.plateShades[0] ?? palette.hull, [0.05, 0.055, 0.05]) },
     uPlate1: { value: v3(palette.plateShades[1] ?? palette.hull, [0.05, 0.055, 0.05]) },
@@ -1318,6 +1679,7 @@ function makeUniforms(budget: TierBudget, palette: ShipPalette, markRows: number
     uScorch: { value: v3(palette.scorch, [0.011, 0.0095, 0.0088]) },
     uAmber: { value: v3(palette.interiorLight, [1.0, 0.52, 0.13]) },
     uPlumeColor: { value: v3(palette.engineCore, [0.16, 0.36, 1.0]) },
+    uGrimeTint: { value: grimeTint(palette) },
 
     uRough: { value: 0.7 },
     uMetalness: { value: 0.16 },
@@ -1337,6 +1699,8 @@ function makeUniforms(budget: TierBudget, palette: ShipPalette, markRows: number
     uLampTint: { value: new Float32Array(budget.lamp * 4) },
     uStain: { value: new Float32Array(budget.stain * 4) },
     uStainAxis: { value: new Float32Array(budget.stain * 4) },
+    uWound: { value: new Float32Array(budget.wound * 4) },
+    uWoundAxis: { value: new Float32Array(budget.wound * 4) },
   };
 
   if (markRows > 0) {
@@ -1367,6 +1731,7 @@ function acquireProgram(bp: ShipBlueprint, quality: QualitySettings, markRows: n
     SHIP_OCC_MAX: budget.occ,
     SHIP_LAMP_MAX: budget.lamp,
     SHIP_STAIN_MAX: budget.stain,
+    SHIP_WOUND_MAX: Math.max(budget.wound, 1),
     SHIP_MARK_MAX: Math.max(budget.mark, 1),
     SHIP_GRIME_OCTAVES: budget.grimeOctaves,
     SEAM_RELIEF_MAX: SEAM_RELIEF_MAX_KM.toExponential(6),
@@ -1492,11 +1857,15 @@ class ShipMaterials implements ShipMaterialSet {
   private readonly lampTint: Float32Array;
   private readonly stain: Float32Array;
   private readonly stainAxis: Float32Array;
+  private readonly wound: Float32Array;
+  private readonly woundAxis: Float32Array;
   private readonly mark: Float32Array;
   private readonly markU: Float32Array;
   private readonly markV: Float32Array;
   private readonly seed = new Float32Array(3);
   private readonly flow = new Float32Array(3);
+  private readonly aftSpan = new Float32Array(2);
+  private readonly fillDir = new Float32Array([0, -1, 0]);
   private readonly wearA = new Float32Array(4);
   private readonly wearB = new Float32Array(4);
 
@@ -1540,6 +1909,8 @@ class ShipMaterials implements ShipMaterialSet {
     this.lampTint = new Float32Array(budget.lamp * 4);
     this.stain = new Float32Array(budget.stain * 4);
     this.stainAxis = new Float32Array(budget.stain * 4);
+    this.wound = new Float32Array(budget.wound * 4);
+    this.woundAxis = new Float32Array(budget.wound * 4);
     this.mark = new Float32Array(budget.mark * 4);
     this.markU = new Float32Array(budget.mark * 4);
     this.markV = new Float32Array(budget.mark * 4);
@@ -1599,13 +1970,101 @@ class ShipMaterials implements ShipMaterialSet {
     this.seed[1] = (((s >>> 10) & 0x3ff) / 1024) * 40;
     this.seed[2] = (((s >>> 20) & 0x3ff) / 1024) * 40;
 
+    this.fillAftSpan(bp);
     this.fillOccluders(bp);
     this.fillLamps(bp);
     this.fillStains(bp);
+    this.fillWounds(bp);
     this.atlas = this.fillMarkings(bp, markings);
   }
 
   // --- construction-time uploads -----------------------------------------
+
+  /**
+   * The hull's extent along the flow axis, so grime can have a gradient.
+   *
+   * Everything a ship sheds travels one way: residue from the drive, plume off
+   * the radiators, vented atmosphere, its own dust. Plating downstream of that
+   * is filthy and plating upstream of it is comparatively clean, and BRIEF §7
+   * calls the alternative — the same expected dirtiness at the nose as at the
+   * tail — the single most common failure. The span is measured from the real
+   * geometry (volume runs and engine throats projected onto `flowDirection`)
+   * rather than assumed symmetric about the origin, because a ship whose origin
+   * sits at its centre of mass is not a ship whose origin sits amidships.
+   */
+  private fillAftSpan(bp: ShipBlueprint): void {
+    const fx = this.flow[0] ?? 0;
+    const fy = this.flow[1] ?? 0;
+    const fz = this.flow[2] ?? 1;
+    let lo = Infinity;
+    let hi = -Infinity;
+    const note = (p: Vec3 | undefined): void => {
+      if (p === undefined) return;
+      const t = (p[0] ?? 0) * fx + (p[1] ?? 0) * fy + (p[2] ?? 0) * fz;
+      if (t < lo) lo = t;
+      if (t > hi) hi = t;
+    };
+    for (const v of bp.primaryVolumes) note(v.frame.origin);
+    for (const m of bp.modules) if (m.present) note(m.frame.origin);
+    for (const e of bp.engines) note(e.frame.origin);
+    if (!Number.isFinite(lo) || !Number.isFinite(hi) || hi - lo < this.hullLen * 0.1) {
+      lo = -this.hullLen * 0.5;
+      hi = this.hullLen * 0.5;
+    }
+    this.aftSpan[0] = lo;
+    this.aftSpan[1] = hi;
+  }
+
+  /**
+   * The damage timeline, as an analytic set.
+   *
+   * Ranked by how much of the ship's story each wound carries — severity first,
+   * then size — because the array is capped and a scatter of pinholes must never
+   * evict the hole that took the module off. Age is carried through verbatim:
+   * it is the field that turns a set of marks into a history, and the shader
+   * reads nothing else to decide whether a wound shows torn bright metal or
+   * thirty years of oxide.
+   */
+  private fillWounds(bp: ShipBlueprint): void {
+    this.wound.fill(0);
+    this.woundAxis.fill(0);
+    const slots = this.wound.length / 4;
+    if (slots === 0) return;
+
+    const events = bp.damageHistory
+      .filter((d) => d.radius > 0 && d.severity > 0)
+      .slice()
+      .sort((a, b) => b.severity * b.radius - a.severity * a.radius);
+
+    // A wound's radius is a real length off the blueprint, but a wound wider
+    // than a fifth of the hull is a structural event the geometry module has
+    // already expressed as a hole; shading it as a surface mark on top of that
+    // would only wash the whole ship.
+    const rMax = this.hullLen * 0.2;
+    // Thirty years is "old" — past it, everything is equally weathered. Younger
+    // than about a month is "fresh": still bright metal, no oxide.
+    const OLD_SECONDS = 30 * 365 * 24 * 3600;
+    const FRESH_SECONDS = 30 * 24 * 3600;
+
+    let w = 0;
+    for (const d of events) {
+      if (w >= slots) break;
+      this.wound[w * 4] = d.frame.origin[0];
+      this.wound[w * 4 + 1] = d.frame.origin[1];
+      this.wound[w * 4 + 2] = d.frame.origin[2];
+      this.wound[w * 4 + 3] = Math.min(d.radius, rMax);
+      // The direction the strike arrived along. Degenerate input falls back to
+      // the surface normal, which at least keeps the wound on the hull.
+      writeUnit(this.woundAxis, w * 4, d.incidence, d.frame.forward[0], d.frame.forward[1], d.frame.forward[2]);
+      const age = clamp01(
+        Math.log(Math.max(d.ageSeconds, FRESH_SECONDS) / FRESH_SECONDS) /
+          Math.log(OLD_SECONDS / FRESH_SECONDS),
+      );
+      // floor = severity in 16 steps, fract = age. Same idiom as packStain().
+      this.woundAxis[w * 4 + 3] = Math.round(clamp01(d.severity) * 15) + Math.min(age, 0.999);
+      w++;
+    }
+  }
 
   private fillOccluders(bp: ShipBlueprint): void {
     const slots = this.occPart.length;
@@ -1830,6 +2289,19 @@ class ShipMaterials implements ShipMaterialSet {
       f[2] = fill.b;
     }
 
+    // The fill's direction, defaulted to straight down. Zero allocation: the
+    // normalisation is written into a preallocated array.
+    const fd = state.fillDirection;
+    if (fd !== undefined) {
+      const l = Math.hypot(fd.x, fd.y, fd.z);
+      if (l > 1e-9) {
+        this.fillDir[0] = fd.x / l;
+        this.fillDir[1] = fd.y / l;
+        this.fillDir[2] = fd.z / l;
+      }
+    }
+    u.uFillDir.value = this.fillDir;
+
     u.uTime.value = view.time;
     u.uThrottle.value = state.throttle;
     u.uHeat.value = state.heat;
@@ -1857,6 +2329,9 @@ class ShipMaterials implements ShipMaterialSet {
 
     u.uSeed.value = this.seed;
     u.uFlowDir.value = this.flow;
+    u.uAftSpan.value = this.aftSpan;
+    u.uWound.value = this.wound;
+    u.uWoundAxis.value = this.woundAxis;
     u.uWearA.value = this.wearA;
     u.uWearB.value = this.wearB;
     u.uOcc.value = this.occ;
