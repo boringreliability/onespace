@@ -15,6 +15,7 @@ import { config } from '@/core/Config';
 import { Universe } from '@/game/Universe';
 import { Pilot } from '@/game/Pilot';
 import { MapMode } from '@/game/MapMode';
+import { Traffic } from '@/game/Traffic';
 import { Showroom, registerShowroomShots, setShipVisualFactory } from '@/game/Showroom';
 import { createShipVisual } from '@/render/ships/ShipMesh';
 import { activeShotName, registerShot, shotOwnsScene, updateActiveShot } from '@/game/Shots';
@@ -268,6 +269,11 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   const pilot = new Pilot({ universe, hud, audio });
   await engine.add(pilot);
   await engine.add(new ShotDriver());
+
+  progress(0.84, 'reading transponders');
+  // The procedural fleet, in the universe rather than the showroom.
+  const traffic = new Traffic(universe);
+  await engine.add(traffic);
 
   progress(0.86, 'charting the galaxy');
   const map = new MapMode({ universe, warp });
