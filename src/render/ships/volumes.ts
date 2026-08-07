@@ -161,13 +161,34 @@ const VOLUME_FLOOR_FRACTION = 0.008;
  * between a budget and a hope.
  *
  * The share is derived from the level's own `greebleFraction` because that is
- * the blueprint saying how much of the level belongs to detail: at LOD2, where
- * no greeble is placed, the surface is the whole ship and may have nearly all
- * of it; at LOD0 detail is the majority of the frame's triangles and the skin
- * takes half.
+ * the blueprint saying how much of the level belongs to detail: at LOD0 detail
+ * is the majority of the frame's triangles and the skin takes half.
+ *
+ * THE COARSE RUNGS ARE CAPPED SEPARATELY, and the number is measured rather
+ * than argued. `greebleFraction` is 0 at LOD2 and above, which used to hand
+ * the skin 90 % of the rung — and the skin does not need it. Rasterising the
+ * hero hull's outline from the review camera with the detail layer forced on
+ * at every rung puts the loft's own LOD0-vs-LOD2 error at 2.11 %, while the
+ * fittings the skin was crowding out are worth 6.8 % of the same outline: the
+ * last tenth of tessellation is being bought at roughly thirty times the price
+ * of the hardware it displaces.
+ *
+ * `ShipMesh.SILHOUETTE_RESERVE` is where the freed triangles go, and 0.4 is
+ * where the two curves cross. Swept over four hulls — the 62 m hero, a 139 m
+ * salvager, a 1.4 km miner and a 27 m courier — LOD0-vs-LOD2 outline XOR at
+ * shares 0.55 / 0.40 / 0.28 runs 8.44/8.29/8.63, 6.94/7.79/8.14,
+ * 20.72/21.16/21.16 and 11.18/11.21/11.35. The differences are under a point
+ * either way; what 0.40 buys and 0.55 does not is the hero holding its dorsal
+ * boom and its aft extreme at LOD2 within BRIEF §6's 3,000 triangles.
+ *
+ * It is a *ceiling* and not a value, so a blueprint that asks for less still
+ * gets less.
  */
+const COARSE_SURFACE_SHARE = 0.4;
+
 function surfaceBudgetShare(lod: LodLevel): number {
-  return clamp(1 - lod.greebleFraction * 0.5, 0.35, 0.9);
+  const share = clamp(1 - lod.greebleFraction * 0.5, 0.35, 0.9);
+  return lod.level >= 2 ? Math.min(share, COARSE_SURFACE_SHARE) : share;
 }
 
 /**
@@ -180,7 +201,7 @@ function surfaceBudgetShare(lod: LodLevel): number {
  * whichever is *smaller*: a blueprint may ask for less than the brief allows
  * and never for more.
  */
-const BRIEF_TRIANGLE_CAP = [120000, 25000, 3000, 700] as const;
+export const BRIEF_TRIANGLE_CAP = [120000, 25000, 3000, 700] as const;
 
 /** No volume is ground below this, or a hull with many small parts vanishes. */
 const MIN_VOLUME_TRIANGLES = 64;
@@ -2831,28 +2852,94 @@ export function impostorFor(volumes: readonly PrimaryVolume[]): ImpostorDescript
 }
 
 /**
- * The impostor itself: one camera-facing quad, sized to the bounding sphere.
+ * The impostor itself: one camera-facing billboard, CUT TO THE SHIP'S OUTLINE.
  *
- * `uv` carries the billboard parameter, so a material can read the two profile
- * arrays out of a uniform and cut the ship's outline out of the quad. Two
- * triangles, one draw call, no texture, and no render target to dispose — the
- * point of an impostor is that it costs nothing, and a per-ship render target
- * at 154 km would cost more than the ship it replaces.
+ * It used to be a rectangle, and a rectangle is the one shape no ship is. The
+ * comment that stood here said `uv` carried the billboard parameter "so a
+ * material can read the two profile arrays out of a uniform and cut the ship's
+ * outline out of the quad" — and no material ever did. `ShipMaterial` has no
+ * impostor path at all, so what a receding hull actually turned into was a
+ * solid bounding rectangle. Rasterised against LOD0's own outline from the
+ * review camera, that is 56 % symmetric difference on the hero hull, 45 % on a
+ * 1.4 km miner and 106 % on a 27 m courier — a courier that DOUBLES in area at
+ * the moment it becomes an impostor. There is no distance at which that is not
+ * the most visible LOD artefact on the ship.
+ *
+ * So the outline is cut into the geometry instead, where it needs no shader
+ * and no texture: the profile arrays `impostorFor` already measures become the
+ * strip's half-heights, normalised so the widest station is 1 and the caller's
+ * existing cross-axis scale — which is the hull's real projected support in
+ * whatever direction the roll leaves upright — carries the size. The two
+ * profiles are combined by taking the larger at each station, so the shape is
+ * the ship's own taper from every azimuth rather than one view's.
+ *
+ * BRIEF §6 budgets the impostor at "1 quad", and the number that line is
+ * protecting is the DRAW CALL: one bind, no hull, no render target. This is
+ * still one draw call and one geometry; it is 30 triangles instead of 2,
+ * against a rung whose own triangle cap is 700.
  */
 export function buildImpostorQuad(desc: ImpostorDescription): BufferGeometry {
   const g = new BufferGeometry();
   const r = Math.max(desc.radiusKm, 1e-6);
-  // Corner offsets in the billboard's own plane; the vertex shader orients it.
-  const pos = new Float32Array([-r, -r, 0, r, -r, 0, r, r, 0, -r, r, 0]);
-  const uv = new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]);
+  const n = IMPOSTOR_SAMPLES;
+
+  // The outline, normalised. `max` rather than either one alone: the quad is
+  // rolled to face the camera and the cross-axis scale is already the honest
+  // support for that roll, so the profile is only supplying the SHAPE — and a
+  // shape that is short at a station the plan view is wide at would put a
+  // notch in a hull that has none.
+  const f = new Float32Array(n);
+  let peak = 0;
+  for (let i = 0; i < n; i++) {
+    f[i] = Math.max(desc.sideProfile[i]!, desc.planProfile[i]!);
+    if (f[i]! > peak) peak = f[i]!;
+  }
+  // A hull whose profiles are all zero (no volumes) still has to produce a
+  // well-formed quad rather than a degenerate one.
+  const inv = peak > 1e-12 ? 1 / peak : 0;
+
+  const pos = new Float32Array(n * 6);
+  const uv = new Float32Array(n * 4);
+  const nrm = new Float32Array(n * 6);
+  const surf = new Float32Array(n * 8);
+  for (let i = 0; i < n; i++) {
+    const u = n > 1 ? i / (n - 1) : 0;
+    const x = (u * 2 - 1) * r;
+    // Never exactly zero: a station of no height would pinch the strip into a
+    // point and the ship would flicker through it as the billboard rolls.
+    const h = Math.max(f[i]! * inv, 0.04) * r;
+    for (const k of [0, 1]) {
+      const v = i * 2 + k;
+      pos[v * 3] = x;
+      pos[v * 3 + 1] = k === 0 ? -h : h;
+      uv[v * 2] = u;
+      uv[v * 2 + 1] = k;
+      nrm[v * 3 + 2] = 1;
+      // Fully lit, no bent-normal opinion: at impostor range the shading is a
+      // single value and the outline is the whole read.
+      surf[v * 4] = 0.7;
+      surf[v * 4 + 3] = 1;
+    }
+  }
+  const idx = new Uint16Array((n - 1) * 6);
+  for (let i = 0; i < n - 1; i++) {
+    const a = i * 2;
+    // Wound anticlockwise in the billboard's own XY plane, so the face normal
+    // is +Z exactly as the rectangle's was.
+    idx[i * 6] = a;
+    idx[i * 6 + 1] = a + 2;
+    idx[i * 6 + 2] = a + 3;
+    idx[i * 6 + 3] = a;
+    idx[i * 6 + 4] = a + 3;
+    idx[i * 6 + 5] = a + 1;
+  }
+
   g.setAttribute('position', new BufferAttribute(pos, 3));
   g.setAttribute('uv', new BufferAttribute(uv, 2));
-  g.setAttribute('normal', new BufferAttribute(new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1]), 3));
-  // Fully lit, no bent-normal opinion: at impostor range the shading is a
-  // single value and the outline is the whole read.
-  g.setAttribute('aSurf', new BufferAttribute(new Float32Array([0.7, 0, 0, 1, 0.7, 0, 0, 1, 0.7, 0, 0, 1, 0.7, 0, 0, 1]), 4));
-  g.setAttribute('aBent', new BufferAttribute(new Float32Array(16), 4));
-  g.setIndex(new BufferAttribute(new Uint16Array([0, 1, 2, 0, 2, 3]), 1));
+  g.setAttribute('normal', new BufferAttribute(nrm, 3));
+  g.setAttribute('aSurf', new BufferAttribute(surf, 4));
+  g.setAttribute('aBent', new BufferAttribute(new Float32Array(n * 8), 4));
+  g.setIndex(new BufferAttribute(idx, 1));
   g.computeBoundingSphere();
   return g;
 }

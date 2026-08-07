@@ -988,7 +988,16 @@ export class Showroom implements GameModule {
       });
 
       radius = Math.max(radius, group.position.length() + e.blueprint.dimensions.boundingRadius);
-      if (setup.lod !== undefined) e.visual.setLod(setup.lod);
+      // ALWAYS set the rung, never only when the shot names one.
+      //
+      // The visual is cached across shots, and shoot.mjs runs shots in global
+      // registerShot order rather than this table's order — so ship-lod2 and
+      // ship-extreme-distance execute BEFORE the hero frames and leave their
+      // decimated hull behind. Measured: ship-hero-close, ship-greeble-close
+      // and ship-high-quality were photographs of a 2-triangle impostor, and
+      // the silhouette frames were the 2,508-triangle LOD2 hull. Two full
+      // review rounds critiqued those frames as if they were LOD0.
+      e.visual.setLod(setup.lod ?? 0);
     }
     this.layoutRadiusKm = Math.max(radius, 1e-4);
 

@@ -384,6 +384,121 @@ const SEAM_RELIEF_MAX_KM = 2.5e-5;
 const FILL_GAIN = 3.4;
 
 /**
+ * Optical depth of the vacuum-weathering film at `uFilmDepth * dirt == 1`, in
+ * stops of the plate's own reflectance.
+ *
+ * See the film block in `SURFACE_FRAG` for why this term exists at all. What
+ * this constant fixes is its FORM and its DEPTH, and both were wrong.
+ *
+ * Form: the film used to be `albedo *= 1 - k * t`, a linear subtraction, so its
+ * reachable depth was bounded by `t` — at the reference hull's `t` of 0.61 it
+ * could not remove more than 61% of the paint no matter what `k` was set to,
+ * and pushing `k` past 1 made the albedo negative. An absorbing film is
+ * Beer-Lambert in its thickness, not linear in it, so `exp2(-stops * t)` is
+ * both the physically correct shape and the one that has no ceiling and no
+ * floor problem: it is bounded to (0, 1] by construction.
+ *
+ * Depth: 3.2 stops takes the reference Kessler hull (`uFilmDepth` 0.736, mid
+ * dirt, so `t` = 0.61) to 0.26 of its paint chip — a plate authored at 0.058
+ * linear renders at 0.015, and the range across the maintenance and age bands
+ * runs 0.031 (new, well kept) to `FILM_FLOOR` (neglected, forty years). That is
+ * the "near-black base with enormous dark surfaces" of ARCHITECTURE §6 stated
+ * as a reflectance rather than as an exposure trick.
+ *
+ * WHY IT HAS TO BE THIS DEEP, which is the part the previous two rounds missed:
+ * `PostFX`'s meter is SUBJECT-weighted (`LuminancePass.uSubject`) and its gain
+ * is `uMeterGain` 0.65, so the hull carries most of the vote on its own
+ * exposure. Scale the hull's radiance by k and the iris gives back k^-0.65w;
+ * with the hull at 60-100% of the meter's weight, a k of 0.5 arrives on screen
+ * as 0.65 to 0.78. The old linear film's 0.58 multiply therefore moved the
+ * measured frame by about 12%, which is exactly what the last two rounds saw.
+ * There is no way to move this hull one stop on screen without moving it two
+ * and a half in scene-linear, and no amount of output scaling can substitute,
+ * because output scaling is metered too.
+ *
+ * And it is the measurable half of the HUE as well: `GradePass`'s split tone
+ * interpolates `uShadowTint` (0.84, 0.97, 1.14) to `uHighTint` (1.12, 1.00,
+ * 0.84) on DISPLAY luminance, so a PERFECTLY NEUTRAL fragment measures
+ * R-B = +19 at display 128, +38 at 156 and +47 at 174 — and -10 at display 64.
+ * Measured on the r4 frames, the lit hull's R-B tracks that curve band for band
+ * (-18 at 40-64, -4 at 64-96, +19 at 96-128, +40 at 128-160, +53 at 160-200):
+ * the material was not producing a warm pixel, it was producing a pixel one
+ * stop too bright and the grade was making it warm. Value and hue are one knob
+ * on this hull and this is the knob.
+ */
+const FILM_STOPS = 3.2;
+
+/**
+ * The film never removes more than this much of the paint.
+ *
+ * `exp2(-3.2)` is 0.11, so a neglected forty-year-old Ossuary hull whose grime
+ * field is also saturated would render at 0.4% reflectance — past "near-black"
+ * and into "a hole in space", which BRIEF §8's "it holds up against black
+ * space" rejects harder than a pale hull. A hull can be filthy; it cannot stop
+ * being a surface. Kessler's reference hull sits at 0.26, well clear of this, so
+ * the floor only ever engages on the extreme end of the maintenance band.
+ */
+const FILM_FLOOR = 0.14;
+
+/**
+ * Ceilings on every non-plate albedo constant, as a multiple of the ship's own
+ * reference plate luminance.
+ *
+ * THE INVARIANT: a detail on a hull is a material difference, not a light
+ * source. Nothing that is still paint, primer, oxide or dirt may be brighter
+ * than about a stop above the plate it sits on; bare steel may be brighter than
+ * that because it genuinely is; the faction accent may be brighter still
+ * because it is the one thing on the ship allowed to shout.
+ *
+ * `families.ts` authors these against no such reference and they land where the
+ * hue wanted them to, not where the value should be. Measured against each
+ * faction's own mean plate:
+ *
+ *     bareMetal   Kessler 3.5x   Sillane 4.7x   Ossuary 5.6x
+ *     accent      Kessler 2.8x   Sillane 11.8x  Ossuary 5.2x
+ *     trim        Kessler 1.6x   Sillane 1.8x   Ossuary 3.1x
+ *     primer      Kessler 1.0x   Sillane 1.3x   Ossuary 2.0x
+ *
+ * That matters more than it looks, because the masks that mix TOWARDS these —
+ * `bare`, `chip`, `corr`, the trim band and the markings — are the ones the
+ * detail cascade does NOT gate. Seams, grooves, plate edges, scuffing and the
+ * dirt ribbons all ride `kPlate`/`kBay` and fade out with distance; `bare` and
+ * `chip` and `corr` do not. So the far field converged to a mean well ABOVE the
+ * paint's own value while every darkening band converged to nothing, which is
+ * why `ship-lod0` measured brighter than `ship-hero-close` and why the warm
+ * bias read identically at every LOD — it is not a wear layer, it is what the
+ * hull's area-weighted albedo actually is.
+ *
+ * The ceiling is applied as a UNIFORM SCALE of the triple, so chromaticity —
+ * and therefore saturation — is preserved exactly. The accent stays the only
+ * saturated thing on the hull; it just stops being the brightest thing on it by
+ * a factor of twelve.
+ */
+const VALUE_CEILING = {
+  /**
+   * Bare steel under the paint. Brighter than paint, not five times brighter.
+   * The file already argued this at the plate-edge band ("uMetal at 0.2 linear
+   * — three to four times the hull's own albedo"); it narrowed the band instead
+   * of fixing the value, so every OTHER consumer of `bare` kept paying it.
+   */
+  metal: 1.6,
+  /**
+   * The one saturated hue, and it stays the one saturated hue: the ceiling is a
+   * uniform scale, so chromaticity and therefore saturation are untouched and
+   * only the value moves. Sillane's accent measured 11.8x its own plate — that
+   * is not an accent, it is a light source, and on the fleet frame it was the
+   * single largest bright area on three hulls at once.
+   */
+  accent: 1.8,
+  /** Handrails, grab points, hatch surrounds. A different coat, not a lamp. */
+  trim: 1.2,
+  /** Primer and oxide are underlayers of the same paint system. */
+  underlayer: 1.25,
+  /** A replaced plate may be a shade lighter. A third of a stop, not two. */
+  patch: 1.35,
+} as const;
+
+/**
  * The grime film's chromaticity, normalised to unit luminance.
  *
  * Taken from `palette.scorch`, which every faction authors, then pulled 35%
@@ -1308,7 +1423,23 @@ void main() {
   // ship-extreme-distance measured at 193/255 and ship-lod0 measured brighter
   // than ship-hero-close. A weathered hull's mean is the weathered value; this
   // is always on, so the far field now converges to it.
-  albedo *= 1.0 - 0.68 * uFilmDepth * (0.58 + 0.42 * dirt);
+  //
+  // BEER-LAMBERT, NOT LINEAR, and that is not a stylistic preference — it is
+  // what let the term reach its own stated depth. The old form, albedo *= 1 -
+  // k * t, cannot remove more than a fraction t of the paint however large k
+  // is, and the reference hull's t is 0.61 — so the film's maximum authority on
+  // that hull was 61% and its actual setting was 42%. Past k = 1 the albedo goes
+  // NEGATIVE. An absorbing film over paint attenuates exponentially in its
+  // thickness, so exp2(-stops * t) is both the correct shape and unbounded
+  // above while bounded to (0, 1] below by construction. FILM_STOPS in the TS
+  // above carries the measurement and the argument for the depth.
+  //
+  // filmT is hoisted because the specular lobe and the dielectric F0 below read
+  // the same number: a hull may not be filthy in its pigment and polished in its
+  // highlight, and it was — the coherent reflection is the term that arrives
+  // wearing the STAR's colour rather than the paint's.
+  float filmT = clamp(uFilmDepth * (0.58 + 0.42 * dirt), 0.0, 1.0);
+  albedo *= max(exp2(-SHIP_FILM_STOPS * filmT), SHIP_FILM_FLOOR);
 
   // Trim, and only on the handful of fittings the crew actually grab. Applied
   // across everything merely "exposed" it stops being trim and becomes a second
@@ -1464,7 +1595,26 @@ void main() {
   float D  = a2 / (PI * dd * dd);
   float k  = a * 0.5;
   float G  = (NoV / (NoV * (1.0 - k) + k)) * (NoL / (NoL * (1.0 - k) + k));
-  vec3  F0 = mix(vec3(0.04), albedo, metalness);
+  // The DIELECTRIC F0 IS NOT 0.04 ON A WEATHERED HULL, and this is the last
+  // place the achromatic budget was being paid in full.
+  //
+  // 0.04 is the normal-incidence reflectance of a smooth polymer/air interface
+  // — clean, unbroken topcoat. What filmT measures is the fraction of that
+  // interface that is no longer there: chalked binder, vacuum-deposited dust,
+  // micrometeorite frosting. A powdered surface has no interface to reflect
+  // coherently off, so its F0 falls towards the ~0.01 of a matte mineral dust
+  // rather than staying at fresh lacquer. The filmed factor below already
+  // removed
+  // some of this lobe, but it left F0 at showroom value, so the fragment was
+  // simultaneously 70% weathered in its pigment and factory-fresh in its
+  // Fresnel.
+  //
+  // This is the term that decides the HUE, not just the level: F0 * uSunColor is
+  // the star's chromaticity with no albedo anywhere in it (R/B = 1.22 under the
+  // showroom key), so every point of specular fraction is a point of warmth
+  // laid over paint authored at R/B = 0.82 specifically to come back neutral.
+  // Metals keep their own F0 — a bare steel chip is supposed to be a mirror.
+  vec3  F0 = mix(vec3(mix(0.040, 0.009, filmT)), albedo, metalness);
   vec3  F  = F0 + (1.0 - F0) * pow(1.0 - VoH, 5.0);
 
   // Dust does not only broaden the specular lobe, it ABSORBS it: a film of it
@@ -1495,8 +1645,14 @@ void main() {
   // reflection away — that is what chalking IS — so uPaintFade belongs in this
   // term, and it is per-faction, so removing it correctly gives the three hulls
   // three different specular fractions as well as three different hues.
+  //
+  // Reads filmT, the same number the albedo film and F0 above read, rather
+  // than uFilmDepth on its own: this fragment's dirt loading is part of how
+  // much film is on it, and having the pigment darken with the dirt while the
+  // lobe attenuated with only the ship-wide average is what let a heavily
+  // streaked panel keep a clean-plate highlight.
   float filmed = (1.0 - 0.55 * max(dirt, soot))
-               * (1.0 - 0.72 * uFilmDepth * (0.45 + 0.55 * uPaintFade));
+               * (1.0 - 0.72 * filmT * (0.45 + 0.55 * uPaintFade));
 
   vec3 spec = (D * G / max(4.0 * NoV * NoL, 1e-4)) * F * NoL * filmed;
   // No 1/PI on diffuse: uSunColor is authored as irradiance with PI already
@@ -1897,6 +2053,11 @@ function cacheKeyFor(bp: ShipBlueprint, tier: QualityTier, markRows: number): st
     // but not a soot colour must not share a program.
     rgbHex(p.scorch),
     rgbHex(p.oxide),
+    // The value ceilings (VALUE_CEILING) are struck against the MEAN of the four
+    // plate shades, and only shade 0 is hashed above. Two palettes agreeing on
+    // shade 0 and differing on 1..3 would otherwise share a program whose
+    // uMetal, uAccent and uTrim were computed from the wrong reference.
+    plateLuminance(p).toExponential(4),
   ].join('|');
 }
 
@@ -1905,7 +2066,61 @@ function v3(c: RGB | undefined, fallback: readonly [number, number, number]): Fl
   return new Float32Array([s[0], s[1], s[2]]);
 }
 
+/** Luminance weights, identical to the ones `SURFACE_FRAG` uses on `albedo`. */
+function lumOf(r: number, g: number, b: number): number {
+  return 0.3 * r + 0.59 * g + 0.11 * b;
+}
+
+/**
+ * The ship's reference plate luminance — the value every other albedo constant
+ * is measured against. Mean of the four plate shades, because that is what the
+ * production-batch mix in `SURFACE_FRAG` actually averages to over a hull.
+ */
+function plateLuminance(palette: ShipPalette): number {
+  const shades = palette.plateShades;
+  const n = Math.min(shades.length, 4);
+  if (n === 0) {
+    const h = palette.hull ?? [0.05, 0.055, 0.05];
+    return Math.max(lumOf(h[0], h[1], h[2]), 1e-5);
+  }
+  let sum = 0;
+  for (let i = 0; i < n; i++) {
+    const c = shades[i];
+    sum += lumOf(c[0], c[1], c[2]);
+  }
+  return Math.max(sum / n, 1e-5);
+}
+
+/**
+ * `v3()` with a value ceiling: scale the triple down, chromaticity intact,
+ * until its luminance is at most `ratio` times the reference plate's.
+ *
+ * Only ever darkens — a faction that authored a detail colour DARKER than its
+ * plate keeps it exactly. See `VALUE_CEILING` for why this exists.
+ */
+function v3Capped(
+  c: RGB | undefined,
+  fallback: readonly [number, number, number],
+  plateLum: number,
+  ratio: number,
+): Float32Array {
+  const out = v3(c, fallback);
+  const lum = lumOf(out[0], out[1], out[2]);
+  const max = plateLum * ratio;
+  if (lum <= max || lum <= 1e-6) return out;
+  const k = max / lum;
+  out[0] *= k;
+  out[1] *= k;
+  out[2] *= k;
+  return out;
+}
+
 function makeUniforms(budget: TierBudget, palette: ShipPalette, markRows: number): Record<string, IUniform> {
+  // Everything below that is NOT the plate is measured against the plate. See
+  // VALUE_CEILING: a detail is a material difference, not a light source, and
+  // the masks that reach for these colours are the ones the detail cascade
+  // never fades, so an unbounded one raises the hull's mean at every LOD.
+  const pl = plateLuminance(palette);
   const u: Record<string, IUniform> = {
     uSunDir: { value: new Float32Array([0, 1, 0]) },
     uSunColor: { value: new Float32Array([1, 0.95, 0.88]) },
@@ -1934,15 +2149,21 @@ function makeUniforms(budget: TierBudget, palette: ShipPalette, markRows: number
     uPlate1: { value: v3(palette.plateShades[1] ?? palette.hull, [0.05, 0.055, 0.05]) },
     uPlate2: { value: v3(palette.plateShades[2] ?? palette.hull, [0.05, 0.055, 0.05]) },
     uPlate3: { value: v3(palette.plateShades[3] ?? palette.plateShades[0] ?? palette.hull, [0.05, 0.055, 0.05]) },
-    uPatch0: { value: v3(palette.patchShades[0] ?? palette.hull, [0.08, 0.07, 0.05]) },
-    uPatch1: { value: v3(palette.patchShades[1] ?? palette.patchShades[0] ?? palette.hull, [0.04, 0.046, 0.044]) },
-    uPatch2: { value: v3(palette.patchShades[2] ?? palette.patchShades[0] ?? palette.hull, [0.095, 0.048, 0.022]) },
-    uMismatch: { value: v3(palette.mismatch[0] ?? palette.patchShades[0] ?? palette.hull, [0.05, 0.05, 0.055]) },
-    uAccent: { value: v3(palette.accent, [0.4, 0.078, 0.008]) },
-    uTrim: { value: v3(palette.trim, [0.1, 0.098, 0.062]) },
-    uMetal: { value: v3(palette.bareMetal, [0.2, 0.21, 0.235]) },
-    uPrimer: { value: v3(palette.primer, [0.125, 0.034, 0.018]) },
-    uOxide: { value: v3(palette.oxide, [0.088, 0.032, 0.013]) },
+    uPatch0: { value: v3Capped(palette.patchShades[0] ?? palette.hull, [0.08, 0.07, 0.05], pl, VALUE_CEILING.patch) },
+    uPatch1: {
+      value: v3Capped(palette.patchShades[1] ?? palette.patchShades[0] ?? palette.hull, [0.04, 0.046, 0.044], pl, VALUE_CEILING.patch),
+    },
+    uPatch2: {
+      value: v3Capped(palette.patchShades[2] ?? palette.patchShades[0] ?? palette.hull, [0.095, 0.048, 0.022], pl, VALUE_CEILING.patch),
+    },
+    uMismatch: {
+      value: v3Capped(palette.mismatch[0] ?? palette.patchShades[0] ?? palette.hull, [0.05, 0.05, 0.055], pl, VALUE_CEILING.patch),
+    },
+    uAccent: { value: v3Capped(palette.accent, [0.4, 0.078, 0.008], pl, VALUE_CEILING.accent) },
+    uTrim: { value: v3Capped(palette.trim, [0.1, 0.098, 0.062], pl, VALUE_CEILING.trim) },
+    uMetal: { value: v3Capped(palette.bareMetal, [0.2, 0.21, 0.235], pl, VALUE_CEILING.metal) },
+    uPrimer: { value: v3Capped(palette.primer, [0.125, 0.034, 0.018], pl, VALUE_CEILING.underlayer) },
+    uOxide: { value: v3Capped(palette.oxide, [0.088, 0.032, 0.013], pl, VALUE_CEILING.underlayer) },
     uScorch: { value: v3(palette.scorch, [0.011, 0.0095, 0.0088]) },
     uAmber: { value: v3(palette.interiorLight, [1.0, 0.52, 0.13]) },
     uPlumeColor: { value: v3(palette.engineCore, [0.16, 0.36, 1.0]) },
@@ -2002,6 +2223,12 @@ function acquireProgram(bp: ShipBlueprint, quality: QualitySettings, markRows: n
     SHIP_MARK_MAX: Math.max(budget.mark, 1),
     SHIP_GRIME_OCTAVES: budget.grimeOctaves,
     SEAM_RELIEF_MAX: SEAM_RELIEF_MAX_KM.toExponential(6),
+    // Optical depth of the vacuum-weathering film. A define rather than a
+    // uniform because it is a property of the ART DIRECTION, not of a ship:
+    // every hull in the game weathers on the same curve and only `uFilmDepth`
+    // — the per-ship position on it — varies.
+    SHIP_FILM_STOPS: FILM_STOPS.toFixed(3),
+    SHIP_FILM_FLOOR: FILM_FLOOR.toFixed(3),
   };
   if (budget.rivets) defines.SHIP_RIVETS = '';
   if (budget.bump) defines.SHIP_BUMP = '';

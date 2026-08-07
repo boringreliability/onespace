@@ -21,13 +21,27 @@
  *    detonations. If the only difference between two drives were their colour
  *    this file would have failed its brief.
  *
- * 3. **Two materials, four draw calls.** BRIEF §6 allows three materials per
- *    ship and `ShipMaterial.ts` owns one of them, so propulsion owns exactly
- *    two: an opaque nozzle material (the only thing here that needs
- *    `DoubleSide` + `gl_FrontFacing`) and ONE additive material shared by
- *    plumes, jets, lights and the wake, branching on a per-instance `iKind`.
- *    Everything is instanced; a ten-engine capital costs the same number of
- *    draw calls as a single-engine courier.
+ * 3. **Two materials, four draw calls — a HARD bound, not a typical case.**
+ *    BRIEF §6 allows three materials per ship and `ShipMaterial.ts` owns one of
+ *    them, so propulsion owns exactly two: an opaque nozzle material (the only
+ *    thing here that needs `DoubleSide` + `gl_FrontFacing`) and ONE additive
+ *    material shared by plumes, jets, lights and the wake, branching on a
+ *    per-instance `iKind`. Everything is instanced; a ten-engine capital costs
+ *    the same number of draw calls as a single-engine courier.
+ *
+ *    The bound per rung is now structural rather than incidental:
+ *
+ *      LOD0  nozzles + fittings + plume + emitter quads  = 4  (+1 re-entry wake)
+ *      LOD1  nozzles + plume + emitter quads             = 3  (+1 re-entry wake)
+ *      LOD2  nozzles + plume + emitter quads             = 3
+ *      LOD3  plume + emitter quads                       = 2
+ *
+ *    Four is the FLOOR at LOD0, and the reason is worth writing down because it
+ *    is the reason not to keep pushing: the opaque pair and the additive pair
+ *    each need two different geometries (a bell and a cup; a cone shell and a
+ *    quad), and an `InstancedMesh` draws exactly one. Folding either pair into
+ *    a single masked buffer was measured on the hero and rejected — see
+ *    `mergeNozzleShapes`.
  *
  * 4. **Nothing is authored in metres.** Nozzle geometry is built in a unit
  *    envelope (exit radius 1, length 1) and scaled per instance, and every
@@ -252,10 +266,20 @@ const BUDGETS: Record<QualityTier, Budget> = {
  *         It is a lattice of 3–7 segment tubes and it is ~60% of a bell's
  *         triangles; below a few hundred pixels of hull it is one grey smudge.
  *         Plume drops to a single shell, which changes its DEPTH, not its size.
- *   LOD2  every fixture (RCS cups, lamp housings), the engine wash cards, the
- *         re-entry wake, and the per-style nozzle split: one simplified mesh
- *         serves the whole ship, which is also one draw call instead of one
- *         per doctrine.
+ *         ALSO every fitting — the RCS cups and the lamp housings. This used to
+ *         happen at LOD2 and it was a rung too late. Measured across 21 hulls
+ *         (hero, 8 roles × medium/capital, 3 factions) at each hull's own LOD1
+ *         threshold of `lengthKm * 25`, 1080p and a 50° vertical field: the
+ *         LARGEST fitting on ANY of them is 0.78 px across and the smallest is
+ *         0.02 px. Every one is sub-pixel, most by more than an order of
+ *         magnitude, while the bells beside them are 1.1–7.7 px and stay. The
+ *         emitters are untouched — the lamps and the jets live in the quad mesh
+ *         and carry a screen-space pixel floor, so a distant ship still lights
+ *         and still puffs; what goes is the machined body behind them. Worth
+ *         one draw call and ~2.2 k triangles at the rung whose whole-ship
+ *         budget is 25 k and whose hull already spends 19.7 k of it.
+ *   LOD2  the engine wash cards, the re-entry wake, and every nozzle profile
+ *         but the dominant one: one simplified bell serves the whole ship.
  *   LOD3  the nozzles themselves. At impostor range the drive IS the plume and
  *         a handful of navigation lights, which is exactly what the brief says
  *         should carry the read at thirty pixels.
@@ -275,7 +299,10 @@ interface RungPlan {
    * How many fittings (RCS cups, then lamp housings) survive. -1 keeps all of
    * them, 0 none. A capital's fitting list runs to hundreds and each one is a
    * closed cup of 8 × (seg/2) triangles, so this is the second-largest item in
-   * the budget after the bells themselves.
+   * the budget after the bells themselves — and, because the fittings are the
+   * only thing in this file that needs a SECOND opaque geometry, it is also a
+   * whole draw call. Non-zero at LOD0 only; see the rung table above for the
+   * pixel measurement that put the cut there.
    */
   readonly fixtureLimit: number;
   /**
@@ -315,7 +342,9 @@ function rungPlan(b: Budget, level: number, crowded: boolean): RungPlan {
       plumeSeg: Math.max(10, Math.round(b.plumeSeg * (crowded ? 0.5 : 0.68))),
       plumeSteps: Math.max(4, Math.round(b.plumeSteps * 0.6)),
       plumeLayers: 1,
-      fixtureLimit: 64,
+      // Sub-pixel on every hull measured at this rung's own threshold. See the
+      // rung table on `RungPlan`.
+      fixtureLimit: 0,
       quadLimit: -1,
       wake: true,
     };
@@ -369,6 +398,28 @@ const PLUME_RADIANCE = 0.62;
  * is looking at; the rank as a whole is.
  */
 const PLUME_CROWD_THRESHOLD = 10;
+
+/**
+ * Distinct nozzle PROFILES one merged nozzle mesh keeps.
+ *
+ * The nozzles used to be split into one `InstancedMesh` per distinct
+ * `NozzleStyle`, which made propulsion's draw-call count a function of the
+ * blueprint's engine doctrine — 1 for every ship the generator makes today,
+ * but 6 for a hull that mixed them, and nothing anywhere bounded it. That is
+ * the one place in this file where a per-ship property could buy a draw call,
+ * and BRIEF §6 is a hard ceiling of 12 for the whole ship.
+ *
+ * It is now always exactly one mesh: the profiles present are concatenated into
+ * one buffer and each instance selects its own with `iShape` (see
+ * `mergeNozzleShapes`). The cap is on how many profiles that buffer holds,
+ * because a masked vertex is still a shaded vertex and a masked triangle is
+ * still a triangle `renderer.info` counts — and `ShipMesh.propulsionTriangles`
+ * subtracts that count from the greeble budget, so unbounded masking would take
+ * detail off the hull to save a call. Two is what a mixed hull actually needs:
+ * a yard's own doctrine plus the one odd drive a wreck was repaired with.
+ * Instances of any rarer style are drawn with the dominant profile.
+ */
+const MAX_NOZZLE_SHAPES = 2;
 
 /** Hard cap on emissive fixtures. A super-capital's navlight list can be long. */
 const MAX_LIGHTS = 320;
@@ -503,12 +554,22 @@ class Buf {
     this.idx.push(a, b, c, a, c, d);
   }
 
+  /**
+   * `aShape` is always present and always zero here.
+   *
+   * Both meshes on the nozzle material must present the same attribute set or
+   * three.js compiles a second program for the one that is missing an
+   * attribute, and BRIEF §6 counts materials per ship. The fittings are a
+   * single profile, so theirs is a run of zeros; `mergeNozzleShapes` is the
+   * only thing that writes a non-zero one.
+   */
   geometry(): BufferGeometry {
     const g = new BufferGeometry();
     g.setAttribute('position', new BufferAttribute(new Float32Array(this.pos), 3));
     g.setAttribute('normal', new BufferAttribute(new Float32Array(this.nrm), 3));
     g.setAttribute('aT', new BufferAttribute(new Float32Array(this.at), 1));
     g.setAttribute('aPart', new BufferAttribute(new Float32Array(this.part), 1));
+    g.setAttribute('aShape', new BufferAttribute(new Float32Array(this.count), 1));
     g.setIndex(this.idx);
     return g;
   }
@@ -1012,6 +1073,60 @@ function buildNozzle(style: NozzleStyle, seg: number, throat: number, detail: nu
   }
 }
 
+/**
+ * Every profile a rung draws, concatenated into ONE indexed buffer.
+ *
+ * Each vertex is tagged with the profile it came from; each instance names the
+ * profile it wants; the vertex shader pushes the mismatches outside the clip
+ * volume so the triangle is rejected before rasterisation. One draw call serves
+ * a hull whose pods mix doctrines, and — the point — the count no longer
+ * depends on the blueprint at all.
+ *
+ * WHY THIS IS NOT ALSO DONE TO THE FITTINGS, which would take LOD0 from four
+ * draw calls to three. Masking costs a shaded vertex and a counted triangle per
+ * instance per profile it is NOT drawing, so it is only affordable where the
+ * instance count is small. The nozzles are 1–12 instances of an ~790-triangle
+ * profile; the fittings are 30+ instances of a 72-triangle one. Measured on the
+ * hero at LOD0: nozzles-only is 33 instances × 858 tri = 28.3 k submitted
+ * against 4.5 k drawn, i.e. +23.8 k triangles — and `ShipMesh.propulsionTriangles`
+ * subtracts propulsion's submitted count from the LOD1 greeble allowance, which
+ * on that rung is `25 k − 19.7 k hull − 2.7 k propulsion ≈ 2.6 k`. The masked
+ * version would drive it negative and strip every greeble off the hull at LOD1
+ * to save one draw call. Two opaque meshes it is.
+ */
+function mergeNozzleShapes(bufs: readonly Buf[]): BufferGeometry {
+  let vTotal = 0;
+  for (const b of bufs) vTotal += b.count;
+
+  const pos = new Float32Array(vTotal * 3);
+  const nrm = new Float32Array(vTotal * 3);
+  const at = new Float32Array(vTotal);
+  const part = new Float32Array(vTotal);
+  const shape = new Float32Array(vTotal);
+  const idx: number[] = [];
+
+  let base = 0;
+  for (let s = 0; s < bufs.length; s++) {
+    const b = bufs[s];
+    pos.set(b.pos, base * 3);
+    nrm.set(b.nrm, base * 3);
+    at.set(b.at, base);
+    part.set(b.part, base);
+    shape.fill(s, base, base + b.count);
+    for (let k = 0; k < b.idx.length; k++) idx.push(b.idx[k] + base);
+    base += b.count;
+  }
+
+  const g = new BufferGeometry();
+  g.setAttribute('position', new BufferAttribute(pos, 3));
+  g.setAttribute('normal', new BufferAttribute(nrm, 3));
+  g.setAttribute('aT', new BufferAttribute(at, 1));
+  g.setAttribute('aPart', new BufferAttribute(part, 1));
+  g.setAttribute('aShape', new BufferAttribute(shape, 1));
+  g.setIndex(idx);
+  return g;
+}
+
 // ---------------------------------------------------------------------------
 // Additive geometry — one attribute layout for every emissive family
 // ---------------------------------------------------------------------------
@@ -1106,11 +1221,13 @@ const NOZZLE_VERT = /* glsl */ `
 
 attribute float aT;
 attribute float aPart;
+attribute float aShape;   // which profile in the merged buffer this vertex is
 
 attribute vec3  iSize;    // (exitRadius, exitRadius, bellLength) km
 attribute vec3  iCore;    // plume core colour, for the throat glow
 attribute float iTech;
 attribute float iSeed;
+attribute float iShape;   // which profile this instance draws
 
 varying vec3  vLocal;     // UNIT-nozzle space — every noise frequency lives here
 varying vec3  vPos;       // ship-local km, for the view vector
@@ -1140,6 +1257,17 @@ void main() {
 
   gl_Position = projectionMatrix * modelViewMatrix * local;
   #include <logdepthbuf_vertex>
+
+  // ---- profile mask ------------------------------------------------------
+  // One buffer holds every nozzle profile the ship uses, so one draw call
+  // serves a hull that mixes doctrines (see mergeNozzleShapes). A vertex
+  // belonging to a profile this instance is not drawing is pushed outside the
+  // clip volume on all three axes; all three vertices of such a triangle get
+  // the same position, so the primitive is trivially rejected before raster and
+  // never reaches a fragment. Written AFTER logdepthbuf_vertex on purpose —
+  // that chunk edits gl_Position, and a discarded primitive has no depth to be
+  // wrong about.
+  if (abs(aShape - iShape) > 0.5) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
 }
 `;
 
@@ -1953,10 +2081,15 @@ interface PropulsionRung {
   readonly level: number;
   readonly group: Group;
   readonly geometries: BufferGeometry[];
-  readonly nozzleMeshes: InstancedMesh[];
-  /** Which nozzle mesh, and which instance inside it, each nozzle occupies. */
-  readonly nzMesh: Uint8Array;
-  readonly nzSlot: Uint16Array;
+  /**
+   * ONE mesh, or none at the impostor rung — never a list.
+   *
+   * It used to be one per distinct `NozzleStyle`, which is why the gimbal path
+   * needed a (mesh, slot) indirection per nozzle. Every profile now lives in
+   * one buffer selected per instance, so instance `i` IS nozzle `i` in the
+   * staging order and the indirection is gone with the meshes it existed for.
+   */
+  readonly nozzleMesh: InstancedMesh | null;
   readonly fixtureMesh: InstancedMesh | null;
   readonly plumeMesh: InstancedMesh | null;
   readonly quadMesh: InstancedMesh | null;
@@ -2134,7 +2267,7 @@ export class ShipPropulsion {
   private readonly lodDistance: Float32Array;
 
   // --- the ACTIVE rung's meshes, aliased so the frame path stays flat --------
-  private nozzleMeshes: InstancedMesh[] = [];
+  private nozzleMesh: InstancedMesh | null = null;
   private fixtureMesh: InstancedMesh | null = null;
   private plumeMesh: InstancedMesh | null = null;
   private quadMesh: InstancedMesh | null = null;
@@ -2220,8 +2353,15 @@ export class ShipPropulsion {
   private readonly crowded: boolean;
   /** Mean throat/exit ratio, baked into every rung's nozzle geometry. */
   private readonly throatRatio: number;
-  /** The style the most nozzles use — the one a merged rung draws. */
-  private readonly dominantStyle: NozzleStyle;
+  /**
+   * The nozzle styles this ship uses, most-used first.
+   *
+   * `[0]` is the dominant style — the one a merged rung draws for everything —
+   * and the first `MAX_NOZZLE_SHAPES` entries are the profiles a fine rung
+   * keeps in its buffer. Ordering by tally is what makes the truncation cheap:
+   * the styles that lose their own profile are the ones on the fewest pods.
+   */
+  private readonly styleOrder: readonly NozzleStyle[];
   private readonly nozzleStage: NozzleStage;
   private readonly fixtureStage: FixtureStage;
   private readonly plumeStage: AdditiveBatch;
@@ -2426,17 +2566,12 @@ export class ShipPropulsion {
 
     this.nozzleStage = { style: nzStyle, size: nzSize, matrix: nzMatrix, seed: nzSeed, count: nzCount };
     this.plumeStage = plumeBatch;
-    // A merged rung draws every nozzle with one geometry, so it has to be the
-    // one the most nozzles actually use or the silhouette changes at the swap.
-    let bestStyle: NozzleStyle = 'bell';
-    let bestTally = -1;
-    for (const [style, tally] of styleTally) {
-      if (tally > bestTally) {
-        bestTally = tally;
-        bestStyle = style;
-      }
-    }
-    this.dominantStyle = bestStyle;
+    // Most-used first. A merged rung draws every nozzle with `styleOrder[0]`,
+    // so it has to be the one the most nozzles actually use or the silhouette
+    // changes at the swap; a fine rung keeps the first MAX_NOZZLE_SHAPES of
+    // them and draws the rest with `[0]` for the same reason.
+    const order = [...styleTally.entries()].sort((a, b) => b[1] - a[1]).map(([style]) => style);
+    this.styleOrder = order.length > 0 ? order : ['bell'];
 
     this.hasGimbal = this.nozzles.some((n) => n.gimbal > 1e-4);
     // A gimballed drive does most of the vectoring with the bell, so its
@@ -2653,7 +2788,7 @@ export class ShipPropulsion {
 
     // Rebind the frame path. Everything below this line reads the ACTIVE rung
     // and nothing walks the scene graph per frame.
-    this.nozzleMeshes = rung.nozzleMeshes;
+    this.nozzleMesh = rung.nozzleMesh;
     this.fixtureMesh = rung.fixtureMesh;
     this.plumeMesh = rung.plumeMesh;
     this.quadMesh = rung.quadMesh;
@@ -2677,11 +2812,8 @@ export class ShipPropulsion {
     const group = new Group();
     group.name = `propulsion-lod${level}`;
     const geometries: BufferGeometry[] = [];
-    const nozzleMeshes: InstancedMesh[] = [];
     const stage = this.nozzleStage;
     const n = stage.count;
-    const nzMesh = new Uint8Array(n);
-    const nzSlot = new Uint16Array(n);
     let triangles = 0;
 
     const triCount = (g: BufferGeometry, instances: number): number => {
@@ -2690,69 +2822,48 @@ export class ShipPropulsion {
     };
 
     // ---- nozzles ----------------------------------------------------------
+    // EXACTLY ONE MESH, whatever the ship. Every profile the hull uses lives in
+    // one buffer and each instance selects its own; instance `i` is nozzle `i`
+    // in the staging order, so nothing downstream needs a slot map.
+    let nozzleMesh: InstancedMesh | null = null;
     if (plan.nozzles && n > 0) {
-      // One InstancedMesh per style present — one draw call for almost every
-      // ship, because a faction has one nozzle doctrine — collapsing to exactly
-      // one for the whole ship once the styles stop being distinguishable.
-      const groups: NozzleStyle[] = [];
-      if (plan.mergeStyles) {
-        groups.push(this.dominantStyle);
-        for (let i = 0; i < n; i++) {
-          nzMesh[i] = 0;
-          nzSlot[i] = i;
-        }
-      } else {
-        for (let i = 0; i < n; i++) {
-          const s = stage.style[i];
-          let gi = groups.indexOf(s);
-          if (gi < 0) {
-            gi = groups.length;
-            groups.push(s);
-          }
-          nzMesh[i] = gi;
-        }
+      const shapes = plan.mergeStyles
+        ? this.styleOrder.slice(0, 1)
+        : this.styleOrder.slice(0, MAX_NOZZLE_SHAPES);
+
+      const shapeIdx = new Float32Array(n);
+      for (let i = 0; i < n; i++) {
+        // Anything past the cap falls back to the dominant profile, which is
+        // index 0 by construction — never to a hole where a nozzle should be.
+        const s = shapes.indexOf(stage.style[i]);
+        shapeIdx[i] = s < 0 ? 0 : s;
       }
 
-      for (let gi = 0; gi < groups.length; gi++) {
-        // Gather this style's instances out of the staged, ship-ordered arrays.
-        const members: number[] = [];
-        for (let i = 0; i < n; i++) if (plan.mergeStyles || nzMesh[i] === gi) members.push(i);
-        if (members.length === 0) continue;
-        const count = members.length;
-        const size = new Float32Array(count * 3);
-        const matrix = new Float32Array(count * 16);
-        const seed = new Float32Array(count);
-        const core = new Float32Array(count * 3);
-        const techA = new Float32Array(count);
-        for (let k = 0; k < count; k++) {
-          const src = members[k];
-          if (!plan.mergeStyles) nzSlot[src] = k;
-          size.set(stage.size.subarray(src * 3, src * 3 + 3), k * 3);
-          matrix.set(stage.matrix.subarray(src * 16, src * 16 + 16), k * 16);
-          seed[k] = stage.seed[src];
-          core.set(this.nozzleCore.subarray(src * 3, src * 3 + 3), k * 3);
-          techA[k] = this.nozzleTech[src];
-        }
-
-        const geo = buildNozzle(groups[gi], plan.nozzleSeg, this.throatRatio, plan.nozzleDetail).geometry();
-        geo.setAttribute('iSize', new InstancedBufferAttribute(size, 3));
-        geo.setAttribute('iCore', new InstancedBufferAttribute(core, 3));
-        geo.setAttribute('iTech', new InstancedBufferAttribute(techA, 1));
-        geo.setAttribute('iSeed', new InstancedBufferAttribute(seed, 1));
-        const mesh = new InstancedMesh(geo, this.nozzleMat, count);
-        mesh.instanceMatrix.array.set(matrix);
-        mesh.instanceMatrix.needsUpdate = true;
-        if (this.hasGimbal) mesh.instanceMatrix.setUsage(DynamicDrawUsage);
-        // The ship is the near subject and the integrator culls it as a whole;
-        // per-mesh culling here would only fight the vertex-shader extrusion.
-        mesh.frustumCulled = false;
-        mesh.renderOrder = 0;
-        mesh.onBeforeRender = this.pushNozzle;
-        triangles += triCount(geo, count);
-        geometries.push(geo);
-        nozzleMeshes.push(mesh);
-        group.add(mesh);
-      }
+      const bufs: Buf[] = [];
+      for (const style of shapes) bufs.push(buildNozzle(style, plan.nozzleSeg, this.throatRatio, plan.nozzleDetail));
+      const geo = mergeNozzleShapes(bufs);
+      // Straight views onto the staged arrays: the instance order IS the ship
+      // order, so there is nothing to gather.
+      geo.setAttribute('iSize', new InstancedBufferAttribute(stage.size, 3));
+      geo.setAttribute('iCore', new InstancedBufferAttribute(this.nozzleCore, 3));
+      geo.setAttribute('iTech', new InstancedBufferAttribute(this.nozzleTech, 1));
+      geo.setAttribute('iSeed', new InstancedBufferAttribute(stage.seed, 1));
+      geo.setAttribute('iShape', new InstancedBufferAttribute(shapeIdx, 1));
+      nozzleMesh = new InstancedMesh(geo, this.nozzleMat, n);
+      nozzleMesh.instanceMatrix.array.set(stage.matrix);
+      nozzleMesh.instanceMatrix.needsUpdate = true;
+      if (this.hasGimbal) nozzleMesh.instanceMatrix.setUsage(DynamicDrawUsage);
+      // The ship is the near subject and the integrator culls it as a whole;
+      // per-mesh culling here would only fight the vertex-shader extrusion.
+      nozzleMesh.frustumCulled = false;
+      nozzleMesh.renderOrder = 0;
+      nozzleMesh.onBeforeRender = this.pushNozzle;
+      // Submitted, not drawn: on a mixed-doctrine hull the masked profiles are
+      // in this number, because they are in the number the renderer reports and
+      // in the number `ShipMesh` charges against the ship's triangle budget.
+      triangles += triCount(geo, n);
+      geometries.push(geo);
+      group.add(nozzleMesh);
     }
 
     // ---- fittings ---------------------------------------------------------
@@ -2768,6 +2879,9 @@ export class ShipPropulsion {
       geo.setAttribute('iCore', new InstancedBufferAttribute(this.fixtureCore, 3));
       geo.setAttribute('iTech', new InstancedBufferAttribute(this.fixtureTech, 1));
       geo.setAttribute('iSeed', new InstancedBufferAttribute(fix.seed, 1));
+      // One profile, so both shape channels are zero and the mask never fires.
+      // Present because the program is shared with the nozzle mesh.
+      geo.setAttribute('iShape', new InstancedBufferAttribute(new Float32Array(fixCount), 1));
       fixtureMesh = new InstancedMesh(geo, this.nozzleMat, fixCount);
       fixtureMesh.instanceMatrix.array.set(fix.matrix.subarray(0, fixCount * 16));
       fixtureMesh.instanceMatrix.needsUpdate = true;
@@ -2844,9 +2958,7 @@ export class ShipPropulsion {
       level,
       group,
       geometries,
-      nozzleMeshes,
-      nzMesh,
-      nzSlot,
+      nozzleMesh,
       fixtureMesh,
       plumeMesh,
       quadMesh,
@@ -2855,9 +2967,14 @@ export class ShipPropulsion {
       quadDrive,
       plumeGain: 1 / (plan.plumeLayers * 2),
       triangles,
-      // The wake and the plume are only drawn when they are doing something, so
-      // the honest number is what a still frame at full burn costs.
-      drawCalls: nozzleMeshes.length + (fixtureMesh ? 1 : 0) + (plumeMesh ? 1 : 0) + (quadMesh ? 1 : 0),
+      // EVERY mesh the rung can put on screen at once, including the wake. The
+      // plume is hidden at idle and the wake below re-entry heat, but a budget
+      // that only holds while the ship is coasting is not a budget — and this
+      // number is what the review manifest reports propulsion as costing.
+      // Structurally 4, 3, 3, 2 down the ladder, plus the wake on an
+      // atmosphere-capable hull at LOD0 and LOD1.
+      drawCalls: (nozzleMesh ? 1 : 0) + (fixtureMesh ? 1 : 0) + (plumeMesh ? 1 : 0)
+        + (quadMesh ? 1 : 0) + (wakeMesh ? 1 : 0),
     };
   }
 
@@ -3107,14 +3224,14 @@ export class ShipPropulsion {
   private applyGimbal(): void {
     const rung = this.activeRung;
     if (!rung) return;
-    const meshes = rung.nozzleMeshes;
+    // Nozzle `i` is instance `i` — every profile shares one mesh and the
+    // instance order is the staging order, so there is no slot map to consult.
+    // At the impostor rung there is no mesh at all and only the plume moves.
+    const mesh = rung.nozzleMesh;
+    const arr = mesh ? (mesh.instanceMatrix.array as Float32Array) : null;
     for (let i = 0; i < this.nozzles.length; i++) {
       const n = this.nozzles[i];
       if (n.gimbal <= 1e-4) continue;
-      // The (mesh, slot) a nozzle occupies is a property of the RUNG — a merged
-      // rung packs every style into one mesh — so it is looked up there rather
-      // than baked into the nozzle.
-      const mesh = meshes[rung.nzMesh[i]];
       // Thrust opposes exhaust, so a nose-up command swings the bells the other
       // way. The sign is the whole point of doing this at all.
       this._qg.setFromAxisAngle(this._axisX, -this.vGimbalPitch * n.gimbal);
@@ -3122,7 +3239,7 @@ export class ShipPropulsion {
       this._qg.setFromAxisAngle(this._axisY, -this.vGimbalYaw * n.gimbal);
       this._q.multiply(this._qg);
       this._m4.compose(this.nozzlePos[i], this._q, this._scale);
-      if (mesh) this._m4.toArray(mesh.instanceMatrix.array as Float32Array, rung.nzSlot[i] * 16);
+      if (arr) this._m4.toArray(arr, i * 16);
       if (this.plumeMesh && n.plumeSlot >= 0) {
         // The plume anchors at the exit plane, which moves when the bell swings.
         this._m4b.identity().setPosition(0, 0, this.nozzleBell[i]);
@@ -3130,7 +3247,7 @@ export class ShipPropulsion {
         this._m4b.toArray(this.plumeMesh.instanceMatrix.array as Float32Array, n.plumeSlot * 16);
       }
     }
-    for (const mesh of meshes) mesh.instanceMatrix.needsUpdate = true;
+    if (mesh) mesh.instanceMatrix.needsUpdate = true;
     if (this.plumeMesh) this.plumeMesh.instanceMatrix.needsUpdate = true;
   }
 
@@ -3261,7 +3378,7 @@ export class ShipPropulsion {
       const rung = this.rungs[i];
       if (!rung) continue;
       for (const g of rung.geometries) g.dispose();
-      for (const mesh of rung.nozzleMeshes) mesh.dispose();
+      rung.nozzleMesh?.dispose();
       rung.fixtureMesh?.dispose();
       rung.plumeMesh?.dispose();
       rung.quadMesh?.dispose();
@@ -3271,7 +3388,7 @@ export class ShipPropulsion {
       this.rungs[i] = null;
     }
     this.activeRung = null;
-    this.nozzleMeshes = [];
+    this.nozzleMesh = null;
     this.fixtureMesh = null;
     this.plumeMesh = null;
     this.quadMesh = null;

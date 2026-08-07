@@ -35,7 +35,6 @@ import {
   InstancedMesh,
   Matrix4,
   Mesh,
-  NormalBlending,
   Object3D,
   Vector3,
 } from 'three';
@@ -48,6 +47,7 @@ import { factionById, greebleVocabulary } from '@/gen/ships/families';
 import type { ShipDriveState, ShipVisual } from '@/game/Showroom';
 
 import {
+  BRIEF_TRIANGLE_CAP,
   HullBuilder,
   buildImpostorQuad,
   buildSpine,
@@ -71,18 +71,102 @@ import { ShipPropulsion, type ShipDriveState as DriveState } from './propulsion'
 /** How many instanced greeble batches a ship may spend. The rest is baked. */
 const MAX_GREEBLE_BATCHES = 5;
 
-/** The rung at which the ship stops being geometry and becomes one quad. */
-const IMPOSTOR_LEVEL = 3;
+/**
+ * Fewest instances that still earn a batch its own draw call.
+ *
+ * A bind plus a draw for twenty fittings is a bargain and for three is not,
+ * and the difference only shows up at the coarse rungs, where the budget has
+ * trimmed most families to single figures. See the demotion in `build`.
+ */
+const INSTANCE_MIN = 20;
 
 /**
- * Level at and beyond which the engine bells and their fixtures stand down.
+ * The share of a rung's triangle cap that belongs to the OUTLINE, whatever the
+ * rest of the accounting says.
  *
- * At LOD2 the hull is 40–120 px. A nozzle throat is under a pixel of machined
- * metal; the additive plume and the navigation lights are the entire read, and
- * they are what `ship-extreme-distance` asks to still be there. So the *solid*
- * propulsion hardware goes and the emitters stay.
+ * Measured on the hero hull with the detail layer forced on at every rung: the
+ * lofted structure alone is already stable — LOD0-vs-LOD1 outline XOR 0.42 %
+ * and LOD0-vs-LOD2 2.11 % — and every point above that came from fittings
+ * being culled. LOD2's ladder budget is 2,633 triangles against 2,508 of hull,
+ * which leaves the detail layer 125 and in practice zero, so the whole rim of
+ * every volume lost its hardware in one step: XOR 9.8 %.
+ *
+ * So a rung reserves this much of its cap for detail even when the ordinary
+ * arithmetic says there is nothing left. Nothing is overspent to pay for it:
+ * `volumes.ts:COARSE_SURFACE_SHARE` stops the skin taking 90 % of a rung it
+ * does not need, and this is where that goes. On the hero that turns LOD2's
+ * detail allowance from 125 triangles into 852 — nine of its twelve
+ * support-owning fittings — for a rung that still draws 2,888 in total.
  */
-const PROPULSION_HARDWARE_LEVEL = 2;
+const SILHOUETTE_RESERVE = 0.3;
+
+/**
+ * How much a fitting NEAR one of the ship's supports outranks one that is not.
+ *
+ * A pure value-per-triangle ranking is right for AREA and wrong for EXTENT: a
+ * mast is 124 triangles of almost no projected area, so it is the first thing
+ * a knapsack drops — and it is also the 25 px of dorsal boom the LOD critic
+ * measured going missing between LOD1 and LOD2. Extent is what the eye reads
+ * as "the ship changed shape", so a fitting standing at the end of the ship
+ * competes at 33× its honest value per triangle, and the ones that actually
+ * OWN a support (see `EXTREME_DIRS`) do not compete at all — they sort above
+ * the whole field. On the hero that second set is 12 fittings out of 429, and
+ * 1,240 triangles out of LOD0's 28,694.
+ */
+const EXTREME_BONUS = 32;
+
+/**
+ * How wide the band round each support is, as a fraction of hull length.
+ *
+ * A boom is a mast plus the clamps and the conduit that run out along it, and
+ * a ranking that favoured only the tip would leave a floating spike whenever
+ * the rung could afford two fittings and not three. 6 % of the hero's 62 m is
+ * 3.7 m, which is the fitting cluster and not the hull under it.
+ */
+const EXTREME_BAND_FRACTION = 0.06;
+
+/**
+ * The directions a silhouette extreme is measured along.
+ *
+ * Six axes are not enough, and the review camera is the proof: it looks down
+ * (0.7, 0.3, 0.65), so the leftmost pixel of the hero's outline is the tip
+ * that maximises (−0.68, 0, 0.73) — a direction no axis names. Holding the
+ * axis owners alone kept the dorsal boom and still lost 22 px off the aft end.
+ *
+ * So the axes are joined by the eight corner diagonals of the cube: fourteen
+ * directions, no two of which are more than 55° apart, which bounds how far
+ * the true support in any view direction can fall below the nearest one that
+ * is held. Fourteen directions do NOT mean fourteen fittings — on the hero
+ * they resolve to twelve, because a mast at the top of the ship owns +y and
+ * the diagonals either side of it at once.
+ */
+const EXTREME_DIRS = ((): Float32Array => {
+  const d: number[] = [];
+  for (let a = 0; a < 3; a++) {
+    for (const s of [1, -1]) d.push(a === 0 ? s : 0, a === 1 ? s : 0, a === 2 ? s : 0);
+  }
+  const k = 1 / Math.sqrt(3);
+  for (let i = 0; i < 8; i++) {
+    d.push((i & 1 ? k : -k), (i & 2 ? k : -k), (i & 4 ? k : -k));
+  }
+  return Float32Array.from(d);
+})();
+
+/** How many of them there are. `EXTREME_DIRS` is three floats each. */
+const EXTREME_DIR_COUNT = EXTREME_DIRS.length / 3;
+
+/**
+ * The offset that lifts a held fitting clear of every unheld one.
+ *
+ * Scores are value-per-triangle in square kilometres, which on a 62 m hull is
+ * of order 1e-5; 1 is nine orders of magnitude above the largest of them and
+ * still exactly representable, so the sort can never interleave the two sets
+ * and "held" stays a prefix.
+ */
+const PROTECT_RANK = 1;
+
+/** The rung at which the ship stops being geometry and becomes one quad. */
+const IMPOSTOR_LEVEL = 3;
 
 /**
  * Millisecond ceiling on one frame's share of the background LOD prebuild.
@@ -135,6 +219,18 @@ interface DetailBatch {
    * line up with the matrices.
    */
   readonly score: Float32Array;
+  /**
+   * How many of the leading instances OWN one of the ship's supports.
+   *
+   * `rankDetail` sorts them to the front of the family and above every
+   * unheld fitting on the ship, so they are the first thing any rung buys and
+   * the last thing it gives up — and "held" is still a prefix, which is what
+   * keeps every rung's set a subset of the finer one's. They are bought out of
+   * the budget rather than exempted from it: an exemption put the hero's LOD2
+   * at 3,348 triangles against BRIEF §6's 3,000, and a rung that holds its
+   * shape by going over budget has moved the problem, not solved it.
+   */
+  readonly protect: number;
 }
 
 export class ShipMesh implements ShipVisual {
@@ -157,6 +253,14 @@ export class ShipMesh implements ShipVisual {
   private readonly detailOccluders: OccluderSphere[] = [];
   /** Scratch, one slot per family. Refilled per rung; never reallocated. */
   private readonly keep: number[] = [];
+  /** Families whose next instance no longer fits. Scratch, as `keep`. */
+  private readonly capped: boolean[] = [];
+  /** cx, cy, cz, hx, hy, hz of the blueprint's bounds. Set once, in `detail`. */
+  private readonly detailBox = new Float32Array(6);
+  /** The detail layer's own supports, one per `EXTREME_DIRS`. Set in `detail`. */
+  private readonly detailExtremes = new Float32Array(EXTREME_DIR_COUNT);
+  /** Which (family, instance) owns each of them. Set once, in `detail`. */
+  private readonly detailExtremeOwner = new Int32Array(EXTREME_DIR_COUNT * 2);
 
   /** Impostor state. All of it is set once, in `buildImpostor`. */
   private impostor: Mesh | null = null;
@@ -169,11 +273,8 @@ export class ShipMesh implements ShipVisual {
   private impostorPlanHalf = 0;
   private impostorSideHalf = 0;
 
-  /** Propulsion meshes stood down at the coarse rungs. Kept so restore is O(k). */
-  private readonly stoodDown: Mesh[] = [];
-  /** Measured once, in `propulsionTriangles`. -1 = not yet measured. */
-  private propulsionTriAll = -1;
-  private propulsionTriEmitters = -1;
+  /** What the drive costs at each rung. Measured lazily; -1 = not yet. */
+  private readonly propulsionTri = [-1, -1, -1, -1];
   /** What LOD0 cost to build, ms. The yardstick `warmStep` predicts from. */
   private lod0BuildMs = 0;
 
@@ -309,12 +410,21 @@ export class ShipMesh implements ShipVisual {
 
     // The dense families earn a draw call; the long tail is welded into the
     // hull buffer, which costs vertices once instead of a bind every frame.
-    // Which family is which is decided once, on the full scatter, so a family
-    // can never migrate between the two paths as the budget tightens.
+    //
+    // WHICH FAMILY IS WHICH IS DECIDED ONCE, on the full scatter, so a family
+    // can never migrate as the budget tightens — but a batch that has been
+    // trimmed to three instances is not worth a bind at any budget, so a rung
+    // may additionally *demote* one to the baked path. That direction is safe
+    // where the other is not, for a reason worth stating: `ShipMaterialSet`
+    // binds `greeble` to the very same material object as `hull` (see there),
+    // so the two paths differ in how the geometry is submitted and in nothing
+    // that reaches a pixel. The trigger is the coarse rungs, where LOD2 was
+    // spending five instanced draws on twelve fittings — 8 draw calls for a
+    // 40-pixel ship, which at forty ships in a system is the frame.
     for (let i = 0; i < details.length; i++) {
       const d = details[i]!;
       const n = this.keep[i]!;
-      if (d.instanced || n <= 0) continue;
+      if (n <= 0 || (d.instanced && n >= INSTANCE_MIN)) continue;
       bakeScatter(trimmed(d.scatter, n), hb);
     }
 
@@ -334,7 +444,7 @@ export class ShipMesh implements ShipVisual {
     for (let i = 0; i < details.length; i++) {
       const d = details[i]!;
       const n = this.keep[i]!;
-      if (!d.instanced || n <= 0) continue;
+      if (!d.instanced || n < INSTANCE_MIN) continue;
       const im = this.makeInstanced(d.scatter, n);
       instances.push(im);
       group.add(im);
@@ -431,11 +541,14 @@ export class ShipMesh implements ShipVisual {
     // No analytic casters: there is no surface left for a contact shadow to
     // land on. An empty set is uploaded so the rung does not inherit whichever
     // rung happened to be built before it.
+    const idx = geometry.getIndex();
     return {
       group,
       geometry,
       instances: [],
-      triangles: 2,
+      // Measured, not declared: `buildImpostorQuad` cuts the hull's outline
+      // into the strip and the station count is its business, not this file's.
+      triangles: idx ? idx.count / 3 : 0,
       drawCalls: 1,
       occSpheres: new Float32Array(0),
       occParts: new Float32Array(0),
@@ -474,15 +587,43 @@ export class ShipMesh implements ShipVisual {
 
     const split = splitScatterBudget(scatters, MAX_GREEBLE_BATCHES);
     const instanced = new Set(split.instanced);
+    // Two passes, and they cannot be one: "is this fitting at the ship's
+    // ventral extreme" is a question about every family at once, and a
+    // per-family ranking that answered it from its own instances alone would
+    // protect the lowest hatch on the ship as if it were the keel.
+    const band = bp.dimensions.lengthKm * EXTREME_BAND_FRACTION;
+    measureExtremes(scatters, this.detailExtremes, this.detailExtremeOwner);
+    const bnd = bp.dimensions.bounds;
+    this.detailBox[0] = (bnd.min[0] + bnd.max[0]) * 0.5;
+    this.detailBox[1] = (bnd.min[1] + bnd.max[1]) * 0.5;
+    this.detailBox[2] = (bnd.min[2] + bnd.max[2]) * 0.5;
+    this.detailBox[3] = Math.max((bnd.max[0] - bnd.min[0]) * 0.5, 1e-9);
+    this.detailBox[4] = Math.max((bnd.max[1] - bnd.min[1]) * 0.5, 1e-9);
+    this.detailBox[5] = Math.max((bnd.max[2] - bnd.min[2]) * 0.5, 1e-9);
+
     const out: DetailBatch[] = [];
-    for (const s of scatters) {
+    for (let f = 0; f < scatters.length; f++) {
+      const s = scatters[f]!;
+      const triPerInstance = s.count > 0 ? s.triangles / s.count : 0;
+      const ranked = rankDetail(
+        s,
+        f,
+        triPerInstance,
+        this.detailBox,
+        this.detailExtremes,
+        this.detailExtremeOwner,
+        band,
+        Math.max(bp.dimensions.lengthKm, 1e-9),
+      );
       out.push({
         scatter: s,
-        triPerInstance: s.count > 0 ? s.triangles / s.count : 0,
+        triPerInstance,
         instanced: instanced.has(s),
-        score: rankDetail(s),
+        score: ranked.score,
+        protect: ranked.protect,
       });
       this.keep.push(s.count);
+      this.capped.push(false);
     }
     this.details = out;
     return out;
@@ -500,29 +641,75 @@ export class ShipMesh implements ShipVisual {
    */
   private detailTriangleBudget(level: number, structureTriangles: number): number {
     const lod = this.lodDescriptor(level);
+    /**
+     * The cap is the TIGHTER of the blueprint's ladder value and BRIEF §6's.
+     *
+     * `LodLevel.triangleBudget` is `120000 · sizeK` with `sizeK` running to
+     * 1.6, so a capital hull is handed a 40 k licence for a rung the brief caps
+     * at 25 k — and this method used to spend against the licence. Measured on
+     * a 1.4 km miner: LOD1 came out at 38,516 triangles against a 25,000 cap,
+     * 17,550 of them detail nobody had authorised. `volumes.ts` already takes
+     * this same `min` and states why: the brief is the contract, the ladder is
+     * advice, and a blueprint may ask for less than the brief allows but never
+     * for more.
+     */
+    const brief = BRIEF_TRIANGLE_CAP[Math.min(Math.max(level | 0, 0), 3)] ?? 0;
+    const cap = Math.min(lod.triangleBudget, brief);
     const spent = structureTriangles + this.propulsionTriangles(level);
-    return Math.max(
-      0,
-      Math.min(lod.triangleBudget * GREEBLE_TRI_SHARE, lod.triangleBudget - spent),
-    );
+    /**
+     * ...and the floor under the share, which is what stops a coarse rung
+     * changing shape.
+     *
+     * `greebleFraction` is 0 at LOD2 and above, so the ordinary share is zero
+     * there and the whole detail layer went in one step — every volume on the
+     * ship lost the hardware round its rim, and `ship-lod2`'s brief says the
+     * silhouette is the only thing that matters at that rung. The reserve is
+     * paid for on the other side by `volumes.ts:COARSE_SURFACE_SHARE`, which
+     * stops the skin taking 90 % of a rung it does not need, so this is a
+     * reallocation and never an overspend: both terms are bounded by what the
+     * cap has left after the hull and the drive, and a rung that is already
+     * over reserves nothing.
+     */
+    const share = Math.min(cap * GREEBLE_TRI_SHARE, Math.max(0, cap - spent));
+    // The reserve — and only the reserve — is measured against BRIEF §6's cap
+    // rather than the tighter of the two. The ladder's own value is a
+    // tessellation hint the generator derived from the hull's size class; the
+    // brief's is the number the review manifest is checked against. Spending
+    // the gap between them is allowed when what it buys is the outline and
+    // never when it is ordinary detail, which is the difference between the
+    // hero's LOD2 having 265 triangles for its silhouette hardware and having
+    // 632 — the difference between holding two of its nine support-owning
+    // fittings and holding five.
+    const reserve = Math.min(brief * SILHOUETTE_RESERVE, Math.max(0, brief - spent));
+    return Math.max(share, reserve);
   }
 
   /**
-   * What the drive costs this rung, measured off its own scene graph.
+   * What the drive costs AT THIS RUNG, measured off its own scene graph.
    *
-   * `propulsion` builds one engine bell set and never reduces it, and BRIEF
-   * §6's per-rung triangle budget is for the *ship*, not for the hull. Nobody
-   * was subtracting it, so a hull could sit inside its own budget while the
-   * ship it belongs to was 7 % over. Measured rather than declared, for the
-   * same reason `stats()` is: `ShipPropulsion` exposes no count, and a number
-   * this file guessed would be wrong the first time propulsion changed.
+   * BRIEF §6's per-rung triangle budget is for the *ship*, not for the hull,
+   * so the drive has to be subtracted before the hull's detail layer is told
+   * what it may spend. It used to be measured once and charged at that figure
+   * to every rung, because `propulsion` genuinely did build one bell set and
+   * draw it from arm's length to the horizon. It no longer does: it has four
+   * rungs of its own, and `setLod` now hands it the level (see there). One
+   * measurement per rung, taken by walking the rung that is parented — the
+   * module detaches the others precisely so that this traversal is true.
+   *
+   * Measuring rather than declaring, for the same reason `stats()` does: a
+   * number this file guessed would be wrong the first time propulsion changed.
    */
   private propulsionTriangles(level: number): number {
-    const solid = level < PROPULSION_HARDWARE_LEVEL;
-    if (solid && this.propulsionTriAll >= 0) return this.propulsionTriAll;
-    if (!solid && this.propulsionTriEmitters >= 0) return this.propulsionTriEmitters;
+    const i = Math.min(Math.max(level | 0, 0), 3);
+    const cached = this.propulsionTri[i]!;
+    if (cached >= 0) return cached;
+    // Measuring a rung means having it parented, which means borrowing the
+    // drive for the length of one traversal. Put it back afterwards: `build`
+    // runs for rungs the ship is not showing (see `warmStep`), and a drive
+    // left on a rung the hull is not on is a visible pop for a measurement.
+    const restore = this.active >= 0 ? this.active : 0;
+    this.propulsion.setLod(i as 0 | 1 | 2 | 3);
     let all = 0;
-    let emitters = 0;
     this.propulsion.object3d.traverse((o) => {
       const mesh = o as Mesh;
       if (mesh.isMesh !== true) return;
@@ -532,25 +719,31 @@ export class ShipMesh implements ShipVisual {
       const im = mesh as InstancedMesh;
       // Counted whether or not it is visible right now: the plume is hidden at
       // idle and a budget that only holds while the drive is cold is not one.
-      const n = (verts / 3) * (im.isInstancedMesh === true ? im.count : 1);
-      all += n;
-      const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
-      if (mat && (mat.transparent || mat.blending !== NormalBlending)) emitters += n;
+      all += (verts / 3) * (im.isInstancedMesh === true ? im.count : 1);
     });
-    this.propulsionTriAll = all;
-    this.propulsionTriEmitters = emitters;
-    return solid ? all : emitters;
+    this.propulsionTri[i] = all;
+    if (restore !== i) this.propulsion.setLod(restore as 0 | 1 | 2 | 3);
+    return all;
   }
 
   /**
    * Fill `keep[i]` with how many instances of family `i` this rung draws.
    *
-   * One ranking across all families, biggest hardware first, spent until the
-   * budget runs out. Because `rankDetail` sorted each family into that same
-   * order, the answer is a prefix of every family's arrays — so the per-
-   * instance channels still line up with the matrices, and a coarser rung's
-   * set is always a strict subset of a finer one's. That is the property that
-   * makes the transition invisible: hardware can leave, nothing can arrive.
+   * One ranking across all families, best outline-per-triangle first, spent
+   * until the budget runs out. Because `rankDetail` sorted each family into
+   * that same order, the answer is a prefix of every family's arrays — so the
+   * per-instance channels still line up with the matrices, and a coarser
+   * rung's set is always a strict subset of a finer one's. That is the
+   * property that makes the transition invisible: hardware can leave, nothing
+   * can arrive.
+   *
+   * The fittings that own the ship's own supports are first in that order by
+   * construction (`PROTECT_RANK`), so a rung buys its outline before it buys
+   * anything else and gives it up last. That is what a rung that drops them
+   * loses: not detail, but length — which is what `ship-lod2`'s brief calls a
+   * whole mass collapsing. On the hero, LOD2 buys nine of the twelve for 852
+   * of its 2,888 triangles, and its outline then spans exactly the pixels
+   * LOD0's does on both screen axes.
    */
   private detailKeep(budget: number): void {
     const details = this.details;
@@ -564,6 +757,7 @@ export class ShipMesh implements ShipVisual {
       for (let i = 0; i < details.length; i++) this.keep[i] = details[i]!.scatter.count;
       return;
     }
+    for (let i = 0; i < details.length; i++) this.capped[i] = false;
     let spent = 0;
     for (;;) {
       let best = -1;
@@ -571,7 +765,7 @@ export class ShipMesh implements ShipVisual {
       for (let i = 0; i < details.length; i++) {
         const d = details[i]!;
         const k = this.keep[i]!;
-        if (k >= d.scatter.count) continue;
+        if (k >= d.scatter.count || this.capped[i] === true) continue;
         const s = d.score[k]!;
         // Ties break on family order, which `scatterGreebles` derives from the
         // faction vocabulary — never on floating-point luck.
@@ -582,7 +776,15 @@ export class ShipMesh implements ShipVisual {
       }
       if (best < 0) break;
       const cost = details[best]!.triPerInstance;
-      if (spent + cost > budget) break;
+      if (spent + cost > budget) {
+        // Retire this family and carry on rather than ending the whole spend.
+        // Families do not cost the same — a ladder is 168 triangles and a
+        // bracket 36 — so stopping at the first thing that will not fit left
+        // 2,209 of LOD1's 21,939 triangles unspent while the outline was
+        // missing hardware that would have fitted in them four times over.
+        this.capped[best] = true;
+        continue;
+      }
       spent += cost;
       this.keep[best]!++;
     }
@@ -703,7 +905,16 @@ export class ShipMesh implements ShipVisual {
     if (built.occCount > 0) {
       this.materials.setOccluders(built.occSpheres, built.occParts, built.occCount);
     }
-    this.setPropulsionDetail(level);
+    // The drive goes to the same rung as the hull. `propulsion.ts` builds four
+    // rungs of its own and says in as many words that `ShipMesh.setLod` should
+    // forward to it; nothing did, so the drive drew its LOD0 bells at every
+    // range and this file compensated by hiding them wholesale above LOD1.
+    // Both halves of that were wrong: 6,744 triangles of bell — a third of
+    // LOD1's whole ship budget — were charged to a rung that had reduced
+    // nothing, which is what starved the detail layer that carries the
+    // outline; and hiding them at LOD2 deleted a mass the module's own ladder
+    // had already decided to keep.
+    this.propulsion.setLod(level);
     if (level >= IMPOSTOR_LEVEL && this.lastView) this.orientImpostor(this.lastView);
 
     // Materials are shared, so the per-ship uniforms have to be current at
@@ -711,36 +922,6 @@ export class ShipMesh implements ShipVisual {
     for (const child of built.group.children) {
       child.onBeforeRender = this.pushUniforms;
     }
-  }
-
-  /**
-   * Stand the solid propulsion hardware down at the coarse rungs.
-   *
-   * `propulsion` has no LOD of its own — it builds one engine bell set and
-   * draws it at every range — so the assembler is the only place that knows
-   * the ship is now 40 px wide. The discriminator is the blending mode, which
-   * is the same one `Showroom.setSilhouette` uses and for the same reason:
-   * normal-blended propulsion geometry is machined metal, additive propulsion
-   * geometry is light. Metal under a pixel goes; light does not, because at
-   * impostor range the plume and the navigation lights ARE the ship — which is
-   * `ship-extreme-distance`'s own stated read, and killing them would make a
-   * populated system look empty.
-   */
-  private setPropulsionDetail(level: number): void {
-    if (level < PROPULSION_HARDWARE_LEVEL) {
-      for (const m of this.stoodDown) m.visible = true;
-      this.stoodDown.length = 0;
-      return;
-    }
-    if (this.stoodDown.length > 0) return;
-    this.propulsion.object3d.traverse((o) => {
-      const mesh = o as Mesh;
-      if (mesh.isMesh !== true || !mesh.visible) return;
-      const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
-      if (!mat || mat.transparent || mat.blending !== NormalBlending) return;
-      mesh.visible = false;
-      this.stoodDown.push(mesh);
-    });
   }
 
   /** Spin the impostor quad about the hull's long axis to face the camera. */
@@ -853,30 +1034,153 @@ function trimmed(s: InstancedScatter, count: number): InstancedScatter {
 }
 
 /**
- * Rank a family's instances by how much of the ship's outline they are, and
- * permute the batch into that order.
+ * The six axis-aligned supports of everything the detail layer placed, as the
+ * *tips* of the fittings rather than their mounting points: +x, +y, +z, −x,
+ * −y, −z. A fitting is only an extreme if the end that sticks out is.
  *
- * The instance matrix is placement × rotation × scale, so its column lengths
- * are the fitting's own size in kilometres — and column 1 is the mounting
- * normal, i.e. how far it stands proud of the plating. Height counts most
- * (a mast on the outline is the outline; a flush plate is not) and the plan
- * footprint counts for something (a wide bracket seen edge-on is a bump).
- *
- * Ranking is the entire trick. Dropping the *last* greebles placed drops a
- * random subset and the outline flickers; dropping the *smallest* is what LOD
- * has always meant, and it is what makes "sub-metre hardware may go, but the
- * primary and secondary masses must be untouched" achievable at all.
+ * `owner` is filled alongside them with the family and instance that holds
+ * each one — 12 integers, six (family, instance) pairs. Those six fittings,
+ * and only those six, are what the ship's drawn length, beam and height are
+ * made of, so they are the set `detailKeep` refuses to spend.
  */
-function rankDetail(s: InstancedScatter): Float32Array {
+function measureExtremes(
+  scatters: readonly InstancedScatter[],
+  out: Float32Array,
+  owner: Int32Array,
+): void {
+  out.fill(-Infinity);
+  owner.fill(-1);
+  for (let f = 0; f < scatters.length; f++) {
+    const s = scatters[f]!;
+    for (let i = 0; i < s.count; i++) {
+      const o = i * 16;
+      // Translation plus column 1 — the mounting normal scaled by the
+      // fitting's own height, which is exactly the vector from the plating to
+      // the tip.
+      const tx = s.matrices[o + 12]! + s.matrices[o + 4]!;
+      const ty = s.matrices[o + 13]! + s.matrices[o + 5]!;
+      const tz = s.matrices[o + 14]! + s.matrices[o + 6]!;
+      for (let d = 0; d < EXTREME_DIR_COUNT; d++) {
+        const p =
+          tx * EXTREME_DIRS[d * 3]! + ty * EXTREME_DIRS[d * 3 + 1]! + tz * EXTREME_DIRS[d * 3 + 2]!;
+        if (p > out[d]!) {
+          out[d] = p;
+          owner[d * 2] = f;
+          owner[d * 2 + 1] = i;
+        }
+      }
+    }
+  }
+}
+
+/**
+ * Rank a family's instances by how much of the ship's OUTLINE they are per
+ * triangle they cost, and permute the batch into that order.
+ *
+ * WHY THIS IS NOT A SIZE SORT ANY MORE. The previous ranking was
+ * `sy + 0.45·max(sx, sz)` — the fitting's own size — spent by a greedy that
+ * compared sizes across families and ignored what each family cost. Three
+ * things were wrong with it, and together they are the whole of the LOD1 pop:
+ *
+ *   1. SIZE IS NOT OUTLINE. A slab bolted to the inboard face of a pylon, deep
+ *      in the canyon between the hull and a nacelle, is never on any silhouette
+ *      from any angle. It outranked the hardware on the ventral rim, which is
+ *      on the silhouette from half of them.
+ *   2. A RANKING WITHOUT A PRICE IS NOT A BUDGET. A ladder costs 168 triangles
+ *      and a bracket 36. Comparing their sizes and not their prices spent the
+ *      rung's whole detail allowance on a handful of expensive fittings.
+ *   3. EXTENT IS NOT AREA. A mast is 124 triangles of almost no projected
+ *      area, so any honest value-per-triangle ranking drops it first — and it
+ *      is the dorsal boom whose disappearance the critic measured in pixels.
+ *
+ * So: the value of a fitting is the outline area it adds *when it is on the
+ * rim*, which is its standoff times its width; that is multiplied by how far
+ * its tip actually reaches out of the hull along its own mounting normal, so
+ * hardware pointing into a gap is discounted and hardware on the outer skin is
+ * not; the result is divided by the triangles it costs, which makes the
+ * greedy in `detailKeep` a real value-density knapsack; and finally anything
+ * standing at one of the ship's six extremes is lifted clear of the ranking
+ * altogether, because losing an extreme is losing a shape and not losing a
+ * detail.
+ *
+ * @param box    cx, cy, cz, hx, hy, hz — the blueprint's declared bounds.
+ * @param band   how close to an extreme still counts as owning it, km.
+ */
+function rankDetail(
+  s: InstancedScatter,
+  family: number,
+  triPerInstance: number,
+  box: Float32Array,
+  extremes: Float32Array,
+  owner: Int32Array,
+  band: number,
+  hullLengthKm: number,
+): { score: Float32Array; protect: number } {
   const n = s.count;
   const score = new Float32Array(n);
   const order: number[] = [];
+  const cost = Math.max(triPerInstance, 1);
+  const inv = 1 / Math.max(band, 1e-9);
+  let protect = 0;
   for (let i = 0; i < n; i++) {
     const o = i * 16;
     const sx = Math.hypot(s.matrices[o]!, s.matrices[o + 1]!, s.matrices[o + 2]!);
     const sy = Math.hypot(s.matrices[o + 4]!, s.matrices[o + 5]!, s.matrices[o + 6]!);
     const sz = Math.hypot(s.matrices[o + 8]!, s.matrices[o + 9]!, s.matrices[o + 10]!);
-    score[i] = sy + Math.max(sx, sz) * 0.45;
+    // The mounting normal, and the tip it carries.
+    const h = sy > 1e-12 ? 1 / sy : 0;
+    const nx = s.matrices[o + 4]! * h;
+    const ny = s.matrices[o + 5]! * h;
+    const nz = s.matrices[o + 6]! * h;
+    const tx = s.matrices[o + 12]! + s.matrices[o + 4]!;
+    const ty = s.matrices[o + 13]! + s.matrices[o + 5]!;
+    const tz = s.matrices[o + 14]! + s.matrices[o + 6]!;
+    // How far out of the hull the tip reaches along its own normal, as a
+    // fraction of the hull box's support in that direction. ~1 on the outer
+    // skin pointing outward; small or negative down a canyon or under a wing.
+    const support = Math.abs(nx) * box[3]! + Math.abs(ny) * box[4]! + Math.abs(nz) * box[5]!;
+    const reach =
+      ((tx - box[0]!) * nx + (ty - box[1]!) * ny + (tz - box[2]!) * nz) / Math.max(support, 1e-9);
+    const exposure = reach < 0 ? 0 : reach > 1 ? 1 : reach;
+    // The bump it adds to the outline: standoff × width, weighted so a fitting
+    // that is all height still counts as more than a flush plate of the same
+    // footprint.
+    const value =
+      sy * (Math.max(sx, sz) * 0.75 + sy * 0.25) * (0.12 + 0.88 * exposure * exposure);
+    // Does it own one of the ship's six extremes?
+    let edge = 0;
+    for (let d = 0; d < EXTREME_DIR_COUNT; d++) {
+      const p =
+        tx * EXTREME_DIRS[d * 3]! + ty * EXTREME_DIRS[d * 3 + 1]! + tz * EXTREME_DIRS[d * 3 + 2]!;
+      const near = 1 - (extremes[d]! - p) * inv;
+      if (near > edge) edge = near;
+    }
+    if (edge < 0) edge = 0;
+    // The bonus is a bias inside the ranking; OWNING a support is a separate
+    // and much harder statement, made about a handful of fittings on the whole
+    // ship. Everything merely *near* an extreme competes for budget like
+    // everything else — it just competes well.
+    let owned = 0;
+    for (let d = 0; d < EXTREME_DIR_COUNT; d++) {
+      if (owner[d * 2] === family && owner[d * 2 + 1] === i) owned++;
+    }
+    if (owned > 0) protect++;
+    // Held instances are offset clear of every unheld score so the sort below
+    // cannot interleave them, which is what keeps "held" a prefix and
+    // therefore expressible as a count.
+    const density = (value / cost) * (1 + EXTREME_BONUS * edge * edge);
+    // Held fittings are ordered among THEMSELVES by how many supports they own
+    // and then by how far they stand proud — never by density, which is the
+    // one ranking that is certainly wrong here. A mast is the worst value per
+    // triangle on the ship and it is also four metres of ship; a hatch at the
+    // same extreme is 36 triangles and thirty centimetres. When a rung can
+    // only afford two held fittings it has to buy the metres, not the count.
+    // Both terms are below 1, so neither can reorder the one above it, and
+    // density remains the final tiebreak.
+    score[i] =
+      owned > 0
+        ? PROTECT_RANK + owned + Math.min(sy / hullLengthKm, 0.9) + density
+        : density;
     order.push(i);
   }
   // Placement index breaks ties, so the ranking is byte-identical on every
@@ -896,7 +1200,7 @@ function rankDetail(s: InstancedScatter): Float32Array {
     s.shade[k] = shade[i]!;
     ranked[k] = score[i]!;
   }
-  return ranked;
+  return { score: ranked, protect };
 }
 
 function maxOf(a: Float32Array): number {
