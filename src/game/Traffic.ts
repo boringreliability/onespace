@@ -355,14 +355,19 @@ export class Traffic implements GameModule {
     if (v.coOrbit) {
       // STATION-KEEPING, not an independently integrated orbit.
       //
-      // Deriving the contact's own circular orbit from the player's position
-      // and speed still drifted at about 49 km/s — close enough to the
-      // planet's own orbital speed around its star to say the two are not in
-      // the same reference frame, and chasing that further is not worth what
-      // it buys. A vessel matching your velocity is in any case what a real
-      // ship near another ship does: it holds station. Offset is expressed in
-      // a frame built from the player's motion, so the contact stays off the
-      // same shoulder however the player manoeuvres.
+      // An earlier attempt derived the contact's own circular orbit and
+      // drifted at about 49 km/s. That looked like a reference-frame
+      // mismatch, because it is close to the planet's own orbital speed
+      // around its star — but it was not. Measured afterwards
+      // (src/gen/frame.test.ts, and in the running game): the body's
+      // finite-difference speed matches Universe.bodyVelocity to 0.2%, and a
+      // ship left coasting holds its altitude to the metre over tens of
+      // seconds. The frames agree. The 49 km/s was a bug in that attempt's
+      // own basis, captured before the reference velocity existed.
+      //
+      // Station-keeping is kept anyway, because it is also simply what a ship
+      // parked near another ship does, and it survives the player
+      // manoeuvring rather than only coasting.
       const c = v.coOrbit;
       const flight = this.universe.flight;
       this.tmp.copy(flight.relativeVelocity);
