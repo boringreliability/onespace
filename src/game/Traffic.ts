@@ -43,11 +43,31 @@ import type { Universe, UniverseBody } from '@/game/Universe';
  */
 const MAX_TRAFFIC = 4;
 
+/** Reused origin for the anchor-relative radial. */
+const ZERO3 = new Vector3();
+
 /** Beyond this the mesh is released entirely; the ship still exists as data. */
 const RELEASE_DISTANCE_KM = 6e5;
 
 /** Roles that plausibly loiter near a world rather than crossing the system. */
 const PARKED_ROLES = ['freighter', 'tanker', 'salvager', 'miner', 'survey', 'station-tender'] as const;
+
+/**
+ * A circular orbit expressed in the plane the player is actually in, rather
+ * than in the XZ plane. Deriving it from orbital elements put an earlier
+ * attempt in the ecliptic while the player sat well off it, and a 40 km offset
+ * came out as 4,061 km.
+ */
+interface CoOrbit {
+  /** Fallback direction of travel, if the player is momentarily stationary. */
+  readonly t0: Vector3;
+  /** Fallback radial direction. */
+  readonly r0: Vector3;
+  /** Distance ahead along the player's track, km. */
+  readonly aheadKm: number;
+  /** Distance outward from the body below, km. */
+  readonly aboveKm: number;
+}
 
 interface Vessel {
   readonly blueprint: ShipBlueprint;
@@ -59,8 +79,16 @@ interface Vessel {
   readonly orbitRadiusKm: number;
   readonly phase: number;
   readonly inclination: number;
-  /** Set for the first contact: a fixed world offset from the player's spawn. */
-  readonly parkedAt: Vector3 | null;
+  /**
+   * Set for co-orbital contacts: the player's own orbit, captured at spawn.
+   *
+   * A vessel parked at a fixed world offset is stationary while the player
+   * orbits at kilometres per second, so the contact separates continuously —
+   * measured, 541 km after ten seconds. Sharing the orbit keeps it off your
+   * shoulder for as long as you both coast, which is what "there is a ship
+   * out there" has to mean before anything else can be built on it.
+   */
+  readonly coOrbit: CoOrbit | null;
   visual: ShipVisual | null;
   readonly view: MutableViewState;
   distanceKm: number;
@@ -184,20 +212,7 @@ export class Traffic implements GameModule {
             ? this.playerPhase(anchor) + 40 / Math.max(radius, 1)
             : rng.range(0, Math.PI * 2),
         inclination: i === 0 ? 0 : rng.gaussian(0, 0.4),
-        // The first contact is parked at an explicit offset from where the
-        // player actually is, rather than derived from orbital elements.
-        // Deriving it put the vessel in the XZ plane while the player sits
-        // well off it, and the 40 km I asked for came out as 4,061 km. For a
-        // first integration, "somewhere you can see it" beats "somewhere
-        // Kepler agrees with".
-        parkedAt:
-          i === 0
-            ? new Vector3(
-                this.universe.flight.position.x + rng.range(-1.2, 1.2),
-                this.universe.flight.position.y + rng.range(0.3, 0.9),
-                this.universe.flight.position.z + rng.range(2.0, 3.4),
-              )
-            : null,
+        coOrbit: i === 0 && anchor ? this.captureCoOrbit(anchor, rng.range(1.6, 4.2)) : null,
         visual: null,
         view: new MutableViewState(),
         distanceKm: Infinity,
@@ -212,6 +227,39 @@ export class Traffic implements GameModule {
         tone: 'normal',
       });
     }
+  }
+
+  /**
+   * Capture the player's current circular orbit about `anchor`, with the
+   * vessel leading by `separationKm` along the track.
+   */
+  private captureCoOrbit(anchor: UniverseBody, separationKm: number): CoOrbit | null {
+    const flight = this.universe.flight;
+    const r = new Vector3().subVectors(flight.position, anchor.world);
+    const radiusKm = r.length();
+    if (radiusKm < 1e-6) return null;
+
+    // Tangential component of the player's velocity in the anchor's frame.
+    const v = new Vector3().copy(flight.relativeVelocity);
+    const rHat = r.clone().divideScalar(radiusKm);
+    v.addScaledVector(rHat, -v.dot(rHat));
+    if (v.lengthSq() < 1e-12) {
+      // Coasting radially, or stationary: pick any perpendicular so the frame
+      // is still well defined rather than degenerate.
+      v.set(0, 1, 0).addScaledVector(rHat, -rHat.y);
+      if (v.lengthSq() < 1e-12) v.set(1, 0, 0).addScaledVector(rHat, -rHat.x);
+    }
+    const speed = v.length();
+    const tHat = v.divideScalar(speed);
+
+    return {
+      r0: rHat,
+      t0: tHat,
+      aheadKm: separationKm,
+      // A little higher, so the contact reads against the planet rather than
+      // against the same patch of black the player is looking at.
+      aboveKm: separationKm * 0.35,
+    };
   }
 
   /** The player's current orbital phase about a body, in the same frame placeVessel uses. */
@@ -304,8 +352,32 @@ export class Traffic implements GameModule {
 
   /** Keplerian enough: a circular orbit about the anchor, inclined and phased. */
   private placeVessel(v: Vessel): void {
-    if (v.parkedAt) {
-      v.world.copy(v.parkedAt);
+    if (v.coOrbit) {
+      // STATION-KEEPING, not an independently integrated orbit.
+      //
+      // Deriving the contact's own circular orbit from the player's position
+      // and speed still drifted at about 49 km/s — close enough to the
+      // planet's own orbital speed around its star to say the two are not in
+      // the same reference frame, and chasing that further is not worth what
+      // it buys. A vessel matching your velocity is in any case what a real
+      // ship near another ship does: it holds station. Offset is expressed in
+      // a frame built from the player's motion, so the contact stays off the
+      // same shoulder however the player manoeuvres.
+      const c = v.coOrbit;
+      const flight = this.universe.flight;
+      this.tmp.copy(flight.relativeVelocity);
+      if (this.tmp.lengthSq() < 1e-12) this.tmp.copy(c.t0);
+      else this.tmp.normalize();
+      // Radial direction: away from the body below, or the epoch vector.
+      this.local.copy(v.anchor ? v.anchor.world : ZERO3);
+      this.local.subVectors(flight.position, this.local);
+      if (this.local.lengthSq() < 1e-12) this.local.copy(c.r0);
+      else this.local.normalize();
+
+      v.world
+        .copy(flight.position)
+        .addScaledVector(this.tmp, c.aheadKm)
+        .addScaledVector(this.local, c.aboveKm);
       return;
     }
     if (!v.anchor) {

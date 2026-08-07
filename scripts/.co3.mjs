@@ -1,0 +1,18 @@
+import { chromium } from 'playwright';
+import { spawn } from 'node:child_process';
+const srv=spawn('npx',['vite','preview','--port','4242','--strictPort','--host','127.0.0.1'],{cwd:process.cwd(),stdio:'ignore'});
+const wait=async u=>{for(let i=0;i<200;i++){try{if((await fetch(u)).ok)return 1}catch{}await new Promise(r=>setTimeout(r,200))}};
+await wait('http://127.0.0.1:4242/');
+const b=await chromium.launch({args:['--use-gl=angle','--enable-unsafe-swiftshader','--ignore-gpu-blocklist']});
+const p=await b.newPage({viewport:{width:1600,height:800}});
+await p.goto('http://127.0.0.1:4242/');
+await p.waitForFunction(()=>window.__osReady===true,null,{timeout:120000});
+const settle=async sec=>{ await p.evaluate(x=>window.__osSettle(x), sec);
+  await p.waitForFunction(()=>window.__osSettled===true,null,{timeout:200000}); };
+const snap=async l=>{ const r=await p.evaluate(()=>{const e=window.oneSpace,t=e.get('traffic');const n=t.nearest();
+  return {sep:n?+n.distanceKm.toPrecision(4):null,lods:t.stats().lods};}); console.log(l,JSON.stringify(r)); };
+await settle(4);  await snap('t=  4s');
+await settle(26); await snap('t= 30s');
+await settle(30); await snap('t= 60s');
+await p.screenshot({path:'review/coorbit.png'});
+await b.close(); srv.kill();
