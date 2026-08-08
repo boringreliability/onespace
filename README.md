@@ -122,5 +122,11 @@ node scripts/shoot.mjs planet-orbit --out review/mine --width 2560 --height 1440
   ground haze is not. `AtmosphereRenderer.setDepthTexture()` is waiting for it.
 - `Planet.ts` still applies its own cheap limb and haze terms, which
   double-count against the real scattering shell on worlds that have one.
-- Landing works, but has no dedicated surface camera or surface-mode UI yet:
-  the ship touches down, reports contact and stays put, and that is all.
+- Landing works and the game now knows it: the ship touches down, the throttle
+  is cut, the arrival is graded in the log, and the HUD reads 0 m/s at 0 m.
+  **The surface camera does not.** On touchdown the rig switches to `orbit`
+  mode, and the captured frame shows only starfield — no hull, no ground. The
+  orbit camera evidently frames something other than the landed ship, so
+  either it needs a target it is not being given, or it needs a real `surface`
+  mode of its own with the planet's up vector as its reference. Reproduce by
+  dropping the ship onto terrain and reading review/landed.png.

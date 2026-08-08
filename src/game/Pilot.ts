@@ -14,7 +14,7 @@ import { bus } from '@/core/EventBus';
 import { config } from '@/core/Config';
 
 import { Ship } from '@/ship/Ship';
-import { CameraRig } from '@/ship/CameraRig';
+import { CameraRig, type CameraMode } from '@/ship/CameraRig';
 import type { Universe } from '@/game/Universe';
 import { shotOwnsScene } from '@/game/Shots';
 import type { Hud } from '@/ui/Hud';
@@ -74,9 +74,67 @@ export class Pilot implements GameModule {
     this.rig = new CameraRig(ctx.camera);
 
     bus.on('camera:shake', ({ intensity, duration }) => this.rig.shake(intensity, duration));
+
+    bus.on('ship:touchdown', ({ speed, vertical }) => this.onTouchdown(speed, vertical));
+    bus.on('ship:crashed', ({ speed }) => {
+      this.enterLanded();
+      bus.emit('log', {
+        text: `HULL BREACH — ${(speed * 1000).toFixed(0)} M/S`,
+        tone: 'warn',
+      });
+    });
   }
 
+  /**
+   * Grade the arrival and say so. A pilot knows the difference between setting
+   * a hull down and arriving at it, and the log is where the game admits it.
+   */
+  private onTouchdown(speed: number, vertical: number): void {
+    this.enterLanded();
+    const mps = Math.abs(vertical) * 1000;
+    const grade =
+      mps < 2 ? 'TOUCHDOWN — CLEAN' : mps < 8 ? 'TOUCHDOWN' : 'TOUCHDOWN — HARD';
+    bus.emit('log', {
+      text: `${grade} · ${mps.toFixed(1)} M/S`,
+      tone: mps < 8 ? 'good' : 'warn',
+    });
+  }
+
+  private enterLanded(): void {
+    if (this.landed) return;
+    this.landed = true;
+    // Orbit framing puts the hull on the ground with the horizon behind it,
+    // which is the read a chase camera cannot give once the ship has stopped:
+    // a trailing camera behind a stationary object shows only the object.
+    this.modeBeforeLanding = this.rig.mode;
+    this.rig.setMode('orbit');
+    // Cut the throttle. Sitting on a world with the engines spooled is how a
+    // player discovers they have taken off again without meaning to.
+    ctxInputSetThrottle(this.lastCtx, 0);
+  }
+
+  private leaveLanded(): void {
+    if (!this.landed) return;
+    this.landed = false;
+    this.rig.setMode(this.modeBeforeLanding);
+    bus.emit('log', { text: 'AIRBORNE', tone: 'normal' });
+  }
+
+  /**
+   * Landed state.
+   *
+   * FlightModel has emitted ship:touchdown and ship:crashed since it was
+   * written and nothing ever listened, so the ship could reach the ground,
+   * stop, and the game would not acknowledge it. Being on a world is a state
+   * the player is in, not an event that passes.
+   */
+  private landed = false;
+  /** The camera mode to restore when the ship lifts off again. */
+  private modeBeforeLanding: CameraMode = 'chase';
+  private lastCtx: EngineContext | null = null;
+
   update(dt: number, ctx: EngineContext): void {
+    this.lastCtx = ctx;
     if (shotOwnsScene()) {
       // The ship may be the shot's own subject, framed by its own camera —
       // leave the hull exactly where the shot put it.
@@ -119,6 +177,10 @@ export class Pilot implements GameModule {
     // eases its aim towards the velocity vector, and a world one would point
     // along the planet's orbit around its sun no matter what the pilot did.
     this.rig.update(dt, this.renderPos, flight.renderOrientation, flight.velocity, ctx);
+
+    // The ship leaves the ground the moment the model says it has, rather than
+    // on a throttle press — a bounce off a ridge is a departure too.
+    if (this.landed && !flight.grounded) this.leaveLanded();
 
     // 5. Instruments.
     this.publishVitals(flight);
@@ -175,6 +237,11 @@ export class Pilot implements GameModule {
     this.ship.dispose();
     this.rig.dispose();
   }
+}
+
+/** Cut the throttle without reaching through the engine context inline. */
+function ctxInputSetThrottle(ctx: EngineContext | null, value: number): void {
+  ctx?.input.setThrottle(value);
 }
 
 function clamp(v: number, lo: number, hi: number): number {
