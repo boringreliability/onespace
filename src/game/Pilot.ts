@@ -172,6 +172,15 @@ export class Pilot implements GameModule {
     this.ship.object3d.quaternion.copy(flight.renderOrientation);
     this.ship.update(dt, ctx, this.shipState);
 
+    // The camera cannot know which way is up on a world. Near a body the local
+    // vertical is simply the parent-relative position; in open space there is
+    // no such thing and the rig falls back to the hull's own attitude.
+    if (this.universe.nearestAltitudeKm !== null) {
+      this.rig.setReferenceUp(this.up.copy(flight.position).normalize());
+    } else {
+      this.rig.setReferenceUp(null);
+    }
+
     // 4. Camera.
     // `flight.velocity` is parent-relative, which is what the rig wants: it
     // eases its aim towards the velocity vector, and a world one would point

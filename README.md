@@ -124,7 +124,8 @@ node scripts/shoot.mjs planet-orbit --out review/mine --width 2560 --height 1440
   double-count against the real scattering shell on worlds that have one.
 - Landing works and the game now knows it: the ship touches down, the throttle
   is cut, the arrival is graded in the log, and the HUD reads 0 m/s at 0 m.
-  The surface camera works: land in daylight and you get lit terrain, a
-  horizon and stars above it. The hull itself is still outside the frame —
-  the orbit rig's elevation puts it below the view — so the last piece is
-  choosing a landed framing rather than reusing the inspection camera's.
+  The surface camera works and is level: land in daylight and you get lit
+  terrain and stars, with the camera's roll about the local vertical measured
+  at 1.6e-15 degrees. The hull itself is still outside the frame — the orbit
+  rig's elevation puts it below the view — so the last piece is a landed
+  framing of its own rather than reusing the inspection camera's.

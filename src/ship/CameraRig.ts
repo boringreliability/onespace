@@ -471,6 +471,28 @@ export class CameraRig {
    * @param immediate skip the cross-fade. Only the screenshot harness should
    *        pass true — in game a cut is always wrong.
    */
+  /**
+   * The direction the camera should call "up", in render space.
+   *
+   * The rig only ever sees a position and an orientation, so it cannot know
+   * which way is up on a world — and levelling against world Y gives a
+   * diagonal horizon on any planet whose vertical points somewhere else, while
+   * levelling against the SHIP gives a diagonal horizon whenever the hull is
+   * sitting at an angle, which a landed hull generally is. The integrator
+   * knows the local vertical; it tells us. Pass null in open space.
+   */
+  setReferenceUp(up: Vector3 | null): void {
+    if (up) {
+      this.referenceUp.copy(up);
+      this.hasReferenceUp = true;
+    } else {
+      this.hasReferenceUp = false;
+    }
+  }
+
+  private readonly referenceUp = new Vector3(0, 1, 0);
+  private hasReferenceUp = false;
+
   setMode(mode: CameraMode, immediate = false): void {
     if (mode === this.mode_ && this.blendT >= 1) return;
 
@@ -579,7 +601,7 @@ export class CameraRig {
     this.stepChase(step, shipPosition, shipOrientation, shipVelocity);
     this.stepCockpit(step, shipPosition, shipOrientation, ctx);
     this.stepCinematic(shipPosition);
-    this.stepOrbit(step, shipPosition, ctx);
+    this.stepOrbit(step, shipPosition, shipOrientation, ctx);
 
     // Cross-fade. Every mode's pose is solved every frame — they are a handful
     // of springs each — so a transition is a plain interpolation with no state
@@ -892,7 +914,12 @@ export class CameraRig {
 
   // -- orbit ---------------------------------------------------------------
 
-  private stepOrbit(dt: number, shipPosition: Vector3, ctx: EngineContext): void {
+  private stepOrbit(
+    dt: number,
+    shipPosition: Vector3,
+    shipOrientation: Quaternion,
+    ctx: EngineContext,
+  ): void {
     if (!this.orbitTargetSet) {
       this.orbitDistance = 0.2;
       this.orbitDistanceCur = 0.2;
@@ -940,7 +967,12 @@ export class CameraRig {
     const l = dir.length();
     if (l > 1e-9) dir.divideScalar(l);
     else dir.set(0, 0, -1);
-    this.lookRotation(this.poseOrbit.quaternion, pos, dir, this.tmpB.set(0, 1, 0));
+    // Level against the local vertical when the integrator has supplied one,
+    // the ship's own up otherwise. World Y is neither, on a planet.
+    if (this.hasReferenceUp) this.tmpB.copy(this.referenceUp);
+    else this.tmpB.set(0, 1, 0).applyQuaternion(shipOrientation);
+    if (Math.abs(this.tmpB.dot(dir)) > 0.999) this.tmpB.set(0, 1, 0);
+    this.lookRotation(this.poseOrbit.quaternion, pos, dir, this.tmpB);
     this.poseOrbit.fov = this.orbitFov;
   }
 
