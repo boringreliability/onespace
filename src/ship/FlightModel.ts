@@ -7,6 +7,26 @@
  * the terrain sampler changes as you approach a planet), and because it must be
  * runnable headlessly for `flightSelfTest()`.
  *
+ * THE FRAME — read this before touching anything below.
+ *
+ * oneSpace uses patched conics with an explicit parent body, the way Kerbal
+ * Space Program does. `position` and `velocity` are stored RELATIVE TO THE
+ * PARENT, exactly one body's gravity acts, and `worldPosition` is a derived
+ * quantity that exists only for rendering and the floating origin.
+ *
+ * The alternative — integrating in the star-centred inertial frame while
+ * measuring speed against the nearby body — is what this file used to do, and
+ * it made the body the parent of the ship's *velocity* but not of its
+ * *position*. Every consumer then had to remember to add the planet's ~49 km/s
+ * by hand. Traffic forgot and its contacts drifted; landing forgot and the
+ * ship's height above ground rose while it descended. Both looked like an
+ * engine-level frame mismatch and were not: they were the missing half of a
+ * decision nobody had finished making. `referenceVelocity` was the patch over
+ * that gap and it is gone, because there is no longer a gap.
+ *
+ * Frames are crossed in exactly one function: `rebase()`. If a second copy of
+ * those two lines appears anywhere in the project, the design has failed.
+ *
  * DESIGN NOTES
  *
  * - The ship is a rigid body, not a camera on rails. Everything the pilot does
@@ -54,6 +74,62 @@ const FIXED_H = 1 / 120;
 const MAX_SUBSTEPS = 8;
 /** Altitude (km) above ground at which "grounded" releases. 5 m of hysteresis. */
 const GROUND_RELEASE = 0.005;
+
+/**
+ * Sphere-of-influence hysteresis. A ship skimming a boundary would otherwise
+ * swap parents every frame, and each swap is a subtraction of two large,
+ * nearly-equal numbers — the one operation in this design that costs precision.
+ * Enter low, leave high, so the band between them is dead.
+ */
+export const SOI_ENTER_FACTOR = 0.98;
+export const SOI_LEAVE_FACTOR = 1.02;
+
+/**
+ * Floor on a body's sphere of influence, in units of its own radius.
+ *
+ * The formula is honest and occasionally produces a boundary INSIDE the body —
+ * measured, 12 of 699 generated bodies, worst case 0.54 radii. Those are worlds
+ * so tidally dominated by their primary that you genuinely cannot orbit them,
+ * which is a fine thing to model and a terrible thing to ship: a body that can
+ * never become the parent is a body the ground sampler is never installed for,
+ * so the player would fly through its surface. 1.5 radii is the smallest floor
+ * that leaves room to descend, and it changes nothing for the other 98%.
+ */
+export const SOI_MIN_RADII = 1.5;
+
+/**
+ * Has the ship left its parent's sphere of influence? `distance` is
+ * parent-relative, km. Deliberately a function rather than an inline
+ * comparison: the asymmetry with `entersSoi` IS the hysteresis, and the two
+ * belong side by side where that is visible.
+ */
+export function leavesSoi(distance: number, radius: number): boolean {
+  return distance > radius * SOI_LEAVE_FACTOR;
+}
+
+/** Has the ship entered a child's sphere of influence? `distance` is to that child. */
+export function entersSoi(distance: number, radius: number): boolean {
+  return radius > 0 && distance < radius * SOI_ENTER_FACTOR;
+}
+
+/**
+ * Radius of a body's sphere of influence, km — the standard two-body result
+ *
+ *     r_soi = a · (m / M)^(2/5)
+ *
+ * `semiMajorAxis` is the body's own orbit about its primary, `mu` its
+ * gravitational parameter and `parentMu` the primary's. Mass ratio and mu ratio
+ * are the same number, and mu is what the rest of the engine already carries.
+ *
+ * A body with no primary (the star) has no boundary within its own system, so
+ * an infinite radius is the honest answer rather than a large magic number:
+ * every comparison against it then falls out correctly without a special case.
+ */
+export function soiRadius(semiMajorAxis: number, mu: number, parentMu: number): number {
+  if (!(parentMu > 0)) return Number.POSITIVE_INFINITY;
+  if (!(semiMajorAxis > 0) || !(mu > 0)) return 0;
+  return semiMajorAxis * Math.pow(mu / parentMu, 0.4);
+}
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -180,9 +256,19 @@ export interface FlightCommand {
   brake: boolean;
 }
 
-export interface GravitySource {
-  /** World position, km. Owned by the caller — mutate it in place as bodies orbit. */
+/**
+ * The one body whose gravity acts, and the frame the ship's state is stored in.
+ *
+ * `position` and `velocity` are WORLD quantities owned by the caller and held
+ * by reference — mutate them in place as the body travels its own orbit and the
+ * ship follows for free, which is the entire point of the parent-relative
+ * model. Everything else the ship stores is measured against them.
+ */
+export interface ParentBody {
+  /** World position, km. Mutated in place by whoever owns the body. */
   readonly position: Vector3;
+  /** World velocity, km/s. Same ownership. */
+  readonly velocity: Vector3;
   /** Standard gravitational parameter GM, km³/s². Earth is 398600. */
   readonly mu: number;
   /** Body radius, km. Optional; lets `altitude` work without a ground sampler. */
@@ -190,19 +276,29 @@ export interface GravitySource {
 }
 
 /**
- * Returns the ship's altitude above the terrain at `worldPos`, in km.
- * Negative means the ship is inside the ground. Sampling terrain is expensive,
- * so this is only called when the ship is plausibly near a surface.
- */
-/**
  * Terrain query for collision.
  *
- * Returns the ship's ALTITUDE ABOVE THE SURFACE in km at that world position —
- * negative when penetrating. NOT the surface radius: this was wired to
+ * Takes the ship's PARENT-RELATIVE position — the planet you are landing on is
+ * the parent by construction, so the sampler never has to undo the body's
+ * orbital motion, and a landing site cannot slide out from under the ship.
+ *
+ * Returns the ship's ALTITUDE ABOVE THE SURFACE in km, negative when
+ * penetrating. NOT the surface radius: this was wired to
  * PlanetRenderer.surfaceRadius() once, which returns ~11,000, so the ship was
  * never in contact with anything and simply flew through the ground.
  */
-export type GroundSampler = (worldPos: Vector3) => number;
+export type GroundSampler = (parentRelativePos: Vector3) => number;
+
+/**
+ * Stand-in for "no parent": deep space, or a headless test with no world.
+ * Having a zero object rather than a null branch keeps the hot path free of
+ * `if (parent)` in every method that reads a frame.
+ */
+const NO_PARENT: ParentBody = {
+  position: new Vector3(),
+  velocity: new Vector3(),
+  mu: 0,
+};
 
 export type ImpactKind = 'landing' | 'hard' | 'crash';
 
@@ -212,9 +308,13 @@ export class FlightModel {
   readonly config: ShipConfig;
 
   // --- authoritative rigid-body state -------------------------------------
-  /** World position, km. Read freely; use `teleport()` to move the ship. */
+  /**
+   * Position RELATIVE TO THE PARENT, km. This is the canonical storage; the
+   * world position is derived from it. Read freely; use `teleport()` to move
+   * the ship and `rebase()` to change which body it is measured against.
+   */
   readonly position = new Vector3();
-  /** World velocity, km/s. */
+  /** Velocity RELATIVE TO THE PARENT, km/s. Already the number the HUD wants. */
   readonly velocity = new Vector3();
   /** Hull orientation. The nose points along local -Z. */
   readonly orientation = new Quaternion();
@@ -222,12 +322,24 @@ export class FlightModel {
   readonly angularVelocity = new Vector3();
 
   /**
+   * `parent.position + position`, refreshed once per `update()`. Derived, never
+   * integrated — the floating origin and anything that has to place the ship
+   * against a body it is not orbiting read this. Writing to it does nothing.
+   */
+  readonly worldPosition = new Vector3();
+
+  /**
    * Position/orientation extrapolated to the *display* time, i.e. including the
    * fraction of a substep left in the accumulator. Renderers and the camera rig
    * should read these; physics reads `position`/`orientation`. Without this the
    * ship visibly beats against the 120 Hz grid at unrelated frame rates.
+   *
+   * `renderPosition` is parent-relative like `position`; `renderWorldPosition`
+   * is the same instant expressed in world coordinates, and is what the hull is
+   * actually drawn at.
    */
   readonly renderPosition = new Vector3();
+  readonly renderWorldPosition = new Vector3();
   readonly renderOrientation = new Quaternion();
 
   // --- derived frames, refreshed every substep ----------------------------
@@ -237,24 +349,10 @@ export class FlightModel {
   readonly right = new Vector3(1, 0, 0);
   /** Hull +Y in world space. */
   readonly up = new Vector3(0, 1, 0);
-  /** Away from the dominant gravity source; +Y in deep space. */
+  /** Away from the parent; +Y with no parent. */
   readonly localUp = new Vector3(0, 1, 0);
   /** Gravitational acceleration acting on the ship, km/s². */
   readonly gravityAccel = new Vector3();
-
-  /**
-   * Velocity of the frame the ship is flying in — the body it is near, moving
-   * on its own orbit. Everything that asks "how fast are we going" must ask it
-   * about THIS, not about the world.
-   *
-   * A planet's orbital speed around its star is tens of km/s, far above any
-   * ship's top speed. Measuring against the world therefore pins the thrust
-   * limiter at zero everywhere in the universe: full throttle, no acceleration,
-   * no G, nothing moves. The ship is unflyable in any orbit.
-   */
-  readonly referenceVelocity = new Vector3();
-  /** velocity - referenceVelocity. Recomputed each step, never allocated. */
-  readonly relativeVelocity = new Vector3();
 
   /** The pilot's intent. Write into this, or call `applyInput()`. */
   readonly command: FlightCommand = {
@@ -278,7 +376,7 @@ export class FlightModel {
   private readonly alphaRoll: number;
 
   // --- world hooks --------------------------------------------------------
-  private sources: readonly GravitySource[] = [];
+  private parentBody: ParentBody = NO_PARENT;
   private groundSampler: GroundSampler | null = null;
   private landingPlanet: PlanetSpec | null = null;
   private density = 0;
@@ -292,7 +390,6 @@ export class FlightModel {
 
   // --- readouts -----------------------------------------------------------
   private _speed = 0;
-  private _relSpeed = 0;
   private _verticalSpeed = 0;
   private _altitude = Number.POSITIVE_INFINITY;
   private _gForce = 0;
@@ -338,13 +435,14 @@ export class FlightModel {
   // Readouts — the HUD's entire contract with the flight model
   // -------------------------------------------------------------------------
 
-  /** km/s. */
+  /**
+   * km/s relative to the parent — what the thrust limiter, the HUD and the
+   * camera all mean by "speed". There is no world-speed readout because nothing
+   * in the game has ever wanted one: parked in a stable orbit it reads ~53 km/s
+   * against the star, which is a true number that answers no useful question.
+   */
   get speed(): number {
     return this._speed;
-  }
-  /** Speed within the local frame — what the limiter and the HUD both mean. */
-  get relativeSpeed(): number {
-    return this._relSpeed;
   }
   /** km/s along `localUp`. Positive is climbing. */
   get verticalSpeed(): number {
@@ -397,25 +495,58 @@ export class FlightModel {
   // World hooks
   // -------------------------------------------------------------------------
 
+  /** The body the ship's state is measured against. `null` = deep space. */
+  get parent(): ParentBody | null {
+    return this.parentBody === NO_PARENT ? null : this.parentBody;
+  }
+
   /**
-   * The bodies pulling on the ship. The array and its `Vector3`s are held by
-   * reference so orbiting bodies cost nothing per frame — mutate them in place.
-   * Keep this list short: only the star and the current planet/moon matter.
+   * Declare the parent WITHOUT converting the state vector.
+   *
+   * This reinterprets `position` and `velocity` as being relative to the new
+   * body, which for any non-zero state is a teleport. It exists for exactly two
+   * moments — system entry and warp arrival — where the state is about to be
+   * overwritten by `teleport()` anyway, and `orbitalVelocityAt()` needs to know
+   * the parent's `mu` first. During flight, use `rebase()`.
    */
-  setGravitySources(sources: readonly GravitySource[]): void {
-    this.sources = sources;
+  setParent(parent: ParentBody | null): void {
+    this.parentBody = parent ?? NO_PARENT;
+    this.altCache = 0;
+    this.refreshDerived();
+  }
+
+  /**
+   * Cross a sphere-of-influence boundary: re-express the ship's state relative
+   * to a new parent, leaving its world motion untouched.
+   *
+   * THIS IS THE ONLY PLACE IN THE PROJECT WHERE FRAMES ARE CROSSED. The two
+   * lines below are the whole of the patched-conic model's cost, and the reason
+   * the rest of the game never has to think about a planet's 49 km/s. If you
+   * find yourself writing `+ body.velocity` anywhere else, you are re-opening
+   * the bug this design closed.
+   */
+  rebase(parent: ParentBody | null): void {
+    const from = this.parentBody;
+    const to = parent ?? NO_PARENT;
+    if (from === to) return;
+
+    this.position.add(from.position).sub(to.position);
+    this.velocity.add(from.velocity).sub(to.velocity);
+
+    this.parentBody = to;
+    this.altCache = 0; // a new parent means a new surface, if any
+    this.renderPosition.copy(this.position);
+    this.refreshDerived();
+
+    // Readouts are cached during update(), and a transition happens after it.
+    // Without this the HUD shows the OLD frame's speed for one frame — which on
+    // a boundary crossing is a 49 km/s jump in a number that did not change.
+    this._speed = this.velocity.length();
+    this.computeLocalUp();
+    this._verticalSpeed = this.velocity.dot(this.localUp);
   }
 
   /** Local atmospheric density at the ship, kg/m³. 0 = vacuum. */
-  /**
-   * Tell the model which frame it is flying in. Pass the velocity of the body
-   * you are near; pass zero in deep space.
-   */
-  setReferenceVelocity(v: Vector3 | null): void {
-    if (v) this.referenceVelocity.copy(v);
-    else this.referenceVelocity.set(0, 0, 0);
-  }
-
   setAtmosphere(densityAtShip: number): void {
     this.density = densityAtShip > 0 ? densityAtShip : 0;
   }
@@ -439,31 +570,35 @@ export class FlightModel {
   }
 
   /**
-   * Speed of a circular orbit at `pos` around whichever source dominates there.
+   * Velocity of a circular orbit at parent-relative `pos`, in the parent's
+   * frame — so it is the velocity to hand straight to `teleport()`, with no
+   * composition of the parent's own motion. That composition is what used to be
+   * required here and is what this whole change deletes.
+   *
    * The direction is the one that keeps the orbit closest to the world XZ
    * plane, which is where systems are generated, so spawning is predictable.
    * Not called from `update()` — allocating a default `out` is fine here.
    */
   orbitalVelocityAt(pos: Vector3, out = new Vector3()): Vector3 {
-    const src = this.dominantSourceAt(pos);
-    if (!src) return out.set(0, 0, 0);
-
-    this.sTmp.copy(pos).sub(src.position);
-    const r = this.sTmp.length();
-    if (r < 1e-6) return out.set(0, 0, 0);
+    const mu = this.parentBody.mu;
+    const r = pos.length();
+    if (mu <= 0 || r < 1e-6) return out.set(0, 0, 0);
 
     // Any unit vector perpendicular to r works; pick the one nearest prograde
     // in the ecliptic by crossing with world up, with a fallback for poles.
     this.sTmp2.set(0, 1, 0);
-    out.crossVectors(this.sTmp2, this.sTmp);
+    out.crossVectors(this.sTmp2, pos);
     if (out.lengthSq() < 1e-12) {
       this.sTmp2.set(1, 0, 0);
-      out.crossVectors(this.sTmp2, this.sTmp);
+      out.crossVectors(this.sTmp2, pos);
     }
-    return out.normalize().multiplyScalar(Math.sqrt(src.mu / r));
+    return out.normalize().multiplyScalar(Math.sqrt(mu / r));
   }
 
-  /** Place the ship. Used at spawn and on warp arrival; never during flight. */
+  /**
+   * Place the ship. Used at spawn and on warp arrival; never during flight.
+   * Both arguments are PARENT-RELATIVE — set the parent first.
+   */
   teleport(position: Vector3, velocity?: Vector3, orientation?: Quaternion): void {
     this.position.copy(position);
     this.velocity.copy(velocity ?? this.sTmp.set(0, 0, 0));
@@ -476,6 +611,7 @@ export class FlightModel {
     this.renderPosition.copy(this.position);
     this.renderOrientation.copy(this.orientation);
     this.refreshBodyAxes();
+    this.refreshDerived();
   }
 
   /** Convenience for the integrator: fold `Input` into the command struct. */
@@ -511,6 +647,7 @@ export class FlightModel {
     }
 
     this.extrapolateForRender(this.accumulator);
+    this.refreshDerived();
     this.updateReadouts();
   }
 
@@ -525,14 +662,17 @@ export class FlightModel {
     this._throttle = damp(this._throttle, clamp01(this.command.throttle), c.throttleSpoolTime, h);
 
     // --- gravity ------------------------------------------------------------
-    this.accumulateGravity(this.position, this.sGrav);
+    // One source: the parent. Not a sum. That is the patched-conic
+    // approximation, and it is a feature — it is what makes an orbit *stay* an
+    // orbit over hours of play instead of slowly eating a third body's error.
+    this.parentGravity(this.sGrav);
     this.gravityAccel.copy(this.sGrav);
 
     // --- non-gravitational forces ------------------------------------------
     this.sAcc.set(0, 0, 0);
-    // Relative to the local frame, not the world — see referenceVelocity.
-    this.sTmp.subVectors(this.velocity, this.referenceVelocity);
-    const speed = this.sTmp.length();
+    // `velocity` is already relative to the parent, so this is the speed the
+    // limiter, the drag term and the brake all want, with nothing to subtract.
+    const speed = this.velocity.length();
 
     // Thrust fades as the ceiling approaches. Never clamp the velocity: the
     // whole point is that you feel the engine give up, not the world stop you.
@@ -738,44 +878,35 @@ export class FlightModel {
     this.up.set(0, 1, 0).applyQuaternion(this.orientation);
   }
 
-  private accumulateGravity(at: Vector3, out: Vector3): void {
-    out.set(0, 0, 0);
-    for (let i = 0; i < this.sources.length; i++) {
-      const s = this.sources[i]!;
-      this.sTmp.copy(s.position).sub(at);
-      const r2 = this.sTmp.lengthSq();
-      if (r2 < 1e-9) continue;
-      // a = mu/r² towards the body; the extra 1/r normalises sTmp in place.
-      out.addScaledVector(this.sTmp, (s.mu / r2) * (1 / Math.sqrt(r2)));
+  /** a = -mu/r² · r̂, with r the parent-relative position. */
+  private parentGravity(out: Vector3): void {
+    const mu = this.parentBody.mu;
+    const r2 = this.position.lengthSq();
+    if (mu <= 0 || r2 < 1e-9) {
+      out.set(0, 0, 0);
+      return;
     }
-  }
-
-  private dominantSourceAt(at: Vector3): GravitySource | null {
-    let best: GravitySource | null = null;
-    let bestPull = 0;
-    for (let i = 0; i < this.sources.length; i++) {
-      const s = this.sources[i]!;
-      const r2 = this.sTmp.copy(s.position).sub(at).lengthSq();
-      if (r2 < 1e-9) continue;
-      const pull = s.mu / r2;
-      if (pull > bestPull) {
-        bestPull = pull;
-        best = s;
-      }
-    }
-    return best;
+    out.copy(this.position).multiplyScalar(-(mu / r2) / Math.sqrt(r2));
   }
 
   private computeLocalUp(): void {
-    const src = this.dominantSourceAt(this.position);
-    if (!src) {
+    if (this.parentBody.mu <= 0) {
       this.localUp.set(0, 1, 0);
       return;
     }
-    this.localUp.copy(this.position).sub(src.position);
-    const len = this.localUp.length();
+    const len = this.position.length();
     if (len < 1e-9) this.localUp.set(0, 1, 0);
-    else this.localUp.multiplyScalar(1 / len);
+    else this.localUp.copy(this.position).multiplyScalar(1 / len);
+  }
+
+  /**
+   * `world = parent.world + position`. The single derivation of the world
+   * frame, kept next to nothing else so it stays obviously cheap and obviously
+   * one-directional — nothing ever writes back into it.
+   */
+  private refreshDerived(): void {
+    this.worldPosition.addVectors(this.parentBody.position, this.position);
+    this.renderWorldPosition.addVectors(this.parentBody.position, this.renderPosition);
   }
 
   /**
@@ -796,8 +927,6 @@ export class FlightModel {
 
   private updateReadouts(): void {
     this._speed = this.velocity.length();
-    this.relativeVelocity.subVectors(this.velocity, this.referenceVelocity);
-    this._relSpeed = this.relativeVelocity.length();
     this.computeLocalUp();
     this._verticalSpeed = this.velocity.dot(this.localUp);
 
@@ -808,11 +937,9 @@ export class FlightModel {
       this._altitude = this.groundSampler(this.position);
       this.altCache = this._altitude;
     } else {
-      const src = this.dominantSourceAt(this.position);
+      const radius = this.parentBody.radius;
       this._altitude =
-        src && src.radius !== undefined
-          ? this.sTmp.copy(this.position).sub(src.position).length() - src.radius
-          : Number.POSITIVE_INFINITY;
+        radius !== undefined ? this.position.length() - radius : Number.POSITIVE_INFINITY;
     }
 
     // Heading: bearing of the nose in the local horizontal plane, taking world
@@ -837,7 +964,7 @@ export class FlightModel {
 
   /** Drop every reference the model holds. It owns no GPU resources. */
   dispose(): void {
-    this.sources = [];
+    this.parentBody = NO_PARENT;
     this.groundSampler = null;
     this.landingPlanet = null;
   }
@@ -914,7 +1041,7 @@ export function flightSelfTest(): string[] {
     const mu = 10;
     const r = 10;
     const fm = new FlightModel();
-    fm.setGravitySources([{ position: new Vector3(0, 0, 0), mu, radius: 1 }]);
+    fm.setParent({ position: new Vector3(), velocity: new Vector3(), mu, radius: 1 });
     const p = new Vector3(r, 0, 0);
     const v = fm.orbitalVelocityAt(p);
     fm.teleport(p, v);
@@ -1020,7 +1147,7 @@ export function flightSelfTest(): string[] {
     const groundY = 100;
     const mk = (vy: number): FlightModel => {
       const fm = new FlightModel();
-      fm.setGravitySources([{ position: new Vector3(0, 0, 0), mu: 10, radius: groundY }]);
+      fm.setParent({ position: new Vector3(), velocity: new Vector3(), mu: 10, radius: groundY });
       fm.setGroundSampler((p) => p.length() - groundY);
       fm.teleport(new Vector3(0, groundY + 0.5, 0), new Vector3(0, vy, 0));
       return fm;

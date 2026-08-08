@@ -122,30 +122,5 @@ node scripts/shoot.mjs planet-orbit --out review/mine --width 2560 --height 1440
   ground haze is not. `AtmosphereRenderer.setDepthTexture()` is waiting for it.
 - `Planet.ts` still applies its own cheap limb and haze terms, which
   double-count against the real scattering shell on worlds that have one.
-- **Landing does not work yet, and the cause is now narrow.** Measured, not
-  guessed. Both original suspects are ELIMINATED:
-  - *Not the atmosphere.* Turning it off makes the ship separate FASTER
-    (134.8 -> 473.1 km over a minute, against 36.9 -> 198.7 with it on). Drag
-    was helping. The density actually fed to the model in orbit is 9.5e-130.
-  - *Not the planet's rotation.* Over the measurement window the spin is
-    9.3e-6 rad — the world turns once per 2,018,900 s — and querying the
-    terrain with a world-space direction versus the planet's own frame differs
-    by one metre in 7,226 km.
-  - Gravity points inward at the expected magnitude, and the ground sampler
-    returns the correct altitude, so both are exonerated too.
-
-  What is actually happening: the ship's radial velocity is NEGATIVE (it is
-  descending) while its height above ground RISES. The planet is leaving faster
-  than the ship falls — `relativeSpeed` sits at 48.99 km/s, which is the
-  planet's own orbital speed about its star.
-
-  The remaining question is small and specific: a ship given the body's
-  velocity explicitly, via `flight.teleport(position, bodyVelocity)`, still
-  reports `relativeSpeed` 48.99 rather than the ~0.02 it was handed. Either
-  `teleport` is not applying the velocity argument, or `referenceVelocity` is
-  not what `Universe.bodyVelocity` returns at that instant. Answer that one
-  question first; everything downstream of it follows.
-
-  Note this is NOT a reference-frame mismatch in the engine — that hypothesis
-  was tested and disproved in `src/gen/frame.test.ts` and in the running game.
-  A ship left coasting in orbit holds its altitude to the centimetre.
+- Landing works, but has no dedicated surface camera or surface-mode UI yet:
+  the ship touches down, reports contact and stays put, and that is all.

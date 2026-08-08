@@ -100,7 +100,9 @@ export class Pilot implements GameModule {
 
     // 2. Physics already ran inside Universe.update(); read the interpolated
     //    render state so the hull does not stutter between fixed substeps.
-    ctx.origin.toRender(flight.renderPosition, this.renderPos);
+    //    The flight model stores the ship relative to its parent body; the
+    //    floating origin works in world coordinates, so take the derived one.
+    ctx.origin.toRender(flight.renderWorldPosition, this.renderPos);
 
     // 3. Hull.
     this.rcs.set(input.axes.strafeX, input.axes.strafeY, -input.axes.throttle);
@@ -113,9 +115,10 @@ export class Pilot implements GameModule {
     this.ship.update(dt, ctx, this.shipState);
 
     // 4. Camera.
-    // Relative velocity, not world: the rig eases its aim towards the velocity
-    // vector, and the world one points along the planet's orbit around its sun.
-    this.rig.update(dt, this.renderPos, flight.renderOrientation, flight.relativeVelocity, ctx);
+    // `flight.velocity` is parent-relative, which is what the rig wants: it
+    // eases its aim towards the velocity vector, and a world one would point
+    // along the planet's orbit around its sun no matter what the pilot did.
+    this.rig.update(dt, this.renderPos, flight.renderOrientation, flight.velocity, ctx);
 
     // 5. Instruments.
     this.publishVitals(flight);
@@ -127,9 +130,9 @@ export class Pilot implements GameModule {
     const v = this.vitals;
     v.throttle = flight.throttle;
 
-    // Speed within the local frame. The flight model already maintains it —
-    // see FlightModel.referenceVelocity for why world speed is the wrong number.
-    v.speedKmS = flight.relativeSpeed;
+    // Speed relative to the parent body. There is no other kind any more —
+    // see the frame note at the top of FlightModel for why.
+    v.speedKmS = flight.speed;
     v.altitudeKm = this.universe.nearestAltitudeKm;
     v.gLoad = flight.gForce;
 
@@ -138,7 +141,7 @@ export class Pilot implements GameModule {
     // value rather than showing a number that means nothing.
     const nearest = this.universe.nearest;
     if (nearest) {
-      this.toBody.copy(flight.position).sub(nearest.world).normalize();
+      this.toBody.copy(flight.worldPosition).sub(nearest.world).normalize();
       v.pitchRad = Math.asin(clamp(flight.forward.dot(this.toBody), -1, 1));
       this.up.copy(this.toBody);
       v.rollRad = Math.atan2(flight.right.dot(this.up), flight.up.dot(this.up));

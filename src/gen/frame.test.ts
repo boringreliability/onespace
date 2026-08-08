@@ -1,12 +1,16 @@
 /**
- * Reference-frame consistency.
+ * Reference-frame consistency of the generation layer.
  *
- * A vessel placed co-orbital with the player drifted at about 49 km/s — close
- * enough to a planet's own orbital speed around its star to say the two are
- * not in the same frame. These tests isolate where the disagreement is, and
- * they matter beyond traffic: landing is navigation relative to a body that
- * both rotates and orbits, and the same mismatch would slide a landing site
- * out from under the ship.
+ * These began as an investigation into a vessel drifting at ~49 km/s, which
+ * looked like an engine-level frame mismatch. It was not: the orbits here are
+ * self-consistent, and the tests below are what established that. The real
+ * cause was that the ship's position was integrated in the star-centred frame
+ * while only its velocity had a parent, so anything PLACED near a body without
+ * being handed that body's motion was left behind at the body's orbital speed.
+ *
+ * That is now fixed properly — see docs/SOI.md — but these assertions stay,
+ * because the property they guard is what the whole patched-conic model rests
+ * on: a stored period and an analytic velocity must describe the same orbit.
  */
 
 import { describe, expect, it } from 'vitest';

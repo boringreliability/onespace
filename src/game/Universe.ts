@@ -46,7 +46,15 @@ import { StarRenderer } from '@/render/Star';
 import { AtmosphereRenderer } from '@/render/Atmosphere';
 import { sceneDepthTexture } from '@/render/PostFX';
 
-import { DEFAULT_SHIP_CONFIG, FlightModel, type GravitySource } from '@/ship/FlightModel';
+import {
+  DEFAULT_SHIP_CONFIG,
+  entersSoi,
+  FlightModel,
+  leavesSoi,
+  SOI_MIN_RADII,
+  soiRadius,
+  type ParentBody,
+} from '@/ship/FlightModel';
 
 /**
  * Orbits run at 1:1 with the ship.
@@ -86,8 +94,21 @@ interface Body {
   readonly parent: Body | null;
   /** World position, kilometres, star at the origin. float64. */
   readonly world: Vector3;
+  /** World velocity, km/s — its own Keplerian motion plus every parent's. */
+  readonly worldVelocity: Vector3;
   /** Position relative to its parent (or the star), kilometres. */
   readonly local: Vector3;
+  /**
+   * The ship's-eye view of this body: world position and velocity by reference
+   * (so the ship follows the body for free), plus mu and radius. Handed
+   * straight to `FlightModel.rebase()`.
+   */
+  readonly frame: ParentBody;
+  /**
+   * Sphere-of-influence radius, km. Computed once at system entry — it depends
+   * only on the semi-major axis and the two masses, none of which change.
+   */
+  soiRadius: number;
   planet: PlanetRenderer | null;
   clouds: CloudRenderer | null;
   rings: RingRenderer | null;
@@ -152,6 +173,12 @@ export class Universe implements GameModule {
   nearest: Body | null = null;
   nearestAltitudeKm: number | null = null;
 
+  /**
+   * The body the ship's state vector is stored relative to, or null for the
+   * star. Exactly one body's gravity acts, and this is it.
+   */
+  shipParent: Body | null = null;
+
   // Preallocated scratch. Nothing in update() may allocate (ARCHITECTURE §5).
   private readonly tmpA = new Vector3();
   private readonly tmpB = new Vector3();
@@ -160,8 +187,11 @@ export class Universe implements GameModule {
   private readonly sunDir = new Vector3();
   private readonly sunColor = new Color();
   private readonly starWorld = new Vector3();
-  private readonly gravity: GravitySource[] = [];
+  /** The star does not move in its own system's frame. Never written. */
+  private readonly starVelocity = new Vector3();
+  private starFrame: ParentBody = { position: this.starWorld, velocity: this.starVelocity, mu: 0 };
   private readonly orbitScratch = { x: 0, y: 0, z: 0 };
+  private readonly velScratch = { x: 0, y: 0, z: 0 };
 
   constructor(private readonly options: UniverseOptions = {}) {
     this.seed = options.seed ?? DEFAULT_UNIVERSE_SEED;
@@ -245,6 +275,15 @@ export class Universe implements GameModule {
     this.star = new StarRenderer(primary, config.quality);
     this.root.add(this.star.object3d);
 
+    // The root of the parent chain. Pinned at the world origin with zero
+    // velocity by construction, so it needs no per-frame maintenance.
+    this.starFrame = {
+      position: this.starWorld,
+      velocity: this.starVelocity,
+      mu: MU_SUN * primary.mass,
+      radius: primary.radius,
+    };
+
     // Flatten planets and moons into one list. Moons carry a parent pointer so
     // their world position composes rather than orbiting the star directly.
     for (const spec of system.planets) {
@@ -255,18 +294,26 @@ export class Universe implements GameModule {
       }
     }
 
+    // r_soi = a·(m/M)^(2/5), once per body — a, m and M are all constants of
+    // the generated system, so this never needs recomputing. The floor is the
+    // one concession to playability; see SOI_MIN_RADII.
+    for (const b of this.bodies) {
+      b.soiRadius = Math.max(
+        soiRadius(
+          b.spec.orbit.semiMajorAxis,
+          b.frame.mu,
+          b.parent ? b.parent.frame.mu : this.starFrame.mu,
+        ),
+        b.spec.radius * SOI_MIN_RADII,
+      );
+    }
+
     this.orbitTime = 0;
     this.updateOrbits();
 
     if (!this.options.headless) {
-      // Gravity has to exist before the ship is placed: orbitalVelocityAt()
-      // asks the flight model for the dominant attractor, and with no sources
-      // registered it returns a zero vector. The ship was being spawned at
-      // rest beside a planet and then simply falling — reported as "the speed
-      // increases without doing anything".
       this.camWorld.set(0, 0, 0);
       for (const b of this.bodies) b.distanceSq = 0;
-      this.applyGravity();
       this.placeShipOnArrival();
     }
 
@@ -275,10 +322,22 @@ export class Universe implements GameModule {
   }
 
   private makeBody(spec: PlanetSpec, parent: Body | null): Body {
+    const world = new Vector3();
+    const worldVelocity = new Vector3();
     return {
       spec,
       parent,
-      world: new Vector3(),
+      world,
+      worldVelocity,
+      // Same Vector3 objects, not copies: the flight model holds this frame by
+      // reference, so the body orbiting moves the ship with it at zero cost.
+      frame: {
+        position: world,
+        velocity: worldVelocity,
+        mu: MU_EARTH * spec.mass,
+        radius: spec.radius,
+      },
+      soiRadius: 0,
       local: new Vector3(),
       planet: null,
       clouds: null,
@@ -298,26 +357,31 @@ export class Universe implements GameModule {
   private placeShipOnArrival(): void {
     const target = this.pickHeroBody();
     if (!target) {
+      this.setShipParent(null);
       this.flight.teleport(new Vector3(0, 0, 6 * AU));
       return;
     }
+    // The world we arrive at becomes the parent, so everything below is stated
+    // in ITS frame: the offset is parent-relative and so is the velocity.
+    this.setShipParent(target);
+
     // 1.6 radii, not 2.6. Arrival should put the world within a minute or two
     // of thrust, not an hour: at 0.25 km/s^2 a 2.6-radius standoff is a
     // four-minute burn each way before anything happens.
     const alt = target.spec.radius * 1.6;
-    this.tmpA.copy(target.world);
     // Offset towards the star so the terminator crosses the frame.
-    this.tmpB.copy(target.world).normalize().multiplyScalar(-1);
-    this.tmpB.y += 0.35;
-    this.tmpB.normalize().multiplyScalar(alt);
-    this.tmpA.add(this.tmpB);
+    this.tmpA.copy(target.world).normalize().multiplyScalar(-1);
+    this.tmpA.y += 0.35;
+    this.tmpA.normalize().multiplyScalar(alt);
 
     // Point the nose at the world we just arrived at. Position alone is not
     // enough: dropping in with a default orientation aims the camera at empty
     // space, and the opening frame is the one frame that has to earn the next
     // ten minutes.
-    this.arrivalLook.copy(target.world).sub(this.tmpA).normalize();
-    this.arrivalUp.copy(this.tmpA).normalize();
+    this.arrivalLook.copy(this.tmpA).normalize().multiplyScalar(-1);
+    // "Up" here is radial from the STAR, not from the planet — the latter is
+    // antiparallel to the look direction and degenerates the basis.
+    this.arrivalUp.copy(target.world).add(this.tmpA).normalize();
     // Orthogonalise the up vector against the view direction, otherwise a
     // near-radial approach degenerates the basis and the roll snaps.
     this.arrivalUp.addScaledVector(this.arrivalLook, -this.arrivalLook.dot(this.arrivalUp));
@@ -332,36 +396,23 @@ export class Universe implements GameModule {
     this.arrivalMat.lookAt(ZERO, this.arrivalLook, this.arrivalUp);
     this.arrivalQuat.setFromRotationMatrix(this.arrivalMat);
 
-    // Circular velocity about the planet, PLUS the planet's own motion about
-    // the star. Without the second term the ship is left behind at exactly the
-    // planet's orbital speed and the altitude readout creeps upward forever —
-    // which is what "the planet just disappeared" looked like the second time.
+    // Circular velocity about the planet — and nothing else. The planet's own
+    // 49 km/s about the star used to be added here by hand; it is now implicit
+    // in the parent frame, which is the whole point of the change.
     this.flight.orbitalVelocityAt(this.tmpA, this.tmpB);
-    this.bodyVelocity(target, this.arrivalVel);
-    this.tmpB.add(this.arrivalVel);
     this.flight.teleport(this.tmpA, this.tmpB, this.arrivalQuat);
+    this.syncGroundSampler();
   }
 
   /**
-   * World velocity of a body: its own Keplerian motion plus every parent's,
-   * so a moon carries its planet's motion around the star.
+   * World velocity of a body: its own Keplerian motion plus every parent's, so
+   * a moon carries its planet's motion around the star. Maintained by
+   * `updateOrbits()`; this is a copy of the cached value.
    */
   bodyVelocity(body: Body, out: Vector3): Vector3 {
-    out.set(0, 0, 0);
-    for (let b: Body | null = body; b; b = b.parent) {
-      const mu = b.parent
-        ? MU_EARTH * b.parent.spec.mass
-        : MU_SUN * this.system.stars[0]!.mass;
-      orbitalVelocity(b.spec.orbit, this.orbitTime, mu, this.orbitScratch);
-      out.x += this.orbitScratch.x;
-      out.y += this.orbitScratch.y;
-      out.z += this.orbitScratch.z;
-    }
-    return out;
+    return out.copy(body.worldVelocity);
   }
 
-  private readonly frameVel = new Vector3();
-  private readonly arrivalVel = new Vector3();
   private readonly arrivalLook = new Vector3();
   private readonly arrivalUp = new Vector3();
   private readonly arrivalQuat = new Quaternion();
@@ -404,6 +455,15 @@ export class Universe implements GameModule {
   private leaveSystem(): void {
     for (const b of this.bodies) this.releaseRenderers(b);
     this.bodies = [];
+    // Every Body about to be dropped is also a frame something might still be
+    // holding. Clear the ship's parent explicitly rather than leaving it
+    // pointing at a body from a system that no longer exists.
+    this.shipParent = null;
+    this.nearest = null;
+    this.samplerBody = null;
+    this.samplerRenderer = null;
+    this.flight.setGroundSampler(null);
+    this.flight.setParent(null);
     if (this.star) {
       this.root.remove(this.star.object3d);
       this.star.dispose();
@@ -432,9 +492,11 @@ export class Universe implements GameModule {
     this.updateOrbits();
 
     if (!this.options.headless) {
-      this.applyGravity();
       this.flight.update(dt);
-      this.camWorld.copy(this.flight.position);
+      // Transitions are checked AFTER integration, so a substep is never taken
+      // with the state vector and the frame disagreeing.
+      this.updateShipParent();
+      this.camWorld.copy(this.flight.worldPosition);
     } else {
       ctx.origin.toWorld(ctx.camera.position, this.camWorld);
     }
@@ -448,13 +510,31 @@ export class Universe implements GameModule {
     this.updateNearest();
   }
 
-  /** Advance every body's Keplerian position. Moons compose onto their parent. */
+  /**
+   * Advance every body's Keplerian position and velocity. Moons compose onto
+   * their parent, which works because `bodies` is built planets-first, so a
+   * parent is always updated before its children in a single pass.
+   *
+   * Velocity is maintained here rather than derived on demand because it is now
+   * load-bearing: it *is* the frame the ship flies in, held by reference.
+   */
   private updateOrbits(): void {
     for (const b of this.bodies) {
       orbitalPosition(b.spec.orbit, this.orbitTime, this.orbitScratch);
       b.local.set(this.orbitScratch.x, this.orbitScratch.y, this.orbitScratch.z);
-      if (b.parent) b.world.copy(b.parent.world).add(b.local);
-      else b.world.copy(b.local);
+      orbitalVelocity(
+        b.spec.orbit,
+        this.orbitTime,
+        b.parent ? b.parent.frame.mu : this.starFrame.mu,
+        this.velScratch,
+      );
+      b.worldVelocity.set(this.velScratch.x, this.velScratch.y, this.velScratch.z);
+      if (b.parent) {
+        b.world.copy(b.parent.world).add(b.local);
+        b.worldVelocity.add(b.parent.worldVelocity);
+      } else {
+        b.world.copy(b.local);
+      }
 
       // Axial rotation. Negative period means retrograde, which the modulo
       // handles for free.
@@ -466,26 +546,64 @@ export class Universe implements GameModule {
     }
   }
 
-  /** Feed the flight model real inverse-square gravity from the local bodies. */
-  private applyGravity(): void {
-    this.gravity.length = 0;
-    const primary = this.system.stars[0]!;
-    this.gravity.push({ position: this.starWorld, mu: MU_SUN * primary.mass });
+  /**
+   * Declare the ship's parent without converting its state. Only legitimate
+   * when the state is about to be overwritten — system entry, warp arrival.
+   * In flight, `updateShipParent()` is the only route, and it goes via
+   * `FlightModel.rebase()`.
+   */
+  private setShipParent(body: Body | null): void {
+    this.shipParent = body;
+    this.flight.setParent(body ? body.frame : this.starFrame);
+    this.flight.setLandingContext(body ? body.spec : null);
+  }
 
-    // Only bodies that could plausibly matter — everything else is noise
-    // against the star and costs a square root per frame for nothing.
-    for (const b of this.bodies) {
-      // Relative cut-off: a moon stops mattering a few hundred of its own
-      // radii away, but a gas giant still dominates at the same distance.
-      const reach = b.spec.radius * 400;
-      if (b.distanceSq > reach * reach) continue;
-      this.gravity.push({
-        position: b.world,
-        mu: MU_EARTH * b.spec.mass,
-        radius: b.spec.radius,
-      });
+  /**
+   * Patched conics: check once per frame, after the ship has been integrated,
+   * whether it has crossed a sphere-of-influence boundary.
+   *
+   * Descending into a child's SOI and ascending out of the current one are the
+   * same operation with the roles swapped, and both are performed by
+   * `FlightModel.rebase()` — the one function in the project that crosses
+   * frames. Nothing here touches the state vector itself.
+   */
+  private updateShipParent(): void {
+    const parent = this.shipParent;
+
+    // --- ascend: outside the current parent's SOI ---------------------------
+    if (parent) {
+      if (leavesSoi(this.flight.position.length(), parent.soiRadius)) {
+        this.rebaseShip(parent.parent);
+        // Fall through: leaving a moon's SOI may drop us straight into a
+        // sibling's, and waiting a frame would integrate one step in the wrong
+        // frame. One transition per direction per frame is enough.
+      }
     }
-    this.flight.setGravitySources(this.gravity);
+
+    // --- descend: inside a child's SOI --------------------------------------
+    const current = this.shipParent;
+    for (const b of this.bodies) {
+      if (b.parent !== current || b === current) continue;
+      const gap = this.tmpA.subVectors(this.flight.worldPosition, b.world).length();
+      if (entersSoi(gap, b.soiRadius)) {
+        this.rebaseShip(b);
+        break;
+      }
+    }
+  }
+
+  private rebaseShip(next: Body | null): void {
+    if (next === this.shipParent) return;
+    this.shipParent = next;
+    this.flight.rebase(next ? next.frame : this.starFrame);
+    this.flight.setLandingContext(next ? next.spec : null);
+    this.syncGroundSampler();
+    bus.emit('log', {
+      text: next
+        ? `SOI — ${next.spec.name.toUpperCase()}`
+        : `SOI — ${this.system.stars[0]!.name.toUpperCase()}`,
+      tone: 'normal',
+    });
   }
 
   /**
@@ -648,8 +766,45 @@ export class Universe implements GameModule {
   private readonly starView = new MutableViewState();
 
   /**
-   * Track the closest body and the ship's altitude over it, and keep the flight
-   * model's ground sampler pointed at whatever we are actually near.
+   * The terrain query, installed for the ship's PARENT rather than for whatever
+   * body happens to be nearest. You cannot land on something you are not in the
+   * sphere of influence of, and the parent is the one body whose frame the
+   * sampler's argument is already in — so there is no world-space round trip
+   * and no way for the ground to slide out from under the ship.
+   *
+   * Re-checked every frame against the renderer as well as the body: renderers
+   * stream in and out by distance, and the old code only re-installed when the
+   * body changed, so a sampler could stay null after its planet arrived.
+   */
+  private syncGroundSampler(): void {
+    const body = this.shipParent;
+    const renderer = body?.planet ?? null;
+    if (body === this.samplerBody && renderer === this.samplerRenderer) return;
+    this.samplerBody = body;
+    this.samplerRenderer = renderer;
+
+    if (!body || !renderer) {
+      this.flight.setGroundSampler(null);
+      return;
+    }
+    this.flight.setGroundSampler((relPos: Vector3) => {
+      // ALTITUDE above the terrain, not the terrain's radius. The flight
+      // model treats a negative return as penetration and pushes out along
+      // the surface normal; handing it a radius meant it saw ~11,000 km of
+      // clearance everywhere and the ship flew straight through the ground.
+      const dist = relPos.length();
+      if (dist < 1e-9) return -body.spec.radius;
+      this.tmpDir.copy(relPos).divideScalar(dist);
+      return dist - renderer.surfaceRadius(this.tmpDir);
+    });
+  }
+
+  private samplerBody: Body | null = null;
+  private samplerRenderer: PlanetRenderer | null = null;
+
+  /**
+   * Track the closest body — the HUD's altimeter and the audio proximity both
+   * want it, and it is not necessarily the parent (a moon you are passing).
    */
   private updateNearest(): void {
     let best: Body | null = null;
@@ -661,42 +816,21 @@ export class Universe implements GameModule {
         best = b;
       }
     }
-
-    if (best !== this.nearest) {
-      this.nearest = best;
-      this.flight.setLandingContext(best ? best.spec : null);
-      if (best?.planet) {
-        const renderer = best.planet;
-        const body = best;
-        this.flight.setGroundSampler((worldPos: Vector3) => {
-          // ALTITUDE above the terrain, not the terrain's radius. The flight
-          // model treats a negative return as penetration and pushes out along
-          // the surface normal; handing it a radius meant it saw ~11,000 km of
-          // clearance everywhere and the ship flew straight through the ground.
-          this.tmpDir.copy(worldPos).sub(body.world);
-          const dist = this.tmpDir.length();
-          if (dist < 1e-9) return -body.spec.radius;
-          this.tmpDir.divideScalar(dist);
-          return dist - renderer.surfaceRadius(this.tmpDir);
-        });
-      } else {
-        this.flight.setGroundSampler(null);
-      }
-    }
-
+    this.nearest = best;
     this.nearestAltitudeKm = best && bestGap < best.spec.radius * 40 ? bestGap : null;
 
-    // The frame the ship is flying in. Without this the thrust limiter, the
-    // camera and the HUD all measure against the star and get an answer
-    // dominated by the planet's own orbital motion.
-    if (best) this.flight.setReferenceVelocity(this.bodyVelocity(best, this.frameVel));
-    else this.flight.setReferenceVelocity(null);
+    this.syncGroundSampler();
 
-    // Atmospheric density for drag and re-entry heating.
-    if (best?.spec.atmosphere && this.nearestAltitudeKm !== null) {
-      const a = best.spec.atmosphere;
-      const density = Math.exp(-Math.max(0, this.nearestAltitudeKm) / a.scaleHeight);
-      this.flight.setAtmosphere(density * a.pressure);
+    // Atmospheric density for drag and re-entry heating. Read from the PARENT:
+    // drag acts against the air's own motion, and the air moves with the body
+    // whose frame the ship's velocity is already expressed in. Taking it from
+    // `nearest` would let a moon you are flying past brake you against a
+    // planet's atmosphere.
+    const air = this.shipParent?.spec.atmosphere;
+    if (air) {
+      const altitude = this.flight.position.length() - this.shipParent!.spec.radius;
+      const density = Math.exp(-Math.max(0, altitude) / air.scaleHeight);
+      this.flight.setAtmosphere(density * air.pressure);
     } else {
       this.flight.setAtmosphere(0);
     }

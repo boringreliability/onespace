@@ -43,9 +43,6 @@ import type { Universe, UniverseBody } from '@/game/Universe';
  */
 const MAX_TRAFFIC = 4;
 
-/** Reused origin for the anchor-relative radial. */
-const ZERO3 = new Vector3();
-
 /** Beyond this the mesh is released entirely; the ship still exists as data. */
 const RELEASE_DISTANCE_KM = 6e5;
 
@@ -57,16 +54,22 @@ const PARKED_ROLES = ['freighter', 'tanker', 'salvager', 'miner', 'survey', 'sta
  * than in the XZ plane. Deriving it from orbital elements put an earlier
  * attempt in the ecliptic while the player sat well off it, and a 40 km offset
  * came out as 4,061 km.
+ *
+ * This is a real orbit about the anchor, not station-keeping on the player. It
+ * can be, now that the ship's own state is stored in the anchor's frame: the
+ * two share a frame by construction, so a vessel given the player's orbit plus
+ * a few km of offset simply stays off their shoulder. The earlier version had
+ * to chase the player every frame because there was no shared frame to sit in.
  */
 interface CoOrbit {
-  /** Fallback direction of travel, if the player is momentarily stationary. */
-  readonly t0: Vector3;
-  /** Fallback radial direction. */
+  /** Anchor-relative position at epoch, km. */
   readonly r0: Vector3;
-  /** Distance ahead along the player's track, km. */
-  readonly aheadKm: number;
-  /** Distance outward from the body below, km. */
-  readonly aboveKm: number;
+  /** Unit normal of the orbit plane — r̂ × t̂ at capture. */
+  readonly axis: Vector3;
+  /** Mean motion, rad/s: the player's own tangential rate at capture. */
+  readonly rate: number;
+  /** `Traffic.time` at capture. */
+  readonly epoch: number;
 }
 
 interface Vessel {
@@ -170,18 +173,24 @@ export class Traffic implements GameModule {
         maintenance: rng.range(0.2, 0.8),
       });
 
-      // The FIRST vessel always anchors to the world the player is at.
-      //
-      // Picking anchors uniformly across the system put the only contact 57
-      // million km away, where it is released before it is ever drawn — a
-      // correct simulation of an empty sky, and useless as a first
-      // integration. One ship you can actually fly to is the whole point.
+      // The FIRST vessel always anchors to the world the player is at — which
+      // is now a well-defined thing: the ship's SOI parent. Picking anchors
+      // uniformly across the system put the only contact 57 million km away,
+      // where it is released before it is ever drawn — a correct simulation of
+      // an empty sky, and useless as a first integration. One ship you can
+      // actually fly to is the whole point.
+      const home = this.universe.shipParent ?? this.universe.nearest;
       const anchor =
-        i === 0 && this.universe.nearest
-          ? this.universe.nearest
+        i === 0 && home
+          ? home
           : bodies.length > 0
             ? bodies[rng.int(0, bodies.length - 1)]!
             : null;
+      // Co-orbital placement reads the player's state vector directly, and that
+      // vector is only in the anchor's frame when the anchor IS the parent.
+      // Requiring that rather than converting is what keeps the two frame lines
+      // in FlightModel.rebase() the only ones in the project.
+      const coOrbital = i === 0 && anchor !== null && anchor === this.universe.shipParent;
       // The first vessel shares the PLAYER'S orbit, not an arbitrary one.
       //
       // Parking it at 1.3 planet radii is physically sensible and visually
@@ -191,7 +200,7 @@ export class Traffic implements GameModule {
       // arrangement where the first contact is something you can actually see
       // and fly to.
       const playerRadius = anchor
-        ? this.universe.flight.position.distanceTo(anchor.world)
+        ? this.universe.flight.worldPosition.distanceTo(anchor.world)
         : 0;
       const radius =
         i === 0 && anchor
@@ -212,7 +221,7 @@ export class Traffic implements GameModule {
             ? this.playerPhase(anchor) + 40 / Math.max(radius, 1)
             : rng.range(0, Math.PI * 2),
         inclination: i === 0 ? 0 : rng.gaussian(0, 0.4),
-        coOrbit: i === 0 && anchor ? this.captureCoOrbit(anchor, rng.range(1.6, 4.2)) : null,
+        coOrbit: coOrbital ? this.captureCoOrbit(anchor!, rng.range(1.6, 4.2)) : null,
         visual: null,
         view: new MutableViewState(),
         distanceKm: Infinity,
@@ -232,15 +241,19 @@ export class Traffic implements GameModule {
   /**
    * Capture the player's current circular orbit about `anchor`, with the
    * vessel leading by `separationKm` along the track.
+   *
+   * `anchor` is the ship's SOI parent, so `flight.position` and
+   * `flight.velocity` are ALREADY anchor-relative — nothing is converted here,
+   * and there is nothing left to forget to convert.
    */
   private captureCoOrbit(anchor: UniverseBody, separationKm: number): CoOrbit | null {
     const flight = this.universe.flight;
-    const r = new Vector3().subVectors(flight.position, anchor.world);
+    const r = flight.position.clone();
     const radiusKm = r.length();
     if (radiusKm < 1e-6) return null;
 
     // Tangential component of the player's velocity in the anchor's frame.
-    const v = new Vector3().copy(flight.relativeVelocity);
+    const v = flight.velocity.clone();
     const rHat = r.clone().divideScalar(radiusKm);
     v.addScaledVector(rHat, -v.dot(rHat));
     if (v.lengthSq() < 1e-12) {
@@ -250,21 +263,25 @@ export class Traffic implements GameModule {
       if (v.lengthSq() < 1e-12) v.set(1, 0, 0).addScaledVector(rHat, -rHat.x);
     }
     const speed = v.length();
-    const tHat = v.divideScalar(speed);
+    const tHat = v.clone().divideScalar(speed);
 
     return {
-      r0: rHat,
-      t0: tHat,
-      aheadKm: separationKm,
-      // A little higher, so the contact reads against the planet rather than
-      // against the same patch of black the player is looking at.
-      aboveKm: separationKm * 0.35,
+      // Ahead along the track, and a little higher so the contact reads against
+      // the planet rather than against the same patch of black the player is
+      // already looking at.
+      r0: r.addScaledVector(tHat, separationKm).addScaledVector(rHat, separationKm * 0.35),
+      axis: new Vector3().crossVectors(rHat, tHat).normalize(),
+      // Mean motion of a circular orbit through the player's current state. It
+      // is a genuine orbit, so a coasting player and this vessel stay together
+      // without either of them steering.
+      rate: speed / radiusKm,
+      epoch: this.time,
     };
   }
 
   /** The player's current orbital phase about a body, in the same frame placeVessel uses. */
   private playerPhase(anchor: UniverseBody): number {
-    this.tmp.copy(this.universe.flight.position).sub(anchor.world);
+    this.tmp.copy(this.universe.flight.worldPosition).sub(anchor.world);
     return Math.atan2(this.tmp.z, this.tmp.x);
   }
 
@@ -300,7 +317,7 @@ export class Traffic implements GameModule {
       this.populate();
     }
 
-    this.camWorld.copy(this.universe.flight.position);
+    this.camWorld.copy(this.universe.flight.worldPosition);
 
     for (const v of this.vessels) {
       this.placeVessel(v);
@@ -352,37 +369,20 @@ export class Traffic implements GameModule {
 
   /** Keplerian enough: a circular orbit about the anchor, inclined and phased. */
   private placeVessel(v: Vessel): void {
-    if (v.coOrbit) {
-      // STATION-KEEPING, not an independently integrated orbit.
+    if (v.coOrbit && v.anchor) {
+      // A REAL ORBIT in the anchor's frame, not station-keeping on the player.
       //
-      // An earlier attempt derived the contact's own circular orbit and
-      // drifted at about 49 km/s. That looked like a reference-frame
-      // mismatch, because it is close to the planet's own orbital speed
-      // around its star — but it was not. Measured afterwards
-      // (src/gen/frame.test.ts, and in the running game): the body's
-      // finite-difference speed matches Universe.bodyVelocity to 0.2%, and a
-      // ship left coasting holds its altitude to the metre over tens of
-      // seconds. The frames agree. The 49 km/s was a bug in that attempt's
-      // own basis, captured before the reference velocity existed.
-      //
-      // Station-keeping is kept anyway, because it is also simply what a ship
-      // parked near another ship does, and it survives the player
-      // manoeuvring rather than only coasting.
+      // An earlier attempt derived the contact's own circular orbit and drifted
+      // at about 49 km/s — the planet's own orbital speed about its star. The
+      // cause was that the vessel's orbit was expressed about the planet while
+      // the player's position was integrated about the star, so the two were
+      // never in the same frame however carefully the basis was captured. That
+      // is fixed at the root now: the ship's position is stored relative to the
+      // same body this orbit is about, so rotating a captured offset is all
+      // that is needed and the contact stays put with nothing chasing anything.
       const c = v.coOrbit;
-      const flight = this.universe.flight;
-      this.tmp.copy(flight.relativeVelocity);
-      if (this.tmp.lengthSq() < 1e-12) this.tmp.copy(c.t0);
-      else this.tmp.normalize();
-      // Radial direction: away from the body below, or the epoch vector.
-      this.local.copy(v.anchor ? v.anchor.world : ZERO3);
-      this.local.subVectors(flight.position, this.local);
-      if (this.local.lengthSq() < 1e-12) this.local.copy(c.r0);
-      else this.local.normalize();
-
-      v.world
-        .copy(flight.position)
-        .addScaledVector(this.tmp, c.aheadKm)
-        .addScaledVector(this.local, c.aboveKm);
+      this.local.copy(c.r0).applyAxisAngle(c.axis, c.rate * (this.time - c.epoch));
+      v.world.addVectors(v.anchor.world, this.local);
       return;
     }
     if (!v.anchor) {
