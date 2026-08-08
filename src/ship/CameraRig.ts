@@ -894,11 +894,17 @@ export class CameraRig {
 
   private stepOrbit(dt: number, shipPosition: Vector3, ctx: EngineContext): void {
     if (!this.orbitTargetSet) {
-      this.orbitTarget.copy(shipPosition);
       this.orbitDistance = 0.2;
       this.orbitDistanceCur = 0.2;
       this.orbitTargetSet = true;
     }
+    // The target FOLLOWS the ship. It used to be captured once behind the latch
+    // above, which is wrong in a game where render space is rebased by the
+    // floating origin and the world itself travels at tens of km/s: the target
+    // went stale within a frame and the camera ended up staring at empty space
+    // beside a landed hull. Azimuth, elevation and distance are still the
+    // player's to steer; only the point they orbit is pinned to the subject.
+    this.orbitTarget.copy(shipPosition);
 
     // Only steer from raw input while this view is actually on screen.
     if (this.mode_ === 'orbit' && dt > 0) {
