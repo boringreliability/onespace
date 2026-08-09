@@ -42,6 +42,13 @@ const MODE_ORDER: readonly CameraMode[] = ['chase', 'cockpit', 'orbit', 'cinemat
 /** Radians the chase aim may deviate from the nose towards the velocity. ~11 deg. */
 const MAX_VELOCITY_AIM_ANGLE = 0.19;
 
+/**
+ * Floor on the orbit camera's elevation while a local vertical is known, in
+ * radians. ~17 degrees: enough that the lens clears the ship and the ground it
+ * is standing on, shallow enough that the sky still occupies most of the frame.
+ */
+const ORBIT_MIN_SURFACE_ELEVATION = 0.30;
+
 const TWO_PI = Math.PI * 2;
 const EPS = 1e-4;
 
@@ -956,12 +963,41 @@ export class CameraRig {
       this.orbitDistanceVel = this.spring.outVel;
     }
 
-    const ce = Math.cos(this.orbitElevationCur);
+    // Build the offset in a frame based on the reference up when there is one.
+    //
+    // The spherical offset used to be laid out on the WORLD axes, so
+    // "elevation" meant "above the system's ecliptic" and on a planet it could
+    // put the camera underground: measured on a landed hull, the rig sat at
+    // ground level pitched 60 degrees UP, with a near slope filling the frame
+    // and the true horizon 60 degrees below the bottom edge. Anchoring the
+    // frame to the local vertical makes elevation mean what it says, and a
+    // floor on it keeps the lens above the surface looking down at the hull.
+    let el = this.orbitElevationCur;
     const pos = this.poseOrbit.position;
-    pos
-      .set(Math.sin(this.orbitAzimuthCur) * ce, Math.sin(this.orbitElevationCur), Math.cos(this.orbitAzimuthCur) * ce)
-      .multiplyScalar(Math.max(this.orbitDistanceCur, 1e-4))
-      .add(this.orbitTarget);
+    const dist = Math.max(this.orbitDistanceCur, 1e-4);
+
+    if (this.hasReferenceUp) {
+      el = Math.max(el, ORBIT_MIN_SURFACE_ELEVATION);
+      const up = this.tmpA.copy(this.referenceUp).normalize();
+      // Any two directions perpendicular to up will do; pick one that does not
+      // degenerate when up happens to align with a world axis.
+      const seed = Math.abs(up.y) > 0.95 ? this.tmpB.set(1, 0, 0) : this.tmpB.set(0, 1, 0);
+      const right = this.tmpC.copy(seed).cross(up).normalize();
+      const fwd = this.tmpD.copy(up).cross(right).normalize();
+      const ceL = Math.cos(el);
+      pos
+        .copy(right)
+        .multiplyScalar(Math.sin(this.orbitAzimuthCur) * ceL * dist)
+        .addScaledVector(fwd, Math.cos(this.orbitAzimuthCur) * ceL * dist)
+        .addScaledVector(up, Math.sin(el) * dist)
+        .add(this.orbitTarget);
+    } else {
+      const ce = Math.cos(el);
+      pos
+        .set(Math.sin(this.orbitAzimuthCur) * ce, Math.sin(el), Math.cos(this.orbitAzimuthCur) * ce)
+        .multiplyScalar(dist)
+        .add(this.orbitTarget);
+    }
 
     const dir = this.tmpA.copy(this.orbitTarget).sub(pos);
     const l = dir.length();
