@@ -16,6 +16,8 @@ import { Universe } from '@/game/Universe';
 import { Pilot } from '@/game/Pilot';
 import { MapMode } from '@/game/MapMode';
 import { Traffic } from '@/game/Traffic';
+import { ShipLog } from '@/game/Log';
+import { Scanner } from '@/game/Scanner';
 import { Showroom, registerShowroomShots, setShipVisualFactory } from '@/game/Showroom';
 import { createShipVisual } from '@/render/ships/ShipMesh';
 import { activeShotName, registerShot, shotOwnsScene, updateActiveShot } from '@/game/Shots';
@@ -32,6 +34,7 @@ import { registerCloudShots } from '@/render/Clouds';
 import { registerAtmosphereShots } from '@/render/Atmosphere';
 
 import { Hud, registerHudShots } from '@/ui/Hud';
+import { Codex, registerCodexShots } from '@/ui/Codex';
 import { Audio } from '@/audio/Audio';
 import { Warp, registerWarpShots } from '@/ship/Warp';
 import { registerCameraShots } from '@/ship/CameraRig';
@@ -245,6 +248,14 @@ class ReviewGuard implements GameModule {
 }
 
 export async function registerModules(engine: Engine, progress: ProgressFn): Promise<void> {
+  progress(0.03, 'opening the log');
+  // First, ahead of Universe. `Universe.init()` calls `enterSystem`, which
+  // emits `system:entered` — so a log registered after it would miss the
+  // opening system every single session, silently, forever. The log depends on
+  // nothing but the bus, so putting it first costs nothing and closes the seam.
+  const shipLog = new ShipLog();
+  await engine.add(shipLog);
+
   progress(0.05, 'seeding universe');
   const universe = new Universe();
   await engine.add(universe);
@@ -274,6 +285,14 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   // The procedural fleet, in the universe rather than the showroom.
   const traffic = new Traffic(universe);
   await engine.add(traffic);
+
+  progress(0.85, 'calibrating the array');
+  // Scanner needs both the universe and the fleet, so it can only be built
+  // once Traffic exists. The codex only needs the log.
+  await engine.add(new Scanner({ universe, traffic }));
+  const codex = new Codex({ log: shipLog });
+  await engine.add(codex);
+  registerCodexShots(codex, universe, shipLog);
 
   progress(0.86, 'charting the galaxy');
   const map = new MapMode({ universe, warp });

@@ -295,4 +295,15 @@ export interface ScanResult {
   readonly targetId: string;
   readonly name: string;
   readonly lines: readonly string[];
+  /**
+   * What was scanned. Optional for backward compatibility with the showroom
+   * fixtures written before the log existed; consumers that care should treat
+   * an absent value as 'world'.
+   *
+   * The ship's log needs this and cannot recover it from `targetId` — a hull
+   * id and a planet id are both opaque strings, and guessing from their shape
+   * is exactly the kind of cross-module assumption that has cost this project
+   * a day at a time.
+   */
+  readonly kind?: 'world' | 'vessel';
 }

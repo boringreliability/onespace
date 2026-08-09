@@ -2602,6 +2602,7 @@ export function shipScan(bp: ShipBlueprint): ScanResult {
     targetId: bp.id,
     name: bp.scan.displayName || bp.name,
     lines: lines.slice(0, SCAN_MAX_LINES),
+    kind: 'vessel',
   };
 }
 
