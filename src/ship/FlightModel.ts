@@ -72,6 +72,11 @@ const FIXED_H = 1 / 120;
  * clamp in `Engine.step()`, so a stalled frame never spirals.
  */
 const MAX_SUBSTEPS = 8;
+
+/** Seconds for the cruise speed to answer the throttle. */
+const CRUISE_RESPONSE = 1.6;
+/** Seconds for the brake to bleed cruise speed away. Sharper than the throttle. */
+const CRUISE_BRAKE = 0.7;
 /** Altitude (km) above ground at which "grounded" releases. 5 m of hysteresis. */
 const GROUND_RELEASE = 0.005;
 
@@ -401,6 +406,17 @@ export class FlightModel {
   private _assist = true;
   private lastEmittedThrottle = -1;
 
+  /**
+   * Speed ceiling imposed by the cruise drive, km/s, or null when sublight.
+   *
+   * Non-null replaces the whole force model: see `stepCruise`. A ship under
+   * cruise is not on a trajectory, so gravity, drag and the sublight thrust
+   * curve all stand down.
+   */
+  private cruiseCap: number | null = null;
+  /** Scalar speed along the nose while cruising. The velocity vector follows it. */
+  private cruiseSpeed = 0;
+
   private accumulator = 0;
 
   // --- scratch. Every vector the update path touches lives here. ----------
@@ -551,6 +567,34 @@ export class FlightModel {
     this.density = densityAtShip > 0 ? densityAtShip : 0;
   }
 
+  /**
+   * Hand the flight model a cruise ceiling, km/s, or `null` to fly sublight.
+   *
+   * Entering seeds the scalar speed from the current velocity so the drive
+   * picks the ship up rather than snatching it. Leaving keeps the velocity
+   * vector exactly as it is — by then the drive has already bled the ceiling
+   * down to sublight, so what the orbital machinery inherits is a normal state
+   * vector pointing where the nose points.
+   */
+  setCruise(capKmS: number | null): void {
+    if (capKmS === null) {
+      this.cruiseCap = null;
+      return;
+    }
+    if (this.cruiseCap === null) this.cruiseSpeed = this.velocity.length();
+    this.cruiseCap = Math.max(0, capKmS);
+  }
+
+  /** True while the cruise drive is carrying the ship. */
+  get cruising(): boolean {
+    return this.cruiseCap !== null;
+  }
+
+  /** Local atmospheric density last handed in, kg/m³. 0 = vacuum. */
+  get atmosphericDensity(): number {
+    return this.density;
+  }
+
   /** Install (or clear, with `null`) the terrain height query used for collision. */
   setGroundSampler(fn: GroundSampler | null): void {
     this.groundSampler = fn;
@@ -657,6 +701,11 @@ export class FlightModel {
     const c = this.config;
     this.refreshBodyAxes();
 
+    if (this.cruiseCap !== null) {
+      this.stepCruise(h);
+      return;
+    }
+
     // --- throttle spool -----------------------------------------------------
     this._boosting = this.command.boost;
     this._throttle = damp(this._throttle, clamp01(this.command.throttle), c.throttleSpoolTime, h);
@@ -716,6 +765,51 @@ export class FlightModel {
     this.stepRotation(h, speed);
     this.stepHeating(h, speed);
     if (this.groundSampler) this.stepGround(h);
+  }
+
+  /**
+   * One substep under the cruise drive.
+   *
+   * Deliberately not the sublight force model with a bigger number in it. Under
+   * cruise the ship is *carried*, not accelerated: velocity is the nose times a
+   * scalar, gravity is suspended, and there is no drag because the drive only
+   * runs in vacuum. That is what makes the trip steerable — a 10^6 km/s state
+   * vector being bent by thrust would answer the controls in geological time.
+   *
+   * The one line that must not be softened is the hard clamp to the ceiling.
+   * The ceiling falls as the ship closes on a body, and it is that fall which
+   * keeps the step below a fraction of the clearance. Easing towards it instead
+   * would let the speed lag the ceiling on approach, which is precisely how a
+   * ship ends up inside a planet.
+   */
+  private stepCruise(h: number): void {
+    const c = this.config;
+    const cap = this.cruiseCap ?? 0;
+
+    this._boosting = false;
+    this._throttle = damp(this._throttle, clamp01(this.command.throttle), c.throttleSpoolTime, h);
+
+    // Throttle chooses a fraction of the ceiling, so the pilot can coast in
+    // slowly rather than being pinned at the maximum the gap allows.
+    const target = cap * clamp01(this.command.throttle);
+    this.cruiseSpeed = damp(this.cruiseSpeed, target, CRUISE_RESPONSE, h);
+    if (this.command.brake) this.cruiseSpeed = damp(this.cruiseSpeed, 0, CRUISE_BRAKE, h);
+    // Hard, unsmoothed, every step. See the note above.
+    this.cruiseSpeed = Math.min(this.cruiseSpeed, cap);
+
+    this.velocity.copy(this.forward).multiplyScalar(this.cruiseSpeed);
+    this.position.addScaledVector(this.velocity, h);
+
+    // No proper acceleration to report: the drive does not push the crew.
+    this.gravityAccel.set(0, 0, 0);
+    this._gForce = damp(this._gForce, 0, 0.15, h);
+    this.density = 0;
+    this._heating = damp(this._heating, 0, 0.4, h);
+
+    // Zero speed into the rotation step: its only speed term is the aero one,
+    // which is already gated on density, and handing it 10^7 invites a term
+    // nobody has thought about to wake up.
+    this.stepRotation(h, 0);
   }
 
   // -------------------------------------------------------------------------

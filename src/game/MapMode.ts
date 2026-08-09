@@ -147,7 +147,10 @@ export class MapMode implements GameModule {
     registerStarMapShots(this.ui);
 
     this.disposers.push(
-      bus.on('ui:toggle-map', () => this.toggle()),
+      // Not 'ui:toggle-map' any more: M opens the LOCAL chart, and SystemMap
+      // decides when the galaxy takes over. MapMode still owns the galaxy view
+      // entirely — it just no longer owns the key.
+      bus.on('ui:toggle-galaxy', () => this.toggle()),
       bus.on('nav:jump-requested', (req) => void this.jump(req.systemId, req.name, ctx)),
       bus.on('system:entered', () => {
         this.rechart();
@@ -240,6 +243,7 @@ export class MapMode implements GameModule {
     this.view.setGridVisible(this.open);
 
     bus.emit(this.open ? 'ui:map-opened' : 'ui:map-closed');
+    bus.emit('ui:chart', { chart: this.open ? 'galaxy' : null });
     bus.emit('log', {
       text: this.open
         ? 'CHART — GALACTIC · DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A SYSTEM'

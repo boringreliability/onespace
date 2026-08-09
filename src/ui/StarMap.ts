@@ -1188,7 +1188,12 @@ export class StarMap implements GameModule {
   // ---------------------------------------------------------------- events
 
   private bindEvents(): void {
-    const offToggle = bus.on('ui:toggle-map', () => this.toggle());
+    // 'ui:toggle-galaxy', not 'ui:toggle-map'. M now opens the LOCAL chart, and
+    // the galaxy is reached from there. The galactic chart's open state has two
+    // owners — MapMode holds the camera, this holds the UI — and they stay in
+    // step only by listening to the same event. Leaving this one on the raw key
+    // opened both charts at once on the first press.
+    const offToggle = bus.on('ui:toggle-galaxy', () => this.toggle());
     this.disposers.push(offToggle);
 
     const offSystem = bus.on('system:entered', ({ system }) => {

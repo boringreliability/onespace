@@ -26,6 +26,7 @@ export interface InputAxes {
 export type ActionName =
   | 'boost'
   | 'brake'
+  | 'cruise'
   | 'warp'
   | 'scan'
   | 'map'
@@ -40,6 +41,7 @@ const KEY_ACTIONS: Record<string, ActionName> = {
   ShiftLeft: 'boost',
   ShiftRight: 'boost',
   Space: 'brake',
+  KeyG: 'cruise', // not F: F is strafe-down. J stays the interstellar jump
   KeyJ: 'warp',
   KeyT: 'scan',   // not E: E is roll, and a key cannot mean two things
   KeyM: 'map',

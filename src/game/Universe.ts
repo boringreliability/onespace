@@ -28,6 +28,7 @@ import { Rng, hashSeed } from '@/math/rng';
 
 import {
   AU,
+  SOLAR_RADIUS,
   type GalaxySpec,
   type PlanetSpec,
   type StarSystemSpec,
@@ -164,6 +165,14 @@ export class Universe implements GameModule {
   private orbitTime = 0;
 
   /**
+   * The clock every body's position is a function of. The local chart needs it
+   * to place bodies itself rather than reading back positions it cannot see.
+   */
+  get orbitSeconds(): number {
+    return this.orbitTime;
+  }
+
+  /**
    * Set while the galaxy chart is open. The system keeps existing — it simply
    * stops advancing, so returning to flight does not teleport every moon.
    */
@@ -172,6 +181,13 @@ export class Universe implements GameModule {
   /** Nearest body, recomputed each frame — the HUD and audio both want it. */
   nearest: Body | null = null;
   nearestAltitudeKm: number | null = null;
+  /**
+   * Distance to the nearest surface anywhere in the system, km — every body
+   * plus the star. Unlike `nearestAltitudeKm` this is never null: the cruise
+   * drive turns it directly into a speed ceiling, so a missing value would be
+   * a missing speed limit.
+   */
+  nearestGapKm = Number.POSITIVE_INFINITY;
 
   /**
    * The body the ship's state vector is stored relative to, or null for the
@@ -818,6 +834,16 @@ export class Universe implements GameModule {
     }
     this.nearest = best;
     this.nearestAltitudeKm = best && bestGap < best.spec.radius * 40 ? bestGap : null;
+
+    // Clearance to the nearest surface in the whole system, always — including
+    // the star, which is not in `bodies` and is the one thing in a system you
+    // most want a fast drive to notice. The altimeter deliberately reports
+    // null once a body is far away; the cruise drive needs the number at every
+    // range, because the number IS its speed limit.
+    const starGap =
+      this.tmpA.subVectors(this.flight.worldPosition, this.starWorld).length() -
+      (this.system.stars[0]?.radius ?? 0) * SOLAR_RADIUS;
+    this.nearestGapKm = Math.max(0, Math.min(bestGap, starGap));
 
     this.syncGroundSampler();
 

@@ -39,7 +39,19 @@ export interface GameEvents {
   'log': { text: string; tone?: 'normal' | 'warn' | 'good' };
 
   'quality:changed': { tier: string };
+  /** The one chart key. Opens the LOCAL chart; SystemMap routes from there. */
   'ui:toggle-map': void;
+  /** Show or hide the galactic chart. Owned by MapMode, requested by SystemMap. */
+  'ui:toggle-galaxy': void;
+  /**
+   * Which chart, if any, currently owns the screen.
+   *
+   * Each chart announces its own state and nothing else's. Anything that has
+   * to stand down while a chart is up — the flight HUD, the other chart —
+   * listens here rather than to one chart's private open/close events, which
+   * is how the local chart first shipped with the HUD showing through it.
+   */
+  'ui:chart': { chart: 'system' | 'galaxy' | null };
   'ui:toggle-codex': void;
 
   /** The camera rig changed viewpoint. HUD dims/undims the cockpit chrome on this. */

@@ -18,6 +18,7 @@ import { MapMode } from '@/game/MapMode';
 import { Traffic } from '@/game/Traffic';
 import { ShipLog } from '@/game/Log';
 import { Scanner } from '@/game/Scanner';
+import { Cruise } from '@/game/Cruise';
 import { Showroom, registerShowroomShots, setShipVisualFactory } from '@/game/Showroom';
 import { createShipVisual } from '@/render/ships/ShipMesh';
 import { activeShotName, registerShot, shotOwnsScene, updateActiveShot } from '@/game/Shots';
@@ -35,6 +36,7 @@ import { registerAtmosphereShots } from '@/render/Atmosphere';
 
 import { Hud, registerHudShots } from '@/ui/Hud';
 import { Codex, registerCodexShots } from '@/ui/Codex';
+import { SystemMap, registerSystemMapShots } from '@/ui/SystemMap';
 import { Audio } from '@/audio/Audio';
 import { Warp, registerWarpShots } from '@/ship/Warp';
 import { registerCameraShots } from '@/ship/CameraRig';
@@ -222,11 +224,10 @@ class ReviewGuard implements GameModule {
   ) {}
 
   init(): void {
-    bus.on('ui:map-opened', () => {
-      this.mapOpen = true;
-    });
-    bus.on('ui:map-closed', () => {
-      this.mapOpen = false;
+    // Either chart, not just the galactic one. The local chart shipped once
+    // with the flight HUD legible straight through it.
+    bus.on('ui:chart', ({ chart }) => {
+      this.mapOpen = chart !== null;
     });
   }
 
@@ -286,6 +287,10 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   const traffic = new Traffic(universe);
   await engine.add(traffic);
 
+  progress(0.845, 'priming the cruise drive');
+  // After Universe, whose `nearestGapKm` is its speed limit.
+  await engine.add(new Cruise({ universe }));
+
   progress(0.85, 'calibrating the array');
   // Scanner needs both the universe and the fleet, so it can only be built
   // once Traffic exists. The codex only needs the log.
@@ -293,6 +298,13 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   const codex = new Codex({ log: shipLog });
   await engine.add(codex);
   registerCodexShots(codex, universe, shipLog);
+
+  progress(0.855, 'plotting the local chart');
+  // Registered before MapMode: it owns the M key and decides when the galaxy
+  // chart takes over, so it must be listening before anything can press it.
+  const systemMap = new SystemMap({ universe });
+  await engine.add(systemMap);
+  registerSystemMapShots(systemMap);
 
   progress(0.86, 'charting the galaxy');
   const map = new MapMode({ universe, warp });

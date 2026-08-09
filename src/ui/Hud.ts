@@ -166,7 +166,10 @@ interface UnitBand {
 const SPEED_BANDS: readonly UnitBand[] = [
   { label: 'm/s', scale: 1000, decimals: 0, max: 1 },
   { label: 'km/s', scale: 1, decimals: 2, max: C_KMS * 0.01 },
-  { label: 'c', scale: 1 / C_KMS, decimals: 4, max: Infinity },
+  { label: 'c', scale: 1 / C_KMS, decimals: 4, max: C_KMS * 10 },
+  // The cruise drive reaches a few hundred c. Four decimals there is noise
+  // pretending to be precision, and the digits change too fast to read.
+  { label: 'c', scale: 1 / C_KMS, decimals: 0, max: Infinity },
 ];
 
 const ALT_BANDS: readonly UnitBand[] = [
