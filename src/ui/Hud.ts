@@ -495,6 +495,7 @@ export class Hud implements GameModule {
   // --- nodes we mutate ----------------------------------------------------
   private vThrottleFill!: CssVar;
   private tThrottleNum!: TextSlot;
+  private tAssist: TextSlot | null = null;
   private vThrottleIdx!: CssVar;
 
   private speedTape!: Tape;
@@ -691,6 +692,11 @@ export class Hud implements GameModule {
     this.hasStick = true;
     this.stickX = clamp(x, -1, 1);
     this.stickY = clamp(y, -1, 1);
+  }
+
+  /** The flight-assist line under the throttle gauge (game/assistReadout.ts). */
+  setAssist(text: string): void {
+    this.tAssist?.set(text);
   }
 
   setVisible(b: boolean): void {
@@ -1216,6 +1222,10 @@ export class Hud implements GameModule {
     const digits = el('span', 'os-num', num);
     el('span', 'os-unit', num, '%');
     this.tThrottleNum = new TextSlot(digits);
+    // v2: what the flight computer is holding. Under FA-ON the gauge above is
+    // engine output (0 % while holding speed in vacuum), so this line is the
+    // only place the set speed is visible.
+    this.tAssist = new TextSlot(el('div', 'os-thr-fa', p));
   }
 
   private buildRight(root: HTMLElement): void {
@@ -1872,6 +1882,14 @@ const CSS = /* css */ `
   box-shadow: 0 0 10px rgba(255, 180, 84, 0.85), 0 0 2px rgba(0, 0, 0, 0.9);
 }
 .os-hud .os-thr-num { display: flex; align-items: baseline; gap: 3px; }
+.os-thr-fa {
+  margin-top: 6px;
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  color: var(--os-amber);
+  text-shadow: var(--os-shadow);
+  white-space: nowrap;
+}
 
 /* Right stack ------------------------------------------------------------- */
 .os-hud .os-right {

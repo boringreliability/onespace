@@ -454,6 +454,8 @@ export class FlightModel {
   private _attitudeHold = true;
   private _fa = false;
   private _assistState: AssistState = 'off';
+  /** Lever value at the last SOI rebase while FA held speed; see step(). */
+  private soiLatchLever: number | null = null;
   private _assistTarget = 0;
   private lastEmittedThrottle = -1;
 
@@ -616,6 +618,7 @@ export class FlightModel {
    * the bug this design closed.
    */
   rebase(parent: ParentBody | null): void {
+    if (this._fa && this._assistState === 'hold') this.soiLatchLever = this.command.throttle;
     const from = this.parentBody;
     const to = parent ?? NO_PARENT;
     if (from === to) return;
@@ -806,7 +809,15 @@ export class FlightModel {
     // path below line for line and is bit-identical to FA-OFF.
     let active = false;
     if (this._fa) {
+      // After an SOI rebase the hold reference jumped by the parents'
+      // relative velocity (up to ~49 km/s). Coast until the pilot moves the
+      // lever, rather than burning for minutes to re-null a speed they never
+      // asked to change (review-p1a M1).
+      if (this.soiLatchLever !== null && this.command.throttle !== this.soiLatchLever) {
+        this.soiLatchLever = null;
+      }
       if (this.command.brake) this._assistState = 'stop';
+      else if (this.soiLatchLever !== null) this._assistState = 'coast';
       else if (this.command.throttle > 0) this._assistState = 'hold';
       else this._assistState = 'coast'; // the detent, and NaN
       active = this._assistState !== 'coast';

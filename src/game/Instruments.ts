@@ -27,6 +27,7 @@ import {
   type VerticalReadout,
 } from '@/game/flightAids';
 import type { Hud, HudInstruments } from '@/ui/Hud';
+import { assistReadout } from '@/game/assistReadout';
 
 export interface InstrumentsOptions {
   readonly universe: Universe;
@@ -113,6 +114,8 @@ export class Instruments implements GameModule {
 
     p.location = locationLabel(u.system.name, parentName);
     this.hud.setInstruments(p);
+    const f = this.universe.flight;
+    this.hud.setAssist(assistReadout(f.assistState, f.assistTargetKmS));
     // The virtual stick's dot (track A's deflection → track B's HUD mark).
     // Hidden while the pointer is free: the stick only exists under lock.
     const d = ctx.input.stickDeflection;
