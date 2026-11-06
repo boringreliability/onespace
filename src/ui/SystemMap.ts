@@ -362,7 +362,8 @@ export class SystemMap implements GameModule {
 
   private select(n: Node): void {
     this.selected = n;
-    bus.emit('target:changed', { id: n.spec.id, name: n.spec.name });
+    // Canonical target id (shared contract): `body:<spec.name>`.
+    bus.emit('target:changed', { id: `body:${n.spec.name}`, name: n.spec.name });
     this.quote();
   }
 
