@@ -708,8 +708,15 @@ export class Universe implements GameModule {
     const obj = b.planet.object3d;
     obj.visible = false;
     const planet = b.planet;
-    const settled = ctx.renderer
-      .compileAsync(obj, ctx.camera, ctx.scene)
+    // The scene graph alone misses the heaviest programs: the terrain bake
+    // and shadow clipmap, and the cloud/atmosphere marches, live in private
+    // scenes (phase-0 review #4). Each renderer compiles its own.
+    const settled = Promise.all([
+      ctx.renderer.compileAsync(obj, ctx.camera, ctx.scene),
+      planet.compileAsync(ctx.renderer, ctx.camera),
+      b.clouds?.compileAsync(ctx.renderer, ctx.camera),
+      b.atmosphere?.compileAsync(ctx.renderer, ctx.camera),
+    ])
       .catch(() => undefined)
       .then(() => {
         this.pendingCompile.delete(planet);
