@@ -9,8 +9,9 @@
 import { Engine } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
 import { registerShaderChunks } from '@/shaders/chunks';
-import { setShot, shotList, shotNames } from '@/game/Shots';
+import { clearShot, setShot, shotList, shotNames } from '@/game/Shots';
 import { modes } from '@/core/Modes';
+import { parseRoute } from '@/core/Route';
 
 const boot = {
   el: document.getElementById('boot') as HTMLDivElement,
@@ -59,7 +60,8 @@ async function main(): Promise<void> {
   await engine.prewarm();
 
   boot.set(1, 'ready');
-  modes.go('flight');
+  // `?mode=yard` boots straight into the Yard; everything else flies.
+  modes.go(parseRoute(window.location.search).mode === 'yard' ? 'yard' : 'flight');
   engine.start();
   bus.emit('boot:done');
   setTimeout(() => boot.hide(), 400);
@@ -84,6 +86,8 @@ function installReviewHarness(engine: Engine): void {
     boot.hide();
     await setShot(name, engine.context);
   };
+  // Leave the active shot and return to the mode it interrupted.
+  w.__osClearShot = () => clearShot(engine.context);
   w.__osSettle = async (seconds: number) => {
     w.__osSettled = false;
     await engine.simulate(seconds);

@@ -23,6 +23,12 @@ import { Showroom, registerShowroomShots, setShipVisualFactory } from '@/game/Sh
 import { createShipVisual } from '@/render/ships/ShipMesh';
 import { activeShotName, registerShot, shotOwnsScene, updateActiveShot } from '@/game/Shots';
 import type { NebulaSpec, PlanetSpec, RingSpec } from '@/gen/types';
+// -- v2-p2b: the Yard and mode gating ---------------------------------------
+import { modes } from '@/core/Modes';
+import { Yard, YARD_DRIVES, YARD_FACTIONS, YARD_LIGHTS, YARD_VIEWS } from '@/game/Yard';
+import { YardPanel } from '@/ui/YardPanel';
+import { MODULE_MODES, applyGating } from '@/game/gating';
+// ---------------------------------------------------------------------------
 
 import { MutableViewState } from '@/render/ViewState';
 import { Sky, registerSkyShots } from '@/render/Sky';
@@ -234,7 +240,10 @@ class ReviewGuard implements GameModule {
   lateUpdate(_dt: number, ctx: EngineContext): void {
     const shot = activeShotName();
     const owned = shotOwnsScene();
-    this.hud.setVisible((!owned || shot === 'hud-full') && !this.mapOpen);
+    // v2-p2b: the flight HUD belongs to the flight modes. In the yard it is
+    // frozen with the rest of flight (gating.ts) and must not hang over it.
+    const flightMode = modes.base === 'flight' || modes.base === 'map' || modes.base === 'review';
+    this.hud.setVisible((!owned || shot === 'hud-full') && !this.mapOpen && flightMode);
     this.gallery.root.visible = shot !== null && GALLERY_SHOTS.has(shot);
 
     // Planet shots build a fixture and only clear it for each other. Leaving
@@ -328,12 +337,23 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   // nothing here runs during flight. See docs/ships/BRIEF.md.
   setShipVisualFactory(createShipVisual);
   const showroom = new Showroom();
+  // -- v2-p2b: the Yard. Ahead of the stage in tick order, so the stage lights
+  // the hull from THIS frame's orbit camera rather than last frame's.
+  const yard = new Yard({
+    stage: showroom,
+    panel: new YardPanel({ factions: YARD_FACTIONS, lights: YARD_LIGHTS, drives: YARD_DRIVES, views: YARD_VIEWS }),
+    clock: engine,
+    audio,
+  });
+  await engine.add(yard);
+  // ---------------------------------------------------------------------------
   await engine.add(showroom);
   registerShowroomShots(showroom);
 
   progress(0.94, 'grading');
   const postfx = new PostFX(engine.renderer, engine.scene, engine.camera, config.quality);
   engine.setPipeline(postfx);
+  yard.iris = postfx; // v2-p2b: the yard snaps the iris at its scene cuts
 
   // Review shots. Each module frames its own work; see game/Shots.ts.
   registerSkyShots(sky);
@@ -371,6 +391,13 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
     window.removeEventListener('pointerdown', armAudio);
   };
   window.addEventListener('pointerdown', armAudio);
+
+  // -- v2-p2b: mode gating, applied by name once everything is registered.
+  for (const name of Object.keys(MODULE_MODES)) {
+    const m = engine.get(name);
+    if (m) applyGating([m]);
+  }
+  // ---------------------------------------------------------------------------
 
   bus.emit('log', { text: 'ALL SYSTEMS NOMINAL', tone: 'good' });
   progress(1, 'systems nominal');
