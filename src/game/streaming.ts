@@ -24,18 +24,35 @@ export interface StreamCandidate {
 /**
  * Returns, per candidate in input order, whether it should have renderers.
  * Only the `budget` closest eligible candidates are wanted.
+ *
+ * Runs every frame, so it allocates nothing when handed `out` (ARCHITECTURE
+ * §5): the result is written into it, resized to fit. Selection is a repeated
+ * nearest-scan, O(budget × n) — both are single digits to a few dozen. Ties
+ * go to the earlier candidate, so equal distances never flicker.
  */
-export function planStreaming(candidates: readonly StreamCandidate[], budget: number): boolean[] {
-  const out = new Array<boolean>(candidates.length).fill(false);
-  if (budget <= 0) return out;
+export function planStreaming(
+  candidates: readonly StreamCandidate[],
+  budget: number,
+  out: boolean[] = [],
+): boolean[] {
+  const n = candidates.length;
+  out.length = n;
+  out.fill(false);
 
-  const eligible: number[] = [];
-  for (let i = 0; i < candidates.length; i++) {
-    const c = candidates[i]!;
-    const limit = (c.streamed ? STREAM_RELEASE_RADII : STREAM_ACQUIRE_RADII) * c.radiusKm;
-    if (c.distanceKm < limit) eligible.push(i);
+  for (let k = 0; k < budget; k++) {
+    let best = -1;
+    let bestKm = Infinity;
+    for (let i = 0; i < n; i++) {
+      if (out[i]) continue;
+      const c = candidates[i]!;
+      const limit = (c.streamed ? STREAM_RELEASE_RADII : STREAM_ACQUIRE_RADII) * c.radiusKm;
+      if (c.distanceKm < limit && c.distanceKm < bestKm) {
+        best = i;
+        bestKm = c.distanceKm;
+      }
+    }
+    if (best < 0) break;
+    out[best] = true;
   }
-  eligible.sort((a, b) => candidates[a]!.distanceKm - candidates[b]!.distanceKm);
-  for (let k = 0; k < Math.min(budget, eligible.length); k++) out[eligible[k]!] = true;
   return out;
 }
