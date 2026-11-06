@@ -22,7 +22,7 @@ function ship(assist = true): FlightModel {
   const fm = new FlightModel(DEFAULT_SHIP_CONFIG);
   fm.setParent({ position: new Vector3(), velocity: new Vector3(), mu: 0 });
   fm.teleport(new Vector3(), new Vector3(), new Quaternion());
-  fm.flightAssist = assist;
+  fm.attitudeHold = assist; // rotation damping (v2 track A naming)
   return fm;
 }
 

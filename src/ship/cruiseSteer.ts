@@ -131,7 +131,9 @@ export function steerToward(
   const c = flight.config;
   const alphaP = (c.rcsTorque.pitch / c.inertia.pitch) * M_TO_KM;
   const alphaY = (c.rcsTorque.yaw / c.inertia.yaw) * M_TO_KM;
-  const decay = flight.flightAssist ? 1 / c.assistDampTime : 0;
+  // Rotation damping is `attitudeHold` since v2 track A split it from the
+  // translational flight assist; the steering gains depend on the former.
+  const decay = flight.attitudeHold ? 1 / c.assistDampTime : 0;
   const w = flight.angularVelocity;
 
   const kpP = (OMEGA_N * OMEGA_N) / alphaP;

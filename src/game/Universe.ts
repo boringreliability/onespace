@@ -16,10 +16,7 @@
  *   4. Publish what the HUD and audio need to know.
  */
 
-import { Color, Group, Matrix4, Object3D, Quaternion, Vector3 } from 'three';
-
-/** Reused zero vector for basis construction; never mutated. */
-const ZERO = new Vector3(0, 0, 0);
+import { Color, Group, Object3D, Quaternion, Vector3 } from 'three';
 
 import type { EngineContext, GameModule } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
@@ -28,7 +25,6 @@ import { Rng, hashSeed } from '@/math/rng';
 
 import {
   AU,
-  SOLAR_RADIUS,
   type GalaxySpec,
   type PlanetSpec,
   type StarSystemSpec,
@@ -47,6 +43,7 @@ import { StarRenderer } from '@/render/Star';
 import { AtmosphereRenderer } from '@/render/Atmosphere';
 import { sceneDepthTexture } from '@/render/PostFX';
 import { planStreaming, type StreamCandidate } from '@/game/streaming';
+import { circularOrbitState, insideStar, progradeAttitude, starRadiusKm } from '@/game/recovery';
 
 import {
   DEFAULT_SHIP_CONFIG,
@@ -179,6 +176,16 @@ export class Universe implements GameModule {
    */
   paused = false;
 
+  /**
+   * Set by the pause overlay and by the recovery fade. Unlike `paused` (which
+   * MapMode rewrites every frame and which hides the world for the chart),
+   * this freezes the simulation and leaves the scene on screen behind it.
+   */
+  frozen = false;
+
+  /** True while the ship is at or below the star's photosphere (GAMEPLAY F7). */
+  insideStar = false;
+
   /** Nearest body, recomputed each frame — the HUD and audio both want it. */
   nearest: Body | null = null;
   nearestAltitudeKm: number | null = null;
@@ -298,7 +305,9 @@ export class Universe implements GameModule {
       position: this.starWorld,
       velocity: this.starVelocity,
       mu: MU_SUN * primary.mass,
-      radius: primary.radius,
+      // StarSpec.radius is in SOLAR radii; ParentBody.radius is km. Passing it
+      // raw made the star-frame altimeter measure to a 1 km ball.
+      radius: starRadiusKm(primary),
     };
 
     // Flatten planets and moons into one list. Moons carry a parent pointer so
@@ -391,32 +400,15 @@ export class Universe implements GameModule {
     this.tmpA.y += 0.35;
     this.tmpA.normalize().multiplyScalar(alt);
 
-    // Point the nose at the world we just arrived at. Position alone is not
-    // enough: dropping in with a default orientation aims the camera at empty
-    // space, and the opening frame is the one frame that has to earn the next
-    // ten minutes.
-    this.arrivalLook.copy(this.tmpA).normalize().multiplyScalar(-1);
-    // "Up" here is radial from the STAR, not from the planet — the latter is
-    // antiparallel to the look direction and degenerates the basis.
-    this.arrivalUp.copy(target.world).add(this.tmpA).normalize();
-    // Orthogonalise the up vector against the view direction, otherwise a
-    // near-radial approach degenerates the basis and the roll snaps.
-    this.arrivalUp.addScaledVector(this.arrivalLook, -this.arrivalLook.dot(this.arrivalUp));
-    if (this.arrivalUp.lengthSq() < 1e-6) this.arrivalUp.set(0, 1, 0);
-    this.arrivalUp.normalize();
-
-    this.arrivalMat.identity();
-    // Matrix4.lookAt(eye, target, up) already builds a basis whose -Z points
-    // from eye towards target, and -Z is the ship's nose. Negating the target
-    // as well flips the nose onto the star and puts the chase camera inside
-    // the hull.
-    this.arrivalMat.lookAt(ZERO, this.arrivalLook, this.arrivalUp);
-    this.arrivalQuat.setFromRotationMatrix(this.arrivalMat);
-
     // Circular velocity about the planet — and nothing else. The planet's own
     // 49 km/s about the star used to be added here by hand; it is now implicit
     // in the parent frame, which is the whole point of the change.
     this.flight.orbitalVelocityAt(this.tmpA, this.tmpB);
+    // Nose prograde, roof radially out (GAMEPLAY F8). It used to point at the
+    // planet's centre, which framed the world nicely and made the first press
+    // of W a dive. Prograde keeps the world filling the lower frame and makes
+    // the throttle mean "faster along the orbit".
+    progradeAttitude(this.tmpB, this.tmpA, this.arrivalQuat);
     this.flight.teleport(this.tmpA, this.tmpB, this.arrivalQuat);
     this.syncGroundSampler();
   }
@@ -430,10 +422,7 @@ export class Universe implements GameModule {
     return out.copy(body.worldVelocity);
   }
 
-  private readonly arrivalLook = new Vector3();
-  private readonly arrivalUp = new Vector3();
   private readonly arrivalQuat = new Quaternion();
-  private readonly arrivalMat = new Matrix4();
 
   private pickHeroBody(): Body | null {
     let best: Body | null = null;
@@ -504,6 +493,7 @@ export class Universe implements GameModule {
       return;
     }
     this.root.visible = true;
+    if (this.frozen) return;
 
     this.orbitTime += dt * ORBIT_TIME_SCALE;
     this.updateOrbits();
@@ -884,9 +874,10 @@ export class Universe implements GameModule {
     // most want a fast drive to notice. The altimeter deliberately reports
     // null once a body is far away; the cruise drive needs the number at every
     // range, because the number IS its speed limit.
-    const starGap =
-      this.tmpA.subVectors(this.flight.worldPosition, this.starWorld).length() -
-      (this.system.stars[0]?.radius ?? 0) * SOLAR_RADIUS;
+    const starDist = this.tmpA.subVectors(this.flight.worldPosition, this.starWorld).length();
+    const starR = starRadiusKm(this.system.stars[0]);
+    const starGap = starDist - starR;
+    this.insideStar = !this.options.headless && insideStar(starDist, starR);
     this.nearestGapKm = Math.max(0, Math.min(bestGap, starGap));
 
     this.syncGroundSampler();
@@ -909,6 +900,30 @@ export class Universe implements GameModule {
   // -------------------------------------------------------------------------
   // Queries used by UI and audio
   // -------------------------------------------------------------------------
+
+  /**
+   * Put the ship back into a stable circular orbit (GAMEPLAY F6/F7, P5) —
+   * 0.6 R above where it came down, nose prograde. Around the parent world,
+   * or the nearest body when the parent is the star (a star contact), or the
+   * opening world as a last resort. A teleport: call it behind black.
+   */
+  recoverToOrbit(): void {
+    if (this.options.headless) return;
+    const body = this.shipParent ?? this.nearest ?? this.pickHeroBody();
+    this.flight.setCruise(null);
+    if (!body) {
+      this.setShipParent(null);
+      this.flight.teleport(this.tmpA.set(0, 0, 6 * AU), this.tmpB.set(0, 0, 0));
+      this.insideStar = false;
+      return;
+    }
+    const radial = this.tmpA.subVectors(this.flight.worldPosition, body.world);
+    const state = circularOrbitState(radial, body.spec.radius, body.frame.mu);
+    this.setShipParent(body);
+    this.flight.teleport(state.position, state.velocity, state.orientation);
+    this.syncGroundSampler();
+    this.insideStar = false;
+  }
 
   /** Nearby systems for the star map, without generating them all. */
   neighbours(radiusLy = 120, max = 200): StarSystemStub[] {

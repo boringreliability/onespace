@@ -1094,7 +1094,6 @@ export class FlightModel {
         this.angularVelocity.set(0, 0, 0);
         this._grounded = true;
         bus.emit('ship:crashed', { speed: impact, planetId: this.landingPlanet?.id ?? null });
-        bus.emit('log', { text: 'HULL BREACH — IMPACT', tone: 'warn' });
         return;
       }
 

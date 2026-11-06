@@ -10,34 +10,49 @@ npm install
 npm run dev          # http://127.0.0.1:5173
 ```
 
-Click the canvas to capture the pointer.
-
 ## Controls
 
 **Click the canvas first.** Steering is on the mouse and needs pointer capture;
-until you click, only the keyboard works. `Esc` releases it again.
+until you click, only the keyboard works. The NAV ADVISORY line at the bottom
+of the screen says so, and says it again whenever a chart has released the
+pointer. It then suggests the next useful key, and stops suggesting each one
+once you have used it a couple of times.
 
 | | |
 |---|---|
-| mouse | pitch and yaw |
+| mouse · arrow keys | pitch and yaw |
 | `Q` / `E` | roll |
 | `W` / `S` / wheel | throttle (integrated, not instant — it spools) |
+| `X` | throttle to zero |
 | `A` `D` | lateral thrusters |
 | `R` `F` | up / down thrusters |
 | `Shift` | boost |
 | `Space` | brake |
-| `V` | camera: chase → cockpit → orbit → cinematic |
-| `M` | galaxy chart |
-| `T` | scan |
+| `Z` | flight assist on / off |
 | `Tab` | cycle target |
-| `J` | warp |
-| `L` | land |
+| `G` | cruise drive (in-system) |
+| `T` | scan |
+| `M` | local chart; wheel out for the galaxy chart |
+| `J` | jump to the system selected on the galaxy chart |
+| `C` | codex (the ship's log) |
+| `V` | camera: chase → cockpit → orbit → cinematic |
+| `F2` | screenshot (saved as a PNG) |
+| `Esc` | pause: controls, mouse settings, quality, return to orbit |
+
+`L` (land) is reserved for auto-land / lift-off and does nothing yet beyond
+stopping the cruise drive; set down by hand for now.
+
+Crashing, or flying into the star, fades to black and puts the ship back in a
+stable orbit, 0.6 radii above the nearest world, with the nose prograde. The
+pause menu's **Return to orbit** does the same on request.
 
 ### In the chart
 
-Drag to orbit, wheel to zoom, click a system or use the arrow keys, `Enter` to
-jump, `F` to search, `Esc` to close. Opening the chart releases the pointer so
-you can click; click the canvas again afterwards to fly.
+Drag to orbit, wheel to zoom, click a system or use the arrow keys, `Enter` (or
+`J`, after closing the chart) to jump, `F` to search, `Esc` to close. A jump
+takes 7.4 s whatever the distance, and the chart's estimate says so. Opening the
+chart releases the pointer so you can click; click the canvas again afterwards
+to fly.
 
 ### Reading the instruments
 

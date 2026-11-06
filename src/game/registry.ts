@@ -42,6 +42,9 @@ import { Photo } from '@/game/Photo';
 import { DevOverlay } from '@/ui/DevOverlay';
 import { Title } from '@/ui/Title';
 import { parseRoute } from '@/core/Route';
+import { RecoveryCut } from '@/game/RecoveryCut';
+import { Pause } from '@/ui/Pause';
+import { Hints } from '@/ui/Hints';
 import { Warp, registerWarpShots } from '@/ship/Warp';
 import { registerCameraShots } from '@/ship/CameraRig';
 import { registerShipShots } from '@/ship/Ship';
@@ -315,6 +318,17 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   progress(0.86, 'charting the galaxy');
   const map = new MapMode({ universe, warp });
   await engine.add(map);
+
+  // --- v2 phase 1, track D: J, pause, recovery, NAV ADVISORY -----------------
+  // J reads the galaxy chart's selection; the chart only exists from here on.
+  pilot.attachJump(map.ui, warp);
+  progress(0.865, 'arming the recovery beacon');
+  const recovery = new RecoveryCut(universe);
+  await engine.add(recovery);
+  const pause = new Pause({ universe, recovery, warp });
+  await engine.add(pause);
+  await engine.add(new Hints({ universe, pause, recovery, warp }));
+  // --- end track D -------------------------------------------------------------
 
   progress(0.88, 'assembling gallery');
   // One world carries every gallery shot, so rings, clouds and atmosphere are
