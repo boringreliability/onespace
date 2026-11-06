@@ -14,7 +14,7 @@
 import { describe, expect, it } from 'vitest';
 import { Quaternion, Vector3 } from 'three';
 import { DEFAULT_SHIP_CONFIG, FlightModel } from './FlightModel';
-import { noseErrorRad, steerToward } from './cruiseSteer';
+import { aimDirection, noseErrorRad, steerToward } from './cruiseSteer';
 
 const DEG = Math.PI / 180;
 
@@ -168,5 +168,46 @@ describe('the pilot always wins', () => {
     expect(frame(fm, target, HANDS_OFF)).toBe('steer');
     for (let i = 0; i < 8 * 60; i++) frame(fm, target, HANDS_OFF);
     expect(noseErrorRad(fm, target)).toBeLessThan(1 * DEG);
+  });
+});
+
+describe('aiming at the limb, so arrival is tangential', () => {
+  it('Given a limb radius, When hands-off, Then the nose settles asin(limb / d) off the centre line', () => {
+    const fm = ship();
+    const target = new Vector3(0, 0, -1e5); // dead ahead
+    const limb = 2e4;
+    for (let i = 0; i < 8 * 60; i++) {
+      fm.command.pitch = 0;
+      fm.command.yaw = 0;
+      fm.command.roll = 0;
+      steerToward(fm, target, limb);
+      fm.update(1 / 60);
+    }
+    expect(Math.abs(noseErrorRad(fm, target) - Math.asin(limb / 1e5))).toBeLessThan(0.5 * DEG);
+  });
+
+  it('Given the nose exactly on the line of sight, Then the limb side falls back to the ecliptic and is finite', () => {
+    const fm = ship();
+    const d = aimDirection(fm, new Vector3(0, 0, -1e5), 2e4, new Vector3());
+    expect(Number.isFinite(d.x + d.y + d.z)).toBe(true);
+    expect(d.length()).toBeCloseTo(1, 9);
+    // Stays in the ecliptic (XZ) plane: the fallback side is prograde, not up.
+    expect(Math.abs(d.y)).toBeLessThan(1e-9);
+    expect(Math.acos(-d.z)).toBeCloseTo(Math.asin(0.2), 6);
+  });
+
+  it('Given the nose already leaning to one side, Then the limb is taken on that side (no flip-flopping)', () => {
+    const fm = ship();
+    fm.teleport(new Vector3(), new Vector3(), new Quaternion().setFromAxisAngle(new Vector3(1, 0, 0), 3 * DEG));
+    const d = aimDirection(fm, new Vector3(0, 0, -1e5), 2e4, new Vector3());
+    expect(d.y).toBeGreaterThan(0);
+  });
+
+  it('Given the ship inside the limb sphere, Then the aim is just short of tangential — still closing', () => {
+    const fm = ship();
+    const d = aimDirection(fm, new Vector3(0, 0, -1e4), 2e4, new Vector3());
+    const along = -d.z; // component towards the target
+    expect(along).toBeGreaterThan(0);
+    expect(along).toBeLessThan(Math.cos(80 * DEG));
   });
 });

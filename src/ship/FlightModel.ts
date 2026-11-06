@@ -590,6 +590,25 @@ export class FlightModel {
     return this.cruiseCap !== null;
   }
 
+  // --- v2 track C: cruise orbit insertion ----------------------------------
+  /**
+   * Leave cruise with a given PARENT-RELATIVE velocity and the engine cut.
+   *
+   * The one deliberate cheat of the cruise model (see `ship/cruiseOrbit.ts`,
+   * which is the only caller). Not a frame crossing — the velocity is already
+   * in the parent's frame. The spooled throttle is zeroed with it: otherwise
+   * 0.7 s of residual main-drive spool along a nose that is still pointing at
+   * the planet kicks a fresh low orbit eccentric (measured: e ≈ 0.2 at a
+   * 1 000 km moon). Whether it spools back up is the command's business.
+   */
+  exitCruiseWithVelocity(velocity: Vector3): void {
+    this.cruiseCap = null;
+    this.velocity.copy(velocity);
+    this._throttle = 0;
+    this._speed = this.velocity.length();
+  }
+  // --- end track C ----------------------------------------------------------
+
   /** Local atmospheric density last handed in, kg/m³. 0 = vacuum. */
   get atmosphericDensity(): number {
     return this.density;

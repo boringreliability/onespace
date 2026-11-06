@@ -126,18 +126,43 @@ describe('engaging from the opening orbit', () => {
 });
 
 describe('steering to the locked target', () => {
-  it('Given target:changed for body:Remit 31, When cruise is engaged hands-off, Then the module turns the nose onto the planet', () => {
-    const r = opening();
+  it('Given target:changed for body:Remit 31 from 200 000 km, When cruise is engaged hands-off, Then the nose is flown onto the limb of the arrival sphere', () => {
+    // Approved change to the first draft: the steering aims at the tangent to
+    // a sphere of 0.9 × 3 R about the target, not at its centre, so the nose
+    // settles asin(0.9·3R / d) off the centre line — ~5.6° from here.
+    const r = build(new Vector3(200_000, 0, 0), new Vector3(0, 0, 1));
     bus.emit('target:changed', { id: 'body:Remit 31', name: 'Remit 31' });
-    r.axes.throttle = 0; // hold position-ish; this measures the turn
-    const before = noseErrorRad(r.flight, r.world.allBodies()[0]!.world);
+    r.axes.throttle = 0; // hold position; this measures the turn
+    const centre = r.world.allBodies()[0]!.world;
+    const before = noseErrorRad(r.flight, centre);
     r.press.add('cruise');
     r.step(CRUISE_DEFAULTS.spoolTime + 0.1);
     expect(r.cruise.drive.engaged).toBe(true);
     r.step(4);
-    const after = noseErrorRad(r.flight, r.world.allBodies()[0]!.world);
-    expect(before).toBeGreaterThan(60 * (Math.PI / 180));
-    expect(after).toBeLessThan(before * 0.2);
+    const after = noseErrorRad(r.flight, centre);
+    const limb = Math.asin((0.9 * 3 * R) / r.flight.position.length());
+    expect(before).toBeGreaterThan(80 * (Math.PI / 180));
+    expect(Math.abs(after - limb)).toBeLessThan(1 * (Math.PI / 180));
+  });
+
+  it('Given a locked target, When the drive arrives, Then the approach meets the arrival sphere within 30° of tangential', () => {
+    const r = build(new Vector3(200_000, 0, 0), new Vector3(0, 0, 1));
+    bus.emit('target:changed', { id: 'body:Remit 31', name: 'Remit 31' });
+    r.axes.throttle = 0;
+    r.press.add('cruise');
+    r.step(CRUISE_DEFAULTS.spoolTime + 4); // charge and turn on the spot
+    r.axes.throttle = 1;
+    let fromTangential = NaN;
+    for (let i = 0; i < 60 * 60 && Number.isNaN(fromTangential); i++) {
+      const before = r.cruise.drive.phase;
+      r.step(H);
+      if (before === 'cruise' && r.cruise.drive.phase === 'dropping') {
+        const rHat = r.flight.position.clone().normalize();
+        fromTangential = Math.asin(Math.min(1, Math.abs(r.flight.forward.dot(rHat))));
+        expect(r.cruise.drive.dropReason).toBe('arrival');
+      }
+    }
+    expect(fromTangential).toBeLessThan(30 * (Math.PI / 180));
   });
 
   it('Given no target (or a cleared one), When cruise is engaged, Then the nose is left alone — it flies where it points', () => {

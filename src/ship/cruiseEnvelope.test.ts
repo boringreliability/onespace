@@ -194,9 +194,13 @@ describe('arrival — dropping on purpose', () => {
     expect(d.phase).toBe('cruise');
   });
 
-  it('Given a moon whose SOI is 1.6 R, Then arrival happens inside the SOI (≤ 0.9 SOI from the centre)', () => {
-    const soi = 1.6 * MOON_R;
+  it('Given a moon whose SOI is 2.5 R (3 R would be outside it), Then arrival happens inside the SOI (≤ 0.9 SOI from the centre)', () => {
+    // 1.6 R in the first draft: with the 700 km hold floor there is no
+    // clearance that is both inside 0.9 SOI and above hold, and the next test
+    // says which one wins. 2.5 R is a moon where clipping is possible.
+    const soi = 2.5 * MOON_R;
     const c = arrivalClearanceKm(MOON_R, soi);
+    expect(c).toBeLessThan(2 * MOON_R);
     expect(MOON_R + c).toBeLessThanOrEqual(0.9 * soi + 1e-9);
   });
 
