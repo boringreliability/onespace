@@ -3,7 +3,7 @@
  * Pure; `ui/Hints.ts` owns the DOM and the counting.
  *
  * Order, first match wins:
- *   overlay/pause/busy → nothing (the overlay speaks for itself)
+ *   not in flight/overlay/pause/busy → nothing (the overlay speaks for itself)
  *   pointer not captured → CLICK (never retires: it is a state, not a lesson)
  *   fly → cruise (only with a target, not already cruising) → scan → chart → pause
  */
@@ -32,6 +32,12 @@ export const HINT_RETIRE_AFTER: Readonly<Record<RetirableHintId, number>> = {
 export type HintCounts = Partial<Record<RetirableHintId, number>>;
 
 export interface HintState {
+  /**
+   * The game is in flight (not the title, the Yard or a photo overlay). The
+   * line is a flight instrument: on the title it read CLICK TO TAKE THE
+   * CONTROLS under the menu (review-p1).
+   */
+  readonly inFlight: boolean;
   readonly pointerLocked: boolean;
   /** A chart or the codex is up. */
   readonly overlayOpen: boolean;
@@ -60,7 +66,7 @@ export function recordUse(counts: HintCounts, id: RetirableHintId): HintCounts {
 }
 
 export function selectHint(state: HintState, counts: HintCounts): HintId | null {
-  if (state.overlayOpen || state.paused || state.busy) return null;
+  if (!state.inFlight || state.overlayOpen || state.paused || state.busy) return null;
   if (!state.pointerLocked) return 'click';
   if (!isRetired(counts, 'fly')) return 'fly';
   if (state.hasTarget && !state.cruising && !isRetired(counts, 'cruise')) return 'cruise';

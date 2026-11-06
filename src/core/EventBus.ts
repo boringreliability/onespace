@@ -67,6 +67,12 @@ export interface GameEvents {
   'ship:touchdown': { speed: number; vertical: number; planetId: string | null };
   /** Ship met the ground too fast. The hull is gone. */
   'ship:crashed': { speed: number; planetId: string | null };
+  /**
+   * The recovery cut has just teleported the ship into a circular orbit
+   * (crash, star contact or RETURN TO ORBIT). Anything flying the ship — the
+   * cruise drive above all — must let go, or it flies the ship out again.
+   */
+  'ship:recovered': { cause: 'crash' | 'star' | 'requested' };
 
   /** The star map's open transition started/ended. Flight input should stand down. */
   'ui:map-opened': void;

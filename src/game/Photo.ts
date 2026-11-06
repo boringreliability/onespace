@@ -35,6 +35,9 @@ const MOVE_KEYS: Record<string, [number, number, number]> = {
   KeyF: [0, -1, 0],
 };
 
+/** Anything up that owns the screen; photo mode does not open over it. */
+export const PHOTO_BLOCKERS = '.os-pause.is-live, .os-codex.is-live, .os-sysmap.is-live, .os-starmap.is-live';
+
 export class Photo implements GameModule {
   readonly name = 'photo';
   readonly activeIn = ['photo'] as const;
@@ -162,7 +165,10 @@ export class Photo implements GameModule {
     if (modes.overlay !== 'photo') {
       // Only from a base that can host the overlay, and never over a map/menu.
       if (e.code === 'KeyP' && !e.repeat && modes.overlay === null && (modes.base === 'flight' || modes.base === 'yard')) {
-        if (document.querySelector('.os-pause-open, .os-codex-open')) return;
+        // The classes the sheets and charts really toggle. The old selector
+        // ('.os-pause-open, .os-codex-open') matched nothing, so P opened over
+        // the pause sheet and the charts (review-p1).
+        if (document.querySelector(PHOTO_BLOCKERS)) return;
         e.preventDefault();
         this.enter();
       }

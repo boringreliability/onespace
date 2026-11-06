@@ -43,6 +43,7 @@ import { StarRenderer } from '@/render/Star';
 import { AtmosphereRenderer } from '@/render/Atmosphere';
 import { sceneDepthTexture } from '@/render/PostFX';
 import { planStreaming, type StreamCandidate } from '@/game/streaming';
+import { simSlices } from '@/game/timeCompression'; // [v2-p4]
 import { circularOrbitState, insideStar, openingAttitude, progradeAttitude, starRadiusKm } from '@/game/recovery';
 
 import {
@@ -182,6 +183,13 @@ export class Universe implements GameModule {
    * this freezes the simulation and leaves the scene on screen behind it.
    */
   frozen = false;
+
+  /**
+   * [v2-p4] Time-compression factor applied to simulated time (1, 10, 100).
+   * Written only by game/TimeCompression.ts, which owns when it is legal.
+   */
+  simRate = 1;
+  private readonly slices = { count: 0, slice: 0 };
 
   /** True while the ship is at or below the star's photosphere (GAMEPLAY F7). */
   insideStar = false;
@@ -498,14 +506,27 @@ export class Universe implements GameModule {
     this.root.visible = true;
     if (this.frozen) return;
 
-    this.orbitTime += dt * ORBIT_TIME_SCALE;
-    this.updateOrbits();
+    // [v2-p4] Time compression: `simRate` (1/10/100, set only by
+    // game/TimeCompression.ts) scales SIMULATED time, here and nowhere else —
+    // renderers, camera and UI below keep real dt. Advanced in slices because
+    // FlightModel drops anything past 8 substeps a call; see
+    // game/timeCompression.ts. At 1× this is one slice of exactly dt, i.e.
+    // the previous code path.
+    simSlices(dt, this.simRate, this.slices);
+    for (let i = 0; i < this.slices.count; i++) {
+      const h = this.slices.slice;
+      this.orbitTime += h * ORBIT_TIME_SCALE;
+      this.updateOrbits();
+      if (!this.options.headless) {
+        this.flight.update(h);
+        // Transitions are checked AFTER integration, so a substep is never
+        // taken with the state vector and the frame disagreeing.
+        this.updateShipParent();
+      }
+    }
+    // [/v2-p4]
 
     if (!this.options.headless) {
-      this.flight.update(dt);
-      // Transitions are checked AFTER integration, so a substep is never taken
-      // with the state vector and the frame disagreeing.
-      this.updateShipParent();
       this.camWorld.copy(this.flight.worldPosition);
     } else {
       ctx.origin.toWorld(ctx.camera.position, this.camWorld);
@@ -552,7 +573,11 @@ export class Universe implements GameModule {
         ? (this.orbitTime / b.spec.rotationPeriod) * Math.PI * 2
         : 0;
       this.tmpDir.set(Math.sin(b.spec.axialTilt), Math.cos(b.spec.axialTilt), 0).normalize();
+      const carry = b === this.shipParent && this.flight.grounded;
+      if (carry) this.spinDelta.copy(b.spin).invert();
       b.spin.setFromAxisAngle(this.tmpDir, spin);
+      // A landed ship turns with its world (FlightModel.carryWithSurface).
+      if (carry) this.flight.carryWithSurface(this.spinDelta.premultiply(b.spin));
     }
   }
 
@@ -847,12 +872,18 @@ export class Universe implements GameModule {
       // clearance everywhere and the ship flew straight through the ground.
       const dist = relPos.length();
       if (dist < 1e-9) return -body.spec.radius;
-      this.tmpDir.copy(relPos).divideScalar(dist);
+      // Into the planet's own frame: the mesh is rotated by `spin`, the parent
+      // frame is not. Sampling the unrotated direction put collision terrain
+      // and drawn terrain out of step, drifting ~0.5 km/s at the surface.
+      this.samplerQuat.copy(body.spin).invert();
+      this.tmpDir.copy(relPos).divideScalar(dist).applyQuaternion(this.samplerQuat);
       return dist - renderer.surfaceRadius(this.tmpDir);
     });
   }
 
   private samplerBody: Body | null = null;
+  private readonly samplerQuat = new Quaternion();
+  private readonly spinDelta = new Quaternion();
   private samplerRenderer: PlanetRenderer | null = null;
 
   /**
