@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Input } from './Input';
 import { STICK_DEFAULTS, STICK_INVERT_Y_KEY, STICK_SENSITIVITY_KEY } from './stick';
 import { FlightModel } from '@/ship/FlightModel';
+import { Vector3 } from 'three';
 
 type Listener = (e: unknown) => void;
 
@@ -400,5 +401,89 @@ describe('Mouse stick against the flight model (GAMEPLAY B1 acceptance)', () => 
     expect(t60).toBeGreaterThan(10);
     expect(Math.abs(t30 - t60) / t60).toBeLessThan(0.05);
     expect(Math.abs(t144 - t60) / t60).toBeLessThan(0.05);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review p1a
+// ---------------------------------------------------------------------------
+
+describe('review p1a: the lever reaches the coast detent however it gets to 0', () => {
+  it('Given the lever at 30 %, When S is held until the target hits 0, Then the throttle axis is exactly 0 on that frame (not an eased 1e-20)', () => {
+    const input = makeInput();
+    input.setThrottle(0.3);
+    for (let i = 0; i < 120; i++) frame(input, 1 / 60);
+    key('KeyS');
+    let frames = 0;
+    while (input.axes.throttle !== 0 && frames < 120) {
+      frame(input, 1 / 60);
+      frames++;
+    }
+    // 0.3 at 0.9/s is 20 frames of S; the detent must be reached with the target.
+    expect(input.axes.throttle).toBe(0);
+    expect(frames).toBeLessThanOrEqual(21);
+  });
+
+  it('Given the lever up, When code cuts it with setThrottle(0) (touchdown), Then the next frame is exactly 0', () => {
+    const input = makeInput();
+    input.setThrottle(0.5);
+    for (let i = 0; i < 60; i++) frame(input, 1 / 60);
+    input.setThrottle(0);
+    frame(input, 1 / 60);
+    expect(input.axes.throttle).toBe(0);
+  });
+
+  it('Given the lever up, When the wheel winds it past 0, Then the throttle axis is exactly 0', () => {
+    const input = makeInput();
+    input.setThrottle(0.1);
+    for (let i = 0; i < 60; i++) frame(input, 1 / 60);
+    for (let i = 0; i < 3; i++) dom.el.fire('wheel', { deltaY: 1, preventDefault() {} });
+    frame(input, 1 / 60);
+    expect(input.axes.throttle).toBe(0);
+  });
+
+  it('Given FA-ON in orbit with the lever brought down by S (not X), Then the orbit survives: the computer is in coast, not a stop', () => {
+    const input = makeInput();
+    const fm = new FlightModel();
+    fm.flightAssist = true;
+    const mu = 398600;
+    fm.setParent({ position: new Vector3(), velocity: new Vector3(), mu, radius: 6371 });
+    const p = new Vector3(0, 7000, 0);
+    fm.teleport(p, fm.orbitalVelocityAt(p));
+    const v0 = fm.velocity.length();
+
+    input.setThrottle(0.02);
+    for (let i = 0; i < 6; i++) frame(input, 1 / 60, fm);
+    key('KeyS');
+    for (let i = 0; i < 60; i++) frame(input, 1 / 60, fm);
+    key('KeyS', false);
+    for (let i = 0; i < 60 * 30; i++) frame(input, 1 / 60, fm);
+
+    expect(fm.assistState).toBe('coast');
+    // A ~0 km/s speed hold would have retro-burned 7.5 km/s to nothing in ~40 s.
+    expect(fm.velocity.length()).toBeGreaterThan(v0 - 0.1);
+  });
+});
+
+describe('review p1a: stick plumbing survivors', () => {
+  it('Given a deflected stick left alone, When 8 s of frames pass, Then Input recentres it', () => {
+    const input = makeInput();
+    lock(true);
+    move(STICK_DEFAULTS.radiusPx, 0);
+    frame(input, 1 / 60);
+    expect(input.stickDeflection.x).toBeGreaterThan(0.99);
+    for (let i = 0; i < 60 * STICK_DEFAULTS.recentreSeconds + 2; i++) frame(input, 1 / 60);
+    expect(input.stickDeflection.x).toBe(0);
+    expect(input.axes.yaw).toBe(0);
+  });
+
+  it('Given mouse motion that arrived before the lock was lost, When the next frame runs, Then that motion is discarded too', () => {
+    const input = makeInput();
+    lock(true);
+    move(STICK_DEFAULTS.radiusPx, 0); // not yet folded in by update()
+    lock(false);
+    frame(input, 1 / 60);
+    expect(input.stickDeflection.x).toBe(0);
+    expect(input.axes.yaw).toBe(0);
   });
 });

@@ -815,7 +815,11 @@ export class FlightModel {
     // --- throttle spool -----------------------------------------------------
     // Under an active assist `_throttle` is instead the engine output the
     // computer chose, written in `stepAssist`.
-    if (!active) {
+    // In the coast detent the computer cuts the drive outright: the spool would
+    // otherwise keep pushing whatever output the hold last chose for ~1 s
+    // (up to ~0.14 km/s along the nose) after the pilot asked for no thrust.
+    if (this._fa && !active) this._throttle = 0;
+    else if (!active) {
       this._throttle = damp(this._throttle, clamp01(this.command.throttle), c.throttleSpoolTime, h);
     }
 

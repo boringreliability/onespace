@@ -473,3 +473,123 @@ describe('FA-OFF: Newtonian, unchanged', () => {
     expect(b.orientation.equals(a.orientation)).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Review p1a: findings, and tests for the survivors of the mutation run
+// ---------------------------------------------------------------------------
+
+describe('review p1a: the coast detent cuts the drive', () => {
+  it('Given FA-ON accelerating at full main drive, When the lever goes to the detent, Then from the next substep there is no thrust at all (no spool tail)', () => {
+    const fm = deepSpace(true);
+    fm.command.throttle = 0.6;
+    run(fm, 2); // far below v_set: the computer has the main drive pinned
+    expect(fm.throttle).toBeGreaterThan(0.9);
+
+    fm.command.throttle = 0;
+    run(fm, H);
+    const v = fm.velocity.clone();
+    run(fm, 3);
+    expect(fm.velocity.equals(v)).toBe(true);
+    expect(fm.throttle).toBe(0);
+    expect(fm.assistState).toBe('coast');
+  });
+
+  it('Given FA-ON hovering on the brake with the nose up, When the brake is released at lever 0, Then it falls freely at once (the hover thrust does not linger)', () => {
+    const fm = new FlightModel(C);
+    fm.flightAssist = true;
+    fm.setParent({ position: new Vector3(), velocity: new Vector3(), mu: 398600, radius: 6371 });
+    const noseUp = new Quaternion().setFromAxisAngle(new Vector3(1, 0, 0), Math.PI / 2);
+    fm.teleport(new Vector3(0, 7000, 0), new Vector3(), noseUp);
+    fm.command.brake = true;
+    run(fm, 5);
+    expect(fm.throttle).toBeGreaterThan(0); // the main drive carries the hover
+
+    fm.command.brake = false;
+    run(fm, H);
+    expect(fm.throttle).toBe(0);
+    const vz0 = fm.verticalSpeed;
+    run(fm, 1);
+    // g at 7000 km is ~8.1 m/s². A hover decaying over the 0.7 s spool would
+    // lose well under half of that in the first second.
+    expect(vz0 - fm.verticalSpeed).toBeGreaterThan(0.0078);
+  });
+});
+
+describe('review p1a: mutation survivors', () => {
+  it('Given a non-positive or NaN ceiling, Then the set speed is 0, never NaN', () => {
+    expect(assistTargetSpeed(0.5, 0)).toBe(0);
+    expect(assistTargetSpeed(0.5, -1)).toBe(0);
+    expect(assistTargetSpeed(0.5, Number.NaN)).toBe(0);
+  });
+
+  it('Given FA-ON holding station on the brake near an Earth-mass parent, Then gravity is cancelled, not merely damped (no steady sag)', () => {
+    const fm = new FlightModel(C);
+    fm.flightAssist = true;
+    fm.setParent({ position: new Vector3(), velocity: new Vector3(), mu: 398600, radius: 6371 });
+    fm.teleport(new Vector3(0, 7000, 0), new Vector3(), new Quaternion());
+    fm.command.brake = true;
+    run(fm, 30);
+    // Without the feed-forward the P-loop settles at v = g·τ ≈ 4 m/s downward.
+    expect(fm.speed).toBeLessThan(1e-5);
+    expect(Math.abs(fm.position.length() - 7000)).toBeLessThan(0.005);
+  });
+
+  it('Given FA-ON landed with the brake held, Then the computer spends no thrust holding the ship against its own gear', () => {
+    const R = 6371;
+    const fm = new FlightModel(C);
+    fm.flightAssist = true;
+    fm.setParent({ position: new Vector3(), velocity: new Vector3(), mu: 398600, radius: R });
+    fm.setGroundSampler((p) => p.length() - R);
+    fm.teleport(new Vector3(0, R + 0.002, 0), new Vector3(), new Quaternion());
+    run(fm, 5, 1 / 60);
+    expect(fm.grounded).toBe(true);
+    fm.command.brake = true;
+    run(fm, 5, 1 / 60);
+    expect(fm.grounded).toBe(true);
+    // Thrust-only proper acceleration: ~0 when the gear carries the weight,
+    // ~0.83 g if the computer cancels gravity on the ground as well.
+    expect(fm.gForce).toBeLessThan(0.05);
+  });
+
+  it('Given FA-ON at full lever near the ceiling, Then the main drive is still faded by the speed limiter', () => {
+    const fm = deepSpace(true);
+    fm.teleport(new Vector3(), new Vector3(0, 0, -0.9 * C.topSpeed), new Quaternion());
+    fm.command.throttle = 1;
+    const before = fm.velocity.length();
+    run(fm, H);
+    const gained = fm.velocity.length() - before;
+    const limiter = 1 - Math.pow(0.9, C.speedFalloffExponent);
+    expect(gained).toBeGreaterThan(0);
+    expect(gained).toBeLessThanOrEqual(MAIN * limiter * H * 1.0001);
+  });
+
+  it('Given FA-ON and a lateral (X) strafe, Then the pilot’s strafe wins on that axis too', () => {
+    const fm = deepSpace(true);
+    fm.command.throttle = 0.2;
+    fm.command.strafeX = 1;
+    run(fm, 2);
+    // Full RCS to the right for 2 s, unopposed by the computer.
+    expect(fm.velocity.dot(fm.right)).toBeGreaterThan(RCS * 2 * 0.99);
+  });
+
+  it('Given FA-ON in a hold, When FA is switched off, Then the readouts say off at once, before the next update', () => {
+    const fm = deepSpace(true);
+    fm.command.throttle = 0.3;
+    run(fm, 1);
+    expect(fm.assistState).toBe('hold');
+    quiet.push(bus.on('log', () => {}));
+    fm.flightAssist = false;
+    expect(fm.assistState).toBe('off');
+    expect(fm.assistTargetKmS).toBe(0);
+  });
+
+  it('Given FA-ON in a hold, When the lever goes to the detent, Then the set-speed readout is 0', () => {
+    const fm = deepSpace(true);
+    fm.command.throttle = 0.3;
+    run(fm, 1);
+    expect(fm.assistTargetKmS).toBeGreaterThan(0);
+    fm.command.throttle = 0;
+    run(fm, H);
+    expect(fm.assistTargetKmS).toBe(0);
+  });
+});

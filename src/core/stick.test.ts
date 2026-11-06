@@ -192,3 +192,43 @@ describe('VirtualStick framerate independence', () => {
     expect(Math.abs(a144 - a60) / a60).toBeLessThan(0.05);
   });
 });
+
+describe('review p1a: VirtualStick survivors', () => {
+  it('Given a shove of exactly two radii, When the hand comes back one radius, Then the stick is centred (no wound-up travel)', () => {
+    const s = new VirtualStick({ recentreSeconds: 0 });
+    s.addDelta(2 * R, 0);
+    s.addDelta(-R, 0);
+    expect(s.deflection.x).toBeCloseTo(0, 12);
+  });
+
+  it('Given a non-finite y delta, Then the whole delta is ignored (x does not move either)', () => {
+    const s = new VirtualStick();
+    s.addDelta(R / 2, Number.NaN);
+    s.addDelta(R / 2, Number.POSITIVE_INFINITY);
+    expect(s.deflection.x).toBe(0);
+    expect(s.deflection.y).toBe(0);
+  });
+
+  it('Given a negative dt (clock went backwards), Then recentring does not push the stick outwards', () => {
+    const s = new VirtualStick();
+    s.addDelta(R / 2, 0);
+    s.update(-1);
+    expect(s.deflection.x).toBeCloseTo(0.5, 12);
+  });
+
+  it('Given a small deflection and a long frame, Then recentring stops at the centre and never overshoots it', () => {
+    const s = new VirtualStick();
+    s.addDelta(R * 0.01, 0);
+    s.update(1); // walks 12.5 % of R: far more than the 1 % left
+    expect(s.deflection.x).toBe(0);
+    expect(s.deflection.y).toBe(0);
+  });
+
+  it('Given a half deflection straight down, Then the axis is the rescaled magnitude, not half of it', () => {
+    const s = new VirtualStick({ recentreSeconds: 0 });
+    s.addDelta(0, R / 2);
+    const dz = STICK_DEFAULTS.deadzone;
+    expect(s.axis.y).toBeCloseTo((0.5 - dz) / (1 - dz), 12);
+    expect(s.axis.x).toBe(0);
+  });
+});

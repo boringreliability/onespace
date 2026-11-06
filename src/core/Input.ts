@@ -207,6 +207,11 @@ export class Input {
     }
     this.targetThrottle = clamp(this.targetThrottle, 0, 1);
     a.throttle += (this.targetThrottle - a.throttle) * Math.min(1, dt * 4);
+    // The zero stop IS the coast detent, however the lever got there (S, the
+    // wheel, `setThrottle(0)` on touchdown). The easing above is exponential
+    // and never reaches 0 by itself, and under flight assist a lever at 1e-20
+    // is a speed hold at ~0 km/s: an active stop that eats the orbit.
+    if (this.targetThrottle === 0) a.throttle = 0;
     // X skips the lever's easing on purpose: under flight assist, exactly 0 is
     // the coast detent, and a lever that eases down passes through every set
     // speed on the way (a brief speed hold the pilot never asked for).

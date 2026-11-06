@@ -134,4 +134,12 @@ describe('load/save against storage', () => {
     st.setItem('os.stick.invertY', 'maybe');
     expect(loadStickSettings(st)).toEqual(DEFAULT_STICK_SETTINGS);
   });
+
+  it('Given an out-of-range sensitivity handed to save, Then what is stored is already clamped', () => {
+    const st = memoryStorage();
+    saveStickSettings(st, { sensitivity: 100, invertY: false });
+    expect(st.data.get(STICK_SENSITIVITY_KEY)).toBe(String(STICK_SENSITIVITY_MAX));
+    saveStickSettings(st, { sensitivity: 0.01, invertY: false });
+    expect(st.data.get(STICK_SENSITIVITY_KEY)).toBe(String(STICK_SENSITIVITY_MIN));
+  });
 });
