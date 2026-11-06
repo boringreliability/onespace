@@ -61,7 +61,7 @@ const TIERS: Record<QualityTier, QualitySettings> = {
   medium: {
     tier: 'medium',
     renderScale: 0.85,
-    maxPixelRatio: 1.5,
+    maxPixelRatio: 1,
     planetMaxDepth: 9,
     patchResolution: 33,
     patchBuildBudget: 3,
@@ -81,9 +81,14 @@ const TIERS: Record<QualityTier, QualitySettings> = {
   high: {
     tier: 'high',
     renderScale: 1,
-    maxPixelRatio: 2,
+    // 2 on a retina laptop is 5.8-7.7 Mpx through a raymarched, log-depth
+    // stack; the v2 audit measured 40 % of the frame in that last step of DPR.
+    maxPixelRatio: 1.25,
     planetMaxDepth: 11,
-    patchResolution: 65,
+    // 65 meant ~3.7 M fbm evaluations per frame (each vertex evaluates the
+    // terrain five times). 33 is a quarter of the vertices; the deeper
+    // quadtree keeps close-up detail. Baked tiles replace this in phase 3.
+    patchResolution: 33,
     patchBuildBudget: 4,
     atmosphereSteps: 24,
     atmosphereLightSteps: 8,
@@ -101,7 +106,7 @@ const TIERS: Record<QualityTier, QualitySettings> = {
   ultra: {
     tier: 'ultra',
     renderScale: 1,
-    maxPixelRatio: 2,
+    maxPixelRatio: 1.5,
     planetMaxDepth: 13,
     patchResolution: 65,
     patchBuildBudget: 6,

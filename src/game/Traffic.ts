@@ -26,7 +26,7 @@ import { Rng, hashSeed } from '@/math/rng';
 import { AU, type ScanResult } from '@/gen/types';
 import { lodForDistance } from '@/gen/ships/types';
 import type { ShipBlueprint } from '@/gen/ships/types';
-import { generateShip } from '@/gen/ships/blueprint';
+import { generateShip, type ShipParams } from '@/gen/ships/blueprint';
 import { shipScan } from '@/gen/ships/physics';
 import { FACTIONS } from '@/gen/ships/families';
 
@@ -42,6 +42,8 @@ import type { Universe, UniverseBody } from '@/game/Universe';
  * skybox full of dots.
  */
 const MAX_TRAFFIC = 4;
+/** Heavy builds (one blueprint or one mesh) allowed per frame. */
+const HEAVY_BUILDS_PER_FRAME = 1;
 
 /** Beyond this the mesh is released entirely; the ship still exists as data. */
 const RELEASE_DISTANCE_KM = 6e5;
@@ -73,7 +75,13 @@ interface CoOrbit {
 }
 
 interface Vessel {
-  readonly blueprint: ShipBlueprint;
+  /**
+   * What to build. Generation is deferred: one `generateShip` is 40-75 ms and
+   * a system carries up to four, which v1 built in a single frame on arrival.
+   */
+  readonly params: ShipParams;
+  /** Null until the per-frame build budget reaches this vessel. */
+  blueprint: ShipBlueprint | null;
   /** World position, kilometres. Same frame as Universe's bodies. */
   readonly world: Vector3;
   /** The body it orbits, or null for a vessel in open space. */
@@ -163,7 +171,7 @@ export class Traffic implements GameModule {
       const seed = hashSeed(sys.seed, `vessel:${i}`);
       const faction = rng.pick(FACTIONS);
       const role = rng.pick(PARKED_ROLES);
-      const blueprint = generateShip({
+      const params: ShipParams = {
         seed,
         factionId: faction.id,
         role,
@@ -171,7 +179,7 @@ export class Traffic implements GameModule {
         ageYears: rng.range(8, 60),
         damageLevel: rng.range(0.05, 0.45),
         maintenance: rng.range(0.2, 0.8),
-      });
+      };
 
       // The FIRST vessel always anchors to the world the player is at — which
       // is now a well-defined thing: the ship's SOI parent. Picking anchors
@@ -210,7 +218,8 @@ export class Traffic implements GameModule {
             : AU * rng.range(0.2, 0.8);
 
       this.vessels.push({
-        blueprint,
+        params,
+        blueprint: null,
         world: new Vector3(),
         anchor,
         orbitRadiusKm: radius,
@@ -319,9 +328,21 @@ export class Traffic implements GameModule {
 
     this.camWorld.copy(this.universe.flight.worldPosition);
 
+    // At most one heavy build per frame — a blueprint (40-75 ms) or a mesh
+    // (33-44 ms). Spread over a few frames it is invisible; in one frame it
+    // was the ~600 ms hitch the v2 audit measured just after boot.
+    let heavyBudget = HEAVY_BUILDS_PER_FRAME;
+
     for (const v of this.vessels) {
       this.placeVessel(v);
       v.distanceKm = this.camWorld.distanceTo(v.world);
+
+      if (!v.blueprint) {
+        if (heavyBudget <= 0) continue;
+        heavyBudget--;
+        v.blueprint = generateShip(v.params);
+        continue;
+      }
 
       const wanted =
         v.distanceKm > RELEASE_DISTANCE_KM
@@ -334,6 +355,8 @@ export class Traffic implements GameModule {
       }
 
       if (!v.visual) {
+        if (heavyBudget <= 0) continue;
+        heavyBudget--;
         v.visual = createShipVisual(v.blueprint, config.quality);
         this.root.add(v.visual.object3d);
         v.lod = -1;
@@ -423,9 +446,10 @@ export class Traffic implements GameModule {
   nearest(): { id: string; name: string; distanceKm: number } | null {
     let best: Vessel | null = null;
     for (const v of this.vessels) {
+      if (!v.blueprint) continue;
       if (!best || v.distanceKm < best.distanceKm) best = v;
     }
-    if (!best) return null;
+    if (!best?.blueprint) return null;
     return { id: best.blueprint.id, name: best.blueprint.name, distanceKm: best.distanceKm };
   }
 
@@ -434,8 +458,8 @@ export class Traffic implements GameModule {
    * and never change, and shipScan walks the whole mass model to build them.
    */
   scan(id: string): ScanResult | null {
-    const v = this.vessels.find((x) => x.blueprint.id === id);
-    if (!v) return null;
+    const v = this.vessels.find((x) => x.blueprint?.id === id);
+    if (!v?.blueprint) return null;
     if (!v.scan) v.scan = shipScan(v.blueprint);
     return v.scan;
   }

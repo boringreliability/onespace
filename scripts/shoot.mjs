@@ -95,9 +95,13 @@ async function run() {
   const browser = await chromium.launch({
     args: [
       // Headless Chromium needs to be told to expose a GPU-ish WebGL stack.
+      // Default is SwiftShader: slow, but bit-identical across machines, which
+      // is what a visual review wants. Its frame times are meaningless — set
+      // OS_GPU=1 to run on the real GPU (Metal on macOS) when measuring.
       '--use-gl=angle',
-      '--use-angle=default',
-      '--enable-unsafe-swiftshader',
+      ...(process.env.OS_GPU
+        ? ['--use-angle=metal', '--enable-gpu']
+        : ['--use-angle=default', '--enable-unsafe-swiftshader']),
       '--enable-webgl',
       '--ignore-gpu-blocklist',
       '--disable-gpu-sandbox',

@@ -72,6 +72,11 @@ export class Pilot implements GameModule {
     ctx.scene.add(this.ship.object3d);
     // The rig needs a real camera, which only exists once the engine has one.
     this.rig = new CameraRig(ctx.camera);
+    // Pilot owns the camera key (it also has to restore the mode after a
+    // landing). Leaving the rig's own handler on as well made one press of V
+    // cycle twice — chase → orbit → chase — so cockpit and cinematic were
+    // unreachable.
+    this.rig.handleToggleKey = false;
 
     bus.on('camera:shake', ({ intensity, duration }) => this.rig.shake(intensity, duration));
 

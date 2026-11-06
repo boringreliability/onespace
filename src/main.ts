@@ -51,6 +51,12 @@ async function main(): Promise<void> {
     bus.emit('boot:progress', { progress: 0.1 + progress * 0.85, status }),
   );
 
+  // Link every program the opening scene needs while the boot veil is still
+  // up. Lazily, the first frame did it synchronously: 0.3 s warm, 2.8 s with
+  // a cold shader cache — a frozen screen as the first thing a player sees.
+  boot.set(0.97, 'compiling shaders');
+  await engine.prewarm();
+
   boot.set(1, 'ready');
   engine.start();
   bus.emit('boot:done');

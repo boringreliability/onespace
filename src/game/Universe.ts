@@ -46,6 +46,7 @@ import { RingRenderer } from '@/render/Rings';
 import { StarRenderer } from '@/render/Star';
 import { AtmosphereRenderer } from '@/render/Atmosphere';
 import { sceneDepthTexture } from '@/render/PostFX';
+import { planStreaming, type StreamCandidate } from '@/game/streaming';
 
 import {
   DEFAULT_SHIP_CONFIG,
@@ -632,24 +633,30 @@ export class Universe implements GameModule {
       b.distanceSq = this.camWorld.distanceToSquared(b.world);
     }
 
-    // Partial selection: we only need the top N, not a full sort.
-    const wanted = new Set<Body>();
-    const pool = this.bodies.slice();
-    pool.sort((a, z) => a.distanceSq - z.distanceSq);
-    for (let i = 0; i < Math.min(PLANET_RENDER_BUDGET, pool.length); i++) {
-      const b = pool[i]!;
-      // Beyond ~60 planet radii a world is a dot; a full quadtree for a dot is
-      // waste. The star renderer's point-light impostor covers those.
-      if (b.distanceSq < Math.pow(b.spec.radius * 60, 2)) wanted.add(b);
+    // Acquire at 60 radii, release at 75 — see game/streaming.ts for why the
+    // two thresholds differ. The candidate array is reused across frames.
+    const cands = this.streamCandidates;
+    while (cands.length < this.bodies.length) cands.push({ distanceKm: 0, radiusKm: 1, streamed: false });
+    cands.length = this.bodies.length;
+    for (let i = 0; i < this.bodies.length; i++) {
+      const b = this.bodies[i]!;
+      const c = cands[i]!;
+      c.distanceKm = Math.sqrt(b.distanceSq);
+      c.radiusKm = b.spec.radius;
+      c.streamed = b.planet !== null;
     }
+    const wanted = planStreaming(cands, PLANET_RENDER_BUDGET);
 
-    for (const b of this.bodies) {
-      if (wanted.has(b)) this.acquireRenderers(b, ctx);
+    for (let i = 0; i < this.bodies.length; i++) {
+      const b = this.bodies[i]!;
+      if (wanted[i]) this.acquireRenderers(b, ctx);
       else if (b.planet) this.releaseRenderers(b);
     }
   }
 
-  private acquireRenderers(b: Body, _ctx: EngineContext): void {
+  private streamCandidates: Array<{ -readonly [K in keyof StreamCandidate]: StreamCandidate[K] }> = [];
+
+  private acquireRenderers(b: Body, ctx: EngineContext): void {
     if (b.planet) return;
     const q = config.quality;
 
@@ -673,6 +680,22 @@ export class Universe implements GameModule {
       // cheap path stays on by default so a world nobody wired still has air.
       b.planet.setAtmosphereShell(true);
     }
+
+    // Compile the new world's programs off the critical path. Without this
+    // the first frame that draws it links them synchronously — 140-740 ms of
+    // frozen screen at exactly the moment a planet comes into view. The
+    // object stays hidden until its programs are ready; at 60 radii it is a
+    // few pixels across, so a frame or two of absence is invisible.
+    const obj = b.planet.object3d;
+    obj.visible = false;
+    const planet = b.planet;
+    ctx.renderer
+      .compileAsync(obj, ctx.camera, ctx.scene)
+      .catch(() => undefined)
+      .then(() => {
+        // Released while compiling: a new renderer may now own the slot.
+        if (b.planet === planet) obj.visible = true;
+      });
 
     bus.emit('planet:approached', {
       planet: b.spec,

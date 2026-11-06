@@ -55,6 +55,14 @@ export interface CruiseConfig {
   readonly dropTime: number;
   /** The ceiling handed back to the flight model on exit, km/s. */
   readonly exitSpeedKmS: number;
+  /**
+   * Relative air density above which the drive refuses. An exponential
+   * atmosphere never reaches zero — float64 only underflows at ~745 scale
+   * heights — so a `> 0` test locked the drive out thousands of kilometres
+   * above a world whose air is a couple of hundred thick. 1e-6 is ~14 scale
+   * heights: the top of any atmosphere a player would call one.
+   */
+  readonly atmosphereCutoff: number;
 }
 
 export const CRUISE_DEFAULTS: CruiseConfig = {
@@ -71,6 +79,7 @@ export const CRUISE_DEFAULTS: CruiseConfig = {
   // The sublight ceiling. Dropping at 1 050 km/s would fling the ship past
   // whatever it came to see; this is the one deliberate cheat in the model.
   exitSpeedKmS: 60,
+  atmosphereCutoff: 1e-6,
 };
 
 /**
@@ -123,7 +132,7 @@ export interface CruiseInputs {
   /** Distance to the nearest surface — any body, or the star. Kilometres. */
   readonly clearanceKm: number;
   readonly grounded: boolean;
-  /** Non-zero means the ship is in air. */
+  /** Relative air density; above `atmosphereCutoff` the ship is in air. */
   readonly atmosphericDensity: number;
 }
 
@@ -167,7 +176,7 @@ export class CruiseDrive {
    */
   private obstacle(i: CruiseInputs, keeping: boolean): CruiseBlock | null {
     if (i.grounded) return 'landed';
-    if (i.atmosphericDensity > 0) return 'atmosphere';
+    if (i.atmosphericDensity > this.config.atmosphereCutoff) return 'atmosphere';
     const need = keeping ? this.config.dropClearanceKm : this.config.engageClearanceKm;
     if (!(i.clearanceKm >= need)) return 'mass';
     return null;
