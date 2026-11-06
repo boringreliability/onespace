@@ -146,6 +146,8 @@ import {
   ZeroFactor,
   type IUniform,
   type Texture,
+  type Camera,
+  type WebGLRenderer,
 } from 'three';
 
 import type { EngineContext } from '@/core/Engine';
@@ -1096,6 +1098,22 @@ export class AtmosphereRenderer {
   /** The precomputed column-density table, for anyone who wants to inspect it. */
   getTransmittanceLut(): Texture {
     return this.lut;
+  }
+
+  /**
+   * Link the scattering march ahead of its first use, without blocking where
+   * the driver supports KHR_parallel_shader_compile. It renders in a private
+   * scene that renderer.compileAsync(object3d) never traverses, into its own
+   * target, which is bound here because the program key includes the
+   * target's output colour space. The side flip in update() is render state,
+   * not a program change (three only rekeys on needsUpdate).
+   */
+  async compileAsync(renderer: WebGLRenderer, camera: Camera): Promise<void> {
+    const prev = renderer.getRenderTarget();
+    renderer.setRenderTarget(this.scatterRT);
+    const job = renderer.compileAsync(this.marchScene, camera);
+    renderer.setRenderTarget(prev);
+    await job;
   }
 
   update(dt: number, ctx: EngineContext, view: ViewState): void {
