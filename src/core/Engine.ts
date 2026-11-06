@@ -21,6 +21,8 @@ import { config, detectTier, type QualitySettings } from './Config';
 import { FloatingOrigin } from './FloatingOrigin';
 import { Input } from './Input';
 import { ResolutionGovernor } from './ResolutionGovernor';
+import { modes, type Mode } from './Modes';
+import { tickModules } from './tick';
 import { parseDevParams } from './Route';
 
 export interface EngineContext {
@@ -40,6 +42,14 @@ export interface EngineContext {
 
 export interface GameModule {
   readonly name: string;
+  /**
+   * Modes this module lives in (see core/Modes.ts and core/tick.ts). Omitted
+   * means always on — the v1 behaviour, and the right default for anything
+   * whose clock must not stop (log, audio).
+   */
+  readonly activeIn?: readonly Mode[];
+  /** Told on every mode change, active or not, so it can hide or restore. */
+  onModeChange?(from: Mode, to: Mode, ctx: EngineContext): void;
   init?(ctx: EngineContext): Promise<void> | void;
   /** Called every frame, in registration order. */
   update?(dt: number, ctx: EngineContext): void;
@@ -67,6 +77,11 @@ export class Engine {
   readonly origin = new FloatingOrigin();
 
   private modules: GameModule[] = [];
+  /** Reused every frame — no allocation in the loop. */
+  private tickState: { base: typeof modes.base; overlay: typeof modes.overlay } = {
+    base: modes.base,
+    overlay: modes.overlay,
+  };
   private pipeline: RenderPipeline | null = null;
   private clock = new Clock();
   private running = false;
@@ -130,6 +145,11 @@ export class Engine {
     this.camera.position.set(0, 0, 0);
 
     this.input = new Input(canvas);
+
+    modes.onChange((from, to) => {
+      const ctx = this.context;
+      for (const m of this.modules) m.onModeChange?.(from, to, ctx);
+    });
 
     this.handleResize();
     window.addEventListener('resize', this.handleResize);
@@ -205,8 +225,9 @@ export class Engine {
     this.input.update(dt);
 
     const ctx = this.context;
-    for (const m of this.modules) m.update?.(dt, ctx);
-    for (const m of this.modules) m.lateUpdate?.(dt, ctx);
+    this.tickState.base = modes.base;
+    this.tickState.overlay = modes.overlay;
+    tickModules(this.modules, this.tickState, dt, ctx);
 
     if (this.pipeline) this.pipeline.render(dt, ctx);
     else this.renderer.render(this.scene, this.camera);
