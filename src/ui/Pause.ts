@@ -25,6 +25,12 @@ import {
   saveStickSettings,
   type StickSettings,
 } from '@/ui/stickSettings';
+import {
+  FLIGHT_PRESETS,
+  FLIGHT_PRESET_IDS,
+  activeFlightPreset,
+  setActiveFlightPreset,
+} from '@/game/flightPreset'; // [v2-p4]
 
 /** Seconds for the sheet to fade. Eased, never snapped (ARCHITECTURE §6). */
 const FADE = 0.22;
@@ -53,6 +59,9 @@ const CONTROLS: ReadonlyArray<readonly [string, string]> = [
   ['V', 'CAMERA'],
   ['F2', 'SCREENSHOT'],
   ['ESC', 'PAUSE'],
+  // [v2-p4]
+  ['L', 'AUTOPILOT — LAND · TO ORBIT'],
+  [', / .', 'TIME COMPRESSION (GROUND · STABLE ORBIT)'],
 ];
 
 /** localStorage, or null where it is blocked (private windows, sandboxed frames). */
@@ -264,6 +273,34 @@ export class Pause implements GameModule {
     note.className = 'os-pz-note';
     note.textContent = 'RELOADS';
     tierRow.append(tier, note);
+
+    // --- [v2-p4] flight preset (P8). Persisted by game/flightPreset.ts; the
+    // FA default applies at once, the autopilot gate on the next L.
+    const presetRow = this.row(set, 'FLIGHT PRESET');
+    const preset = document.createElement('select');
+    preset.className = 'os-pz-select';
+    for (const id of FLIGHT_PRESET_IDS) {
+      const o = document.createElement('option');
+      o.value = id;
+      o.textContent = FLIGHT_PRESETS[id].label;
+      preset.appendChild(o);
+    }
+    const presetNote = document.createElement('span');
+    presetNote.className = 'os-pz-note';
+    const showPreset = (): void => {
+      const p = activeFlightPreset();
+      preset.value = p.id;
+      presetNote.textContent = p.blurb;
+    };
+    preset.addEventListener('change', () => {
+      const p = setActiveFlightPreset(preset.value);
+      this.universe.flight.flightAssist = p.flightAssist;
+      bus.emit('log', { text: `FLIGHT PRESET — ${p.label}`, tone: 'normal' });
+      showPreset();
+    });
+    presetRow.append(preset, presetNote);
+    showPreset();
+    // --- [/v2-p4]
 
     // Actions.
     const actions = document.createElement('div');

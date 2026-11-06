@@ -144,8 +144,12 @@ describe('L engages the autopilot', () => {
     h.input.press('land');
     h.tick(240);
     expect(h.ap.active).toBe(true);
-    // 4 s of deorbit burn out of a 1.2 km/s orbit must have taken something off.
-    expect(h.fm.speed).toBeLessThan(Math.sqrt(MU / (1.6 * R)) - 0.05);
+    // 4 s of deorbit burn out of a ~1 km/s orbit must have taken horizontal
+    // speed off. (Total speed rises: the suicide burn dives first.)
+    const up = h.fm.position.clone().normalize();
+    const horizontal = h.fm.velocity.clone().addScaledVector(up, -h.fm.velocity.dot(up)).length();
+    expect(horizontal).toBeLessThan(Math.sqrt(MU / (1.6 * R)) - 0.05);
+    expect(h.fm.verticalSpeed).toBeLessThan(0);
   });
 
   it('Given an engaged autopilot, When L is pressed again, Then it disengages with "AUTOPILOT DISENGAGED" and FA is restored', () => {

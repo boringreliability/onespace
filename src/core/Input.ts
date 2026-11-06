@@ -46,7 +46,10 @@ export type ActionName =
   | 'pause'
   | 'screenshot'
   | 'zeroThrottle'
-  | 'flightAssist';
+  | 'flightAssist'
+  // [v2-p4] time compression steps (game/TimeCompression.ts)
+  | 'timeSlower'
+  | 'timeFaster';
 
 const KEY_ACTIONS: Record<string, ActionName> = {
   ShiftLeft: 'boost',
@@ -64,6 +67,9 @@ const KEY_ACTIONS: Record<string, ActionName> = {
   F2: 'screenshot',
   KeyX: 'zeroThrottle', // the coast detent: lever to 0 in one press, not 1.1 s of S
   KeyZ: 'flightAssist',
+  // [v2-p4] `,` / `.` step time compression 1× / 10× / 100× (the KSP keys).
+  Comma: 'timeSlower',
+  Period: 'timeFaster',
 };
 
 export class Input {

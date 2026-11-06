@@ -21,6 +21,8 @@ import { Scanner } from '@/game/Scanner';
 import { Targeting } from '@/game/Targeting';
 import { Instruments } from '@/game/Instruments';
 import { Cruise } from '@/game/Cruise';
+import { AutoPilot } from '@/game/AutoPilot'; // [v2-p4]
+import { TimeControl } from '@/game/TimeControl'; // [v2-p4]
 import { Showroom, registerShowroomShots, setShipVisualFactory } from '@/game/Showroom';
 import { createShipVisual } from '@/render/ships/ShipMesh';
 import { activeShotName, registerShot, shotOwnsScene, updateActiveShot } from '@/game/Shots';
@@ -301,6 +303,13 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   progress(0.845, 'priming the cruise drive');
   // After Universe, whose `nearestGapKm` is its speed limit.
   await engine.add(new Cruise({ universe }));
+  // [v2-p4] L: auto-land / auto-orbit. After Pilot (it overwrites the command
+  // Pilot copied from the stick) and after Cruise (which also reads L).
+  // Time compression after both: it judges this frame's command and autopilot.
+  const autopilot = new AutoPilot({ universe, warp });
+  await engine.add(autopilot);
+  await engine.add(new TimeControl({ universe, warp, autopilot, hud }));
+  // [/v2-p4]
 
   progress(0.85, 'calibrating the array');
   // Scanner needs both the universe and the fleet, so it can only be built

@@ -693,6 +693,14 @@ export class Hud implements GameModule {
     this.stickY = clamp(y, -1, 1);
   }
 
+  // --- [v2-p4] time compression readout -----------------------------------
+  private tHeadRate: TextSlot | null = null;
+  /** "×10" / "×100" after the location while time is compressed; blank at 1×. */
+  setTimeRate(rate: number): void {
+    this.tHeadRate?.set(rate > 1 ? `×${rate}` : '');
+  }
+  // --- [/v2-p4]
+
   setVisible(b: boolean): void {
     this.visible = b;
     this.root?.classList.toggle('os-hidden', !b);
@@ -1193,6 +1201,8 @@ export class Hud implements GameModule {
     const loc = el('span', 'os-head-loc', p, 'uncharted');
     this.tHeadScale = new TextSlot(scale);
     this.tHeadLoc = new TextSlot(loc);
+    // [v2-p4] time compression factor; empty (and so invisible) at 1×.
+    this.tHeadRate = new TextSlot(el('span', 'os-head-rate', p, ''));
   }
 
   private buildThrottle(root: HTMLElement): void {
@@ -1805,6 +1815,9 @@ const CSS = /* css */ `
 .os-hud .os-head-scale { color: var(--os-dim); }
 .os-hud .os-head-sep { opacity: 0.55; }
 .os-hud .os-head-loc { color: var(--os-amber); text-shadow: var(--os-glow); }
+/* [v2-p4] time compression */
+.os-hud .os-head-rate { color: var(--os-amber); text-shadow: var(--os-glow); letter-spacing: 0.15em; }
+.os-hud .os-head-rate:empty { display: none; }
 
 /* Throttle ---------------------------------------------------------------- */
 .os-hud .os-thr { left: 64px; top: 50%; transform: translateY(-50%); }
