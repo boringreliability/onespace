@@ -10,6 +10,7 @@
  */
 
 import type { EngineContext } from '@/core/Engine';
+import { modes, type BaseMode } from '@/core/Modes';
 
 export interface Shot {
   /** Kebab-case, stable — it becomes the PNG filename. */
@@ -45,6 +46,12 @@ export interface Shot {
 
 const shots = new Map<string, Shot>();
 let active: Shot | null = null;
+/**
+ * The mode a review shot interrupted, so clearing it can hand that mode back.
+ * Set only by the FIRST shot of a run: shot → shot stays in review, and the
+ * mode to return to is still the one the player (or the harness) was in.
+ */
+let returnTo: BaseMode | null = null;
 
 export function registerShot(shot: Shot): void {
   if (shots.has(shot.name)) {
@@ -65,6 +72,13 @@ export async function setShot(name: string, ctx: EngineContext): Promise<void> {
   const shot = shots.get(name);
   if (!shot) throw new Error(`unknown shot "${name}"`);
   if (active && active !== shot) active.teardown?.(ctx);
+  // A shot is a mode. Entering `review` is what stands the Yard down and
+  // tells every module the scene is taken; `shotOwnsScene()` below still
+  // answers per shot, so a `live` shot keeps the simulation running.
+  if (modes.base !== 'review' && modes.can('review')) {
+    returnTo = modes.base;
+    modes.go('review');
+  }
   active = shot;
   await shot.apply(ctx);
 }
@@ -89,6 +103,15 @@ export function updateActiveShot(dt: number, ctx: EngineContext): void {
   active?.update?.(dt, ctx);
 }
 
-export function clearShot(): void {
+/**
+ * Leave the active shot: tear its fixture down and return to the mode it
+ * interrupted. A no-op when no shot is active.
+ */
+export function clearShot(ctx: EngineContext): void {
+  if (!active) return;
+  const shot = active;
   active = null;
+  shot.teardown?.(ctx);
+  if (modes.base === 'review' && returnTo && modes.can(returnTo)) modes.go(returnTo);
+  returnTo = null;
 }

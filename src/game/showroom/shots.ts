@@ -32,7 +32,7 @@ import {
 // FAILURE, because a critic given only a picture will review the lighting.
 // ===========================================================================
 
-interface ShowroomShotDef {
+export interface ShowroomShotDef {
   readonly name: string;
   readonly description: string;
   readonly setup: ShowroomSetup;
@@ -41,7 +41,7 @@ interface ShowroomShotDef {
   readonly settle?: number;
 }
 
-const SHOT_DEFS: readonly ShowroomShotDef[] = [
+export const SHOT_DEFS: readonly ShowroomShotDef[] = [
   // -- silhouette ----------------------------------------------------------
   {
     name: 'ship-silhouette-side',

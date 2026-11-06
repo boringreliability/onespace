@@ -52,6 +52,7 @@ import {
 import type { EngineContext, GameModule } from '@/core/Engine';
 import { config, type QualitySettings, type QualityTier } from '@/core/Config';
 import { MutableViewState, type ViewState } from '@/render/ViewState';
+import { Lru } from './lru';
 
 import { generateShip, type ShipParams } from '@/gen/ships/blueprint';
 import {
@@ -852,6 +853,9 @@ interface CacheEntry {
 /** World up, read-only. */
 const _worldUp = new Vector3(0, 1, 0);
 
+/** Most cached ship visuals kept on the GPU. See `Showroom.cache`. */
+export const STAGE_CACHE_CAPACITY = 16;
+
 export class Showroom implements GameModule {
   readonly name = 'showroom';
   readonly root = new Group();
@@ -863,7 +867,16 @@ export class Showroom implements GameModule {
   private scaleGeometry: BufferGeometry | null = null;
   private scaleMesh: Mesh | null = null;
 
-  private readonly cache = new Map<string, CacheEntry>();
+  /**
+   * Bounded since the Yard: a player paging through seeds would otherwise
+   * keep every hull they ever looked at on the GPU. 16 holds the whole review
+   * set (13 distinct hull/tier pairs) with room to spare, so a capture never
+   * regenerates a hull mid-run and the frames stay byte-identical.
+   */
+  private readonly cache = new Lru<string, CacheEntry>(STAGE_CACHE_CAPACITY, (_key, e) => {
+    e.visual.object3d.removeFromParent();
+    e.visual.dispose();
+  });
   private subjects: ShowroomSubject[] = [];
   private layoutRadiusKm = 0.05;
 
@@ -1007,6 +1020,9 @@ export class Showroom implements GameModule {
     this.subjects = [];
 
     const entries = setup.ships.map((p) => this.resolve(p, tier, quality));
+    // After the whole set is resolved, never during: the hulls about to go on
+    // stage are pinned, so the eviction can only take ones nobody is showing.
+    this.cache.trim((e) => entries.includes(e));
     if (setup.requireDistinctRoles === true) reportRoleCollision(entries);
 
     // Laid out along X, nose forward, in the order given, broken into `rows`
@@ -1289,6 +1305,41 @@ export class Showroom implements GameModule {
       (uniforms.uRimColor!.value as Color).setRGB(0.34, 0.38, 0.46);
       (uniforms.uBaseColor!.value as Color).setRGB(0.004, 0.0045, 0.006);
     }
+  }
+
+  // -- live controls (the Yard) --------------------------------------------
+
+  /**
+   * Re-light the stage without re-laying it out. Same arithmetic as the light
+   * block at the end of `configure`, but every field is required: a preset is
+   * always a complete lighting, never a partial override of the last one.
+   */
+  setLight(light: {
+    readonly sunDirection: Triple;
+    readonly sunColor: Triple;
+    readonly sunIntensity: number;
+    readonly fillColor: Triple;
+    readonly fillDirection: Triple;
+  }): void {
+    const d = light.sunDirection;
+    this.sunDirection.set(d[0], d[1], d[2]).normalize();
+    const c = light.sunColor;
+    this.sunColor.setRGB(c[0], c[1], c[2]).multiplyScalar(light.sunIntensity);
+    const f = light.fillColor;
+    this.fillColor.setRGB(f[0], f[1], f[2]);
+    const fd = light.fillDirection;
+    this.fillDirection.set(fd[0], fd[1], fd[2]).normalize();
+    for (const s of this.subjects) s.visual.setFillLight?.(this.fillColor);
+  }
+
+  /** Change what the drives are doing. The visuals damp towards it. */
+  setDrive(drive: ShipDriveState): void {
+    this.drive = drive;
+  }
+
+  /** The current key direction, world space, unit. Read-only by contract. */
+  get keyDirection(): Vector3 {
+    return this.sunDirection;
   }
 
   // -- framing helpers used by the shots ------------------------------------
@@ -1654,10 +1705,7 @@ export class Showroom implements GameModule {
     this.setSilhouette(false);
     for (const s of this.subjects) s.root.removeFromParent();
     this.subjects = [];
-    for (const entry of this.cache.values()) {
-      entry.visual.object3d.removeFromParent();
-      entry.visual.dispose();
-    }
+    // The LRU's eviction callback detaches and disposes each visual.
     this.cache.clear();
     this.scaleMesh?.removeFromParent();
     this.scaleMesh = null;
