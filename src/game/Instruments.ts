@@ -113,5 +113,9 @@ export class Instruments implements GameModule {
 
     p.location = locationLabel(u.system.name, parentName);
     this.hud.setInstruments(p);
+    // The virtual stick's dot (track A's deflection → track B's HUD mark).
+    // Hidden while the pointer is free: the stick only exists under lock.
+    const d = ctx.input.stickDeflection;
+    this.hud.setStickDeflection(document.pointerLockElement ? d.x : null, d.y);
   }
 }
