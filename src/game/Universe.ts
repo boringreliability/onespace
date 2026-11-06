@@ -43,7 +43,7 @@ import { StarRenderer } from '@/render/Star';
 import { AtmosphereRenderer } from '@/render/Atmosphere';
 import { sceneDepthTexture } from '@/render/PostFX';
 import { planStreaming, type StreamCandidate } from '@/game/streaming';
-import { circularOrbitState, insideStar, progradeAttitude, starRadiusKm } from '@/game/recovery';
+import { circularOrbitState, insideStar, openingAttitude, progradeAttitude, starRadiusKm } from '@/game/recovery';
 
 import {
   DEFAULT_SHIP_CONFIG,
@@ -408,7 +408,10 @@ export class Universe implements GameModule {
     // planet's centre, which framed the world nicely and made the first press
     // of W a dive. Prograde keeps the world filling the lower frame and makes
     // the throttle mean "faster along the orbit".
-    progradeAttitude(this.tmpB, this.tmpA, this.arrivalQuat);
+    // …pitched 30° down towards the limb (v2 merge): a purely prograde nose
+    // put the limb 51° below it, outside the chase view — the opening shot
+    // was empty sky. See game/openingAttitude.test.ts.
+    openingAttitude(this.tmpB, this.tmpA, this.arrivalQuat);
     this.flight.teleport(this.tmpA, this.tmpB, this.arrivalQuat);
     this.syncGroundSampler();
   }

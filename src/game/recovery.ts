@@ -100,6 +100,34 @@ export function progradeAttitude(
 }
 
 /**
+ * Nose pitch below prograde for the opening frame. At 1.6 R the limb is
+ * acos(1/1.6) ≈ 51° below the orbital horizon; 30° down puts it ~21° below
+ * the nose — inside the chase camera's ±31° view, low in the frame — while
+ * the nose stays cos 30° ≈ 87 % prograde, so W is not a dive.
+ */
+export const OPENING_PITCH_DOWN_RAD = (30 * Math.PI) / 180;
+
+/** Prograde, pitched down towards the world by OPENING_PITCH_DOWN_RAD, roof out. */
+export function openingAttitude(
+  velocity: Vector3,
+  radialOut: Vector3,
+  out = new Quaternion(),
+): Quaternion {
+  const v = velocity.clone();
+  if (!(v.lengthSq() > 1e-18)) return progradeAttitude(velocity, radialOut, out);
+  v.normalize();
+  // The "down" direction in the orbit plane: −radial with its prograde part removed.
+  const down = radialOut.clone().normalize().multiplyScalar(-1);
+  down.addScaledVector(v, -down.dot(v));
+  if (down.lengthSq() < 1e-12) return progradeAttitude(velocity, radialOut, out);
+  down.normalize();
+  const nose = v
+    .multiplyScalar(Math.cos(OPENING_PITCH_DOWN_RAD))
+    .addScaledVector(down, Math.sin(OPENING_PITCH_DOWN_RAD));
+  return progradeAttitude(nose, radialOut, out);
+}
+
+/**
  * Has the ship reached the photosphere? The star used to have no collision at
  * all, so you could fly straight through it (GAMEPLAY F7).
  *
