@@ -10,6 +10,7 @@
  */
 
 import type { EngineContext, GameModule } from '@/core/Engine';
+import type { Mode } from '@/core/Modes';
 import { bus } from '@/core/EventBus';
 import { shotOwnsScene } from '@/game/Shots';
 import type { Universe } from '@/game/Universe';
@@ -64,6 +65,15 @@ export class Hints implements GameModule {
   private disposers: Array<() => void> = [];
 
   constructor(private readonly opts: HintsOptions) {}
+
+  /**
+   * Gated to flight/map (game/gating.ts). A sleeping module stops updating
+   * but its DOM would stay up — "CLICK TO TAKE THE CONTROLS" over the title or
+   * the Yard — so it hides itself on the way out.
+   */
+  onModeChange(_from: Mode, to: Mode): void {
+    if (this.el) this.el.style.visibility = to === 'flight' || to === 'map' ? '' : 'hidden';
+  }
 
   init(): void {
     this.injectStyle();
