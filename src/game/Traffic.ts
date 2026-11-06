@@ -454,6 +454,33 @@ export class Traffic implements GameModule {
   }
 
   /**
+   * Built vessels, for targeting. Read-only: `contactAt` hands back the live
+   * world vector, which the caller must not write or retain past the frame.
+   * Unbuilt vessels have no id yet and are skipped by returning null.
+   */
+  get contactCount(): number {
+    return this.vessels.length;
+  }
+
+  contactAt(i: number): { readonly id: string; readonly name: string; readonly world: Vector3 } | null {
+    const v = this.vessels[i];
+    if (!v?.blueprint) return null;
+    return { id: v.blueprint.id, name: v.blueprint.name, world: v.world };
+  }
+
+  /** Copy a vessel's world position into `out`; false if it is not (yet) here. */
+  vesselWorld(id: string, out: Vector3): boolean {
+    for (let i = 0; i < this.vessels.length; i++) {
+      const v = this.vessels[i]!;
+      if (v.blueprint?.id === id) {
+        out.copy(v.world);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
    * Scan result for the HUD. Cached: the lines are derived from the blueprint
    * and never change, and shipScan walks the whole mass model to build them.
    */

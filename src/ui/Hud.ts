@@ -65,6 +65,40 @@ export interface HudTarget {
   leadY?: number;
   /** Short classifier printed under the name, e.g. "ICE GIANT". */
   kind?: string;
+  /** Rate the gap shrinks, km/s; negative while opening. Omit to hide the line. */
+  closingKmS?: number;
+  /** Seconds to arrival at the current closing speed, or null when not closing. */
+  etaS?: number | null;
+}
+
+/**
+ * Derived flight instruments, fed after `setVitals` each frame. Everything the
+ * HUD cannot compute without a camera or a universe arrives here. The caller
+ * may hand the same mutable object back every frame.
+ */
+export interface HudInstruments {
+  /** False when the ship is too slow for a velocity direction to mean anything. */
+  hasVelocity: boolean;
+  /** Prograde marker, CSS px, and whether it projects behind the camera. */
+  proX: number;
+  proY: number;
+  proBehind: boolean;
+  retroX: number;
+  retroY: number;
+  retroBehind: boolean;
+  /** Vertical speed, km/s, positive climbing; null hides the VSI row. */
+  vsiKmS: number | null;
+  /** Seconds to ground at the current sink rate; null hides it. */
+  ttiS: number | null;
+  /**
+   * Overrides the vitals altitude: measured above terrain where a ground
+   * sampler exists, and against the same body VEL is. Null = no reference.
+   */
+  altitudeKm: number | null;
+  /** The body ALT is measured against. */
+  altBody: string | null;
+  /** The title line: where the ship is. */
+  location: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -89,6 +123,23 @@ function hash01(n: number): number {
   let h = (n | 0) * 374761393;
   h = (h ^ (h >>> 13)) * 1274126177;
   return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
+/** m:ss, h:mm:ss, or a floor for absurd waits. */
+function clockText(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds));
+  if (s >= 100 * 3600) return '>99h';
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const ss = String(s % 60).padStart(2, '0');
+  return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`;
+}
+
+/** Signed speed with a unit that suits it: m/s below 1 km/s. */
+function speedText(kmS: number): string {
+  const a = Math.abs(kmS);
+  const sign = kmS < 0 ? '−' : '+';
+  return a < 1 ? `${sign}${fixed(a * 1000, 0)} m/s` : `${sign}${fixed(a, 2)} km/s`;
 }
 
 /** Avoids the "-0" that toFixed happily produces near zero. */
@@ -331,6 +382,13 @@ const ATT_ARM = 50;
 const ATT_NUM = 54;
 /** Radius of the roll scale. Outside `ATT_R`, so the two scales cannot touch. */
 const ATT_ROLL_R = 100;
+/** Full stick deflection puts the dot this far from the screen centre, CSS px. */
+const STICK_RADIUS_PX = 64;
+
+/** Inside the viewport with a small margin. Off-glass markers fade, never clamp. */
+function onGlass(x: number, y: number, w: number, h: number): boolean {
+  return x > 8 && x < w - 8 && y > 8 && y < h - 8;
+}
 
 export class Hud implements GameModule {
   readonly name = 'hud';
@@ -383,10 +441,38 @@ export class Hud implements GameModule {
   private tgtLeadX = 0;
   private tgtLeadY = 0;
   private tgtHasLead = false;
+  private tgtHasClosing = false;
+  private tgtClosing = 0;
+  private tgtClosingShown = 0;
+  private tgtEta: number | null = null;
   /** Screen-space bracket position, damped so the bracket lags the body. */
   private brX = 0;
   private brY = 0;
   private brInit = false;
+
+  // --- instruments --------------------------------------------------------
+  private hasVel = false;
+  private proX = 0;
+  private proY = 0;
+  private proBehind = true;
+  private retroX = 0;
+  private retroY = 0;
+  private retroBehind = true;
+  private proShownX = 0;
+  private proShownY = 0;
+  private retroShownX = 0;
+  private retroShownY = 0;
+  private hasVsi = false;
+  private vsiTarget = 0;
+  private vsi = 0;
+  private tti: number | null = null;
+  private altBody = '';
+  /** Stick deflection, -1..1 each axis, and its damped on-glass position. */
+  private stickX = 0;
+  private stickY = 0;
+  private stickShownX = 0;
+  private stickShownY = 0;
+  private hasStick = false;
 
   // --- scanner ------------------------------------------------------------
   private scanState: 'idle' | 'busy' | 'show' = 'idle';
@@ -401,6 +487,9 @@ export class Hud implements GameModule {
   private rSpeed = new Readout();
   private rAlt = new Readout();
   private rDist = new Readout();
+  private rVsi = new Readout();
+  private rTti = new Readout();
+  private rClose = new Readout();
   private rG = new Readout();
 
   // --- nodes we mutate ----------------------------------------------------
@@ -435,6 +524,22 @@ export class Hud implements GameModule {
   private tTgtKind!: TextSlot;
   private tTgtDist!: TextSlot;
   private elTgtLead!: HTMLElement;
+  private tTgtClose!: TextSlot;
+
+  private elPro!: HTMLElement;
+  private vProX!: CssVar;
+  private vProY!: CssVar;
+  private elRetro!: HTMLElement;
+  private vRetroX!: CssVar;
+  private vRetroY!: CssVar;
+  private elStick!: HTMLElement;
+  private vStickX!: CssVar;
+  private vStickY!: CssVar;
+  private elVsi!: HTMLElement;
+  private tVsi!: TextSlot;
+  private tTti!: TextSlot;
+  private elTti!: HTMLElement;
+  private tAltBody!: TextSlot;
 
   private logSlots: LogSlot[] = [];
 
@@ -539,6 +644,53 @@ export class Hud implements GameModule {
     this.tgtHasLead = info.leadX !== undefined && info.leadY !== undefined;
     this.tgtLeadX = info.leadX ?? info.x;
     this.tgtLeadY = info.leadY ?? info.y;
+    this.tgtHasClosing = info.closingKmS !== undefined;
+    this.tgtClosing = info.closingKmS ?? 0;
+    this.tgtEta = info.etaS ?? null;
+  }
+
+  /**
+   * Feed the derived instruments. Call AFTER `setVitals` in the same frame:
+   * the altitude here replaces the vitals one, because it is measured against
+   * terrain and against the body VEL refers to.
+   */
+  setInstruments(i: HudInstruments): void {
+    this.hasVel = i.hasVelocity;
+    this.proX = i.proX;
+    this.proY = i.proY;
+    this.proBehind = i.proBehind;
+    this.retroX = i.retroX;
+    this.retroY = i.retroY;
+    this.retroBehind = i.retroBehind;
+    this.hasVsi = i.vsiKmS !== null;
+    this.vsiTarget = i.vsiKmS ?? 0;
+    this.tti = i.ttiS;
+    if (i.altitudeKm === null) {
+      this.hasAlt = false;
+    } else {
+      this.hasAlt = true;
+      this.altTarget = Math.max(0, i.altitudeKm);
+    }
+    this.altBody = i.altBody ?? '';
+    // Null before init() has built the DOM.
+    this.tHeadLoc?.set(i.location);
+  }
+
+  /**
+   * The virtual stick's deflection, each axis -1..1 (x right, y up). Drawn as
+   * an amber dot offset from the screen centre. `null`, or a centred stick,
+   * fades the dot out.
+   */
+  setStickDeflection(x: number | null, y = 0): void {
+    if (x === null || (Math.abs(x) < 0.01 && Math.abs(y) < 0.01)) {
+      this.hasStick = false;
+      this.stickX = 0;
+      this.stickY = 0;
+      return;
+    }
+    this.hasStick = true;
+    this.stickX = clamp(x, -1, 1);
+    this.stickY = clamp(y, -1, 1);
   }
 
   setVisible(b: boolean): void {
@@ -578,6 +730,12 @@ export class Hud implements GameModule {
     this.roll = damp(this.roll, this.rollTarget, 9, dt);
     this.gLoad = damp(this.gLoad, this.gLoadTarget, 5, dt);
     this.tgtDistShown = damp(this.tgtDistShown, this.tgtDist, 6, dt);
+    this.tgtClosingShown = damp(this.tgtClosingShown, this.tgtClosing, 5, dt);
+    this.vsi = damp(this.vsi, this.vsiTarget, 4.5, dt);
+    // The stick dot is the pilot's own hand, so it is quick, but it still has
+    // to travel, or a recentring stick would blink back to the middle.
+    this.stickShownX = damp(this.stickShownX, this.stickX, 16, dt);
+    this.stickShownY = damp(this.stickShownY, this.stickY, 16, dt);
 
     this.warpSilence += dt;
     if (this.warpSilence > 0.6) this.warpTarget = 0;
@@ -595,6 +753,8 @@ export class Hud implements GameModule {
     this.drawTapes();
     this.drawAttitude();
     this.drawTarget(ctx.width, ctx.height, dt);
+    this.drawMarkers(ctx.width, ctx.height, dt);
+    this.drawStick(ctx.width, ctx.height);
     this.drawWarp();
     this.drawFlicker();
   }
@@ -643,11 +803,25 @@ export class Hud implements GameModule {
       this.tAltNum.set(fixed(this.rAlt.step(aval, aq), aband.decimals));
       this.tAltUnit.set(aband.label);
       this.altTape.update(aval);
+      this.tAltBody.set(this.altBody);
     } else {
       this.tAltNum.set('- - -');
       this.tAltUnit.set('no ref');
+      this.tAltBody.set('');
     }
     this.elAltUnit.classList.toggle('os-swap', this.altSwap > 0);
+
+    // Vertical speed, in m/s below 1 km/s so it reads in the same units as
+    // the landing limits the log grades touchdowns against.
+    this.elVsi.classList.toggle('os-void', !this.hasVsi);
+    if (this.hasVsi) {
+      const q = Math.abs(this.vsi) < 1 ? 0.001 : 0.01;
+      this.tVsi.set(speedText(this.rVsi.step(this.vsi, q)));
+    }
+    const tti = this.tti;
+    this.elTti.classList.toggle('os-void', tti === null);
+    this.elTti.classList.toggle('os-warn', tti !== null && tti < 30);
+    if (tti !== null) this.tTti.set(clockText(this.rTti.step(tti, 1)));
   }
 
   private drawAttitude(): void {
@@ -728,6 +902,61 @@ export class Hud implements GameModule {
     const band = ALT_BANDS[pickBand(ALT_BANDS, this.tgtDistShown, 1)]!;
     const dv = this.tgtDistShown * band.scale;
     this.tTgtDist.set(`${fixed(this.rDist.step(dv, Math.pow(10, -band.decimals)), band.decimals)} ${band.label}`);
+
+    if (!this.tgtHasClosing) {
+      this.tTgtClose.set('');
+    } else {
+      const c = this.rClose.step(this.tgtClosingShown, Math.abs(this.tgtClosingShown) < 1 ? 0.001 : 0.01);
+      const eta = this.tgtEta;
+      this.tTgtClose.set(
+        eta !== null
+          ? `${speedText(c)} · eta ${clockText(eta)}`
+          : c < 0
+            ? `${speedText(c)} · opening`
+            : speedText(c),
+      );
+    }
+  }
+
+  /**
+   * Prograde and retrograde. Only one of the pair is ever in front of the
+   * camera; the other fades out rather than being clamped to the edge, since
+   * an edge-clamped velocity marker reads as a target.
+   */
+  private drawMarkers(w: number, h: number, dt: number): void {
+    const proOn = this.hasVel && !this.proBehind && onGlass(this.proX, this.proY, w, h);
+    const retroOn = this.hasVel && !this.retroBehind && onGlass(this.retroX, this.retroY, w, h);
+    this.elPro.classList.toggle('os-void', !proOn);
+    this.elRetro.classList.toggle('os-void', !retroOn);
+    // Damped only while on the glass. A marker re-entering from behind moves
+    // to its point while still invisible, then fades in where it belongs.
+    if (proOn) {
+      this.proShownX = damp(this.proShownX, this.proX, 12, dt);
+      this.proShownY = damp(this.proShownY, this.proY, 12, dt);
+    } else {
+      this.proShownX = this.proX;
+      this.proShownY = this.proY;
+    }
+    if (retroOn) {
+      this.retroShownX = damp(this.retroShownX, this.retroX, 12, dt);
+      this.retroShownY = damp(this.retroShownY, this.retroY, 12, dt);
+    } else {
+      this.retroShownX = this.retroX;
+      this.retroShownY = this.retroY;
+    }
+    this.vProX.set(this.proShownX);
+    this.vProY.set(this.proShownY);
+    this.vRetroX.set(this.retroShownX);
+    this.vRetroY.set(this.retroShownY);
+  }
+
+  /** The stick dot sits within `STICK_RADIUS_PX` of the screen centre. */
+  private drawStick(w: number, h: number): void {
+    const moving = Math.abs(this.stickShownX) + Math.abs(this.stickShownY) > 0.01;
+    this.elStick.classList.toggle('os-void', !this.hasStick && !moving);
+    this.vStickX.set(w * 0.5 + this.stickShownX * STICK_RADIUS_PX);
+    // Screen y grows downward; stick up is nose up.
+    this.vStickY.set(h * 0.5 - this.stickShownY * STICK_RADIUS_PX);
   }
 
   private drawWarp(): void {
@@ -872,7 +1101,9 @@ export class Hud implements GameModule {
 
       bus.on('scale:changed', ({ to }) => this.tHeadScale.set(scaleLabel(to))),
       bus.on('system:entered', ({ system }) => this.tHeadLoc.set(system.name)),
-      bus.on('planet:approached', ({ planet }) => this.tHeadLoc.set(planet.name)),
+      // No 'planet:approached' here: it fires for every renderer streamed in,
+      // so the title named whichever moon was acquired last (GAMEPLAY F9).
+      // The location arrives with `setInstruments`, from the ship's parent.
       bus.on('galaxy:entered', ({ galaxy }) => this.tHeadLoc.set(galaxy.name)),
     );
   }
@@ -949,6 +1180,7 @@ export class Hud implements GameModule {
     this.buildRight(root);
     this.buildAttitude(root);
     this.buildTargetReticle(root);
+    this.buildMarkers(root);
     this.buildLog(root);
     this.buildScanner(root);
     this.buildWarp(root);
@@ -1000,7 +1232,10 @@ export class Hud implements GameModule {
     this.tSpeedUnit = new TextSlot(this.elSpeedUnit);
 
     this.elAltGauge = el('div', 'os-gauge', p);
-    el('div', 'os-label', this.elAltGauge, 'alt');
+    const altLabel = el('div', 'os-label', this.elAltGauge, 'alt ');
+    // Which world the altimeter is reading. VEL and ALT used to be able to
+    // disagree about that without saying so (GAMEPLAY F11).
+    this.tAltBody = new TextSlot(el('span', 'os-alt-body', altLabel));
     const altRow = el('div', 'os-gauge-row', this.elAltGauge);
     this.altTape = new Tape(altRow);
     const altBox = el('div', 'os-gauge-box', altRow);
@@ -1008,6 +1243,14 @@ export class Hud implements GameModule {
     this.elAltUnit = el('span', 'os-unit', altBox);
     this.tAltNum = new TextSlot(altNum);
     this.tAltUnit = new TextSlot(this.elAltUnit);
+
+    const vs = el('div', 'os-vs', this.elAltGauge);
+    this.elVsi = el('div', 'os-vs-row os-void', vs);
+    el('span', 'os-label', this.elVsi, 'v/s');
+    this.tVsi = new TextSlot(el('span', 'os-vs-num', this.elVsi));
+    this.elTti = el('div', 'os-vs-row os-void', vs);
+    el('span', 'os-label', this.elTti, 'impact');
+    this.tTti = new TextSlot(el('span', 'os-vs-num', this.elTti));
   }
 
   private buildAttitude(root: HTMLElement): void {
@@ -1161,9 +1404,35 @@ export class Hud implements GameModule {
     const name = el('div', 'os-tgt-name', info);
     const kind = el('div', 'os-tgt-kind', info);
     const dist = el('div', 'os-tgt-dist', info);
+    const close = el('div', 'os-tgt-close', info);
     this.tTgtName = new TextSlot(name);
     this.tTgtKind = new TextSlot(kind);
     this.tTgtDist = new TextSlot(dist);
+    this.tTgtClose = new TextSlot(close);
+  }
+
+  private buildMarkers(root: HTMLElement): void {
+    // Prograde: the classic ring with wings and a tail. Retrograde: the same
+    // ring crossed out. Amber, never cyan: cyan is reserved for the nav target.
+    this.elPro = el('div', 'os-vm os-void', root);
+    const ps = svg('svg', '', this.elPro, { viewBox: '0 0 30 30' });
+    svg('circle', '', ps, { cx: 15, cy: 15, r: 5.5 });
+    svg('path', '', ps, { d: 'M 3 15 L 9.5 15 M 20.5 15 L 27 15 M 15 9.5 L 15 4' });
+    this.vProX = new CssVar(this.elPro, '--vx', 0.25, 1);
+    this.vProY = new CssVar(this.elPro, '--vy', 0.25, 1);
+
+    this.elRetro = el('div', 'os-vm os-retro os-void', root);
+    const rs = svg('svg', '', this.elRetro, { viewBox: '0 0 30 30' });
+    svg('circle', '', rs, { cx: 15, cy: 15, r: 5.5 });
+    svg('path', '', rs, {
+      d: 'M 11.1 11.1 L 18.9 18.9 M 18.9 11.1 L 11.1 18.9 M 15 9.5 L 15 4 M 15 20.5 L 15 26',
+    });
+    this.vRetroX = new CssVar(this.elRetro, '--vx', 0.25, 1);
+    this.vRetroY = new CssVar(this.elRetro, '--vy', 0.25, 1);
+
+    this.elStick = el('div', 'os-stick os-void', root);
+    this.vStickX = new CssVar(this.elStick, '--vx', 0.25, 1);
+    this.vStickY = new CssVar(this.elStick, '--vy', 0.25, 1);
   }
 
   private buildLog(root: HTMLElement): void {
@@ -1273,6 +1542,20 @@ export function registerHudShots(hud: Hud): void {
     leadY: 0,
     kind: 'ice giant — ringed',
   };
+  const inst: HudInstruments = {
+    hasVelocity: true,
+    proX: 0,
+    proY: 0,
+    proBehind: false,
+    retroX: 0,
+    retroY: 0,
+    retroBehind: true,
+    vsiKmS: -0.042,
+    ttiS: 2840 / 0.042,
+    altitudeKm: 2840,
+    altBody: 'kesh vaant iii',
+    location: 'kesh vaant iii',
+  };
   const scan: ScanResult = {
     targetId: 'demo-target',
     name: 'kesh vaant iii',
@@ -1310,6 +1593,11 @@ export function registerHudShots(hud: Hud): void {
       bus.emit('log', { text: 'passive array locked on primary', tone: 'normal' });
       bus.emit('scan:complete', scan);
       hud.setVitals(vitals);
+      inst.proX = ctx.width * 0.5 - 140;
+      inst.proY = ctx.height * 0.5 + 60;
+      hud.setInstruments(inst);
+      target.closingKmS = 1.84;
+      target.etaS = 1.84e3;
       target.x = ctx.width * 0.5 + 210;
       target.y = ctx.height * 0.5 - 96;
       hud.setTarget(target);
@@ -1325,6 +1613,13 @@ export function registerHudShots(hud: Hud): void {
       vitals.rollRad = Math.sin(t * 0.13) * 0.32;
       vitals.gLoad = 1.4 + Math.sin(t * 0.41) * 0.15;
       hud.setVitals(vitals);
+      inst.altitudeKm = vitals.altitudeKm;
+      inst.vsiKmS = -0.042 + Math.sin(t * 0.29) * 0.006;
+      inst.ttiS = (vitals.altitudeKm ?? 0) / 0.042;
+      inst.proX = ctx.width * 0.5 - 140 + Math.sin(t * 0.15) * 12;
+      inst.proY = ctx.height * 0.5 + 60 + Math.cos(t * 0.11) * 8;
+      hud.setInstruments(inst);
+      hud.setStickDeflection(0.32 + Math.sin(t * 0.37) * 0.1, -0.18);
 
       target.x = ctx.width * 0.5 + 210 + Math.sin(t * 0.21) * 40;
       target.y = ctx.height * 0.5 - 96 + Math.cos(t * 0.17) * 26;
@@ -1819,6 +2114,45 @@ const CSS = /* css */ `
   text-shadow: var(--os-shadow), 0 0 5px rgba(255, 180, 84, 0.25);
 }
 .os-hud .os-tgt-dist { color: var(--os-amber); font-size: 11px; letter-spacing: 0.14em; margin-top: 2px; text-shadow: var(--os-glow); }
+.os-hud .os-tgt-close { color: var(--os-amber); opacity: 0.78; font-size: 9px; letter-spacing: 0.16em; margin-top: 1px; text-transform: lowercase; }
+
+/* Velocity markers and stick ----------------------------------------------- */
+.os-hud .os-vm {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 30px;
+  height: 30px;
+  transform: translate(calc(var(--vx, 0) * 1px - 50%), calc(var(--vy, 0) * 1px - 50%));
+  transition: opacity 0.3s ease;
+}
+.os-hud .os-vm svg { width: 100%; height: 100%; overflow: visible; }
+.os-hud .os-vm circle, .os-hud .os-vm path {
+  fill: none;
+  stroke: var(--os-amber-hi);
+  stroke-width: 1.3;
+  filter: drop-shadow(0 0 3px rgba(255, 180, 84, 0.5)) drop-shadow(0 0 1px rgba(0, 0, 0, 0.9));
+}
+.os-hud .os-vm.os-retro { opacity: 0.72; }
+.os-hud .os-stick {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--os-amber-hi);
+  box-shadow: 0 0 6px rgba(255, 180, 84, 0.6), 0 0 2px 1px rgba(0, 0, 0, 0.7);
+  transform: translate(calc(var(--vx, 0) * 1px - 50%), calc(var(--vy, 0) * 1px - 50%));
+  transition: opacity 0.3s ease;
+}
+
+/* Vertical speed ------------------------------------------------------------ */
+.os-hud .os-alt-body { color: var(--os-amber); letter-spacing: 0.22em; }
+.os-hud .os-vs { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; margin-top: 2px; }
+.os-hud .os-vs-row { display: flex; gap: 8px; align-items: baseline; transition: opacity 0.4s ease; }
+.os-hud .os-vs-num { color: var(--os-amber); font-size: 11px; letter-spacing: 0.12em; text-shadow: var(--os-glow); text-transform: lowercase; }
+.os-hud .os-vs-row.os-warn .os-vs-num { color: var(--os-warn); }
 .os-hud .os-tgt-arrow {
   position: absolute;
   left: 0;

@@ -18,6 +18,8 @@ import { MapMode } from '@/game/MapMode';
 import { Traffic } from '@/game/Traffic';
 import { ShipLog } from '@/game/Log';
 import { Scanner } from '@/game/Scanner';
+import { Targeting } from '@/game/Targeting';
+import { Instruments } from '@/game/Instruments';
 import { Cruise } from '@/game/Cruise';
 import { Showroom, registerShowroomShots, setShipVisualFactory } from '@/game/Showroom';
 import { createShipVisual } from '@/render/ships/ShipMesh';
@@ -294,7 +296,13 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   progress(0.85, 'calibrating the array');
   // Scanner needs both the universe and the fleet, so it can only be built
   // once Traffic exists. The codex only needs the log.
-  await engine.add(new Scanner({ universe, traffic }));
+  // Targeting before Scanner: the array scans the nav target. After Pilot, so
+  // the camera it projects through has already moved this frame; Instruments
+  // likewise, and its altitude replaces the sphere one Pilot just published.
+  const targeting = new Targeting({ universe, traffic, hud });
+  await engine.add(targeting);
+  await engine.add(new Instruments({ universe, hud }));
+  await engine.add(new Scanner({ universe, traffic, targeting }));
   const codex = new Codex({ log: shipLog });
   await engine.add(codex);
   registerCodexShots(codex, universe, shipLog);
