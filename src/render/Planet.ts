@@ -57,6 +57,7 @@
 
 import {
   BufferGeometry,
+  type Camera,
   Color,
   Float32BufferAttribute,
   FloatType,
@@ -1818,11 +1819,9 @@ export class PlanetRenderer {
   }
 
   /**
-   * The bake pass: a fullscreen quad whose material runs the terrain GLSL per
-   * texel. It renders in its own private scene, so a hidden copy of the quad
-   * also rides in object3d: that is what lets the integrator's
-   * compileAsync(planet.object3d) link the bake program off the main thread
-   * along with everything else (three's compile traverses hidden meshes).
+   * The bake passes: fullscreen quads whose materials run the terrain GLSL per
+   * texel, in private scenes. compileAsync(object3d) never sees those, so
+   * PlanetRenderer.compileAsync() links them against their real targets.
    */
   private buildBakeResources(terrain: string): void {
     const b = this.bakeU;
@@ -1851,11 +1850,6 @@ export class PlanetRenderer {
     const quad = new Mesh(this.bakeGeo, this.bakeMat);
     quad.frustumCulled = false;
     this.bakeScene.add(quad);
-    const prewarm = new Mesh(this.bakeGeo, this.bakeMat);
-    prewarm.frustumCulled = false;
-    prewarm.visible = false;
-    this.root.add(prewarm);
-
     if (this.clipLevels > 0) {
       const c = this.clipU;
       for (const name of TERRAIN_UNIFORM_NAMES) {
@@ -1881,10 +1875,6 @@ export class PlanetRenderer {
       const cq = new Mesh(this.bakeGeo, this.clipMat);
       cq.frustumCulled = false;
       this.clipScene.add(cq);
-      const cw = new Mesh(this.bakeGeo, this.clipMat);
-      cw.frustumCulled = false;
-      cw.visible = false;
-      this.root.add(cw);
     }
   }
 
@@ -1909,6 +1899,46 @@ export class PlanetRenderer {
     this.atlas = rt;
     this.uniforms.uHeightAtlas!.value = rt.texture;
     return rt;
+  }
+
+  private ensureShadowMap(renderer: WebGLRenderer): WebGLRenderTarget {
+    if (this.shadowMap) return this.shadowMap;
+    const n = CLIP_TEXELS;
+    const rt = new WebGLRenderTarget(n * Math.max(1, this.clipLevels), n, {
+      type: renderer.extensions.has('EXT_color_buffer_float') ? FloatType : HalfFloatType,
+      format: RGBAFormat,
+      minFilter: NearestFilter,
+      magFilter: NearestFilter,
+      generateMipmaps: false,
+      depthBuffer: false,
+      stencilBuffer: false,
+    });
+    rt.texture.name = 'os-terrain-shadow-clip';
+    rt.scissorTest = true;
+    this.shadowMap = rt;
+    this.uniforms.uShadowMap!.value = rt.texture;
+    return rt;
+  }
+
+  /**
+   * Link the bake programs ahead of the first bake, without blocking where the
+   * driver supports KHR_parallel_shader_compile. Call alongside
+   * renderer.compileAsync(object3d): the bake scenes are private, so that call
+   * never reaches them. Each is compiled with its own render target bound,
+   * because the program key includes the output colour space of the target.
+   */
+  async compileAsync(renderer: WebGLRenderer, _camera?: Camera): Promise<void> {
+    if (this.disposed || this.isGasGiant || !this.bakeMat) return;
+    const prev = renderer.getRenderTarget();
+    const jobs: Array<Promise<unknown>> = [];
+    renderer.setRenderTarget(this.ensureAtlas(renderer));
+    jobs.push(renderer.compileAsync(this.bakeScene, this.bakeCam));
+    if (this.clipMat) {
+      renderer.setRenderTarget(this.ensureShadowMap(renderer));
+      jobs.push(renderer.compileAsync(this.clipScene, this.bakeCam));
+    }
+    renderer.setRenderTarget(prev);
+    await Promise.all(jobs);
   }
 
   private bakeBegin(renderer: WebGLRenderer): void {
@@ -2199,21 +2229,6 @@ export class PlanetRenderer {
       const prev = this.clipCentre[l] ?? null;
       if (!clipNeedsRecentre(prev, this.camDir, this.clipExtents[l]!, this.radius)) continue;
 
-      if (!this.shadowMap) {
-        this.shadowMap = new WebGLRenderTarget(n * this.clipLevels, n, {
-          type: renderer.extensions.has('EXT_color_buffer_float') ? FloatType : HalfFloatType,
-          format: RGBAFormat,
-          minFilter: NearestFilter,
-          magFilter: NearestFilter,
-          generateMipmaps: false,
-          depthBuffer: false,
-          stencilBuffer: false,
-        });
-        this.shadowMap.texture.name = 'os-terrain-shadow-clip';
-        this.shadowMap.scissorTest = true;
-        u.uShadowMap!.value = this.shadowMap.texture;
-      }
-
       // Tangent basis at the new centre, built off whichever axis is least
       // parallel to it so it never degenerates.
       const c = C[l]!.set(this.camDir[0], this.camDir[1], this.camDir[2]);
@@ -2227,7 +2242,7 @@ export class PlanetRenderer {
       (b.uClipBakeT2!.value as Vector3).copy(T2[l]!);
       b.uClipBakeH!.value = this.clipExtents[l]!;
       b.uClipBakeX!.value = l * n;
-      const rt = this.shadowMap;
+      const rt = this.ensureShadowMap(renderer);
       rt.viewport.set(l * n, 0, n, n);
       rt.scissor.set(l * n, 0, n, n);
       renderer.setRenderTarget(rt);
