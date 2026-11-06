@@ -11,6 +11,7 @@ import { Color, Group, Vector3 } from 'three';
 import type { Engine, EngineContext, GameModule } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
 import { config } from '@/core/Config';
+import { modes } from '@/core/Modes';
 
 import { Universe } from '@/game/Universe';
 import { Pilot } from '@/game/Pilot';
@@ -28,7 +29,6 @@ import { createShipVisual } from '@/render/ships/ShipMesh';
 import { activeShotName, registerShot, shotOwnsScene, updateActiveShot } from '@/game/Shots';
 import type { NebulaSpec, PlanetSpec, RingSpec } from '@/gen/types';
 // -- v2-p2b: the Yard and mode gating ---------------------------------------
-import { modes } from '@/core/Modes';
 import { Yard, YARD_DRIVES, YARD_FACTIONS, YARD_LIGHTS, YARD_VIEWS } from '@/game/Yard';
 import { YardPanel } from '@/ui/YardPanel';
 import { MODULE_MODES, applyGating } from '@/game/gating';
@@ -252,7 +252,9 @@ class ReviewGuard implements GameModule {
     const shot = activeShotName();
     const owned = shotOwnsScene();
     // v2-p2b: the flight HUD belongs to the flight modes. In the yard it is
-    // frozen with the rest of flight (gating.ts) and must not hang over it.
+    // frozen with the rest of flight (gating.ts) and must not hang over it;
+    // the title is not flight either (review-p1: its menu sat under the
+    // pitch ladder). Title/boot are excluded by this whitelist.
     const flightMode = modes.base === 'flight' || modes.base === 'map' || modes.base === 'review';
     this.hud.setVisible((!owned || shot === 'hud-full') && !this.mapOpen && flightMode);
     this.gallery.root.visible = shot !== null && GALLERY_SHOTS.has(shot);
@@ -351,7 +353,7 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   progress(0.865, 'arming the recovery beacon');
   const recovery = new RecoveryCut(universe);
   await engine.add(recovery);
-  const pause = new Pause({ universe, recovery, warp });
+  const pause = new Pause({ universe, recovery, warp, input: engine.input });
   await engine.add(pause);
   await engine.add(new Hints({ universe, pause, recovery, warp }));
   // --- end track D -------------------------------------------------------------

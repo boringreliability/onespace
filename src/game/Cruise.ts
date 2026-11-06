@@ -27,7 +27,14 @@
 import type { EngineContext, GameModule } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
 import { Vector3 } from 'three';
-import { CruiseDrive, arrivalClearanceKm, type CruiseBlock } from '@/ship/CruiseDrive';
+import {
+  CruiseDrive,
+  arrivalClearanceKm,
+  holdClearanceKm,
+  type CruiseArrival,
+  type CruiseBlock,
+  type CruiseInputs,
+} from '@/ship/CruiseDrive';
 import { circularSpeed, insertIntoOrbit } from '@/ship/cruiseOrbit';
 import { steerToward } from '@/ship/cruiseSteer';
 import type { Universe } from '@/game/Universe';
@@ -44,8 +51,10 @@ const REFUSAL: Record<CruiseBlock, string> = {
 /** The part of `Universe` this module reads. Narrow, so it can be stubbed in node. */
 export type CruiseWorld = Pick<
   Universe,
-  'flight' | 'paused' | 'nearestGapKm' | 'nearest' | 'allBodies' | 'system'
+  'flight' | 'paused' | 'frozen' | 'nearestGapKm' | 'nearest' | 'allBodies' | 'system'
 >;
+
+type Mutable<T> = { -readonly [K in keyof T]: T[K] };
 
 type Body = ReturnType<Universe['allBodies']>[number];
 
@@ -60,6 +69,13 @@ function bodyIdOf(b: Body): string {
  * still closing, at ~64° from radial — within ~26° of tangential.
  */
 const LIMB_FRACTION = 0.9;
+
+/**
+ * Clearance the steering keeps from a world that stands between the ship and
+ * its target, in multiples of that world's hold threshold — far enough above
+ * the threshold that skirting it never trips a MASS drop.
+ */
+const OCCLUDER_HOLD_MARGIN = 1.5;
 
 export interface CruiseOptions {
   readonly universe: CruiseWorld;
@@ -84,8 +100,30 @@ export class Cruise implements GameModule {
    * there the engine is held at idle; moving it hands the throttle back.
    */
   private heldLever: number | null = null;
+  /**
+   * Set by `system:entered`: the next frame captures the lever and holds the
+   * engine at idle, exactly as after an orbit insertion. A jump arrives in an
+   * orbit too, and FA-ON's speed hold would fly the ship out of it.
+   */
+  private holdOnNextFrame = false;
   private readonly offs: Array<() => void> = [];
   private readonly sRel = new Vector3();
+  // Preallocated drive inputs (ARCHITECTURE §5: no allocation in update()).
+  private readonly arrivalIn: Mutable<CruiseArrival> = {
+    clearanceKm: 0,
+    radiusKm: 0,
+    soiRadiusKm: 0,
+    closing: false,
+  };
+  private readonly driveIn: Mutable<CruiseInputs> = {
+    requested: false,
+    clearanceKm: 0,
+    grounded: false,
+    atmosphericDensity: 0,
+    nearestRadiusKm: 0,
+    arrival: null,
+    exitSpeedKmS: undefined,
+  };
 
   constructor(opts: CruiseOptions) {
     this.universe = opts.universe;
@@ -95,8 +133,17 @@ export class Cruise implements GameModule {
     // Leaving a system, or being put somewhere by the chart, must not leave a
     // drive running against a world that no longer exists.
     this.offs.push(
-      bus.on('system:entered', () => this.cancel()),
+      bus.on('system:entered', () => {
+        this.cancel();
+        this.holdOnNextFrame = true;
+        // Physics runs before Pilot and this module next frame; without this
+        // that step still flies the old lever into the arrival orbit.
+        this.universe.flight.command.throttle = 0;
+      }),
       bus.on('warp:engaged', () => this.cancel()),
+      // review-p1: the recovery cut teleports the ship into an orbit; a drive
+      // left running carries it straight back out (playtest: e = 0.997).
+      bus.on('ship:recovered', () => this.cancel()),
       bus.on('target:changed', (e) => {
         this.targetId = e.id;
       }),
@@ -111,7 +158,15 @@ export class Cruise implements GameModule {
   private target(): Body | null {
     const id = this.targetId;
     if (id === null) return null;
-    return this.universe.allBodies().find((b) => bodyIdOf(b) === id || b.spec.id === id) ?? null;
+    // A loop, not `.find(closure)`: this runs every frame.
+    const bodies = this.universe.allBodies();
+    for (let i = 0; i < bodies.length; i++) {
+      const b = bodies[i]!;
+      if (b.spec.id === id || (id.startsWith('body:') && id.length === b.spec.name.length + 5 && id.endsWith(b.spec.name))) {
+        return b;
+      }
+    }
+    return null;
   }
 
   /**
@@ -129,10 +184,15 @@ export class Cruise implements GameModule {
   }
 
   update(dt: number, ctx: EngineContext): void {
-    if (shotOwnsScene() || this.universe.paused) {
+    if (shotOwnsScene()) {
       if (this.wanted) this.cancel();
       return;
     }
+    // review-p1: the galaxy chart (`paused`) and the pause sheet or recovery
+    // fade (`frozen`) stop the world; the drive stands still with it. It used
+    // to CANCEL here, and setCruise(null) keeps the velocity — a cruise-speed
+    // state vector (10^3–10^5 km/s) handed to Newtonian flight on close.
+    if (this.universe.paused || this.universe.frozen) return;
 
     const flight = this.universe.flight;
 
@@ -146,34 +206,41 @@ export class Cruise implements GameModule {
     // What the drive is closing on: the locked target, else the nearest body.
     const target = this.target();
     const toward = target ?? this.universe.nearest;
-    let arrival = null;
+    let arrival: CruiseArrival | null = null;
     let limbKm = 0;
     if (toward) {
       const rel = this.sRel.subVectors(toward.world, flight.worldPosition);
       const radius = toward.spec.radius;
-      arrival = {
-        clearanceKm: rel.length() - radius,
-        radiusKm: radius,
-        soiRadiusKm: toward.soiRadius,
-        closing: flight.forward.dot(rel) > 0,
-      };
+      const a = this.arrivalIn;
+      a.clearanceKm = rel.length() - radius;
+      a.radiusKm = radius;
+      a.soiRadiusKm = toward.soiRadius;
+      a.closing = flight.forward.dot(rel) > 0;
+      arrival = a;
       limbKm = LIMB_FRACTION * (radius + arrivalClearanceKm(radius, toward.soiRadius, this.drive.config));
     }
 
     const wasEngaged = this.drive.engaged;
     const wasPhase = this.drive.phase;
-    this.drive.update(dt, {
-      requested: this.wanted,
-      clearanceKm: this.universe.nearestGapKm,
-      grounded: flight.grounded,
-      atmosphericDensity: flight.atmosphericDensity,
-      nearestRadiusKm: this.nearestRadiusKm(),
-      arrival,
-      exitSpeedKmS: circularSpeed(flight.parent?.mu ?? 0, flight.position.length()) || undefined,
-    });
+    const di = this.driveIn;
+    di.requested = this.wanted;
+    di.clearanceKm = this.universe.nearestGapKm;
+    di.grounded = flight.grounded;
+    di.atmosphericDensity = flight.atmosphericDensity;
+    di.nearestRadiusKm = this.nearestRadiusKm();
+    di.arrival = arrival;
+    di.exitSpeedKmS = circularSpeed(flight.parent?.mu ?? 0, flight.position.length()) || undefined;
+    this.drive.update(dt, di);
     // A drop is an answer, not a pause: whatever started it, the toggle is
     // released so the drive does not spool up again by itself.
-    if (wasPhase === 'cruise' && this.drive.phase === 'dropping') this.wanted = false;
+    if (wasPhase === 'cruise' && this.drive.phase === 'dropping') {
+      this.wanted = false;
+      // An obstacle drop used to read only CRUISE DISENGAGED: say why.
+      const why = this.drive.dropReason;
+      if (why === 'mass' || why === 'atmosphere') {
+        bus.emit('log', { text: why === 'mass' ? 'CRUISE DROPPED — MASS LOCK' : 'CRUISE DROPPED — ATMOSPHERE', tone: 'warn' });
+      }
+    }
 
     if (wasEngaged && !this.drive.engaged) {
       // The handover. In orbit if there is anything to orbit, else the
@@ -195,7 +262,32 @@ export class Cruise implements GameModule {
     // Steering to the locked target, while charging and while carried — not
     // during the drop, whose direction is the insertion's business.
     if (target && (this.drive.phase === 'spooling' || this.drive.phase === 'cruise')) {
-      steerToward(flight, target.world, limbKm);
+      // review-p1: the straight line to the target often runs through the
+      // world being orbited (the playtest's Vassa sat behind Remit 31). The
+      // drive then flew into it and dropped for MASS at 0.3 R, unexplained.
+      // While a world is in the way, skirt it along the tangent of a sphere
+      // safely above its hold threshold; once the line is clear, aim as before.
+      const occ = this.occluder(target);
+      if (occ) {
+        steerToward(flight, occ.world, occ.spec.radius + OCCLUDER_HOLD_MARGIN * holdClearanceKm(occ.spec.radius, this.drive.config));
+      } else {
+        steerToward(flight, target.world, limbKm);
+      }
+    }
+
+    // NAV hold (review-p1). Under cruise the flight model flies `ceiling ×
+    // lever`, and since FA-ON the lever's resting place is its coast detent:
+    // spawn, recovery and every arrival leave it at exactly 0. G then engaged
+    // a drive that carried the ship at 0 m/s, forever. At the detent the drive
+    // rides the ceiling; any other lever position still picks a fraction of
+    // it, and Space at the detent still holds the ship still to turn on the spot.
+    if (this.drive.engaged && flight.command.throttle <= 0 && !flight.command.brake) {
+      flight.command.throttle = 1;
+    }
+
+    if (this.holdOnNextFrame) {
+      this.holdOnNextFrame = false;
+      if (this.drive.phase === 'idle') this.heldLever = ctx.input.axes.throttle;
     }
 
     // Engine held at idle after an insertion until the lever moves. Runs after
@@ -209,6 +301,32 @@ export class Cruise implements GameModule {
     }
 
     this.announce(ctx);
+  }
+
+  /**
+   * The nearest world, if it stands between the ship and `target`: nearer
+   * than the target along the line of sight, and the line passing inside its
+   * safe sphere. Only the nearest is checked — it is the one a fast drive
+   * would hit first, and the check stays O(1) per frame.
+   */
+  private occluder(target: Body): Body | null {
+    const b = this.universe.nearest;
+    if (!b || b === target) return null;
+    const ship = this.universe.flight.worldPosition;
+    const toT = this.sRel.subVectors(target.world, ship);
+    const dT = toT.length();
+    if (dT < 1e-9) return null;
+    const ux = toT.x / dT;
+    const uy = toT.y / dT;
+    const uz = toT.z / dT;
+    const bx = b.world.x - ship.x;
+    const by = b.world.y - ship.y;
+    const bz = b.world.z - ship.z;
+    const along = bx * ux + by * uy + bz * uz;
+    if (along <= 0 || along >= dT) return null;
+    const perp2 = bx * bx + by * by + bz * bz - along * along;
+    const safe = b.spec.radius + OCCLUDER_HOLD_MARGIN * holdClearanceKm(b.spec.radius, this.drive.config);
+    return perp2 < safe * safe ? b : null;
   }
 
   /** Stop wanting it, and let go this frame rather than easing out. */
