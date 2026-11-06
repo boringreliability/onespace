@@ -754,6 +754,23 @@ export class FlightModel {
     this.refreshDerived();
   }
 
+  /**
+   * Turn a GROUNDED ship with its world. `delta` is this frame's spin
+   * increment (new spin × old spin⁻¹) in the parent frame. The parent frame
+   * does not rotate but the planet mesh does, so without this the drawn
+   * ground slid beneath a landed ship at ~0.5 km/s. An airborne ship is left
+   * alone — it is not attached to anything.
+   */
+  carryWithSurface(delta: Quaternion): void {
+    if (!this._grounded) return;
+    this.position.applyQuaternion(delta);
+    this.orientation.premultiply(delta).normalize();
+    this.renderPosition.applyQuaternion(delta);
+    this.renderOrientation.premultiply(delta).normalize();
+    this.refreshBodyAxes();
+    this.refreshDerived();
+  }
+
   /** Convenience for the integrator: fold `Input` into the command struct. */
   applyInput(axes: InputAxes, boost: boolean, brake: boolean): void {
     const cmd = this.command;

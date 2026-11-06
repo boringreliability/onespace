@@ -573,7 +573,11 @@ export class Universe implements GameModule {
         ? (this.orbitTime / b.spec.rotationPeriod) * Math.PI * 2
         : 0;
       this.tmpDir.set(Math.sin(b.spec.axialTilt), Math.cos(b.spec.axialTilt), 0).normalize();
+      const carry = b === this.shipParent && this.flight.grounded;
+      if (carry) this.spinDelta.copy(b.spin).invert();
       b.spin.setFromAxisAngle(this.tmpDir, spin);
+      // A landed ship turns with its world (FlightModel.carryWithSurface).
+      if (carry) this.flight.carryWithSurface(this.spinDelta.premultiply(b.spin));
     }
   }
 
@@ -868,12 +872,18 @@ export class Universe implements GameModule {
       // clearance everywhere and the ship flew straight through the ground.
       const dist = relPos.length();
       if (dist < 1e-9) return -body.spec.radius;
-      this.tmpDir.copy(relPos).divideScalar(dist);
+      // Into the planet's own frame: the mesh is rotated by `spin`, the parent
+      // frame is not. Sampling the unrotated direction put collision terrain
+      // and drawn terrain out of step, drifting ~0.5 km/s at the surface.
+      this.samplerQuat.copy(body.spin).invert();
+      this.tmpDir.copy(relPos).divideScalar(dist).applyQuaternion(this.samplerQuat);
       return dist - renderer.surfaceRadius(this.tmpDir);
     });
   }
 
   private samplerBody: Body | null = null;
+  private readonly samplerQuat = new Quaternion();
+  private readonly spinDelta = new Quaternion();
   private samplerRenderer: PlanetRenderer | null = null;
 
   /**
