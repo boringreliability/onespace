@@ -63,6 +63,8 @@ export class ResolutionGovernor {
   private windowCount = 0;
   private sinceDropMs = Infinity;
   private spikeRun = 0;
+  /** Window average that triggered the last drop; null after any rise. */
+  private avgAtLastDrop: number | null = null;
 
   constructor(config: Partial<GovernorConfig> = {}) {
     this.config = { ...GOVERNOR_DEFAULTS, ...config };
@@ -96,15 +98,33 @@ export class ResolutionGovernor {
       // Pixel cost scales with area, i.e. with scale²: to bring avg back to
       // target, multiply scale by sqrt(target/avg). Clamp the step so one bad
       // window cannot halve the image.
-      const ideal = this.scale * Math.sqrt(c.targetMs / avg);
-      next = Math.max(ideal, this.scale - c.maxDownStep);
+      //
+      // But only if the last drop bought anything. On a display capped at
+      // 30 Hz every frame is 33 ms however few pixels are drawn; when the
+      // average is unchanged (±5 %) since the last drop, pixels are not the
+      // bottleneck and dropping more would only blur the image for nothing.
+      // A load that got WORSE since then is new information, so it may drop.
+      const prev = this.avgAtLastDrop;
+      // Only plausible for a refresh cap (≤ 2.5 × target, i.e. 24-30 Hz and
+      // up); a machine at 5 fps is better served blurry than unplayable.
+      const futile =
+        prev !== null && avg <= c.targetMs * 2.5 && Math.abs(avg - prev) < prev * 0.05;
+      if (!futile) {
+        const ideal = this.scale * Math.sqrt(c.targetMs / avg);
+        next = Math.max(ideal, this.scale - c.maxDownStep);
+      }
     } else if (avg < c.targetMs * c.upRatio && this.sinceDropMs >= c.upCooldownMs) {
       next = this.scale + c.upStep;
     }
 
     next = Math.min(c.maxScale, Math.max(c.minScale, next));
     if (Math.abs(next - this.scale) < 1e-6) return false;
-    if (next < this.scale) this.sinceDropMs = 0;
+    if (next < this.scale) {
+      this.sinceDropMs = 0;
+      this.avgAtLastDrop = avg;
+    } else {
+      this.avgAtLastDrop = null;
+    }
     this.scale = next;
     return true;
   }

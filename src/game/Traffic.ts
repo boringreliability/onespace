@@ -338,6 +338,9 @@ export class Traffic implements GameModule {
       v.distanceKm = this.camWorld.distanceTo(v.world);
 
       if (!v.blueprint) {
+        // A hull 0.2-0.8 AU away is never drawn; building it would spend a
+        // 40-75 ms frame on nothing. It is built when it comes in range.
+        if (v.distanceKm > RELEASE_DISTANCE_KM) continue;
         if (heavyBudget <= 0) continue;
         heavyBudget--;
         v.blueprint = generateShip(v.params);

@@ -189,4 +189,23 @@ describe('ResolutionGovernor', () => {
     expect(feed(g, 1000 / 60, 2)).toBe(0);
     expect(g.scale).toBe(1);
   });
+
+  // --- refresh-capped displays (review-p0 #6) ------------------------------
+  // At 30 Hz (Energy Saver, some TVs) every frame is 33 ms whatever the GPU
+  // does. Pixels are not the bottleneck; dropping them buys nothing, and v2.0
+  // drove the scale to its floor and kept it there.
+
+  it('Given a display capped at 30 Hz with an idle GPU, Then the scale drops at most once and then holds', () => {
+    const g = new ResolutionGovernor();
+    feed(g, 1000 / 30, 30);
+    expect(g.scale).toBeGreaterThanOrEqual(1 - GOVERNOR_DEFAULTS.maxDownStep - 1e-9);
+  });
+
+  it('Given a drop that did help, Then a further drop is still allowed under heavier load', () => {
+    const g = new ResolutionGovernor();
+    feed(g, 60, 1); // drops
+    const first = g.scale;
+    feed(g, 45, 1); // improved (60 → 45) but still slow: keep going
+    expect(g.scale).toBeLessThan(first);
+  });
 });

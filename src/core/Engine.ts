@@ -247,7 +247,9 @@ export class Engine {
     // wall-clock interval instead, because this number never sees the GPU.
     const frameMs = performance.now() - t0;
     this.avgFrameMs += (frameMs - this.avgFrameMs) * 0.05;
-    if (wallMs > 0 && wallMs < 250) this.avgWallMs += (wallMs - this.avgWallMs) * 0.05;
+    // Clamped, not filtered: under SwiftShader every frame can exceed 250 ms,
+    // and a filter left the readout stuck at a fictional 60 fps.
+    if (wallMs > 0) this.avgWallMs += (Math.min(wallMs, 2000) - this.avgWallMs) * 0.05;
     // Fixed-step simulation (review harness) is not real time; its intervals
     // say nothing about load.
     if (this.fixedDt === null) this.adaptResolution(wallMs);
@@ -284,6 +286,10 @@ export class Engine {
    * failure here only means the first frame compiles lazily, as before.
    */
   async prewarm(): Promise<void> {
+    // One frame first, so modules that create their renderers lazily — the
+    // home planet is acquired by Universe's first update — exist when the
+    // programs are compiled. Under the boot veil; nobody sees this frame.
+    this.step();
     try {
       await this.renderer.compileAsync(this.scene, this.camera);
     } catch {

@@ -40,6 +40,7 @@ import { SystemMap, registerSystemMapShots } from '@/ui/SystemMap';
 import { Audio } from '@/audio/Audio';
 import { Photo } from '@/game/Photo';
 import { DevOverlay } from '@/ui/DevOverlay';
+import { Title } from '@/ui/Title';
 import { parseRoute } from '@/core/Route';
 import { Warp, registerWarpShots } from '@/ship/Warp';
 import { registerCameraShots } from '@/ship/CameraRig';
@@ -261,7 +262,9 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   await engine.add(shipLog);
 
   progress(0.05, 'seeding universe');
-  const universe = new Universe();
+  // `?seed=` picks the universe (whitelisted hex, core/Route.ts).
+  const route = parseRoute(window.location.search);
+  const universe = new Universe(route.universeSeed !== undefined ? { seed: route.universeSeed } : {});
   await engine.add(universe);
 
   progress(0.35, 'mapping the sky');
@@ -360,6 +363,7 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   // writers: its lateUpdate overrides the flight rig (see game/Photo.ts).
   await engine.add(new Photo(engine, postfx));
   await engine.add(new DevOverlay(engine, parseRoute(window.location.search).dev === true));
+  await engine.add(new Title(universe.seed));
 
   registerShot({
     name: 'game-opening',

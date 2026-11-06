@@ -690,13 +690,15 @@ export class Universe implements GameModule {
     const obj = b.planet.object3d;
     obj.visible = false;
     const planet = b.planet;
-    ctx.renderer
+    const settled = ctx.renderer
       .compileAsync(obj, ctx.camera, ctx.scene)
       .catch(() => undefined)
       .then(() => {
+        this.pendingCompile.delete(planet);
         // Released while compiling: a new renderer may now own the slot.
         if (b.planet === planet) obj.visible = true;
       });
+    this.pendingCompile.set(planet, settled);
 
     bus.emit('planet:approached', {
       planet: b.spec,
@@ -704,26 +706,44 @@ export class Universe implements GameModule {
     });
   }
 
+  /**
+   * Programs still compiling, per planet renderer. Disposing a material while
+   * three's compileAsync is polling it throws inside a setTimeout (its
+   * properties are gone) and the promise never settles — so a release that
+   * lands mid-compile detaches at once and disposes when the compile is done.
+   */
+  private pendingCompile = new Map<PlanetRenderer, Promise<void>>();
+
+  private afterCompile(planet: PlanetRenderer | null, fn: () => void): void {
+    const pending = planet ? this.pendingCompile.get(planet) : undefined;
+    if (pending) void pending.then(fn);
+    else fn();
+  }
+
   private releaseRenderers(b: Body): void {
+    const planet = b.planet;
     if (b.clouds) {
-      b.clouds.object3d.removeFromParent();
-      b.clouds.dispose();
+      const clouds = b.clouds;
+      clouds.object3d.removeFromParent();
+      this.afterCompile(planet, () => clouds.dispose());
       b.clouds = null;
     }
     if (b.rings) {
-      b.rings.object3d.removeFromParent();
-      b.rings.dispose();
+      const rings = b.rings;
+      rings.object3d.removeFromParent();
+      this.afterCompile(planet, () => rings.dispose());
       b.rings = null;
     }
     if (b.atmosphere) {
-      b.atmosphere.object3d.removeFromParent();
-      b.atmosphere.dispose();
+      const atmosphere = b.atmosphere;
+      atmosphere.object3d.removeFromParent();
+      this.afterCompile(planet, () => atmosphere.dispose());
       b.atmosphere = null;
       b.planet?.setAtmosphereShell(false);
     }
-    if (b.planet) {
-      this.root.remove(b.planet.object3d);
-      b.planet.dispose();
+    if (planet) {
+      this.root.remove(planet.object3d);
+      this.afterCompile(planet, () => planet.dispose());
       b.planet = null;
       bus.emit('planet:left', { planet: b.spec });
     }

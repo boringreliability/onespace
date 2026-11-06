@@ -11,6 +11,7 @@ import { bus } from '@/core/EventBus';
 import { registerShaderChunks } from '@/shaders/chunks';
 import { setShot, shotList, shotNames } from '@/game/Shots';
 import { modes } from '@/core/Modes';
+import { parseRoute } from '@/core/Route';
 
 const boot = {
   el: document.getElementById('boot') as HTMLDivElement,
@@ -59,7 +60,10 @@ async function main(): Promise<void> {
   await engine.prewarm();
 
   boot.set(1, 'ready');
-  modes.go('flight');
+  // Boot into the title unless a link names a mode (?mode=flight skips it).
+  const route = parseRoute(window.location.search);
+  for (const w of route.warnings) console.warn(`route: ${w}`);
+  modes.go(route.mode ?? 'title');
   engine.start();
   bus.emit('boot:done');
   setTimeout(() => boot.hide(), 400);
