@@ -45,4 +45,20 @@ describe('parseDevParams', () => {
       dpr: 1.25,
     });
   });
+
+  // --- review-p0: the range check hid a loose regex --------------------------
+  // Every one of these parses with Number() to a value inside (0, 3], so only
+  // the strict-decimal pattern stands between them and the engine.
+
+  it('Given dpr written with an exponent, a sign, a space or a bare dot, Then it is dropped', () => {
+    for (const bad of ['1e0', '2e-1', '1.5E0', '%2B1', '+1', '%201', '1.', '.5', '0x1', '1%20']) {
+      expect(parseDevParams(`?dpr=${bad}`).dpr, bad).toBeUndefined();
+    }
+  });
+
+  it('Given ?dpr=3, Then the inclusive upper bound is taken; just over, Then it is dropped', () => {
+    expect(parseDevParams('?dpr=3').dpr).toBe(3);
+    expect(parseDevParams('?dpr=3.01').dpr).toBeUndefined();
+  });
 });
+

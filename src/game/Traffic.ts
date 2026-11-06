@@ -338,6 +338,9 @@ export class Traffic implements GameModule {
       v.distanceKm = this.camWorld.distanceTo(v.world);
 
       if (!v.blueprint) {
+        // A hull 0.2-0.8 AU away is never drawn; building it would spend a
+        // 40-75 ms frame on nothing. It is built when it comes in range.
+        if (v.distanceKm > RELEASE_DISTANCE_KM) continue;
         if (heavyBudget <= 0) continue;
         heavyBudget--;
         v.blueprint = generateShip(v.params);
@@ -451,6 +454,33 @@ export class Traffic implements GameModule {
     }
     if (!best?.blueprint) return null;
     return { id: best.blueprint.id, name: best.blueprint.name, distanceKm: best.distanceKm };
+  }
+
+  /**
+   * Built vessels, for targeting. Read-only: `contactAt` hands back the live
+   * world vector, which the caller must not write or retain past the frame.
+   * Unbuilt vessels have no id yet and are skipped by returning null.
+   */
+  get contactCount(): number {
+    return this.vessels.length;
+  }
+
+  contactAt(i: number): { readonly id: string; readonly name: string; readonly world: Vector3 } | null {
+    const v = this.vessels[i];
+    if (!v?.blueprint) return null;
+    return { id: v.blueprint.id, name: v.blueprint.name, world: v.world };
+  }
+
+  /** Copy a vessel's world position into `out`; false if it is not (yet) here. */
+  vesselWorld(id: string, out: Vector3): boolean {
+    for (let i = 0; i < this.vessels.length; i++) {
+      const v = this.vessels[i]!;
+      if (v.blueprint?.id === id) {
+        out.copy(v.world);
+        return true;
+      }
+    }
+    return false;
   }
 
   /**

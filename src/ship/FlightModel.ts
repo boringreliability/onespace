@@ -39,11 +39,20 @@
  * - The top speed is enforced by *fading the thrust out*, never by clamping the
  *   velocity. Clamping reads as hitting an invisible wall; fading reads as an
  *   engine running out of breath, which is what it is.
- * - `flightAssist` is the character switch. On, a flight computer bleeds off
- *   rotation in about a second and the ship handles like an aeroplane. Off, the
- *   ship handles like an object in vacuum: you rotate until you rotate back.
- *   Assist deliberately does NOT cancel linear drift — newtonian drift is the
- *   point of the game.
+ * - Two separate computers, two switches.
+ *   `attitudeHold` bleeds off rotation in about a second so the ship handles
+ *   like an aeroplane; off, you rotate until you rotate back.
+ *   `flightAssist` (FA, the Z key) is the translational computer. FA-OFF is
+ *   plain Newtonian: the lever is thrust, and drift is yours to manage. FA-ON
+ *   makes the lever a *set speed* along the nose, relative to the parent, and
+ *   flies the hull there with the main drive, the retro and the RCS — each
+ *   inside its own authority, so it can be slow but it can never lie. The
+ *   lever's exact zero is a detent that means COAST: no translational thrust
+ *   at all, so an orbit (the spawn orbit, a cruise drop into orbit) survives
+ *   hands-off. The brake under FA-ON is an active all-stop, against gravity
+ *   too. See `stepAssist`.
+ *   The class defaults to FA-OFF so headless physics — orbit tests, landing
+ *   tests — stays plainly Newtonian; the game turns FA on for the player.
  *
  * UNITS  distance km · time s · mass kg · force N · angle rad
  *   Config forces are given in newtons because those are numbers a human can
@@ -137,6 +146,37 @@ export function soiRadius(semiMajorAxis: number, mu: number, parentMu: number): 
 }
 
 // ---------------------------------------------------------------------------
+// Flight assist
+// ---------------------------------------------------------------------------
+
+/**
+ * Bottom of the FA lever's speed scale, km/s. The curve below is
+ * `V0·((1 + vmax/V0)^t − 1)`: exactly 0 at t = 0, exactly vmax at t = 1, and
+ * exponential in between. With vmax 60 km/s that puts ~50 m/s at 10% of the
+ * lever (touchdown and docking speeds), ~1.7 km/s at mid-lever (low orbit) and
+ * ~10 km/s at three quarters. A linear lever would spend its first 10% on
+ * 0-6 km/s, which makes landing a matter of holding the key for 1/30 s.
+ */
+export const ASSIST_V0 = 0.05;
+
+/**
+ * Time constant of the speed hold, seconds: demanded acceleration is
+ * (velocity error)/τ, then clipped to what the thrusters have. 0.5 s settles
+ * the last 100 m/s in about a second without the hunting a shorter one shows
+ * against a 120 Hz step, and outside that band the hull is simply saturated.
+ */
+const ASSIST_TAU = 0.5;
+
+export type AssistState = 'off' | 'coast' | 'hold' | 'stop';
+
+/** FA lever (0..1) → set speed, km/s. Pure; see `ASSIST_V0` for the shape. */
+export function assistTargetSpeed(throttle: number, vmax: number): number {
+  if (!(throttle > 0) || !(vmax > 0)) return 0; // NaN fails `> 0` too
+  if (throttle >= 1) return vmax;
+  return ASSIST_V0 * (Math.pow(1 + vmax / ASSIST_V0, throttle) - 1);
+}
+
+// ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
@@ -213,8 +253,16 @@ export const DEFAULT_SHIP_CONFIG: ShipConfig = {
   mass: 2.0e5,
   mainThrust: 4.0e7, // 200 m/s² = 0.2 km/s²
   boostMultiplier: 3,
-  rcsThrust: 1.0e7, // 50 m/s² — deliberately a quarter of the main drive
-  brakeThrust: 1.6e7,
+  // 100 m/s² — half the main drive. It was a quarter (50 m/s²), which made
+  // flight assist take ~35 s to swing the velocity round after a 90° turn at
+  // orbital speed. RCS is the only thing allowed to fix lateral drift (the
+  // computer never steers the nose to do it), so its authority IS the
+  // handling.
+  rcsThrust: 2.0e7,
+  // 200 m/s² — parity with the main drive (GAMEPLAY B4). It was 80 m/s², so
+  // slowing down took 2.5× as long as speeding up and no assist could hide
+  // that; with parity the FA lever feels the same in both directions.
+  brakeThrust: 4.0e7,
   // I ≈ m·r² for a 30 m hull: heavy in pitch/yaw, light about the roll axis.
   inertia: { pitch: 18, yaw: 18, roll: 7 },
   // alpha = torque·1e-3 / I  →  2.0, 1.8 and 3.2 rad/s².
@@ -403,7 +451,12 @@ export class FlightModel {
   private _heating = 0;
   private _grounded = false;
   private _boosting = false;
-  private _assist = true;
+  private _attitudeHold = true;
+  private _fa = false;
+  private _assistState: AssistState = 'off';
+  /** Lever value at the last SOI rebase while FA held speed; see step(). */
+  private soiLatchLever: number | null = null;
+  private _assistTarget = 0;
   private lastEmittedThrottle = -1;
 
   /**
@@ -492,19 +545,42 @@ export class FlightModel {
   }
 
   /**
-   * Attitude hold. Off is vacuum: whatever rotation you started, you keep.
-   * This toggle is most of the game's character, so it announces itself.
+   * Flight assist (FA). On, the lever is a set speed and the computer flies
+   * it; off, the lever is thrust. Most of the game's character, so it
+   * announces itself. Does not touch `attitudeHold`.
    */
   get flightAssist(): boolean {
-    return this._assist;
+    return this._fa;
   }
   set flightAssist(on: boolean) {
-    if (on === this._assist) return;
-    this._assist = on;
+    if (on === this._fa) return;
+    this._fa = on;
+    if (!on) {
+      this._assistState = 'off';
+      this._assistTarget = 0;
+    }
     bus.emit('log', {
       text: on ? 'FLIGHT ASSIST ENGAGED' : 'FLIGHT ASSIST OFF — NEWTONIAN',
       tone: on ? 'normal' : 'warn',
     });
+  }
+
+  /** Rotation damping. Off is vacuum: whatever rotation you started, you keep. */
+  get attitudeHold(): boolean {
+    return this._attitudeHold;
+  }
+  set attitudeHold(on: boolean) {
+    this._attitudeHold = on;
+  }
+
+  /** What the FA computer did on the last substep — for the HUD. */
+  get assistState(): AssistState {
+    return this._assistState;
+  }
+
+  /** The speed FA is holding along the nose, km/s; 0 unless `assistState` is 'hold'. */
+  get assistTargetKmS(): number {
+    return this._assistTarget;
   }
 
   // -------------------------------------------------------------------------
@@ -542,6 +618,7 @@ export class FlightModel {
    * the bug this design closed.
    */
   rebase(parent: ParentBody | null): void {
+    if (this._fa && this._assistState === 'hold') this.soiLatchLever = this.command.throttle;
     const from = this.parentBody;
     const to = parent ?? NO_PARENT;
     if (from === to) return;
@@ -589,6 +666,25 @@ export class FlightModel {
   get cruising(): boolean {
     return this.cruiseCap !== null;
   }
+
+  // --- v2 track C: cruise orbit insertion ----------------------------------
+  /**
+   * Leave cruise with a given PARENT-RELATIVE velocity and the engine cut.
+   *
+   * The one deliberate cheat of the cruise model (see `ship/cruiseOrbit.ts`,
+   * which is the only caller). Not a frame crossing — the velocity is already
+   * in the parent's frame. The spooled throttle is zeroed with it: otherwise
+   * 0.7 s of residual main-drive spool along a nose that is still pointing at
+   * the planet kicks a fresh low orbit eccentric (measured: e ≈ 0.2 at a
+   * 1 000 km moon). Whether it spools back up is the command's business.
+   */
+  exitCruiseWithVelocity(velocity: Vector3): void {
+    this.cruiseCap = null;
+    this.velocity.copy(velocity);
+    this._throttle = 0;
+    this._speed = this.velocity.length();
+  }
+  // --- end track C ----------------------------------------------------------
 
   /** Local atmospheric density last handed in, kg/m³. 0 = vacuum. */
   get atmosphericDensity(): number {
@@ -706,9 +802,37 @@ export class FlightModel {
       return;
     }
 
-    // --- throttle spool -----------------------------------------------------
     this._boosting = this.command.boost;
-    this._throttle = damp(this._throttle, clamp01(this.command.throttle), c.throttleSpoolTime, h);
+
+    // --- flight assist mode -------------------------------------------------
+    // Decided before anything moves, so a coasting ship runs the Newtonian
+    // path below line for line and is bit-identical to FA-OFF.
+    let active = false;
+    if (this._fa) {
+      // After an SOI rebase the hold reference jumped by the parents'
+      // relative velocity (up to ~49 km/s). Coast until the pilot moves the
+      // lever, rather than burning for minutes to re-null a speed they never
+      // asked to change (review-p1a M1).
+      if (this.soiLatchLever !== null && this.command.throttle !== this.soiLatchLever) {
+        this.soiLatchLever = null;
+      }
+      if (this.command.brake) this._assistState = 'stop';
+      else if (this.soiLatchLever !== null) this._assistState = 'coast';
+      else if (this.command.throttle > 0) this._assistState = 'hold';
+      else this._assistState = 'coast'; // the detent, and NaN
+      active = this._assistState !== 'coast';
+    }
+
+    // --- throttle spool -----------------------------------------------------
+    // Under an active assist `_throttle` is instead the engine output the
+    // computer chose, written in `stepAssist`.
+    // In the coast detent the computer cuts the drive outright: the spool would
+    // otherwise keep pushing whatever output the hold last chose for ~1 s
+    // (up to ~0.14 km/s along the nose) after the pilot asked for no thrust.
+    if (this._fa && !active) this._throttle = 0;
+    else if (!active) {
+      this._throttle = damp(this._throttle, clamp01(this.command.throttle), c.throttleSpoolTime, h);
+    }
 
     // --- gravity ------------------------------------------------------------
     // One source: the parent. Not a sum. That is the patched-conic
@@ -729,19 +853,25 @@ export class FlightModel {
     const vmax = c.topSpeed * boostMul;
     const limiter = clamp01(1 - Math.pow(Math.min(speed / vmax, 1), c.speedFalloffExponent));
 
-    const main = this._throttle * this.mainAccel * boostMul * limiter;
-    this.sAcc.addScaledVector(this.forward, main);
+    if (active) {
+      this.stepAssist(vmax, boostMul, limiter);
+    } else {
+      if (this._fa) this._assistTarget = 0;
 
-    const rcs = this.rcsAccel * limiter;
-    this.sAcc.addScaledVector(this.right, this.command.strafeX * rcs);
-    this.sAcc.addScaledVector(this.up, this.command.strafeY * rcs);
-    this.sAcc.addScaledVector(this.forward, this.command.strafeZ * rcs);
+      const main = this._throttle * this.mainAccel * boostMul * limiter;
+      this.sAcc.addScaledVector(this.forward, main);
 
-    // Brake is retro-thrust along -v, so it is exempt from the speed limiter —
-    // it only ever removes energy.
-    if (this.command.brake && speed > 1e-6) {
-      const bite = Math.min(1, speed / (this.brakeAccel * h + 1e-9));
-      this.sAcc.addScaledVector(this.velocity, (-this.brakeAccel * bite) / speed);
+      const rcs = this.rcsAccel * limiter;
+      this.sAcc.addScaledVector(this.right, this.command.strafeX * rcs);
+      this.sAcc.addScaledVector(this.up, this.command.strafeY * rcs);
+      this.sAcc.addScaledVector(this.forward, this.command.strafeZ * rcs);
+
+      // Brake is retro-thrust along -v, so it is exempt from the speed limiter —
+      // it only ever removes energy.
+      if (this.command.brake && speed > 1e-6) {
+        const bite = Math.min(1, speed / (this.brakeAccel * h + 1e-9));
+        this.sAcc.addScaledVector(this.velocity, (-this.brakeAccel * bite) / speed);
+      }
     }
 
     // --- atmosphere ---------------------------------------------------------
@@ -765,6 +895,57 @@ export class FlightModel {
     this.stepRotation(h, speed);
     this.stepHeating(h, speed);
     if (this.groundSampler) this.stepGround(h);
+  }
+
+  /**
+   * The FA computer, 'hold' or 'stop'. Writes thrust into `sAcc`; gravity is
+   * added by the caller as for any other thrust.
+   *
+   * It flies the hull, it does not move it: the demanded acceleration is
+   * resolved into body axes and each axis is clipped to the one actuator that
+   * can push that way — main drive forward only (and through the same speed
+   * limiter as the pilot's throttle), retro backward only, RCS laterally. It
+   * never turns the nose to help; a ship drifting sideways is corrected by RCS
+   * alone, so a big turn at speed takes the time a real hull would take.
+   *
+   * Gravity is cancelled in the demand, which is what makes 'stop' a hover and
+   * 'hold' a straight line near a body. Not on the ground, where the gear
+   * already carries the weight and cancelling it would float the ship off.
+   *
+   * No engine spool here: the spool models the lag between the pilot's lever
+   * and the drive, and a controller wrapped round a 0.7 s lag overshoots.
+   * The computer throttles the drive directly, and the readout says so.
+   */
+  private stepAssist(vmax: number, boostMul: number, limiter: number): void {
+    const cmd = this.command;
+    const v = this.velocity;
+
+    const vset = this._assistState === 'hold' ? assistTargetSpeed(cmd.throttle, vmax) : 0;
+    this._assistTarget = vset;
+
+    // a_des = (nose·vset − v)/τ − g, in sTmp.
+    const d = this.sTmp.copy(this.forward).multiplyScalar(vset).sub(v);
+    d.multiplyScalar(1 / ASSIST_TAU);
+    if (!this._grounded) d.sub(this.sGrav);
+
+    const f = d.dot(this.forward);
+    const mainCap = this.mainAccel * boostMul;
+    const main = f > 0 ? Math.min(f, mainCap * limiter) : 0;
+    const retro = f < 0 ? Math.min(-f, this.brakeAccel) : 0;
+
+    // The pilot's strafe wins on its own axis: the computer must not fight
+    // the stick, or strafing under FA would be impossible.
+    const rcs = this.rcsAccel;
+    const rx = cmd.strafeX !== 0 ? cmd.strafeX * rcs : clampAbs(d.dot(this.right), rcs);
+    const uy = cmd.strafeY !== 0 ? cmd.strafeY * rcs : clampAbs(d.dot(this.up), rcs);
+
+    this.sAcc.addScaledVector(this.forward, main - retro);
+    this.sAcc.addScaledVector(this.right, rx);
+    this.sAcc.addScaledVector(this.up, uy);
+
+    // The readout is what the main drive is actually doing, not the lever:
+    // holding a speed in vacuum reads idle, which is the truth.
+    this._throttle = mainCap > 0 ? main / mainCap : 0;
   }
 
   /**
@@ -853,7 +1034,7 @@ export class FlightModel {
 
     w.addScaledVector(this.sTorque, h);
 
-    if (this._assist) {
+    if (this._attitudeHold) {
       // Exponential decay towards zero — not a rate controller. Steady state
       // under a held stick is alpha·tau, and letting go bleeds off in ~1 s.
       // Landing gear locked on the ground stiffens it considerably.
@@ -928,7 +1109,6 @@ export class FlightModel {
         this.angularVelocity.set(0, 0, 0);
         this._grounded = true;
         bus.emit('ship:crashed', { speed: impact, planetId: this.landingPlanet?.id ?? null });
-        bus.emit('log', { text: 'HULL BREACH — IMPACT', tone: 'warn' });
         return;
       }
 
@@ -1072,6 +1252,10 @@ function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
 }
 
+function clampAbs(v: number, limit: number): number {
+  return v < -limit ? -limit : v > limit ? limit : v;
+}
+
 /** Frame-rate independent critical damping towards a target. */
 function damp(current: number, target: number, tau: number, dt: number): number {
   return current + (target - current) * (1 - Math.exp(-dt / tau));
@@ -1206,7 +1390,7 @@ export function flightSelfTest(): string[] {
     );
   }
 
-  // --- 4. flight assist on/off ---------------------------------------------
+  // --- 4. attitude hold on/off ---------------------------------------------
   {
     const fm = new FlightModel();
     fm.command.pitch = 1;
@@ -1222,7 +1406,7 @@ export function flightSelfTest(): string[] {
     );
 
     const fm2 = new FlightModel();
-    fm2.flightAssist = false;
+    fm2.attitudeHold = false;
     fm2.command.pitch = 1;
     run(fm2, 1);
     const spun = fm2.angularVelocity.length();

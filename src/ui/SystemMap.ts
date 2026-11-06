@@ -28,7 +28,7 @@ import type { EngineContext, GameModule } from '@/core/Engine';
 import { activeShotName, registerShot } from '@/game/Shots';
 import { orbitalPosition } from '@/gen/orbit';
 import { AU, SOLAR_RADIUS, type PlanetSpec, type StarSystemSpec } from '@/gen/types';
-import { cruiseTravelSeconds } from '@/ship/CruiseDrive';
+import { cruiseEtaSeconds } from '@/ship/CruiseDrive';
 import type { Universe } from '@/game/Universe';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
@@ -362,7 +362,8 @@ export class SystemMap implements GameModule {
 
   private select(n: Node): void {
     this.selected = n;
-    bus.emit('target:changed', { id: n.spec.id, name: n.spec.name });
+    // Canonical target id (shared contract): `body:<spec.name>`.
+    bus.emit('target:changed', { id: `body:${n.spec.name}`, name: n.spec.name });
     this.quote();
   }
 
@@ -388,7 +389,7 @@ export class SystemMap implements GameModule {
     // The crossing time the cruise drive would actually deliver: it closes on
     // the body, so the gap it flies is surface-to-ship, and the arrival is at
     // the drive's own drop threshold rather than at zero.
-    set('eta', formatEta(cruiseTravelSeconds(Math.max(n.distanceKm - n.spec.radius, 1), 3_000)));
+    set('eta', formatEta(cruiseEtaSeconds(n.distanceKm, n.spec.radius)));
     set('gravity', `${n.spec.gravity.toFixed(1)} m/s²`);
   }
 

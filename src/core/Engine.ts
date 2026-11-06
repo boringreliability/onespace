@@ -22,7 +22,7 @@ import { FloatingOrigin } from './FloatingOrigin';
 import { Input } from './Input';
 import { ResolutionGovernor } from './ResolutionGovernor';
 import { modes, type Mode } from './Modes';
-import { tickModules } from './tick';
+import { moduleDt, tickModules } from './tick';
 import { parseDevParams } from './Route';
 
 export interface EngineContext {
@@ -232,13 +232,24 @@ export class Engine {
     if (this.pipeline) this.pipeline.render(dt, ctx);
     else this.renderer.render(this.scene, this.camera);
 
+    // Read back in the same task as the draw: the drawing buffer is still
+    // intact, so no preserveDrawingBuffer (which costs every frame) is needed.
+    if (this.captureWaiters.length) {
+      const waiters = this.captureWaiters.splice(0);
+      this.canvas.toBlob((b) => {
+        for (const w of waiters) w(b);
+      }, 'image/png');
+    }
+
     this.input.endFrame();
 
     // CPU-side cost only; kept for the stats overlay. The governor is fed the
     // wall-clock interval instead, because this number never sees the GPU.
     const frameMs = performance.now() - t0;
     this.avgFrameMs += (frameMs - this.avgFrameMs) * 0.05;
-    if (wallMs > 0 && wallMs < 250) this.avgWallMs += (wallMs - this.avgWallMs) * 0.05;
+    // Clamped, not filtered: under SwiftShader every frame can exceed 250 ms,
+    // and a filter left the readout stuck at a fictional 60 fps.
+    if (wallMs > 0) this.avgWallMs += (Math.min(wallMs, 2000) - this.avgWallMs) * 0.05;
     // Fixed-step simulation (review harness) is not real time; its intervals
     // say nothing about load.
     if (this.fixedDt === null) this.adaptResolution(wallMs);
@@ -275,11 +286,30 @@ export class Engine {
    * failure here only means the first frame compiles lazily, as before.
    */
   async prewarm(): Promise<void> {
+    // One frame first, so modules that create their renderers lazily — the
+    // home planet is acquired by Universe's first update — exist when the
+    // programs are compiled. Under the boot veil; nobody sees this frame.
+    this.step();
     try {
       await this.renderer.compileAsync(this.scene, this.camera);
     } catch {
       /* fall back to lazy compile */
     }
+  }
+
+  /** Resolve with a PNG of the next rendered frame (null if the browser refuses). */
+  captureNextFrame(): Promise<Blob | null> {
+    return new Promise((resolve) => this.captureWaiters.push(resolve));
+  }
+
+  private captureWaiters: Array<(b: Blob | null) => void> = [];
+
+  /** How many modules tick in the current mode — for the dev overlay. */
+  moduleCounts(): { ticking: number; total: number } {
+    let ticking = 0;
+    const st = { base: modes.base, overlay: modes.overlay };
+    for (const m of this.modules) if (moduleDt(m, st, 1) >= 0) ticking++;
+    return { ticking, total: this.modules.length };
   }
 
   resumeRealtime(): void {

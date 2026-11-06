@@ -58,10 +58,21 @@ looks identical at every moment except that one.
 
 | | |
 |---|---|
-| Engage | 5 000 km clearance, not landed, not in atmosphere |
-| Hold | 3 000 km clearance |
+| Engage | max(1 200 km, 0.5 R) clearance, not landed, not in atmosphere |
+| Hold | max(700 km, 0.3 R) clearance |
+| Arrival | closing on the target (else the nearest body) inside 2 R clearance (r = 3 R), clipped to 0.9 r_soi |
 | Spool | 2.0 s, abortable |
-| Drop | 0.9 s geometric bleed to 60 km/s |
+| Drop | 0.9 s geometric bleed to the circular speed √(μ/r), still under the clearance law; then orbit insertion |
+
+v2: R is the radius of the body the clearance is measured to. The opening orbit
+(4 474 km over Remit 31, R 7 240 km = 0.62 R) can now engage; v1's absolute
+5 000 km refused it. On the drop, `ship/cruiseOrbit.ts` replaces the velocity
+with the circular one about the ship's SOI parent, in the plane of (r, v), and
+`Cruise` holds the engine at idle until the lever moves. That replaces the old
+"bleed to 60 km/s along the nose" as the one deliberate cheat. With a target
+locked (`target:changed`), the nose is steered (PD, critically damped, via
+`FlightModel.command`) to the limb of the arrival sphere, so arrival is
+near-tangential. Any pilot rotation input wins immediately.
 
 Engage and hold thresholds differ on purpose: equal thresholds would flip the
 drive on alternate frames for as long as a ship sat on the boundary.

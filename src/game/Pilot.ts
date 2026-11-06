@@ -19,6 +19,18 @@ import type { Universe } from '@/game/Universe';
 import { shotOwnsScene } from '@/game/Shots';
 import type { Hud } from '@/ui/Hud';
 import type { Audio } from '@/audio/Audio';
+import { resolveJumpKey, type JumpSelection } from '@/game/jumpKey';
+
+/** What `J` needs from the galaxy chart. `StarMap` satisfies it. */
+export interface JumpChart {
+  selectedTarget(): JumpSelection | null;
+  readonly origin: string | null;
+}
+
+/** What `J` needs from the jump drive. `Warp` satisfies it. */
+export interface JumpDrive {
+  readonly phase: string;
+}
 
 /** The hull the game opens with. Picked by eye from a batch of generated ships. */
 const DEFAULT_SHIP_SEED = 0x5c_0117;
@@ -81,8 +93,11 @@ export class Pilot implements GameModule {
     bus.on('camera:shake', ({ intensity, duration }) => this.rig.shake(intensity, duration));
 
     bus.on('ship:touchdown', ({ speed, vertical }) => this.onTouchdown(speed, vertical));
+    // A crash is not a landing: the recovery module fades to black and puts
+    // the ship back in orbit (GAMEPLAY F6). Entering the landed state here
+    // would swing the camera to orbit and then log AIRBORNE on the respawn.
+    // This is the only HULL BREACH line; FlightModel no longer logs its own.
     bus.on('ship:crashed', ({ speed }) => {
-      this.enterLanded();
       bus.emit('log', {
         text: `HULL BREACH — ${(speed * 1000).toFixed(0)} M/S`,
         tone: 'warn',
@@ -137,6 +152,70 @@ export class Pilot implements GameModule {
   /** The camera mode to restore when the ship lifts off again. */
   private modeBeforeLanding: CameraMode = 'chase';
   private lastCtx: EngineContext | null = null;
+  /** [v2-p1a] FA-ON has been applied as the player's default. */
+  private faDefaulted = false;
+
+  private chart: JumpChart | null = null;
+  private drive: JumpDrive | null = null;
+
+  /**
+   * Hand `J` the galaxy chart and the drive. Separate from the constructor
+   * because the chart is built after the pilot in registry order.
+   */
+  attachJump(chart: JumpChart, drive: JumpDrive): void {
+    this.chart = chart;
+    this.drive = drive;
+  }
+
+  /**
+   * `J`: jump to the system selected on the galaxy chart (GAMEPLAY B5). It used
+   * to be read only by Cruise, to cancel cruise. That still happens; this is
+   * the jump itself, through the same request the chart's Enter sends.
+   */
+  private onJumpKey(): void {
+    if (!this.chart) return;
+    const r = resolveJumpKey({
+      selection: this.chart.selectedTarget(),
+      originId: this.chart.origin,
+      warpIdle: (this.drive?.phase ?? 'idle') === 'idle',
+    });
+    if (r.kind === 'jump') {
+      bus.emit('nav:jump-requested', { systemId: r.systemId, name: r.name, distanceLy: r.distanceLy });
+      bus.emit('log', { text: `JUMP AUTHORISED — ${r.name}`, tone: 'good' });
+    } else if (r.kind === 'hint') {
+      bus.emit('log', { text: r.text, tone: 'normal' });
+    }
+  }
+
+  /**
+   * F2: save the frame as a PNG.
+   *
+   * The drawing buffer is not preserved, so it must be read after this frame's
+   * render and before the browser composites it. A microtask queued from inside
+   * the engine's rAF step runs exactly there: after `step()` has rendered and
+   * before control returns to the event loop.
+   */
+  private screenshot(ctx: EngineContext): void {
+    const canvas = ctx.renderer.domElement;
+    queueMicrotask(() => {
+      canvas.toBlob((blob) => {
+        if (!blob) {
+          bus.emit('log', { text: 'SCREENSHOT FAILED', tone: 'warn' });
+          return;
+        }
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        a.href = url;
+        a.download = `onespace-${stamp}.png`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        bus.emit('log', { text: 'SCREENSHOT SAVED', tone: 'good' });
+      }, 'image/png');
+    });
+  }
 
   update(dt: number, ctx: EngineContext): void {
     this.lastCtx = ctx;
@@ -151,15 +230,32 @@ export class Pilot implements GameModule {
     }
     this.ship.object3d.visible = true;
 
-    const flight = this.universe.flight;
     const input = ctx.input;
+    if (input.pressed('screenshot')) this.screenshot(ctx);
+    // Paused or behind the recovery fade: the hull holds still where it is.
+    if (this.universe.frozen) return;
+
+    const flight = this.universe.flight;
 
     // 1. Intent.
+    // --- [v2-p1a] flight assist: FA-ON is the player's default, Z toggles it.
+    // The FlightModel class defaults to FA-OFF so headless physics stays
+    // Newtonian; the first frame turns it on (once) for the player's ship.
+    if (!this.faDefaulted) {
+      flight.flightAssist = true;
+      this.faDefaulted = true;
+    }
+    if (input.pressed('flightAssist')) flight.flightAssist = !flight.flightAssist;
+    // --- [/v2-p1a]
     flight.applyInput(input.axes, input.held('boost'), input.held('brake'));
 
     if (input.pressed('toggleCamera')) this.rig.cycleMode();
     if (input.pressed('map')) bus.emit('ui:toggle-map');
     if (input.pressed('codex')) bus.emit('ui:toggle-codex');
+    if (input.pressed('warp')) this.onJumpKey();
+    // `L` (land) is deliberately unbound in flight for now: auto-land/lift is
+    // phase 4 (PLAN P4). Cruise still reads it as "stop cruising", which is
+    // the honest subset of what landing will mean.
 
     // 2. Physics already ran inside Universe.update(); read the interpolated
     //    render state so the hull does not stutter between fixed substeps.

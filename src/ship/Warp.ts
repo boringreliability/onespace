@@ -47,6 +47,7 @@ import { bus } from '@/core/EventBus';
 import { registerShaderChunks } from '@/shaders/chunks';
 import { registerShot } from '@/game/Shots';
 import type { Vec3 } from '@/gen/types';
+import { WARP_TIMELINE } from '@/ship/warpTimeline';
 
 // ---------------------------------------------------------------------------
 // Public surface
@@ -102,20 +103,22 @@ export class WarpAbortedError extends Error {
 // Timeline. One scalar drives everything; these are its landmarks.
 // ---------------------------------------------------------------------------
 
-const T_CHARGE = 2.0;
-const T_FLASH = 0.4;
-const T_TUNNEL = 2.5;
-const T_ARRIVE = 1.0;
+// The numbers live in warpTimeline.ts so the galaxy chart's JUMP EST reads the
+// same ones (GAMEPLAY F5). Aliased here to keep the sequence code readable.
+const T_CHARGE = WARP_TIMELINE.charge;
+const T_FLASH = WARP_TIMELINE.flash;
+const T_TUNNEL = WARP_TIMELINE.tunnel;
+const T_ARRIVE = WARP_TIMELINE.arrive;
 /** Exposure iris. Runs past the end of the sequence; phase is 'idle' by then. */
-const T_TAIL = 1.5;
+const T_TAIL = WARP_TIMELINE.tail;
 /** How long the charge visuals take to unwind when the pilot aborts. */
-const T_ABORT = 0.7;
+const T_ABORT = WARP_TIMELINE.abort;
 
-const T0_TUNNEL = T_CHARGE; // 2.0 — the flash fires here
-const T0_TUNNEL_BODY = T_CHARGE + T_FLASH; // 2.4
-const T0_ARRIVE = T0_TUNNEL_BODY + T_TUNNEL; // 4.9 — world swap happens here
-const T_END = T0_ARRIVE + T_ARRIVE; // 5.9
-const T_DONE = T_END + T_TAIL; // 7.4
+const T0_TUNNEL = WARP_TIMELINE.tunnelAt; // 2.0 — the flash fires here
+const T0_TUNNEL_BODY = WARP_TIMELINE.tunnelBodyAt; // 2.4
+const T0_ARRIVE = WARP_TIMELINE.arriveAt; // 4.9 — world swap happens here
+const T_END = WARP_TIMELINE.endAt; // 5.9
+const T_DONE = WARP_TIMELINE.doneAt; // 7.4
 
 /** Corridor extent ahead of the camera, km. Also the shader's depth basis. */
 const TUNNEL_LENGTH = 60;
