@@ -89,6 +89,10 @@ describe('retro authority', () => {
     expect(RETRO).toBeGreaterThanOrEqual(MAIN);
   });
 
+  it('Given the default ship, Then RCS authority is 0.1 km/s² (raised 2× so drift dies in seconds, not a minute)', () => {
+    expect(RCS).toBeCloseTo(0.1, 9);
+  });
+
   it('Given FA-OFF at 2 km/s, When the brake is held, Then the ship stops in about v/a_retro seconds', () => {
     const fm = deepSpace(false);
     fm.teleport(new Vector3(), new Vector3(0, 0, -2), new Quaternion());
@@ -190,12 +194,28 @@ describe('FA-ON: speed hold', () => {
     expect(Math.abs(fm.speed - vset) / vset).toBeLessThan(0.01);
   });
 
-  it('Given FA-ON, When the lever is pulled to 0, Then the ship comes to a stop', () => {
+  it('Given FA-ON with the lever at exactly 0 (the detent), Then it coasts: no translational thrust, velocity exactly constant', () => {
     const fm = deepSpace(true);
-    fm.teleport(new Vector3(), new Vector3(0, 0, -3), new Quaternion());
+    const v0 = new Vector3(0.4, -0.1, -3);
+    fm.teleport(new Vector3(), v0, new Quaternion());
     fm.command.throttle = 0;
-    run(fm, 3 / RETRO + 10);
-    expect(fm.speed).toBeLessThan(1e-3);
+    run(fm, 10);
+    expect(fm.velocity.x).toBe(v0.x);
+    expect(fm.velocity.y).toBe(v0.y);
+    expect(fm.velocity.z).toBe(v0.z);
+    expect(fm.assistState).toBe('coast');
+    expect(fm.assistTargetKmS).toBe(0);
+  });
+
+  it('Given FA-ON coasting, When the lever comes off the detent, Then it starts holding speed', () => {
+    const fm = deepSpace(true);
+    fm.command.throttle = 0;
+    run(fm, 1);
+    expect(fm.assistState).toBe('coast');
+    fm.command.throttle = 0.01;
+    run(fm, 1);
+    expect(fm.assistState).toBe('hold');
+    expect(fm.assistTargetKmS).toBeCloseTo(assistTargetSpeed(0.01, C.topSpeed), 9);
   });
 
   it('Given FA-ON holding speed, When the nose is turned 90°, Then the velocity swings round to follow the new nose', () => {
@@ -219,6 +239,26 @@ describe('FA-ON: speed hold', () => {
     fm.command.brake = true;
     run(fm, 2 / RETRO + 10);
     expect(fm.speed).toBeLessThan(1e-3);
+    expect(fm.assistState).toBe('stop');
+    expect(fm.assistTargetKmS).toBe(0);
+  });
+
+  it('Given FA-ON drifting sideways, When the brake is held, Then the stop kills every axis, not just the nose', () => {
+    const fm = deepSpace(true);
+    fm.teleport(new Vector3(), new Vector3(1, -1, 0.5), new Quaternion());
+    fm.command.throttle = 0;
+    fm.command.brake = true;
+    run(fm, 1 / RCS + 10);
+    expect(fm.speed).toBeLessThan(1e-3);
+  });
+
+  it('Given FA-OFF, Then the assist state reads off whatever the lever and brake say', () => {
+    const fm = deepSpace(false);
+    fm.command.throttle = 0.5;
+    fm.command.brake = true;
+    run(fm, 0.1);
+    expect(fm.assistState).toBe('off');
+    expect(fm.assistTargetKmS).toBe(0);
   });
 
   it('Given FA-ON and a strafe command, Then the pilot’s strafe wins on that axis (the computer does not fight the stick)', () => {
@@ -278,6 +318,7 @@ describe('FA-ON: thrust limits (no velocity teleport)', () => {
     const w = worstAccel((fm) => {
       fm.teleport(new Vector3(), new Vector3(0, 0, -8), new Quaternion());
       fm.command.throttle = 0;
+      fm.command.brake = true;
     }, 20);
     expect(w.back).toBeLessThanOrEqual(RETRO * (1 + 1e-6));
     expect(w.back).toBeGreaterThan(RETRO * 0.5);
@@ -287,6 +328,7 @@ describe('FA-ON: thrust limits (no velocity teleport)', () => {
     const w = worstAccel((fm) => {
       fm.teleport(new Vector3(), new Vector3(2, 2, 0), new Quaternion());
       fm.command.throttle = 0;
+      fm.command.brake = true;
     }, 20);
     expect(w.lat).toBeLessThanOrEqual(RCS * (1 + 1e-6));
     expect(w.lat).toBeGreaterThan(RCS * 0.5);
@@ -297,17 +339,58 @@ describe('FA-ON: gravity and the ground', () => {
   const MU = 398600;
   const R = 6371;
 
-  it('Given FA-ON at rest 7000 km from an Earth-mass parent with the lever at 0, Then the computer holds station against gravity (velocity relative to the parent stays ~0)', () => {
-    // The literal reading of "throttle = speed relative to the parent". See the
-    // open design question on orbits in the stage-1 report.
+  function nearEarth(assist: boolean, v = new Vector3()): FlightModel {
     const fm = new FlightModel(C);
-    fm.flightAssist = true;
+    fm.flightAssist = assist;
     fm.setParent({ position: new Vector3(), velocity: new Vector3(), mu: MU, radius: R });
-    fm.teleport(new Vector3(0, 7000, 0), new Vector3(0, 0, 0), new Quaternion());
+    fm.teleport(new Vector3(0, 7000, 0), v, new Quaternion());
     fm.command.throttle = 0;
+    return fm;
+  }
+
+  it('Given FA-ON at rest near an Earth-mass parent with the lever at 0, Then it coasts (falls freely, exactly as FA-OFF would)', () => {
+    const on = nearEarth(true);
+    const off = nearEarth(false);
+    run(on, 30);
+    run(off, 30);
+    // g at 7000 km is ~8.1 m/s²; 30 s of free fall is ~0.24 km/s.
+    expect(on.speed).toBeGreaterThan(0.2);
+    expect(on.verticalSpeed).toBeLessThan(0);
+    expect(on.position.equals(off.position)).toBe(true);
+    expect(on.velocity.equals(off.velocity)).toBe(true);
+  });
+
+  it('Given FA-ON in a circular orbit with the lever at 0, Then the orbit survives hands-off (spawn and cruise-drop depend on it)', () => {
+    const probe = nearEarth(true);
+    const v = probe.orbitalVelocityAt(new Vector3(0, 7000, 0));
+    const fm = nearEarth(true, v);
+    let rMin = Infinity;
+    let rMax = 0;
+    for (let i = 0; i < 120 * 120; i++) {
+      fm.update(H);
+      const r = fm.position.length();
+      rMin = Math.min(rMin, r);
+      rMax = Math.max(rMax, r);
+    }
+    expect((rMax - rMin) / 7000).toBeLessThan(1e-4);
+  });
+
+  it('Given FA-ON at rest near an Earth-mass parent with the brake held, Then the computer holds station against gravity', () => {
+    const fm = nearEarth(true);
+    fm.command.brake = true;
     run(fm, 30);
     expect(fm.speed).toBeLessThan(0.01);
     expect(Math.abs(fm.position.length() - 7000)).toBeLessThan(1);
+    expect(fm.assistState).toBe('stop');
+  });
+
+  it('Given FA-ON in a hold near a parent, Then gravity is compensated so the set speed is held along the nose', () => {
+    const fm = nearEarth(true);
+    fm.command.throttle = 0.2;
+    const vset = assistTargetSpeed(0.2, C.topSpeed);
+    run(fm, 30);
+    expect(Math.abs(fm.speed - vset) / vset).toBeLessThan(0.02);
+    expect(fm.velocity.clone().normalize().dot(fm.forward)).toBeGreaterThan(0.999);
   });
 
   it('Given FA-ON landed with the lever at 0, Then it stays on the ground (the computer does not hover the ship off its gear)', () => {
