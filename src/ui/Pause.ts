@@ -13,6 +13,7 @@
 
 import type { EngineContext, GameModule } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
+import { modes } from '@/core/Modes';
 import { Config, config, type QualityTier } from '@/core/Config';
 import { shotOwnsScene } from '@/game/Shots';
 import type { Universe } from '@/game/Universe';
@@ -34,6 +35,12 @@ export interface PauseOptions {
   readonly recovery: RecoveryCut;
   /** The jump drive; a jump cannot be paused into. */
   readonly warp: { readonly phase: string };
+  /**
+   * The live input, so MOUSE SENSITIVITY and INVERT PITCH take effect now.
+   * Without it they were only written to storage and Input — which reads
+   * storage once, at construction — ignored them until a reload (review-p1).
+   */
+  readonly input?: { setStickSettings(s: StickSettings): void } | null;
 }
 
 const CONTROLS: ReadonlyArray<readonly [string, string]> = [
@@ -81,11 +88,20 @@ export class Pause implements GameModule {
   private readonly universe: Universe;
   private readonly recovery: RecoveryCut;
   private readonly warp: { readonly phase: string };
+  private readonly input: { setStickSettings(s: StickSettings): void } | null;
 
   constructor(opts: PauseOptions) {
     this.universe = opts.universe;
     this.recovery = opts.recovery;
     this.warp = opts.warp;
+    this.input = opts.input ?? null;
+  }
+
+  /** Apply mouse settings for this session and persist them. */
+  applyStickSettings(s: StickSettings): void {
+    this.stick = s;
+    saveStickSettings(storage(), s);
+    this.input?.setStickSettings(s);
   }
 
   /** True while the overlay is up. The hint line stands down under it. */
@@ -131,6 +147,9 @@ export class Pause implements GameModule {
 
   private overlayOpen(): boolean {
     if (this.chartOpen) return true;
+    // Photo mode releases the pointer on entry; that lock loss is not an Esc
+    // and must not open the sheet underneath it (review-p1).
+    if (modes.overlay !== null) return true;
     // The codex owns Esc too and exposes no state; its live class is the
     // honest signal and costs one selector a frame.
     return document.querySelector('.os-codex.is-live') !== null;
@@ -171,7 +190,10 @@ export class Pause implements GameModule {
       this.dispatch({ type: 'escKey', t: performance.now() });
     }
 
-    this.universe.frozen = this.state.open || this.recovery.active;
+    // A mode overlay (photo) freezes the world too: no module declares
+    // `activeIn` yet (D16), so tick.ts's dt = 0 never reached the simulation
+    // and the ship flew on behind the photo camera (review-p1).
+    this.universe.frozen = this.state.open || this.recovery.active || modes.overlay !== null;
 
     const goal = this.state.open ? 1 : 0;
     this.amount += (goal - this.amount) * Math.min(1, dt / FADE);
@@ -232,8 +254,7 @@ export class Pause implements GameModule {
     this.sensVal = document.createElement('span');
     this.sensVal.className = 'os-pz-val';
     sens.addEventListener('input', () => {
-      this.stick = { ...this.stick, sensitivity: Number(sens.value) };
-      saveStickSettings(storage(), this.stick);
+      this.applyStickSettings({ ...this.stick, sensitivity: Number(sens.value) });
       // Not syncSettings(): with storage blocked a re-read would snap the
       // slider back to the default under the pilot's hand.
       if (this.sensVal) this.sensVal.textContent = `${this.stick.sensitivity.toFixed(2)}×`;
@@ -245,8 +266,7 @@ export class Pause implements GameModule {
     inv.type = 'checkbox';
     inv.className = 'os-pz-check';
     inv.addEventListener('change', () => {
-      this.stick = { ...this.stick, invertY: inv.checked };
-      saveStickSettings(storage(), this.stick);
+      this.applyStickSettings({ ...this.stick, invertY: inv.checked });
     });
     invRow.appendChild(inv);
 

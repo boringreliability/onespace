@@ -24,6 +24,7 @@ import {
 } from './hintRules';
 
 const base: HintState = {
+  inFlight: true,
   pointerLocked: true,
   overlayOpen: false,
   paused: false,
@@ -92,6 +93,33 @@ describe('selectHint — what to say', () => {
 
   it('Given every hint retired and the controls taken, Then the line is empty', () => {
     expect(selectHint({ ...base, hasTarget: true }, allUsed)).toBeNull();
+  });
+});
+
+describe('review-p1: hints outside flight and pinned constants', () => {
+  it('Given the title screen (or the Yard, or a photo overlay) with the pointer free, Then there is no hint — not CLICK TO TAKE THE CONTROLS under the menu', () => {
+    expect(selectHint({ ...base, inFlight: false, pointerLocked: false }, none)).toBeNull();
+    expect(selectHint({ ...base, inFlight: false }, none)).toBeNull();
+  });
+
+  it('Given the retirement limits, Then they are fly 3 and every other hint 2 (pinned, not read back)', () => {
+    expect(HINT_RETIRE_AFTER).toEqual({ fly: 3, cruise: 2, scan: 2, chart: 2, pause: 2 });
+  });
+
+  it('Given fly used twice, Then fly is still advised; three times, Then it is not', () => {
+    expect(selectHint(base, { fly: 2 })).toBe('fly');
+    expect(selectHint(base, { fly: 3 })).not.toBe('fly');
+  });
+
+  it('Given recordUse on scan, Then the other counts are kept', () => {
+    expect(recordUse({ fly: 3 }, 'scan')).toEqual({ fly: 3, scan: 1 });
+  });
+
+  it('Given stored counts of 0, 1e999 and 1.7, Then 0 is kept, the overflow is dropped and the fraction is floored', () => {
+    const store = (v: string) => ({ getItem: () => v, setItem: () => undefined });
+    expect(loadHintCounts(store('{"scan":0}'))).toEqual({ scan: 0 });
+    expect(loadHintCounts(store('{"scan":1e999}'))).toEqual({});
+    expect(loadHintCounts(store('{"scan":1.7}'))).toEqual({ scan: 1 });
   });
 });
 

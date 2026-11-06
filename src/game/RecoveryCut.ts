@@ -65,6 +65,14 @@ export class RecoveryCut implements GameModule {
       // Arrive coasting. A throttle left at full is how a recovered pilot
       // finds themselves leaving the orbit they were just given.
       ctx.input.setThrottle(0);
+      // …and the command too. Pilot stands still while the world is frozen,
+      // so the command still holds the old lever; the first physics step after
+      // the fade flew it — an FA-ON speed hold that kicked the fresh orbit
+      // eccentric (playtest: e = 0.12 from a 60 % lever).
+      this.universe.flight.command.throttle = 0;
+      // review-p1: the cruise drive kept running through the cut and flew the
+      // ship straight back out of the recovery orbit.
+      bus.emit('ship:recovered', { cause: this.cause });
       bus.emit('log', {
         text: this.cause === 'requested' ? 'RETURNED TO ORBIT' : 'RECOVERED TO ORBIT',
         tone: 'good',

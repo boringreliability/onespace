@@ -251,6 +251,10 @@ export class Input {
 
   setThrottle(v: number): void {
     this.targetThrottle = clamp(v, 0, 1);
+    // The detent snaps, as X does: an eased cut passes through every FA-ON
+    // speed hold on the way down, and geometrically never quite reaches 0 —
+    // the computer then brakes a recovery orbit to a hover (review-p1).
+    if (this.targetThrottle === 0) this.axes.throttle = 0;
   }
 
   dispose(): void {

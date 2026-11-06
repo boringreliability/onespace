@@ -11,6 +11,7 @@ import { Color, Group, Vector3 } from 'three';
 import type { Engine, EngineContext, GameModule } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
 import { config } from '@/core/Config';
+import { modes } from '@/core/Modes';
 
 import { Universe } from '@/game/Universe';
 import { Pilot } from '@/game/Pilot';
@@ -243,7 +244,9 @@ class ReviewGuard implements GameModule {
   lateUpdate(_dt: number, ctx: EngineContext): void {
     const shot = activeShotName();
     const owned = shotOwnsScene();
-    this.hud.setVisible((!owned || shot === 'hud-full') && !this.mapOpen);
+    // The title is not flight: its menu sat under the pitch ladder (review-p1).
+    const onTitle = modes.current === 'title' && !owned;
+    this.hud.setVisible((!owned || shot === 'hud-full') && !this.mapOpen && !onTitle);
     this.gallery.root.visible = shot !== null && GALLERY_SHOTS.has(shot);
 
     // Planet shots build a fixture and only clear it for each other. Leaving
@@ -333,7 +336,7 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   progress(0.865, 'arming the recovery beacon');
   const recovery = new RecoveryCut(universe);
   await engine.add(recovery);
-  const pause = new Pause({ universe, recovery, warp });
+  const pause = new Pause({ universe, recovery, warp, input: engine.input });
   await engine.add(pause);
   await engine.add(new Hints({ universe, pause, recovery, warp }));
   // --- end track D -------------------------------------------------------------

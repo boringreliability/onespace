@@ -11,6 +11,7 @@
 
 import type { EngineContext, GameModule } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
+import { modes } from '@/core/Modes';
 import { shotOwnsScene } from '@/game/Shots';
 import type { Universe } from '@/game/Universe';
 import type { RecoveryCut } from '@/game/RecoveryCut';
@@ -120,6 +121,7 @@ export class Hints implements GameModule {
       ? null
       : selectHint(
           {
+            inFlight: modes.current === 'flight',
             pointerLocked: input.pointerLocked,
             overlayOpen: this.chartOpen || codexOpen,
             paused: pause.isOpen,
