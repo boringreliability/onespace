@@ -14,13 +14,13 @@ import { describe, expect, it } from 'vitest';
 import {
   atlasLayout,
   bakeNormalEps,
-  dualBasis,
+  clipNeedsRecentre,
   gridTexel,
-  pickShadowAncestor,
+  pickClipLevel,
   selectBuilds,
+  shadowClipExtents,
   SlotPool,
   tileOrigin,
-  tileTransform,
 } from './terrainBake';
 
 describe('atlasLayout', () => {
@@ -91,90 +91,6 @@ describe('gridTexel — vertex grid (with skirt ring) to tile texel', () => {
 
   it('Given an interior vertex, Then it is offset by exactly the skirt ring', () => {
     expect(gridTexel(17, gridN)).toBe(16);
-  });
-});
-
-describe('tileTransform — mapping own-tile uv into an ancestor tile', () => {
-  it('Given the patch is its own reference, Then the transform is identity', () => {
-    const t = tileTransform({ a0: 0.25, b0: 0.5, size: 0.125 }, { a0: 0.25, b0: 0.5, size: 0.125 });
-    expect(t).toEqual({ k: 1, offU: 0, offV: 0 });
-  });
-
-  it('Given the third child of a root, When mapped into the root, Then corners land on the right quarter', () => {
-    const own = { a0: 0, b0: 0.5, size: 0.5 };
-    const root = { a0: 0, b0: 0, size: 1 };
-    const t = tileTransform(own, root);
-    // own uv (0,0) -> root (0, 0.5); own uv (1,1) -> root (0.5, 1).
-    expect(0 * t.k + t.offU).toBeCloseTo(0);
-    expect(0 * t.k + t.offV).toBeCloseTo(0.5);
-    expect(1 * t.k + t.offU).toBeCloseTo(0.5);
-    expect(1 * t.k + t.offV).toBeCloseTo(1);
-  });
-
-  it('Given dyadic patch extents, Then the transform is exact (no seam drift)', () => {
-    const own = { a0: 0.6875, b0: 0.3125, size: 0.0625 };
-    const anc = { a0: 0.5, b0: 0.25, size: 0.25 };
-    const t = tileTransform(own, anc);
-    expect(t.k).toBe(0.25);
-    expect(t.offU).toBe(0.75);
-    expect(t.offV).toBe(0.25);
-  });
-});
-
-describe('pickShadowAncestor', () => {
-  // The chain runs from the patch's parent up to its root. A shadow ray needs a
-  // tile wide enough to contain it, and it must be BUILT (baked) — an unbaked
-  // tile is zeros, which would put every ray under a flat plain at sea level.
-  const chain = [
-    { side: 10, built: true },
-    { side: 20, built: true },
-    { side: 40, built: false },
-    { side: 80, built: true },
-    { side: 160, built: true },
-  ];
-
-  it('Given the patch itself is wide enough, Then no ancestor is needed (-1)', () => {
-    expect(pickShadowAncestor(chain, 5, 5)).toBe(-1);
-  });
-
-  it('Given a required width, Then the nearest built ancestor at least that wide is chosen', () => {
-    expect(pickShadowAncestor(chain, 5, 15)).toBe(1);
-  });
-
-  it('Given the first wide-enough ancestor is unbuilt, Then the next built one up is chosen', () => {
-    expect(pickShadowAncestor(chain, 5, 30)).toBe(3);
-  });
-
-  it('Given nothing is wide enough, Then the topmost built ancestor is the fallback', () => {
-    expect(pickShadowAncestor(chain, 5, 1000)).toBe(4);
-  });
-
-  it('Given an empty chain (a root), Then the patch uses its own tile', () => {
-    expect(pickShadowAncestor([], 5, 1000)).toBe(-1);
-  });
-});
-
-describe('dualBasis — km on the surface to tile uv', () => {
-  it('Given orthogonal tangents, Then the dual vectors are the tangents over their squared lengths', () => {
-    const [da, db] = dualBasis([2, 0, 0], [0, 4, 0]);
-    expect(da).toEqual([0.5, 0, 0]);
-    expect(db[1]).toBeCloseTo(0.25);
-  });
-
-  it('Given skewed tangents, Then dot(dual_i, tangent_j) is the identity', () => {
-    const ta: [number, number, number] = [3, 1, 0.5];
-    const tb: [number, number, number] = [0.7, 2, -0.4];
-    const [da, db] = dualBasis(ta, tb);
-    const dot = (a: readonly number[], b: readonly number[]) => a[0]! * b[0]! + a[1]! * b[1]! + a[2]! * b[2]!;
-    expect(dot(da, ta)).toBeCloseTo(1, 10);
-    expect(dot(da, tb)).toBeCloseTo(0, 10);
-    expect(dot(db, ta)).toBeCloseTo(0, 10);
-    expect(dot(db, tb)).toBeCloseTo(1, 10);
-  });
-
-  it('Given degenerate (parallel) tangents, Then it returns zeros instead of NaN', () => {
-    const [da, db] = dualBasis([1, 0, 0], [2, 0, 0]);
-    expect([...da, ...db].every((v) => v === 0)).toBe(true);
   });
 });
 
@@ -271,5 +187,57 @@ describe('SlotPool — atlas tiles live and die with their patch', () => {
     expect(p.inUse(a)).toBe(true);
     p.release(a);
     expect(p.inUse(a)).toBe(false);
+  });
+});
+
+describe('shadowClipExtents — the camera-centred shadow height map', () => {
+  // Shadow rays run only within 0.06 R of the camera and reach 3x the terrain
+  // amplitude. The outermost level must cover both; each finer level is a
+  // quarter the size, so texel size shrinks 4x per level towards the camera.
+  it('Given R=6000 and amplitude 20 over 4 levels, Then the top level covers 0.07 R + 3 amplitude', () => {
+    const e = shadowClipExtents(6000, 20, 4);
+    expect(e).toHaveLength(4);
+    expect(e[3]).toBeCloseTo(6000 * 0.07 + 60);
+  });
+
+  it('Given any levels, Then each is 4x the one inside it', () => {
+    const e = shadowClipExtents(3000, 8, 4);
+    for (let i = 1; i < e.length; i++) expect(e[i]! / e[i - 1]!).toBeCloseTo(4);
+  });
+});
+
+describe('pickClipLevel', () => {
+  const ext = [10, 40, 160, 640];
+
+  it('Given a point near the centre, Then the finest level is used', () => {
+    expect(pickClipLevel(3, ext)).toBe(0);
+  });
+
+  it('Given a point just inside a level but within its edge margin, Then the next level out is used', () => {
+    // 9.5 of 10 is inside, but bilinear taps and the ray need a margin.
+    expect(pickClipLevel(9.5, ext)).toBe(1);
+  });
+
+  it('Given a point beyond every level, Then -1 (no shadow information)', () => {
+    expect(pickClipLevel(700, ext)).toBe(-1);
+  });
+});
+
+describe('clipNeedsRecentre', () => {
+  const R = 6000;
+  const north: [number, number, number] = [0, 1, 0];
+
+  it('Given no previous centre, Then the level must be baked', () => {
+    expect(clipNeedsRecentre(null, north, 10, R)).toBe(true);
+  });
+
+  it('Given the camera moved less than an eighth of the level, Then it is kept', () => {
+    const a = 1 / R; // 1 km of arc
+    expect(clipNeedsRecentre(north, [Math.sin(a), Math.cos(a), 0], 10, R)).toBe(false);
+  });
+
+  it('Given the camera moved more than an eighth of the level, Then it is re-centred', () => {
+    const a = 2 / R; // 2 km of arc against a 10 km half-extent
+    expect(clipNeedsRecentre(north, [Math.sin(a), Math.cos(a), 0], 10, R)).toBe(true);
   });
 });
