@@ -38,6 +38,9 @@ import { Hud, registerHudShots } from '@/ui/Hud';
 import { Codex, registerCodexShots } from '@/ui/Codex';
 import { SystemMap, registerSystemMapShots } from '@/ui/SystemMap';
 import { Audio } from '@/audio/Audio';
+import { Photo } from '@/game/Photo';
+import { DevOverlay } from '@/ui/DevOverlay';
+import { parseRoute } from '@/core/Route';
 import { Warp, registerWarpShots } from '@/ship/Warp';
 import { registerCameraShots } from '@/ship/CameraRig';
 import { registerShipShots } from '@/ship/Ship';
@@ -352,6 +355,11 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   if (galleryHost.atmosphere) registerAtmosphereShots(galleryHost, gallery.planet.object3d);
 
   await engine.add(new ReviewGuard(hud, gallery));
+
+  // --- v2: photo overlay + dev overlay. Photo MUST stay last among camera
+  // writers: its lateUpdate overrides the flight rig (see game/Photo.ts).
+  await engine.add(new Photo(engine, postfx));
+  await engine.add(new DevOverlay(engine, parseRoute(window.location.search).dev === true));
 
   registerShot({
     name: 'game-opening',

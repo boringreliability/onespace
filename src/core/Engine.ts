@@ -22,7 +22,7 @@ import { FloatingOrigin } from './FloatingOrigin';
 import { Input } from './Input';
 import { ResolutionGovernor } from './ResolutionGovernor';
 import { modes, type Mode } from './Modes';
-import { tickModules } from './tick';
+import { moduleDt, tickModules } from './tick';
 import { parseDevParams } from './Route';
 
 export interface EngineContext {
@@ -232,6 +232,15 @@ export class Engine {
     if (this.pipeline) this.pipeline.render(dt, ctx);
     else this.renderer.render(this.scene, this.camera);
 
+    // Read back in the same task as the draw: the drawing buffer is still
+    // intact, so no preserveDrawingBuffer (which costs every frame) is needed.
+    if (this.captureWaiters.length) {
+      const waiters = this.captureWaiters.splice(0);
+      this.canvas.toBlob((b) => {
+        for (const w of waiters) w(b);
+      }, 'image/png');
+    }
+
     this.input.endFrame();
 
     // CPU-side cost only; kept for the stats overlay. The governor is fed the
@@ -280,6 +289,21 @@ export class Engine {
     } catch {
       /* fall back to lazy compile */
     }
+  }
+
+  /** Resolve with a PNG of the next rendered frame (null if the browser refuses). */
+  captureNextFrame(): Promise<Blob | null> {
+    return new Promise((resolve) => this.captureWaiters.push(resolve));
+  }
+
+  private captureWaiters: Array<(b: Blob | null) => void> = [];
+
+  /** How many modules tick in the current mode — for the dev overlay. */
+  moduleCounts(): { ticking: number; total: number } {
+    let ticking = 0;
+    const st = { base: modes.base, overlay: modes.overlay };
+    for (const m of this.modules) if (moduleDt(m, st, 1) >= 0) ticking++;
+    return { ticking, total: this.modules.length };
   }
 
   resumeRealtime(): void {

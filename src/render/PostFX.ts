@@ -1401,6 +1401,30 @@ export class PostFX implements RenderPipeline {
     this.exposureBiasTarget = Math.max(0.02, v);
   }
 
+  /**
+   * Photo-mode grade overrides; null restores the authored grade. Values are
+   * expected pre-clamped (game/photo/flycam.ts clampGrade). Exposure rides
+   * the eased bias, so even a photo adjustment never snaps.
+   */
+  setGrade(g: { exposure?: number; grain?: number; ca?: number; vignette?: number } | null): void {
+    const gu = this.gradePass.material.uniforms;
+    const fu = this.finalPass.material.uniforms;
+    if (!this.gradeDefaults) {
+      this.gradeDefaults = {
+        grain: fu.uGrain.value as number,
+        ca: gu.uCa.value as number,
+        vignette: (gu.uVignette.value as Vector3).x,
+      };
+    }
+    const d = this.gradeDefaults;
+    fu.uGrain.value = g?.grain ?? d.grain;
+    gu.uCa.value = g?.ca ?? d.ca;
+    (gu.uVignette.value as Vector3).x = g?.vignette ?? d.vignette;
+    this.setExposureBias(g?.exposure ?? 1);
+  }
+
+  private gradeDefaults: { grain: number; ca: number; vignette: number } | null = null;
+
   /** Blow the frame out — jump entry, hull breach, a very close star. */
   flash(intensity: number, durationSeconds: number): void {
     this.flashPeak = Math.max(this.flashPeak, intensity);
