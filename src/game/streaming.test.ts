@@ -78,4 +78,26 @@ describe('planStreaming', () => {
     expect(planStreaming([], 4)).toEqual([]);
     expect(planStreaming([at(1)], 0)).toEqual([false]);
   });
+
+  // --- review-p0 ------------------------------------------------------------
+
+  it('Given an unstreamed body exactly at the acquire distance, Then it is not acquired (inside means strictly inside)', () => {
+    expect(planStreaming([at(STREAM_ACQUIRE_RADII)], 4)).toEqual([false]);
+  });
+
+  it('Given a streamed body exactly at the release distance, Then it is released', () => {
+    expect(planStreaming([at(STREAM_RELEASE_RADII, true)], 4)).toEqual([false]);
+  });
+
+  it('Given an output array from last frame, Then it is reused and fully overwritten (no allocation per frame, ARCHITECTURE §5)', () => {
+    const out = [true, true, true, true];
+    const res = planStreaming([at(80), at(10)], 4, out);
+    expect(res).toBe(out);
+    expect(res).toEqual([false, true]);
+  });
+
+  it('Given equally distant bodies over budget, Then the earlier one wins (stable, so the choice does not flicker)', () => {
+    expect(planStreaming([at(20), at(20), at(20)], 2)).toEqual([true, true, false]);
+  });
 });
+

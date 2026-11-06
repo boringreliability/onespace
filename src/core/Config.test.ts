@@ -36,4 +36,22 @@ describe('quality tiers', () => {
     const r = Config.tiers().map((t) => tier(t).maxPixelRatio);
     for (let i = 1; i < r.length; i++) expect(r[i]!).toBeGreaterThanOrEqual(r[i - 1]!);
   });
+
+  // --- review-p0: the upper bounds alone let a cap fall to anything ----------
+
+  it('Given each tier, Then its pixel-ratio cap is exactly the audited value', () => {
+    // A cap below these is a quality regression nobody measured; above, the
+    // perf regression the audit measured. Change them with DECISIONS.md.
+    expect(tier('low').maxPixelRatio).toBe(1);
+    expect(tier('medium').maxPixelRatio).toBe(1);
+    expect(tier('high').maxPixelRatio).toBe(1.25);
+    expect(tier('ultra').maxPixelRatio).toBe(1.5);
+  });
+
+  it('Given the tiers in order, Then patch resolution never decreases going up and never exceeds 65', () => {
+    const r = Config.tiers().map((t) => tier(t).patchResolution);
+    for (let i = 1; i < r.length; i++) expect(r[i]!).toBeGreaterThanOrEqual(r[i - 1]!);
+    for (const v of r) expect(v).toBeLessThanOrEqual(65);
+  });
 });
+

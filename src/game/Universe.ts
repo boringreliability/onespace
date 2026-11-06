@@ -645,7 +645,7 @@ export class Universe implements GameModule {
       c.radiusKm = b.spec.radius;
       c.streamed = b.planet !== null;
     }
-    const wanted = planStreaming(cands, PLANET_RENDER_BUDGET);
+    const wanted = planStreaming(cands, PLANET_RENDER_BUDGET, this.streamWanted);
 
     for (let i = 0; i < this.bodies.length; i++) {
       const b = this.bodies[i]!;
@@ -655,6 +655,7 @@ export class Universe implements GameModule {
   }
 
   private streamCandidates: Array<{ -readonly [K in keyof StreamCandidate]: StreamCandidate[K] }> = [];
+  private streamWanted: boolean[] = [];
 
   private acquireRenderers(b: Body, ctx: EngineContext): void {
     if (b.planet) return;

@@ -16,7 +16,10 @@
  * - Between the two thresholds it holds still. With vsync a frame is either
  *   one or two refresh intervals; a dead band is what stops it chattering.
  * - A sample over `spikeMs` is a tab switch, a GC or a shader compile, not
- *   load. It is dropped rather than averaged in.
+ *   load. It is dropped rather than averaged in — unless `spikeRunLimit` of
+ *   them arrive back to back. Then it is a GPU that cannot keep up, which is
+ *   exactly the case the governor exists for; those count, clamped to
+ *   `spikeMs` so one frozen frame cannot dominate the window.
  */
 
 export interface GovernorConfig {
@@ -34,6 +37,8 @@ export interface GovernorConfig {
   /** Minimum wait after a drop before any rise. */
   readonly upCooldownMs: number;
   readonly spikeMs: number;
+  /** Consecutive over-`spikeMs` samples after which they count as load. */
+  readonly spikeRunLimit: number;
 }
 
 export const GOVERNOR_DEFAULTS: GovernorConfig = {
@@ -47,6 +52,7 @@ export const GOVERNOR_DEFAULTS: GovernorConfig = {
   windowMs: 500,
   upCooldownMs: 3000,
   spikeMs: 250,
+  spikeRunLimit: 3,
 };
 
 export class ResolutionGovernor {
@@ -56,6 +62,7 @@ export class ResolutionGovernor {
   private windowSum = 0;
   private windowCount = 0;
   private sinceDropMs = Infinity;
+  private spikeRun = 0;
 
   constructor(config: Partial<GovernorConfig> = {}) {
     this.config = { ...GOVERNOR_DEFAULTS, ...config };
@@ -65,7 +72,15 @@ export class ResolutionGovernor {
   /** Feed one frame interval in ms. Returns true when `scale` changed. */
   sample(frameMs: number): boolean {
     const c = this.config;
-    if (!Number.isFinite(frameMs) || frameMs <= 0 || frameMs > c.spikeMs) return false;
+    if (!Number.isFinite(frameMs) || frameMs <= 0) return false;
+    if (frameMs > c.spikeMs) {
+      // A lone long interval is a hitch. A run of them is a 3 fps GPU: v2.0
+      // dropped every one and so held full scale on the slowest machines.
+      if (++this.spikeRun < c.spikeRunLimit) return false;
+      frameMs = c.spikeMs;
+    } else {
+      this.spikeRun = 0;
+    }
 
     this.windowSum += frameMs;
     this.windowCount++;
