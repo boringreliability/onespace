@@ -423,3 +423,42 @@ describe('review-p1: a target behind the world being orbited', () => {
     expect(r.logs.some((t) => t.includes('MASS'))).toBe(false);
   });
 });
+
+describe('v2 merge: leaving the home world, and the arrival frame', () => {
+  it('Given the opening orbit with the nose 30° down (the opening attitude), When G is pressed with no target, Then the drive carries the ship away instead of dropping for "arrival" at the world it is leaving', () => {
+    // review-p1: the home world counted as "closing" inside 2 R, so G from
+    // the opening frame span up for 2 s and dropped at once — ORBIT — REMIT 31.
+    const pos = new Vector3(R + OPENING_ALT, 0, 0);
+    const nose = new Vector3(0, 0, 1).multiplyScalar(Math.cos(Math.PI / 6)).add(new Vector3(-Math.sin(Math.PI / 6), 0, 0));
+    const r = build(pos, nose);
+    r.axes.throttle = 0;
+    r.press.add('cruise');
+    r.step(CRUISE_DEFAULTS.spoolTime + 3);
+    expect(r.cruise.drive.dropReason).not.toBe('arrival');
+    expect(r.logs.some((t) => t.startsWith('ORBIT —'))).toBe(false);
+  });
+
+  it('Given a ship that has left and comes back to the same world, When it closes inside the arrival sphere, Then arrival is armed again', () => {
+    const r = build(new Vector3(6 * R, 0, 0), new Vector3(-1, 0, 0));
+    r.axes.throttle = 0;
+    r.press.add('cruise');
+    r.step(40);
+    expect(r.logs.some((t) => t.startsWith('ORBIT —'))).toBe(true);
+  });
+
+  it('Given an arrival into orbit, Then the ship faces the world (nose pitched down towards the limb), not empty sky', () => {
+    // review-p1: the arrival "money shot" kept the approach attitude and the
+    // world was off-screen. Insertion applies the opening attitude.
+    const r = build(new Vector3(3.5 * R, 0, 0), new Vector3(-1, 0, 0));
+    r.axes.throttle = 0;
+    r.press.add('cruise');
+    r.step(15);
+    expect(r.logs.some((t) => t.startsWith('ORBIT —'))).toBe(true);
+    const nose = r.flight.forward.clone().normalize();
+    const down = r.flight.position.clone().normalize().negate();
+    const v = r.flight.velocity.clone().normalize();
+    expect(nose.dot(down)).toBeCloseTo(Math.sin(Math.PI / 6), 2);
+    expect(nose.dot(v)).toBeCloseTo(Math.cos(Math.PI / 6), 2);
+  });
+});
+

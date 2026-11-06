@@ -26,7 +26,11 @@
 
 import type { EngineContext, GameModule } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
-import { Vector3 } from 'three';
+import { Quaternion, Vector3 } from 'three';
+import { openingAttitude } from '@/game/recovery';
+
+/** Sentinel: arrival is armed (the departure body no longer matters). */
+const NOBODY: object = {};
 import {
   CruiseDrive,
   arrivalClearanceKm,
@@ -109,6 +113,10 @@ export class Cruise implements GameModule {
   private readonly offs: Array<() => void> = [];
   private readonly sRel = new Vector3();
   // Preallocated drive inputs (ARCHITECTURE §5: no allocation in update()).
+  /** The body the drive was engaged beside, or NOBODY once that no longer matters. */
+  private departedFrom: object | null = null;
+  private readonly arrivalQuat = new Quaternion();
+
   private readonly arrivalIn: Mutable<CruiseArrival> = {
     clearanceKm: 0,
     radiusKm: 0,
@@ -216,7 +224,19 @@ export class Cruise implements GameModule {
       a.radiusKm = radius;
       a.soiRadiusKm = toward.soiRadius;
       a.closing = flight.forward.dot(rel) > 0;
-      arrival = a;
+      // Arrival at the world the drive was engaged beside is only armed once
+      // the ship has been out past the arrival sphere. Otherwise G from the
+      // opening orbit (nose 30° down, so "closing") dropped at once — 2 s of
+      // spool for an ORBIT log at the world the pilot was leaving.
+      const arriveKm = arrivalClearanceKm(radius, toward.soiRadius, this.drive.config);
+      if (this.drive.phase === 'idle') {
+        // Not running: the next engage records where it starts from.
+        this.departedFrom = null;
+      } else {
+        if (this.departedFrom === null) this.departedFrom = toward;
+        if (toward !== this.departedFrom || a.clearanceKm > arriveKm * 1.05) this.departedFrom = NOBODY;
+      }
+      arrival = this.departedFrom === toward ? null : a;
       limbKm = LIMB_FRACTION * (radius + arrivalClearanceKm(radius, toward.soiRadius, this.drive.config));
     }
 
@@ -248,6 +268,12 @@ export class Cruise implements GameModule {
       if (insertIntoOrbit(flight)) {
         this.heldLever = ctx.input.axes.throttle;
         if (this.drive.dropReason === 'arrival' && toward) {
+          // Face the world, as the opening frame does: the insertion kept the
+          // approach attitude and the arrival — the game's money shot — was
+          // framed on empty sky (review-p1, ARCHITECTURE §6). The camera rig
+          // is damped, so the swing reads as a turn, not a cut.
+          openingAttitude(flight.velocity, flight.position, this.arrivalQuat);
+          flight.teleport(flight.position, flight.velocity, this.arrivalQuat);
           bus.emit('log', { text: `ORBIT — ${toward.spec.name.toUpperCase()}`, tone: 'good' });
         }
       } else {
