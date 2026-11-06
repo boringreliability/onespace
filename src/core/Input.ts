@@ -6,6 +6,15 @@
  * flight model stays free of input plumbing.
  */
 
+import {
+  VirtualStick,
+  clampSensitivity,
+  loadStickSettings,
+  saveStickSettings,
+  type StickSettings,
+  type StickVector,
+} from './stick';
+
 export interface InputAxes {
   /** Nose up (+) / down (-). */
   pitch: number;
@@ -35,7 +44,9 @@ export type ActionName =
   | 'cycleTarget'
   | 'toggleCamera'
   | 'pause'
-  | 'screenshot';
+  | 'screenshot'
+  | 'zeroThrottle'
+  | 'flightAssist';
 
 const KEY_ACTIONS: Record<string, ActionName> = {
   ShiftLeft: 'boost',
@@ -51,6 +62,8 @@ const KEY_ACTIONS: Record<string, ActionName> = {
   KeyV: 'toggleCamera',
   Escape: 'pause',
   F2: 'screenshot',
+  KeyX: 'zeroThrottle', // the coast detent: lever to 0 in one press, not 1.1 s of S
+  KeyZ: 'flightAssist',
 };
 
 export class Input {
@@ -70,15 +83,43 @@ export class Input {
   wheelDelta = 0;
   pointerLocked = false;
 
-  /** Mouse steering is the primary control; keys are a fallback. */
-  mouseSensitivity = 0.0022;
+  /**
+   * Mouse steering is the primary control; keys are a fallback. The mouse
+   * drives a virtual stick (see `stick.ts`) rather than being read as a
+   * per-frame delta — that delta reading is what made a 2000 px swipe turn the
+   * nose 2.6°.
+   */
+  private readonly stick = new VirtualStick();
+  private settings: StickSettings;
   private keys = new Set<string>();
   private pressedThisFrame = new Set<ActionName>();
   private targetThrottle = 0;
   private disposers: Array<() => void> = [];
 
   constructor(private element: HTMLElement) {
+    this.settings = loadStickSettings(safeStorage());
     this.bind();
+  }
+
+  /**
+   * Stick offset, normalised -1..1, screen convention (+x right, +y down),
+   * before the deadzone — for the HUD's amber dot.
+   */
+  get stickDeflection(): StickVector {
+    return this.stick.deflection;
+  }
+
+  get stickSettings(): StickSettings {
+    return this.settings;
+  }
+
+  /** Validate, apply for this session, and persist where storage allows. */
+  setStickSettings(s: StickSettings): void {
+    this.settings = {
+      sensitivity: clampSensitivity(s.sensitivity),
+      invertY: s.invertY === true,
+    };
+    saveStickSettings(safeStorage(), this.settings);
   }
 
   private bind(): void {
@@ -103,6 +144,12 @@ export class Input {
     };
     const onLockChange = () => {
       this.pointerLocked = document.pointerLockElement === this.element;
+      // Losing the lock (Esc, a map opening) must not leave a turn latched on.
+      if (!this.pointerLocked) {
+        this.stick.reset();
+        this.pointerDX = 0;
+        this.pointerDY = 0;
+      }
     };
     const onClick = () => {
       if (!this.pointerLocked) void this.element.requestPointerLock?.();
@@ -160,12 +207,29 @@ export class Input {
     }
     this.targetThrottle = clamp(this.targetThrottle, 0, 1);
     a.throttle += (this.targetThrottle - a.throttle) * Math.min(1, dt * 4);
+    // X skips the lever's easing on purpose: under flight assist, exactly 0 is
+    // the coast detent, and a lever that eases down passes through every set
+    // speed on the way (a brief speed hold the pilot never asked for).
+    if (this.pressedThisFrame.has('zeroThrottle')) {
+      this.targetThrottle = 0;
+      a.throttle = 0;
+    }
 
-    // Mouse steering, with the vertical axis inverted the way pilots expect.
-    const mousePitch = clamp(-this.pointerDY * this.mouseSensitivity, -1, 1);
-    const mouseYaw = clamp(-this.pointerDX * this.mouseSensitivity, -1, 1);
+    // Mouse → stick. The pixels are summed into a held deflection, so the axis
+    // no longer depends on how many frames the movement was sliced into.
+    const sens = this.settings.sensitivity;
+    this.stick.addDelta(this.pointerDX * sens, this.pointerDY * sens);
     this.pointerDX = 0;
     this.pointerDY = 0;
+    this.stick.update(dt);
+
+    // Signs as before the stick: mouse-up (screen -y) is nose-up and
+    // mouse-right is a NEGATIVE yaw axis, matching ArrowRight; FlightModel's
+    // yawAxisSign turns that into a right turn.
+    const sx = this.stick.axis.x;
+    const sy = this.stick.axis.y;
+    const mousePitch = this.settings.invertY ? sy : -sy;
+    const mouseYaw = -sx;
 
     const keyPitch = (this.isDown('ArrowUp') ? 1 : 0) - (this.isDown('ArrowDown') ? 1 : 0);
     const keyYaw = (this.isDown('ArrowLeft') ? 1 : 0) - (this.isDown('ArrowRight') ? 1 : 0);
@@ -192,6 +256,15 @@ export class Input {
   dispose(): void {
     for (const d of this.disposers) d();
     this.disposers = [];
+  }
+}
+
+/** `localStorage`, or null where even touching the accessor throws. */
+function safeStorage(): Storage | null {
+  try {
+    return typeof localStorage === 'undefined' ? null : localStorage;
+  } catch {
+    return null;
   }
 }
 

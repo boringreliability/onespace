@@ -137,6 +137,8 @@ export class Pilot implements GameModule {
   /** The camera mode to restore when the ship lifts off again. */
   private modeBeforeLanding: CameraMode = 'chase';
   private lastCtx: EngineContext | null = null;
+  /** [v2-p1a] FA-ON has been applied as the player's default. */
+  private faDefaulted = false;
 
   update(dt: number, ctx: EngineContext): void {
     this.lastCtx = ctx;
@@ -155,6 +157,15 @@ export class Pilot implements GameModule {
     const input = ctx.input;
 
     // 1. Intent.
+    // --- [v2-p1a] flight assist: FA-ON is the player's default, Z toggles it.
+    // The FlightModel class defaults to FA-OFF so headless physics stays
+    // Newtonian; the first frame turns it on (once) for the player's ship.
+    if (!this.faDefaulted) {
+      flight.flightAssist = true;
+      this.faDefaulted = true;
+    }
+    if (input.pressed('flightAssist')) flight.flightAssist = !flight.flightAssist;
+    // --- [/v2-p1a]
     flight.applyInput(input.axes, input.held('boost'), input.held('brake'));
 
     if (input.pressed('toggleCamera')) this.rig.cycleMode();
