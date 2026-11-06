@@ -53,6 +53,9 @@ export const MODULE_MODES: Readonly<Record<string, readonly Mode[]>> = {
   hints: PILOTING,
   pause: ['flight'],
   recovery: PILOTING,
+  // v2 phase 4.
+  autopilot: PILOTING,
+  'time-compression': PILOTING,
 };
 
 /**
