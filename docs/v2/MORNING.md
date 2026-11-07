@@ -21,7 +21,7 @@ G cruise → automatisk bane om målet → L land → `.` time compression → L
 | Planet-orbit | 64-74 ms | 8,3 ms |
 | Clouds-orbit | 109 ms | 16 ms |
 
-**Kvalitet:** 1090 tests (fra 139). `npm run verify` er grønt. 8 adversarial reviews
+**Kvalitet:** 1104 tests (fra 139). `npm run verify` er grønt. 10 adversarial reviews
 har tilsammen fundet og rettet ~35 reelle fejl, bl.a. cruise ved throttle 0 = 0 m/s
 og et skib der landede 14 km under havet. Mutation-score efter review: 94-100 % pr. modul.
 

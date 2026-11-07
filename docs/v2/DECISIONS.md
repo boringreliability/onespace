@@ -84,6 +84,10 @@ mutation testing."* Hver beslutning har en kort begrundelse og en konsekvens.
 | D63 | 06:55 | Landed view er merget: komponeret kamera på jorden, øje og sol i kroppens roterende frame, himlen blinker ikke længere sort ved havniveau, motion blur relativt til jorden, detaljer i meterskala, og havet spejler den rigtige himmel | Billedet på jorden var en flad grå mark med fem fejl oven i hinanden (målt) | Terminator-billedet på jorden: 9 → 16,6 ms (inden for budget) |
 | D64 ⚠ | 07:15 | **Regression rettet:** GL feedback loop (~120/s) under foto-overlay. Rodårsag: review-p1 lod Pause fryse Universe under overlays, så `updateBodies` ikke republicerede ping-pong-dybdeteksturen, og atmosfæren samplede den dybde, der blev skrevet. Nu publiceres den også, når Universe er frosset (`game/sceneDepth.ts`) | Fanget i min slutverifikation, ikke af nogen review. Søm-fejl mellem review-p1 og fase 3 | Slut-flowet har 0 konsolfejl |
 
+| D65 | 07:35 | Landed-reviewet er merget: liftoff hopper ikke længere (før: 70 → 200 m og 40° på ét frame), og landed-basis pisker ikke længere rundt nær world ±X. Spinning-frame-ændringen er bekræftet korrekt; en måne, der var helt sort før, er nu belyst rigtigt | Mutation 22/23 (1 ækvivalent) | Ikke rettet: `eyeOffset` nulstilles ved 50 km afstand, og mørke flader på havet ved 100× landed er ikke isoleret |
+
+**Slutverifikation (07:40):** `npm run verify` exit 0, 1104 tests, 0 smoke-FAIL. Browser-flow (titel → flight → Yard → flight → foto → flight → Yard-link) har 0 konsolfejl.
+
 **Kendte, ikke rettede (fra fase 3-review):** HalfFloat-fallback kan ikke rendere uden `EXT_color_buffer_float` (påvirker kun meget gamle GPU'er), og Clouds/Atmosphere genbager sandsynligvis ikke efter tabt kontekst.
 
 **Slutmåling, fase 0-3 (prod, M4 Pro, samme probe som auditten, `?mode=flight`):**
