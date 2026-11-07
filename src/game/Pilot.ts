@@ -7,14 +7,14 @@
  * scene with no universe behind it.
  */
 
-import { Color, Vector3 } from 'three';
+import { Color, Quaternion, Vector3 } from 'three';
 
 import type { EngineContext, GameModule } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
 import { config } from '@/core/Config';
 
 import { Ship } from '@/ship/Ship';
-import { CameraRig, type CameraMode } from '@/ship/CameraRig';
+import { CameraRig, type CameraMode, type LandedFrameSource } from '@/ship/CameraRig';
 import type { Universe } from '@/game/Universe';
 import { shotOwnsScene } from '@/game/Shots';
 import type { Hud } from '@/ui/Hud';
@@ -74,6 +74,19 @@ export class Pilot implements GameModule {
     gLoad: 1,
   };
 
+  /**
+   * What the landed frame needs to know about the world (ship/landedFraming.ts):
+   * where the star is, whether there is a sky, and how the ground lies round
+   * the hull. Refreshed every frame in update(); the rig only reads it.
+   */
+  private readonly landedSource: LandedFrameSource = {
+    sunDir: new Vector3(1, 0, 0),
+    skyWeight: 0,
+    groundRiseAt: (offset: Vector3): number => this.groundRiseAt(offset),
+  };
+  private readonly riseDir = new Vector3();
+  private readonly riseQ = new Quaternion();
+
   constructor(opts: PilotOptions) {
     this.universe = opts.universe;
     this.hud = opts.hud ?? null;
@@ -128,15 +141,60 @@ export class Pilot implements GameModule {
     // which is the read a chase camera cannot give once the ship has stopped:
     // a trailing camera behind a stationary object shows only the object.
     this.modeBeforeLanding = this.rig.mode;
+    // Not the inspection orbit: a composed frame, low over the hull and looking
+    // along the ground at the sky (DECISIONS open point "the frame on the
+    // ground is a flat grey field"; ship/landedFraming.ts).
+    this.refreshLandedSource();
+    this.rig.setLandedFrame(this.landedSource);
     this.rig.setMode('orbit');
     // Cut the throttle. Sitting on a world with the engines spooled is how a
     // player discovers they have taken off again without meaning to.
     ctxInputSetThrottle(this.lastCtx, 0);
   }
 
+  /** Star direction and sky weight for the landed frame, from the parent world. */
+  private refreshLandedSource(): void {
+    const body = this.universe.shipParent;
+    const src = this.landedSource as { sunDir: Vector3; skyWeight: number };
+    if (!body) return;
+    // World axes (the star sits at the origin). Not body.view.sunDirection:
+    // that is in the world's spinning frame, the camera is not.
+    src.sunDir.copy(body.world).negate().normalize();
+    // How much of the frame the sky deserves. Pressure, not presence: a trace
+    // atmosphere is a black sky with a rim, and gets the ground's share.
+    const air = body.spec.atmosphere;
+    src.skyWeight = air ? Math.min(1, Math.max(0, (air.pressure - 0.05) * 2)) : 0;
+  }
+
+  /**
+   * How far the terrain at `offset` (km from the hull, render/world axes)
+   * stands above the ground under the hull, km. Takes the higher of the eye
+   * spot and the midpoint, so a ridge between the lens and the hull lifts the
+   * eye over it rather than hiding the ship. Two terrain samples a frame, only
+   * while landed.
+   */
+  private groundRiseAt(offset: Vector3): number {
+    const body = this.universe.shipParent;
+    const planet = body?.planet;
+    if (!body || !planet) return 0;
+    const flight = this.universe.flight;
+    const shipR = flight.position.length();
+    if (shipR < 1e-9) return 0;
+    const groundR = shipR - Math.max(0, Number.isFinite(flight.altitude) ? flight.altitude : 0);
+    // The mesh turns with `spin`; the parent frame does not (Universe's ground
+    // sampler makes the same conversion).
+    this.riseQ.copy(body.spin).invert();
+    this.riseDir.copy(offset).add(flight.position).normalize().applyQuaternion(this.riseQ);
+    const atEye = planet.surfaceRadius(this.riseDir);
+    this.riseDir.copy(offset).multiplyScalar(0.5).add(flight.position).normalize().applyQuaternion(this.riseQ);
+    const midway = planet.surfaceRadius(this.riseDir);
+    return Math.max(atEye, midway) - groundR;
+  }
+
   private leaveLanded(): void {
     if (!this.landed) return;
     this.landed = false;
+    this.rig.setLandedFrame(null);
     this.rig.setMode(this.modeBeforeLanding);
     bus.emit('log', { text: 'AIRBORNE', tone: 'normal' });
   }
@@ -283,6 +341,8 @@ export class Pilot implements GameModule {
     } else {
       this.rig.setReferenceUp(null);
     }
+
+    if (this.landed) this.refreshLandedSource();
 
     // 4. Camera.
     // `flight.velocity` is parent-relative, which is what the rig wants: it
