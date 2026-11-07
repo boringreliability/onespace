@@ -81,6 +81,9 @@ mutation testing."* Hver beslutning har en kort begrundelse og en konsekvens.
 
 | D62 | 05:50 | **Skibsgenerering i Web Worker er merget** (D56 delvist løst): en pool med højst 2 workers, dedupe, prioritet, annullering, LRU(24) og synkron fallback med 1 skib pr. task. Yard prefetcher seed ±1. Review-stien er stadig synkron | Yard ×10 seed-skift: long tasks 750-1100 ms i alt → 0-115 ms. Boot: 564-1005 → ~442 ms | `createShipVisual` (mesh, 20-70 ms) er stadig på main thread, fordi en flytning kræver en omskrivning af HullBuilder. Kandidat til v2.1 |
 
+| D63 | 06:55 | Landed view er merget: komponeret kamera på jorden, øje og sol i kroppens roterende frame, himlen blinker ikke længere sort ved havniveau, motion blur relativt til jorden, detaljer i meterskala, og havet spejler den rigtige himmel | Billedet på jorden var en flad grå mark med fem fejl oven i hinanden (målt) | Terminator-billedet på jorden: 9 → 16,6 ms (inden for budget) |
+| D64 ⚠ | 07:15 | **Regression rettet:** GL feedback loop (~120/s) under foto-overlay. Rodårsag: review-p1 lod Pause fryse Universe under overlays, så `updateBodies` ikke republicerede ping-pong-dybdeteksturen, og atmosfæren samplede den dybde, der blev skrevet. Nu publiceres den også, når Universe er frosset (`game/sceneDepth.ts`) | Fanget i min slutverifikation, ikke af nogen review. Søm-fejl mellem review-p1 og fase 3 | Slut-flowet har 0 konsolfejl |
+
 **Kendte, ikke rettede (fra fase 3-review):** HalfFloat-fallback kan ikke rendere uden `EXT_color_buffer_float` (påvirker kun meget gamle GPU'er), og Clouds/Atmosphere genbager sandsynligvis ikke efter tabt kontekst.
 
 **Slutmåling, fase 0-3 (prod, M4 Pro, samme probe som auditten, `?mode=flight`):**

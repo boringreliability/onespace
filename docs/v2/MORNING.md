@@ -21,7 +21,7 @@ G cruise → automatisk bane om målet → L land → `.` time compression → L
 | Planet-orbit | 64-74 ms | 8,3 ms |
 | Clouds-orbit | 109 ms | 16 ms |
 
-**Kvalitet:** 1088 tests (fra 139). `npm run verify` er grønt. 8 adversarial reviews
+**Kvalitet:** 1090 tests (fra 139). `npm run verify` er grønt. 8 adversarial reviews
 har tilsammen fundet og rettet ~35 reelle fejl, bl.a. cruise ved throttle 0 = 0 m/s
 og et skib der landede 14 km under havet. Mutation-score efter review: 94-100 % pr. modul.
 
@@ -76,7 +76,7 @@ npm install && npm run dev
 
 ## Hvad der er åbent
 
-- **GL "feedback loop"-advarsler i fotomodus** (fundet i slutverifikationen 07:00). De ser ud til ikke at påvirke billedet. En debug-agent arbejder på det. Se slutningen af DECISIONS.md for status.
+- ~~GL "feedback loop" i fotomodus~~ blev fundet i slutverifikationen og er rettet (D64). Det endelige browser-flow har 0 konsolfejl.
 - **Generator:** derelicts har aktive motorer, og nogle skrog falder uden for deres size-bånd. Kræver version-bump, og det er din beslutning (D46).
 - **Auto-land** dykker ærligt med ~39 km/s, før den bremser. Det er fysisk korrekt, men kan virke hensynsløst. En tyk atmosfære giver ~8 min pr. leg, og 10× under autopilot er foreslået.
 - **`createShipVisual`** (mesh, 20-70 ms) kører stadig på main thread (D62).
