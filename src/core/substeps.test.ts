@@ -73,6 +73,31 @@ describe('substepBudget', () => {
     }
   });
 
+  // [review-v3a] mutation survivors
+  it('Given a NaN, infinite or negative carry, When budgeted, Then the carry is treated as 0 instead of poisoning every later frame', () => {
+    for (const acc of [Number.NaN, Infinity, -0.003]) {
+      const b = substepBudget(acc, 1 / 60, FIXED_H, MAX_SUBSTEPS);
+      expect(b.steps).toBe(2);
+      expect(Number.isFinite(b.carry)).toBe(true);
+      expect(b.carry).toBeCloseTo(0, 12);
+    }
+  });
+
+  it('Given a stall past the ceiling, When budgeted, Then whole substeps are dropped and the carry keeps its phase', () => {
+    const b = substepBudget(0.003, 2.0005, FIXED_H, MAX_SUBSTEPS);
+    const phase = (0.003 + 2.0005) % FIXED_H;
+    expect(b.carry).toBeCloseTo(phase, 9);
+    expect(b.dropped / FIXED_H).toBeCloseTo(Math.round(b.dropped / FIXED_H), 6);
+  });
+
+  it('Given a reused out object that last reported a drop, When the next budget drops nothing, Then dropped reads 0', () => {
+    const out = { steps: 0, carry: 0, dropped: 0 };
+    substepBudget(0, 2, FIXED_H, MAX_SUBSTEPS, out);
+    expect(out.dropped).toBeGreaterThan(0);
+    substepBudget(0, 1 / 60, FIXED_H, MAX_SUBSTEPS, out);
+    expect(out.dropped).toBe(0);
+  });
+
   it('Given an out object, When budgeted, Then it is written and returned (no allocation per frame)', () => {
     const out = { steps: -1, carry: -1, dropped: -1 };
     expect(substepBudget(0, 1 / 60, FIXED_H, MAX_SUBSTEPS, out)).toBe(out);

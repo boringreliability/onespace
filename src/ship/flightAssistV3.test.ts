@@ -123,6 +123,17 @@ describe('[v3-T2] stopDecel: the rounded-√ stop profile (pure)', () => {
     expect(stopDecel(-1, RETRO)).toBe(0);
     expect(stopDecel(Number.NaN, RETRO)).toBe(0);
   });
+
+  // [review-v3a] mutation survivors: each segment of the rounded-√ stop is pinned.
+  it('Given a tiny, a middling and a large error, Then the demand is e/τmin, √(2·J·e) and the cap respectively (J = cap/τa)', () => {
+    const J = RETRO / ASSIST_ACTUATOR_TAU;
+    const eTiny = 0.0005;
+    const eMid = ((RETRO * RETRO) / (2 * J)) * 0.5; // under the cap's knee
+    expect(stopDecel(eTiny, RETRO)).toBeCloseTo(eTiny / 0.05, 12);
+    expect(Math.sqrt(2 * J * eMid)).toBeLessThan(eMid / 0.05);
+    expect(stopDecel(eMid, RETRO)).toBeCloseTo(Math.sqrt(2 * J * eMid), 12);
+    expect(stopDecel(10, RETRO)).toBe(RETRO);
+  });
 });
 
 // ---------------------------------------------------------------------------

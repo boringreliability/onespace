@@ -43,7 +43,12 @@ export function vfovFromHfov(hfovDeg: number, aspect: number): number {
 
 /** Vertical fov in degrees, what `PerspectiveCamera.fov` wants. */
 export function fovPolicy(input: FovInput): number {
-  const aspect = input.aspect > 0 && Number.isFinite(input.aspect) ? input.aspect : REFERENCE_ASPECT;
+  const raw = input.aspect > 0 && Number.isFinite(input.aspect) ? input.aspect : REFERENCE_ASPECT;
+  // [review-v3a] A screen narrower than 16:9 keeps the 16:9 vertical — at
+  // rest AND breathing — so it is solved as 16:9. Breathing in horizontal
+  // degrees at the real aspect zoomed a phone in portrait 66 % harder than
+  // 16:9 (57 → 77° vertical on a cruise spool; 57 → 99° at 1:5).
+  const aspect = raw < REFERENCE_ASPECT ? REFERENCE_ASPECT : raw;
   // The 16:9 vertical; Hor+ keeps it, until the horizontal reaches the cap.
   const vRef = vfovFromHfov(BASE_HFOV_DEG, REFERENCE_ASPECT);
   const hBase = Math.min(HOR_PLUS_MAX_HFOV_DEG, hfovFromVfov(vRef, aspect));

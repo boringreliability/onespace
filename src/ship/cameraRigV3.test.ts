@@ -273,6 +273,15 @@ describe('chase: attitude snaps and explicit reseat (robust to what cruise inser
     }
   });
 
+  // [review-v3a] The snap detector runs in every mode; the reseat is the chase's.
+  it('Given the cockpit, When the attitude snaps 90° in one frame (recovery, arrival), Then the view is the new nose on that very frame — not the old world attitude blended over 0.5 s', () => {
+    const s = sim(16 / 9, 'cockpit');
+    run(s, 1);
+    s.q.setFromAxisAngle(new Vector3(0, 1, 0), 90 * DEG);
+    frame(s, 1 / 60);
+    expect(s.cam.quaternion.angleTo(s.q)).toBeLessThan(0.5 * DEG);
+  });
+
   it('Given steady flight, When reseat() is called, Then that frame is not a cut (< 0.5 m, < 1°)', () => {
     const s = sim();
     s.vel.set(0, 0, -5);

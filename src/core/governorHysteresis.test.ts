@@ -90,6 +90,34 @@ describe('ResolutionGovernor with hysteresis', () => {
     expect(firstRise).toBeGreaterThanOrEqual(5000);
   });
 
+  // [review-v3a] mutation survivors
+  it('Given it has dropped twice, When frames are fast for a long time, Then consecutive rises are at least 5 s apart (each rise re-earns its stability)', () => {
+    const g = new ResolutionGovernor();
+    for (let i = 0; i < 200; i++) g.sample(80); // several drops, 2 s apart
+    expect(g.scale).toBeLessThan(0.8);
+    let t = 0;
+    const rises: number[] = [];
+    for (let i = 0; i < 6000; i++) {
+      t += 10;
+      const before = g.scale;
+      if (g.sample(10) && g.scale > before) rises.push(t);
+    }
+    expect(rises.length).toBeGreaterThan(2);
+    for (let i = 1; i < rises.length; i++) expect(rises[i]! - rises[i - 1]!).toBeGreaterThanOrEqual(5000);
+  });
+
+  it('Given fast frames with one vsync miss (2.2 × target) per window, Then that is not load and it still rises; Given one 2.7 × target frame per window, Then it never rises', () => {
+    const rise = (missMs: number): boolean => {
+      const g = new ResolutionGovernor();
+      for (let i = 0; i < 20; i++) g.sample(60);
+      const dropped = g.scale;
+      for (let i = 0; i < 2000; i++) g.sample(i % 45 === 0 ? missMs : 10);
+      return g.scale > dropped;
+    };
+    expect(rise((1000 / 60) * 2.2)).toBe(true);
+    expect(rise((1000 / 60) * 2.7)).toBe(false);
+  });
+
   it('Given fast frames broken by a 1.5 s stretch between the thresholds, When it wants to rise, Then the 5 s of stability start again after it', () => {
     const g = new ResolutionGovernor();
     for (let i = 0; i < 20; i++) g.sample(60); // drop

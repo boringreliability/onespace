@@ -287,8 +287,13 @@ export class Engine {
    * call `resumeRealtime()` to hand time back to the wall clock.
    */
   simulate(seconds: number, fixedDt = 1 / 60): Promise<void> {
-    this.fixedDt = fixedDt;
-    const remaining = Math.max(1, Math.ceil(seconds / fixedDt));
+    // [review-v3a] Never a step longer than the engine's clamp: FlightModel's
+    // substep budget only covers that (core/substeps.ts), so `simulate(s, 0.1)`
+    // dropped ship time every frame while the world went the full step — the
+    // v2 hop, in the harness. A longer request runs as more, shorter frames.
+    const h = Math.min(fixedDt, ENGINE_MAX_DT);
+    this.fixedDt = h;
+    const remaining = Math.max(1, Math.ceil(seconds / h));
     return new Promise<void>((resolve) => {
       this.frameWaiters.push({ remaining, resolve });
     });
@@ -338,7 +343,8 @@ export class Engine {
   private adaptResolution(wallMs: number): void {
     // [v3-T1] No rise while the autopilot or cruise is flying: each step
     // reallocates the post stack and costs a 56-67 ms frame.
-    if (!this.governor.sample(wallMs, governorHoldUp())) return;
+    // [review-v3a] Only where flight runs: the Yard froze the flags.
+    if (!this.governor.sample(wallMs, governorHoldUp(modes.base))) return;
     this.resolutionScale = this.governor.scale;
     config.dynamicResolution = this.resolutionScale;
     // [v3-T1] Not applySize() here: this runs after render(), and resizing
