@@ -127,6 +127,66 @@ describe('engaging', () => {
     expect(d.blocked).toBe('atmosphere');
   });
 
+  // v2 — an exponential atmosphere never reaches zero. Float64 only underflows
+  // at ~745 scale heights, so a `> 0` gate kept the drive locked at 4 344 km
+  // over a world whose air is 187 km thick. The gate is a threshold, not zero.
+  describe('the atmosphere gate is a threshold, not zero', () => {
+    it('Given the opening orbit, 4 344 km over a 14.6 km scale height, When the drive is requested, Then it engages', () => {
+      const d = new CruiseDrive();
+      const density = Math.exp(-4344 / 14.6); // ≈ 9.5e-130 — hard vacuum
+      expect(density).toBeGreaterThan(0);
+      run(d, CRUISE_DEFAULTS.spoolTime + 0.1, { atmosphericDensity: density });
+      expect(d.blocked).toBe(null);
+      expect(d.phase).toBe('cruise');
+    });
+
+    it('Given density just under the cutoff, Then it engages; just over, Then it refuses', () => {
+      const under = new CruiseDrive();
+      run(under, CRUISE_DEFAULTS.spoolTime + 0.1, {
+        atmosphericDensity: CRUISE_DEFAULTS.atmosphereCutoff * 0.99,
+      });
+      expect(under.phase).toBe('cruise');
+
+      const over = new CruiseDrive();
+      run(over, 5, { atmosphericDensity: CRUISE_DEFAULTS.atmosphereCutoff * 1.01 });
+      expect(over.phase).toBe('idle');
+      expect(over.blocked).toBe('atmosphere');
+    });
+
+    it('Given the cutoff, Then it sits at the top of a real atmosphere (≈ 14 scale heights), not hundreds', () => {
+      const heights = -Math.log(CRUISE_DEFAULTS.atmosphereCutoff);
+      expect(heights).toBeGreaterThan(8);
+      expect(heights).toBeLessThan(20);
+    });
+
+    it('Given density exactly at the cutoff, Then it engages (only density ABOVE the cutoff is air)', () => {
+      const d = new CruiseDrive();
+      run(d, CRUISE_DEFAULTS.spoolTime + 0.1, { atmosphericDensity: CRUISE_DEFAULTS.atmosphereCutoff });
+      expect(d.phase).toBe('cruise');
+    });
+
+    it('Given a ship ten scale heights up (inside any real atmosphere), Then it refuses', () => {
+      // Earth's Kármán line is ~12 scale heights; ten is still air.
+      const d = new CruiseDrive();
+      run(d, 5, { atmosphericDensity: Math.exp(-10) });
+      expect(d.blocked).toBe('atmosphere');
+    });
+
+    it('Given a drive built with its own cutoff, Then that cutoff is the one obeyed', () => {
+      const d = new CruiseDrive({ ...CRUISE_DEFAULTS, atmosphereCutoff: 1e-3 });
+      run(d, CRUISE_DEFAULTS.spoolTime + 0.1, { atmosphericDensity: 1e-4 });
+      expect(d.phase).toBe('cruise');
+    });
+
+    it('Given the drive is cruising, When the ship descends into real air, Then it lets go', () => {
+      const d = new CruiseDrive();
+      run(d, CRUISE_DEFAULTS.spoolTime + 0.1);
+      expect(d.phase).toBe('cruise');
+      run(d, 2, { atmosphericDensity: 0.01 });
+      expect(d.phase).not.toBe('cruise');
+    });
+  });
+
   it('refuses to engage too close to a body', () => {
     const d = new CruiseDrive();
     run(d, 5, { clearanceKm: CRUISE_DEFAULTS.engageClearanceKm * 0.5 });

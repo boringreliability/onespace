@@ -1,0 +1,112 @@
+# v2 — beslutningslog
+
+Autonom kørsel fra 2026-11-06 ~23:45, med ejerens mandat: *"Claude tager alle
+beslutningerne, godkender tests på mine vegne, laver adversarial reviews og
+mutation testing."* Hver beslutning har en kort begrundelse og en konsekvens.
+**Store** beslutninger er markeret ⚠ og er dem, der bør gennemgås først.
+
+| # | Tid | Beslutning | Begrundelse | Konsekvens |
+|---|---|---|---|---|
+| D0 | 23:45 | Ejerens svar: FA-ON er default, `SHIP_GENERATION_VERSION` bumpes med golden-test, "flyv dette skib" er sat til v3 | Svar på PLAN §4 | Styrer fase 1-2 |
+| D1 | 23:45 | Alt arbejde ligger på branch `v2` (fra `docs/v2-plan`), med commit og push pr. delopgave og draft-PR til sidst. Intet går til `main` | Sikker standard. Ejeren kan merge selv | — |
+| D2 | 23:45 | Ejerens ucommittede MAP-Elites-arbejde i hans checkout er ikke rørt. Golden-testen bygges, så den fejler, når det merges, indtil versionen bumpes | Det er hans arbejde, og testen håndhæver hans beslutning | Merge af hans arbejde kræver at `SHIP_GENERATION_VERSION` bumpes til 2 og at golden opdateres |
+| D3 | 23:50 | Der findes ingen `.cursor/rules`, så GS-TDD følger den globale CLAUDE.md: BDD-tests først, godkendelse (af Claude), implementering, verifikation | Fallback er beskrevet i CLAUDE.md | — |
+| D4 | 23:55 | Fase 0-testene er godkendt af Claude: cruise-tærskel, `ResolutionGovernor`, `planStreaming`, `parseDevParams` og tier-guards | Testene dækker de målte fejl, og grænsetilfældene er med (spike, flapping, cooldown, churn, whitelist) | — |
+| D5 | 00:05 | Tre governor-tests er justeret efter Red. Det delvise vindue tømmes før assert, og en "lettere last" på 21 ms erstatter 25 ms, som ramte loftet for, hvor meget skalaen må falde pr. skridt | Det var fejl i testdesignet, ikke i logikken. Hensigten er uændret: ingen flapping, ingen stigning i cooldown, proportionalt fald | — |
+| D6 ⚠ | 00:05 | DPR-loft: low 1, **medium 1 (før 1,5)**, high 1,25 (før 2), ultra 1,5 (før 2). `patchResolution` på high er 33 (før 65) | Audit: DPR 2→1 sparer 40 %. Medium blev sænket for at holde tiers monotone | Billedet er blødere på retina. Fase 3 (bagt terrain) kan give plads til at hæve igen |
+| D7 | 00:05 | Atmosfære-cutoff 1e-6 relativ densitet (~14 skalahøjder) | Toppen af enhver reel atmosfære. Remit 31: cruise er tilladt over ~200 km mod tidligere ~10.900 km | — |
+| D8 | 00:10 | Governoren har bund 0,5, vindue 500 ms, op-cooldown 3 s og ignorerer spikes > 250 ms. Fixed-step (review-harness) fodrer den ikke | Hver ændring reallokerer render targets, og fixed-step er ikke realtid | `stats().fps` er nu wall-clock. `cpuMs` er tilføjet |
+| D9 | 00:10 | Streaming: acquire ved 60 R og release ved 75 R. Ny renderer skjules, indtil `compileAsync` er færdig | Fjerner churn og synkron link ved approach. three kompilerer også skjulte meshes (`scene.traverse`) | En planet kan være usynlig i 1-2 frames ved 60 R, hvor den er et par pixels stor |
+| D10 | 00:10 | Trafik: højst én tung build (blueprint eller mesh) pr. frame. Blueprint genereres lazy | ~600 ms hitch efter boot | Skibe dukker op over ~4-8 frames i stedet for i én |
+| D11 | 00:10 | `shoot.mjs` beholder SwiftShader som default. `OS_GPU=1` giver Metal | Review-frames skal være bit-identiske på tværs af maskiner, mens målinger skal bruge den rigtige GPU | — |
+
+| D12 | 00:20 | Fase 2-fundamentets tests er godkendt af Claude: `Modes`, `tickModules`, `parseRoute`/`serializeRoute` og golden | Dækker tabellen over lovlige overgange, overlay-semantik, whitelist og at versionen pinnes | — |
+| D13 ⚠ | 00:20 | Photo er et *overlay*, ikke en mode. Moduler i den underliggende mode tikker med dt = 0, mens moduler uden `activeIn` (log, audio) beholder rigtig dt | Fotomodus skal fryse simulationen uden at fryse lyd og log, og kameraer skal kunne sætte sig | Moduler, der ikke tåler dt = 0, skal ikke annoteres med `activeIn` |
+| D14 | 00:20 | Golden-testen skriver **kun** golden.json med `UPDATE_GOLDEN=1`. En manglende fil er en fejl | Hvis testen selv skrev en manglende fil, ville det at slette golden.json få testen til at passere | — |
+| D15 ⚠ | 00:25 | Golden-testen er **bevist mod dit MAP-Elites-arbejde**: dine filer blev kopieret midlertidigt ind i min worktree, og testen fejlede med "bump SHIP_GENERATION_VERSION". Filerne blev derefter rullet tilbage. Din checkout er ikke rørt | Beviser at D2 virker | Når du merger MAP-Elites: bump til 2 og kør `UPDATE_GOLDEN=1 npx vitest run src/gen/ships/golden.test.ts` |
+| D16 | 00:25 | Alle moduler starter uannoterede, så de altid er aktive. Annotering sker modul for modul, med verifikation i Yard-sporet | Risiko fra SHOWROOM §5: et modul kan i det skjulte afhænge af at blive tikket | — |
+| D17 | 00:30 | Fase 1 er delt i 4 parallelle spor (A: stick og FA, B: mål og HUD, C: cruise-ankomst, D: taster, pause, respawn og hints), hver i sin egen worktree. Hvert spor afleverer først tests til godkendelse (GS-TDD), og jeg merger til `v2` | Maksimal fremdrift på 8 timer, og sporene ejer hver deres filer | Merge-konflikter i registry, EventBus og Universe løses af mig |
+| D18 | 00:30 | Fase 3a (bagt terrain og sky-cubemap) og fase 2b (Showroom-opdeling og Yard) er startet parallelt med fase 1 | De rører ikke fase 1-filerne. Sporene har fået autonom godkendelse af tests, men skal committe tests separat først | — |
+| D19 | 00:30 | Fase 0 er sendt til adversarial review og mutation testing hos en separat agent | Ejerens krav | — |
+
+| D20 | 00:50 | Tests for spor B (70 tests: mål, flight aids, scan-valg) og spor D (respawn, pause, hints, jump, warp-tid) er godkendt. SystemMap emitter nu `body:<name>`. Et targetet skib scannes uden rækkeviddegrænse (transponder). Stjernen kan ikke vælges med Tab | Testene dækker de målte fejl F1-F11/B2/B5/B6 | — |
+| D21 | 00:50 | Stick-settings: `os.stick.sensitivity` er en multiplikator (1, clamp [0,25; 4]) og `os.stick.invertY` er 'true'/'false'. Spor D's parser er sandheden | Ét fælles format på tværs af spor | Dedupes ved merge |
+| D22 | 00:50 | Spor D må rette `starFrame.radius`, der står i solar-enheder og ikke er konverteret. Først skal alle læsere tjekkes, og der skal en test til | Formodet enhedsfejl, som påvirker stjernekollision | Kan ændre clearance nær stjernen |
+| D23 ⚠ | 00:55 | **FA-ON, variant B:** throttle 0 = *coast* (ingen assist-thrust), throttle > 0 = farthold langs næsen relativt til parent, Space = aktivt stop (også mod tyngdekraft), X = tilbage til coast. FA-OFF = dagens newtonske model med rotationsdæmpning. Z skifter mellem ON og OFF | Med FA-ON bogstaveligt (Elite) ville throttle 0 bremse spawn-banen og cruise-droppet ihjel. Banen er spillets money shot, så hænderne væk skal betyde stabil bane | Den mindste throttle-værdi over 0 bryder banen. Det er bevidst, fordi farthold er et valg |
+| D24 | 00:55 | Retro hæves til 0,2 km/s² (som main), og RCS fordobles til 0,1 km/s². FA-ON må ikke styre næsen | B4-asymmetrien. Lateral drift skal kunne dræbes på rimelig tid uden at computeren tager næsen | FA-OFF bremser også hårdere |
+| D25 | 01:00 | Fotomodus er et overlay (`P`) med eget fly-cam, eksakt integration, drag-look, grade-kontroller og PNG via `toBlob` i draw-tasken. Foto-modulet registreres sidst, så det skriver kameraet efter rig'en | Ingen `preserveDrawingBuffer`-omkostning, og HUD'en skjules via CSS uden at ændre Hud.ts | — |
+| D26 | 01:00 | Dev-overlay med `?dev` eller backtick. Tier-skift sker via reload med `?tier=` | Renderere dimensionerer buffere ved konstruktion, så et live-skift ville kun virke halvt | — |
+
+| D27 ⚠ | 01:20 | **Min fejl, fanget af revieweren:** commit 9c40119 indeholdt et `node_modules`-symlink, fordi `.gitignore` kun matchede mapper. Det er fjernet, og ignore-reglen er rettet (merget fra `review-p0`) | Et frisk clone ville have fået et dødt link | Ingen. Det er rettet på `v2` |
+| D28 | 01:20 | Review-grenen `review-p0` er merget. Governoren tæller nu 3 spikes i træk som last. `planStreaming` allokerer ikke længere. Mutation-score steg fra 50-80 % til 95-100 % | Ejerens krav om sabotage/mutation | — |
+| D29 ⚠ | 01:25 | Governoren gentager ikke et fald, der ikke købte noget (±5 %), men kun når gennemsnittet ≤ 2,5 × target (~42 ms) | En refresh-lås på 30 Hz pressede skalaen i bund for ingenting. Ved 5 fps er sløret bedre end uspilleligt, og den situation kan ikke skelnes fra konstant last | På en låst 30 Hz-skærm falder skalaen højst ét trin (til 0,85) |
+| D30 | 01:25 | Prewarm kører én frame før `compileAsync`. Release midt i compile udskyder dispose. fps-visningen clampes i stedet for at filtrere. Trafik uden for release-afstand bygges ikke | Reviewets fund 3, 5, 9 og 7 | — |
+| D31 ⚠ | 01:30 | **Spillet booter nu i titelskærmen** (UNDOCK / THE YARD / SETTINGS / seed). `?mode=flight` springer den over | PLAN fase 2. Titelskærmen fanger tasterne, mens den er synlig, og skjules under review-shots | Scripts og playtests, der forventer flight ved `/`, skal bruge `?mode=flight` |
+| D32 | 01:30 | Clouds' og Atmospheres private scener prewarmes ikke endnu (reviewets fund 4). Det er sendt til fase 3-agenten | Hører til render-laget | Skyede verdener kan stadig hakke ved acquire, indtil det er løst |
+
+| D33 | 01:45 | Spor A er merget: stick-mus (radius 300 px, deadzone 4 %, lineær recentrering på 8 s), FA-ON som Pilot-default (klassen er FA-OFF, så fysik-tests forbliver newtonske), og throttle-kurven er eksponentiel (t = 0,1 → 52 m/s, 0,5 → 1,7 km/s, 1 → 60 km/s) | Finkontrol til landing i bunden | — |
+| D34 | 01:50 | Spor C er merget: engage = max(1.200 km; 0,5 R), hold = max(700 km; 0,3 R), arrival ved 3 R mens skibet nærmer sig, insertion i cirkulær bane og PD-styring mod kanten af arrival-kuglen | Cruise kan nu aktiveres fra åbningsbanen (4.474 km > 3.620 km) og ender i en stabil bane | — |
+| D35 | 01:55 | Integrationsfejl mellem A og C: styringens gains valgtes ud fra `flightAssist`, men rotationsdæmpning hedder `attitudeHold` efter A's opdeling. Rettet. ⚠ Jeg pushede merge-tilstanden med 2 røde tests i ~5 minutter | Fanget af den fulde testkørsel | Ingen. Tilstanden blev rettet i næste commit |
+| D36 | 02:00 | Spor D er merget: pause, recovery, hints, J-hop, ærlig JUMP EST (7,4 s), F2 og README. `starFrame.radius`-enhedsfejlen er rettet; den påvirkede kun altimeteret i stjernens frame | — | — |
+| D37 ⚠ | 02:05 | **Åbningsbilledet:** næsen peger prograde, men tippet 30° ned mod kanten. Det er mit valg frem for at ændre CameraRig | Kun prograde gav tom stjernehimmel (§6-fejltilstand). Med 30° ligger kanten ~21° under næsen, og næsen er 87 % prograde | Det første tryk på W har en lille nedadgående komponent. Med FA-ON farthold og lav throttle er det ufarligt |
+
+| D38 | 02:20 | Spor B er merget: Tab-mål, body dots, prograde/retro, VSI/TTI, ALT mod terræn med kroppens navn, korrekt titel og scan-valg. Stick-prikken er koblet til HUD'en via Instruments (kun under pointer lock) | — | — |
+| D39 ⚠ | 02:30 | Reviewet af spor A er merget med 2 reelle fejl rettet: (1) S/hjul nåede aldrig præcis 0, så FA blev i "hold" og bremsede banen væk; (2) motorens spool skubbede ~1 s ind i coast. Mutation-score 65 → 98 % | Uden fix 1 ville den mest almindelige handling (S ned til 0) have dræbt banen | — |
+| D40 ⚠ | 02:35 | **SOI-latch:** når skibet krydser en SOI-grænse under FA-hold, coaster assisten, indtil piloten flytter throttle-håndtaget | Hold-referencen springer med forældrenes relative fart (op til ~49 km/s), og computeren ville ellers brænde i minutter for at nå en fart, piloten aldrig har bedt om | Efter et SOI-skift skal piloten røre throttle for at genoptage holdet |
+| D41 | 02:40 | FA-linje under THR-målet (`FA · COAST`, `FA · HOLD 1.70 KM/S`, `FA · STOP`, `FA OFF`) | Under FA-ON viser THR motorens output (0 % under hold i vakuum), så setpunktet var usynligt | — |
+
+| D42 | 02:55 | The Yard er merget. Showroom er delt i `showroom/{Stage,camera,presets,shots}` med **pixel-identiske** review-frames (21 shots, deterministisk fixed-step capture). Catalog, specs, LRU(16) og FlightSnapshot er testet | — | — |
+| D43 ⚠ | 02:55 | Gating er en tabel efter navn (`game/gating.ts`). Flight-modulerne er aktive i `boot, title, flight, map, review`. **`boot` og `title` blev tilføjet af mig ved merge** | Yard-agentens tabel lagde Universe i dvale under boot og titel. Prewarm-steppet ville så aldrig have bygget hjemplaneten, og titlen ville vise et stillbillede | Kun `yard` fryser reelt flight |
+| D44 | 02:55 | Fase 1-modulerne er tilføjet til gating: Targeting og Instruments er aktive som flight, Hints og Recovery i `flight, map`, og Pause kun i `flight`. Hints skjuler sin DOM ved mode-skift | Et sovende modul efterlod sin sidste DOM på skærmen ("CLICK TO TAKE THE CONTROLS" over titlen og Yard) | — |
+| D45 | 02:55 | Shots er en mode (`review`). `setShot` husker den afbrudte mode, og `clearShot` vender tilbage dertil. `__osClearShot` er tilføjet | Yard-sporet | — |
+| D46 | 02:55 | Yard bruger et sort DOM-slør som fade (ikke lys eller exposure) og capture-phase input. Derelicts viser "no active drive signature" | Skjuler build-tiden (≤94 ms) og lækker ingen input til flight | ⚠ **Generator-fund (ikke rettet):** alle derelicts har aktive motorer, og nogle skrog bygges uden for deres size-bånd (medium → 151 m). Skal rettes med et version-bump |
+| D47 | 03:00 | Boot-mode: `?mode=flight` eller `?mode=yard`, ellers titel. `map` og `review` er ikke boot-mål for spillere | — | — |
+
+| D48 | 03:30 | Fase 4 er merget: auto-land og auto-orbit på L, time compression (`,` `.` 1×/10×/100×, kun på jorden eller i stabil bane, sim i slices af 1/20 s, energidrift 2,3e-9 %/bane), presets SURVEY/PILOT/NEWTONIAN | Browser: TOUCHDOWN CLEAN 0,1 m/s efter 290 s, ORBIT efter 250 s | Tykke atmosfærer tager ~8 min pr. leg |
+| D49 | 03:30 | Autopiloten flyver FA-OFF og gendanner pilotens FA bagefter. Under 2 km er nedstigningen clampet til 30 m/s. Recovery er aktiv i alle presets | Fase 4-agentens valg, accepteret | — |
+| D50 ⚠ | 03:40 | **Eksisterende fejl rettet:** ground-sampleren ignorerede planetens spin, mens mesh'et roteres med den. Kollision og tegnet terræn gled fra hinanden med ~0,5 km/s. Et landet skib følger nu overfladen (`carryWithSurface`) | Browser: skibets overflade-relative position er identisk efter 60 s | Ved letning har skibet ikke overfladens tangentialfart (≤0,5 km/s), hvilket er acceptabelt |
+| D51 | 03:40 | Fase 4-modulerne er gated til `flight, map` | — | — |
+
+| D52 ⚠ | 04:00 | Det samlede review af fase 1 er merget. **Kritisk fejl fanget:** cruise med throttle 0 (FA-ON's hvileposition) gav "CRUISE ENGAGED" ved 0 m/s, så de første 10 minutter brød ved 2:40. Nu rider throttle 0 på cruise-loftet, og Space holder skibet stille. Desuden: cruise styrer uden om en verden i vejen, recovery/pause/hop annullerer cruise, settings virker live, og der er 157 mutanter | Playtesten kører nu ende-til-ende: scan → cruise til Vassa (83 s) → cirkulær bane (e = 2e-8) → pause/recovery → hop | — |
+| D53 | 04:05 | Arrival er kun armet, efter skibet har forladt den verden, det startede ved. Indsættelsen giver skibet åbningsattituden, så verden er i billedet ved ankomst. Den dobbelte ARRIVED-log er fjernet | Review-p1's åbne fund. Spillets money shot var tom himmel | Attitude-skiftet ved indsættelsen er et snap, men kamera-rig'en dæmper det |
+| D54 ⚠ | 04:15 | **Fase 3 er merget:** bagt terrain-atlas pr. planet (tile = geometri-slot), skygge-clipmap 4×256², hav i surface-passet, sky-cubemap pr. galakse. `patchResolution` forbliver 33 (65 målt til +5-6 ms) | Den største gevinst i hele planen | Kystlinjer lidt blødere fra kredsløb. Hukommelse: ~5 MB atlas pr. planet, 4 MB clipmap, ~48 MB cubemap på high |
+| D55 | 04:15 | Universe kalder nu `compileAsync` på Planet, Clouds og Atmosphere ved acquire (de private scener fra review #4) | Fjerner de sidste synkrone links ved approach i rigtigt gameplay | — |
+| D56 ⚠ | 04:20 | **Udskudt:** skibsgenerering i Web Worker og faste render targets | Alle scener er nu under 16,7 ms. Tilbageværende hak er én skibs-build (40-75 ms) pr. kontakt og sjældne governor-reallokeringer | Kandidater til v2.1 |
+
+| D57 ⚠ | 04:40 | Reviewet af fase 2 er merget (9 fund, 7 rettet). Foto over Yard lækker ikke længere input, og pause åbner aldrig under overlays. Foto bevarer roll fra indgangskameraet, så der ikke er noget snap. Entry-guards forhindrer Y under hop/recovery. **Golden-testen er strammet:** sweep over ~150 skrog (de 5 faste skibe fangede ikke en ændret alpha-clamp), og re-record under samme version afvises. Mutation-score 73 → 98 % | — | Golden-testen tager ~5 s |
+| D58 | 04:45 | Ethvert `gen` i et link, der ikke er præcis dette builds version (ældre, nyere eller ulæseligt), markeres som "older yard standard" | Review-p2: fremtidige eller ulæselige `gen` blev i stilhed pinnet om til `gen=1`, så linket viste et andet skib | Én mutant-test fra reviewet er opdateret til den nye regel |
+| D59 ⚠ | 04:55 | Reviewet af fase 3 er merget. **Regression rettet:** skibet landede 14 km under det tegnede hav, fordi kollisionen brugte havbunden, mens havet nu tegnes i surface-passet (`drawnHeight`). Desuden: genbag efter tabt WebGL-kontekst (planet og himmel var sorte resten af sessionen), og højst ét clipmap-niveau pr. frame | Fanget ved en rigtig landing på GPU | — |
+| D60 | 05:00 | To ekstra spor er startet: skibsgenerering i Web Worker (D56 genåbnet, fordi der er tid) og billedet fra overfladen (åbent punkt) | Der er tid tilbage i de 8 timer, og begge er blandt de vigtigste tilbageværende hak/look-problemer | — |
+| D61 ⚠ | 05:20 | **Rettet:** (1) RETURN TO ORBIT under autopilot lod autopiloten køre videre (samme parent → intet afbrød den), og den dykkede straks igen. RecoveryCut udsender `ship:recovered` (med årsag; review-p4s ekstra emit i Universe er fjernet ved merge); AutoPilot afbryder og TimeControl går til 1×. (2) Z (eller preset-skift i pause) midt i et leg tændte FA, mens computeren fløj rå thrust gennem assisten. FA tændt udefra er nu et overtag: autopiloten slipper, og FA bliver som piloten valgte (et preset uden autopilot giver presettets FA). (3) Traffic-uret gik i væg-tid: ved 100× sakkede co-orbit-skibe agterud. Det følger nu `Universe.simulatedSeconds` (og står stille under pause) | Browser: før/efter målt (autopilot aktiv efter recovery → afbrudt; traffic-ur +3,5 s mod orbit-ur +326 s → begge +324 s) | Uændret: feltet kender ikke terrænets bevægelse (D50). Over roterende terræn med hældning ~10 % måles touchdown på 5-9 m/s (stadig ikke hårdt, men ikke CLEAN). I browseren på Remit 31: CLEAN 0,9 m/s. Feed-forward på √-feltet ved målradius ryster ±0,012 km/s² radialt |
+
+| D62 | 05:50 | **Skibsgenerering i Web Worker er merget** (D56 delvist løst): en pool med højst 2 workers, dedupe, prioritet, annullering, LRU(24) og synkron fallback med 1 skib pr. task. Yard prefetcher seed ±1. Review-stien er stadig synkron | Yard ×10 seed-skift: long tasks 750-1100 ms i alt → 0-115 ms. Boot: 564-1005 → ~442 ms | `createShipVisual` (mesh, 20-70 ms) er stadig på main thread, fordi en flytning kræver en omskrivning af HullBuilder. Kandidat til v2.1 |
+
+| D63 | 06:55 | Landed view er merget: komponeret kamera på jorden, øje og sol i kroppens roterende frame, himlen blinker ikke længere sort ved havniveau, motion blur relativt til jorden, detaljer i meterskala, og havet spejler den rigtige himmel | Billedet på jorden var en flad grå mark med fem fejl oven i hinanden (målt) | Terminator-billedet på jorden: 9 → 16,6 ms (inden for budget) |
+| D64 ⚠ | 07:15 | **Regression rettet:** GL feedback loop (~120/s) under foto-overlay. Rodårsag: review-p1 lod Pause fryse Universe under overlays, så `updateBodies` ikke republicerede ping-pong-dybdeteksturen, og atmosfæren samplede den dybde, der blev skrevet. Nu publiceres den også, når Universe er frosset (`game/sceneDepth.ts`) | Fanget i min slutverifikation, ikke af nogen review. Søm-fejl mellem review-p1 og fase 3 | Slut-flowet har 0 konsolfejl |
+
+| D65 | 07:35 | Landed-reviewet er merget: liftoff hopper ikke længere (før: 70 → 200 m og 40° på ét frame), og landed-basis pisker ikke længere rundt nær world ±X. Spinning-frame-ændringen er bekræftet korrekt; en måne, der var helt sort før, er nu belyst rigtigt | Mutation 22/23 (1 ækvivalent) | Ikke rettet: `eyeOffset` nulstilles ved 50 km afstand, og mørke flader på havet ved 100× landed er ikke isoleret |
+
+**Slutverifikation (07:40):** `npm run verify` exit 0, 1104 tests, 0 smoke-FAIL. Browser-flow (titel → flight → Yard → flight → foto → flight → Yard-link) har 0 konsolfejl.
+
+**Kendte, ikke rettede (fra fase 3-review):** HalfFloat-fallback kan ikke rendere uden `EXT_color_buffer_float` (påvirker kun meget gamle GPU'er), og Clouds/Atmosphere genbager sandsynligvis ikke efter tabt kontekst.
+
+**Slutmåling, fase 0-3 (prod, M4 Pro, samme probe som auditten, `?mode=flight`):**
+
+| Scene | v1 | v2 |
+|---|---|---|
+| Opening | 112 ms | **8,3 ms** (120 Hz-loft, skala 1,0) |
+| Planet-approach | 211-264 ms | **11,3 ms** |
+| Atmosphere-sunset | 165 ms | **15,2 ms** |
+| Planet-orbit | 64-74 ms | **8,3 ms** |
+| Clouds-orbit | 109 ms | **15,7 ms** |
+
+**Åbne punkter til ejeren (ikke rettet):**
+- Auto-land dykker ærligt med ~39 km/s og en rød "IMPACT 0:13", før den bremser. Det er korrekt fysik, men kan virke hensynsløst. Overvej lavere `BRAKE_FRACTION`, eller 10× time compression under autopilot.
+- Billedet på jorden er en flad grå mark (orbit-kamera ved terræn med dis). Visuelt arbejde i fase 3 eller senere.
+- Generator: derelicts har aktive motorer, og nogle skrog bygges uden for size-båndet. Kræver version-bump (D46).
+- L under cruise afviser autopiloten og dropper samtidig cruise.
+
+**Browser-flow verificeret (03:00):** titel (2 planeter streamet, intet hint eller HUD) → Enter → flight (hint og HUD) → Y → Yard (skjult) → Esc → flight → P → foto → P → flight; `?mode=yard&ship=…` booter med `gen=1` pinnet. 0 konsolfejl.
+
+**Fase 0-måling** (prod, M4 Pro, DPR 2-viewport, samme probe som i auditten): opening 112 → **28 ms**, planet-approach 211-264 → **67 ms**, sunset 165 → **43 ms**. Ingen nye shader-links ved approach. Governoren lander på sin bund (0,5), så terrain er stadig flaskehalsen, og det tages i fase 3.
+**Fundet under verifikation:** cruise afvises nu med "MASS TOO CLOSE" ved spawn (4.474 km < 5.000 km engage). Det løses i fase 1 med radius-relative tærskler.

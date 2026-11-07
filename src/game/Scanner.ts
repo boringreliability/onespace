@@ -16,18 +16,19 @@
  * project keeps paying for.
  */
 
+import { Vector3 } from 'three';
+
 import type { EngineContext, GameModule } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
 import { planetScan } from '@/gen/scan';
 import type { ScanResult } from '@/gen/types';
 import type { Traffic } from '@/game/Traffic';
-import type { Universe } from '@/game/Universe';
+import type { Universe, UniverseBody } from '@/game/Universe';
+import { chooseScanTarget, type ScanBody } from '@/game/scanChoice';
+import { bodyTargetId } from '@/game/targets';
 
 /** Seconds the array takes to resolve a target. Long enough to feel worked for. */
 const SWEEP_TIME = 1.4;
-
-/** A hull closer than this outranks the world below; km. */
-const VESSEL_PRIORITY_KM = 400;
 
 /** Beyond this the array cannot hold a world at all; multiples of its radius. */
 const WORLD_RANGE_RADII = 60;
@@ -35,6 +36,8 @@ const WORLD_RANGE_RADII = 60;
 export interface ScannerOptions {
   readonly universe: Universe;
   readonly traffic?: Traffic | null;
+  /** The nav target, if targeting is wired. Read only. */
+  readonly targeting?: { readonly targetId: string | null } | null;
 }
 
 export class Scanner implements GameModule {
@@ -42,6 +45,7 @@ export class Scanner implements GameModule {
 
   private readonly universe: Universe;
   private readonly traffic: Traffic | null;
+  private readonly targeting: { readonly targetId: string | null } | null;
 
   /** Non-null while a sweep is running. */
   private pending: ScanResult | null = null;
@@ -56,6 +60,7 @@ export class Scanner implements GameModule {
   constructor(opts: ScannerOptions) {
     this.universe = opts.universe;
     this.traffic = opts.traffic ?? null;
+    this.targeting = opts.targeting ?? null;
   }
 
   update(dt: number, ctx: EngineContext): void {
@@ -70,9 +75,10 @@ export class Scanner implements GameModule {
     }
     if (!ctx.input.pressed('scan')) return;
 
+    this.outOfRangeReported = false;
     const target = this.pick();
     if (!target) {
-      bus.emit('log', { text: 'ARRAY FINDS NOTHING IN RANGE', tone: 'warn' });
+      if (!this.outOfRangeReported) bus.emit('log', { text: 'ARRAY FINDS NOTHING IN RANGE', tone: 'warn' });
       return;
     }
     this.pending = target;
@@ -82,32 +88,71 @@ export class Scanner implements GameModule {
   }
 
   /**
-   * Choose what the array locks onto.
-   *
-   * A hull within a few hundred kilometres wins over the planet underneath it:
-   * if you have flown up alongside somebody, that is what you meant to scan.
+   * Choose what the array locks onto: the nav target if there is one, else
+   * the world under the reticle, else the world being orbited. A hull is only
+   * scanned as a target. The old rule let any hull within 400 km outrank the
+   * planet, so with a co-orbiting freighter at spawn the spawn world could
+   * never be scanned (GAMEPLAY F3). Runs once per key press, so it may
+   * allocate.
    */
   private pick(): ScanResult | null {
-    const contact = this.traffic?.nearest() ?? null;
-    if (contact && contact.distanceKm < VESSEL_PRIORITY_KM) {
-      const hit = this.cached(contact.id, () => this.traffic?.scan(contact.id) ?? null);
-      if (hit) return hit;
+    const flight = this.universe.flight;
+    const ship = flight.worldPosition;
+    const nose = flight.forward;
+    const byId = new Map<string, UniverseBody>();
+    const bodies: ScanBody[] = [];
+    const rel = new Vector3();
+    for (const b of this.universe.allBodies()) {
+      const id = bodyTargetId(b.spec.name);
+      byId.set(id, b);
+      rel.subVectors(b.world, ship);
+      const d = rel.length();
+      const angle = d > 1e-9 ? Math.acos(Math.min(1, Math.max(-1, rel.dot(nose) / d))) : 0;
+      bodies.push({
+        id,
+        angleRad: angle,
+        angularRadiusRad: d > b.spec.radius ? Math.asin(b.spec.radius / d) : Math.PI,
+        distanceKm: d,
+        inRange: d - b.spec.radius < b.spec.radius * WORLD_RANGE_RADII,
+      });
     }
 
-    const body = this.universe.nearest;
-    if (body) {
-      const gap = this.universe.nearestAltitudeKm;
-      if (gap === null || gap < body.spec.radius * WORLD_RANGE_RADII) {
-        const hit = this.cached(body.spec.id, () => planetScan(body.spec));
-        if (hit) return hit;
+    const targetId = this.targeting?.targetId ?? null;
+    let target: { id: string; inRange: boolean } | null = null;
+    if (targetId !== null) {
+      const tb = byId.get(targetId);
+      if (tb) {
+        target = { id: targetId, inRange: bodies.find((x) => x.id === targetId)!.inRange };
+      } else if (this.traffic) {
+        // A targeted hull answers its transponder at any range.
+        target = { id: targetId, inRange: true };
       }
     }
 
-    // Nothing below, but somebody out there: take the distant hull rather than
-    // report an empty sky.
-    if (contact) return this.cached(contact.id, () => this.traffic?.scan(contact.id) ?? null);
-    return null;
+    const parent = this.universe.shipParent;
+    const choice = chooseScanTarget({
+      target,
+      bodies,
+      parentId: parent ? bodyTargetId(parent.spec.name) : null,
+    });
+
+    if (choice.kind === 'none') return null;
+    if (choice.kind === 'out-of-range') {
+      const b = byId.get(choice.id);
+      bus.emit('log', {
+        text: `${(b?.spec.name ?? choice.id).toUpperCase()} BEYOND ARRAY RANGE`,
+        tone: 'warn',
+      });
+      this.outOfRangeReported = true;
+      return null;
+    }
+    const b = byId.get(choice.id);
+    if (b) return this.cached(b.spec.id, () => planetScan(b.spec));
+    return this.cached(choice.id, () => this.traffic?.scan(choice.id) ?? null);
   }
+
+  /** Set when `pick()` already explained itself, so update() stays quiet. */
+  private outOfRangeReported = false;
 
   private cached(id: string, build: () => ScanResult | null): ScanResult | null {
     const hit = this.cache.get(id);

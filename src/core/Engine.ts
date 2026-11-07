@@ -20,6 +20,10 @@ import { bus } from './EventBus';
 import { config, detectTier, type QualitySettings } from './Config';
 import { FloatingOrigin } from './FloatingOrigin';
 import { Input } from './Input';
+import { ResolutionGovernor } from './ResolutionGovernor';
+import { modes, type Mode } from './Modes';
+import { moduleDt, tickModules } from './tick';
+import { parseDevParams } from './Route';
 
 export interface EngineContext {
   readonly renderer: WebGLRenderer;
@@ -38,6 +42,14 @@ export interface EngineContext {
 
 export interface GameModule {
   readonly name: string;
+  /**
+   * Modes this module lives in (see core/Modes.ts and core/tick.ts). Omitted
+   * means always on — the v1 behaviour, and the right default for anything
+   * whose clock must not stop (log, audio).
+   */
+  readonly activeIn?: readonly Mode[];
+  /** Told on every mode change, active or not, so it can hide or restore. */
+  onModeChange?(from: Mode, to: Mode, ctx: EngineContext): void;
   init?(ctx: EngineContext): Promise<void> | void;
   /** Called every frame, in registration order. */
   update?(dt: number, ctx: EngineContext): void;
@@ -65,6 +77,11 @@ export class Engine {
   readonly origin = new FloatingOrigin();
 
   private modules: GameModule[] = [];
+  /** Reused every frame — no allocation in the loop. */
+  private tickState: { base: typeof modes.base; overlay: typeof modes.overlay } = {
+    base: modes.base,
+    overlay: modes.overlay,
+  };
   private pipeline: RenderPipeline | null = null;
   private clock = new Clock();
   private running = false;
@@ -77,6 +94,12 @@ export class Engine {
   /** Rolling average frame time in ms, used by the adaptive resolution. */
   private avgFrameMs = 16.7;
   private resolutionScale = 1;
+  /** Wall-clock governor — the only frame timer that sees the GPU. */
+  private governor = new ResolutionGovernor();
+  private lastStepAt = 0;
+  private avgWallMs = 16.7;
+  /** `?dpr=` override; replaces the tier's cap when set. */
+  private dprCap: number | null = null;
 
   /**
    * When set, the loop advances by exactly this much simulated time per frame
@@ -98,15 +121,18 @@ export class Engine {
     });
 
     const gl = this.renderer.getContext() as WebGL2RenderingContext;
-    const tier = detectTier(gl);
+    // `?tier=` and `?dpr=` override the guess. Whitelisted in Route.ts.
+    const dev = parseDevParams(window.location.search);
+    const tier = dev.tier ?? detectTier(gl);
     const q = config.setTier(tier);
+    this.dprCap = dev.dpr ?? null;
 
     this.renderer.outputColorSpace = SRGBColorSpace;
     // The scene is authored in physical-ish units and graded in post, so the
     // renderer itself stays linear — PostFX owns the tone map.
     this.renderer.toneMapping = ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1;
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, q.maxPixelRatio));
+    this.renderer.setPixelRatio(this.pixelRatioCap(q));
 
     // near/far are deliberately extreme; the logarithmic depth buffer copes.
     //
@@ -119,6 +145,11 @@ export class Engine {
     this.camera.position.set(0, 0, 0);
 
     this.input = new Input(canvas);
+
+    modes.onChange((from, to) => {
+      const ctx = this.context;
+      for (const m of this.modules) m.onModeChange?.(from, to, ctx);
+    });
 
     this.handleResize();
     window.addEventListener('resize', this.handleResize);
@@ -181,6 +212,9 @@ export class Engine {
 
   private step(): void {
     const t0 = performance.now();
+    // Interval since the previous frame began: CPU + GPU + vsync, everything.
+    const wallMs = this.lastStepAt > 0 ? t0 - this.lastStepAt : 0;
+    this.lastStepAt = t0;
 
     // Clamp dt: a background tab or a long GC pause must not teleport the ship.
     const realDt = Math.min(this.clock.getDelta(), 1 / 15);
@@ -191,17 +225,34 @@ export class Engine {
     this.input.update(dt);
 
     const ctx = this.context;
-    for (const m of this.modules) m.update?.(dt, ctx);
-    for (const m of this.modules) m.lateUpdate?.(dt, ctx);
+    this.tickState.base = modes.base;
+    this.tickState.overlay = modes.overlay;
+    tickModules(this.modules, this.tickState, dt, ctx);
 
     if (this.pipeline) this.pipeline.render(dt, ctx);
     else this.renderer.render(this.scene, this.camera);
 
+    // Read back in the same task as the draw: the drawing buffer is still
+    // intact, so no preserveDrawingBuffer (which costs every frame) is needed.
+    if (this.captureWaiters.length) {
+      const waiters = this.captureWaiters.splice(0);
+      this.canvas.toBlob((b) => {
+        for (const w of waiters) w(b);
+      }, 'image/png');
+    }
+
     this.input.endFrame();
 
+    // CPU-side cost only; kept for the stats overlay. The governor is fed the
+    // wall-clock interval instead, because this number never sees the GPU.
     const frameMs = performance.now() - t0;
     this.avgFrameMs += (frameMs - this.avgFrameMs) * 0.05;
-    this.adaptResolution();
+    // Clamped, not filtered: under SwiftShader every frame can exceed 250 ms,
+    // and a filter left the readout stuck at a fictional 60 fps.
+    if (wallMs > 0) this.avgWallMs += (Math.min(wallMs, 2000) - this.avgWallMs) * 0.05;
+    // Fixed-step simulation (review harness) is not real time; its intervals
+    // say nothing about load.
+    if (this.fixedDt === null) this.adaptResolution(wallMs);
 
     if (this.frameWaiters.length) this.tickWaiters();
   }
@@ -229,6 +280,38 @@ export class Engine {
     });
   }
 
+  /**
+   * Compile every material currently in the scene, using
+   * KHR_parallel_shader_compile where the driver has it. Never rejects: a
+   * failure here only means the first frame compiles lazily, as before.
+   */
+  async prewarm(): Promise<void> {
+    // One frame first, so modules that create their renderers lazily — the
+    // home planet is acquired by Universe's first update — exist when the
+    // programs are compiled. Under the boot veil; nobody sees this frame.
+    this.step();
+    try {
+      await this.renderer.compileAsync(this.scene, this.camera);
+    } catch {
+      /* fall back to lazy compile */
+    }
+  }
+
+  /** Resolve with a PNG of the next rendered frame (null if the browser refuses). */
+  captureNextFrame(): Promise<Blob | null> {
+    return new Promise((resolve) => this.captureWaiters.push(resolve));
+  }
+
+  private captureWaiters: Array<(b: Blob | null) => void> = [];
+
+  /** How many modules tick in the current mode — for the dev overlay. */
+  moduleCounts(): { ticking: number; total: number } {
+    let ticking = 0;
+    const st = { base: modes.base, overlay: modes.overlay };
+    for (const m of this.modules) if (moduleDt(m, st, 1) >= 0) ticking++;
+    return { ticking, total: this.modules.length };
+  }
+
   resumeRealtime(): void {
     this.fixedDt = null;
     this.clock.getDelta();
@@ -238,18 +321,15 @@ export class Engine {
    * Nudge internal resolution to hold ~60fps. Dropping pixels is far less
    * visible than dropping frames, so this is the first lever we pull.
    */
-  private adaptResolution(): void {
-    if (this.frame % 30 !== 0) return;
-    const target = 16.7;
-    let next = this.resolutionScale;
-    if (this.avgFrameMs > target * 1.35) next -= 0.05;
-    else if (this.avgFrameMs < target * 0.8) next += 0.03;
-    next = Math.max(0.55, Math.min(1, next));
-    if (Math.abs(next - this.resolutionScale) > 0.001) {
-      this.resolutionScale = next;
-      config.dynamicResolution = next;
-      this.applySize();
-    }
+  private adaptResolution(wallMs: number): void {
+    if (!this.governor.sample(wallMs)) return;
+    this.resolutionScale = this.governor.scale;
+    config.dynamicResolution = this.resolutionScale;
+    this.applySize();
+  }
+
+  private pixelRatioCap(q: QualitySettings): number {
+    return Math.min(window.devicePixelRatio, this.dprCap ?? q.maxPixelRatio);
   }
 
   private handleResize = (): void => {
@@ -264,7 +344,7 @@ export class Engine {
     this.height = h;
 
     this.renderer.setPixelRatio(
-      Math.min(window.devicePixelRatio, q.maxPixelRatio) * q.renderScale * this.resolutionScale,
+      this.pixelRatioCap(q) * q.renderScale * this.resolutionScale,
     );
     this.renderer.setSize(w, h, false);
 
@@ -287,14 +367,26 @@ export class Engine {
   }
 
   /** Diagnostics for the debug overlay. */
-  stats(): { fps: number; frameMs: number; scale: number; calls: number; tris: number } {
+  stats(): {
+    fps: number;
+    frameMs: number;
+    cpuMs: number;
+    scale: number;
+    calls: number;
+    tris: number;
+    programs: number;
+  } {
     const info = this.renderer.info;
     return {
-      fps: 1000 / this.avgFrameMs,
-      frameMs: this.avgFrameMs,
+      // Wall-clock: what the player actually gets. v1 reported CPU time here,
+      // which read "500 fps" on a frame that took 112 ms.
+      fps: 1000 / this.avgWallMs,
+      frameMs: this.avgWallMs,
+      cpuMs: this.avgFrameMs,
       scale: this.resolutionScale,
       calls: info.render.calls,
       tris: info.render.triangles,
+      programs: info.programs?.length ?? 0,
     };
   }
 }

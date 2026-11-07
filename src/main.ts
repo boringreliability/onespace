@@ -9,7 +9,9 @@
 import { Engine } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
 import { registerShaderChunks } from '@/shaders/chunks';
-import { setShot, shotList, shotNames } from '@/game/Shots';
+import { clearShot, setShot, shotList, shotNames } from '@/game/Shots';
+import { modes } from '@/core/Modes';
+import { parseRoute } from '@/core/Route';
 
 const boot = {
   el: document.getElementById('boot') as HTMLDivElement,
@@ -51,7 +53,21 @@ async function main(): Promise<void> {
     bus.emit('boot:progress', { progress: 0.1 + progress * 0.85, status }),
   );
 
+  // Link every program the opening scene needs while the boot veil is still
+  // up. Lazily, the first frame did it synchronously: 0.3 s warm, 2.8 s with
+  // a cold shader cache — a frozen screen as the first thing a player sees.
+  boot.set(0.97, 'compiling shaders');
+  await engine.prewarm();
+
   boot.set(1, 'ready');
+  // Boot into the title unless a link names a mode (?mode=flight skips it,
+  // ?mode=yard opens the Yard). `map` and `review` are not boot targets for a
+  // player — the chart and shots are entered from flight — so they fall back
+  // to the title.
+  const route = parseRoute(window.location.search);
+  for (const w of route.warnings) console.warn(`route: ${w}`);
+  const bootMode = route.mode === 'flight' || route.mode === 'yard' ? route.mode : 'title';
+  modes.go(bootMode);
   engine.start();
   bus.emit('boot:done');
   setTimeout(() => boot.hide(), 400);
@@ -76,6 +92,8 @@ function installReviewHarness(engine: Engine): void {
     boot.hide();
     await setShot(name, engine.context);
   };
+  // Leave the active shot and return to the mode it interrupted.
+  w.__osClearShot = () => clearShot(engine.context);
   w.__osSettle = async (seconds: number) => {
     w.__osSettled = false;
     await engine.simulate(seconds);

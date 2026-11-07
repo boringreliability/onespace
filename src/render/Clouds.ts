@@ -72,6 +72,8 @@ import {
   WebGLRenderTarget,
   type IUniform,
   type Texture,
+  type Camera,
+  type WebGLRenderer,
 } from 'three';
 
 import type { EngineContext } from '@/core/Engine';
@@ -963,6 +965,32 @@ export class CloudRenderer {
   }
 
   /**
+   * Link every program this renderer uses, without blocking where the driver
+   * supports KHR_parallel_shader_compile. renderer.compileAsync(object3d)
+   * only reaches the composite shell: the weather, shadow and march passes
+   * live in private scenes and would otherwise link synchronously on the
+   * first update(), which runs all three. Each pass is compiled with its own
+   * render target bound, because the program key includes the target's
+   * output colour space.
+   *
+   * The Front/Back side flip in update() does not need a second program:
+   * three keys FLIP_SIDED into a program only when the material is rebuilt
+   * (needsUpdate); side alone is render state.
+   */
+  async compileAsync(renderer: WebGLRenderer, camera: Camera): Promise<void> {
+    const prev = renderer.getRenderTarget();
+    const jobs: Array<Promise<unknown>> = [];
+    renderer.setRenderTarget(this.weatherRT);
+    jobs.push(renderer.compileAsync(this.weatherScene, this.bakeCamera));
+    renderer.setRenderTarget(this.shadowRT);
+    jobs.push(renderer.compileAsync(this.shadowScene, this.bakeCamera));
+    renderer.setRenderTarget(this.cloudRT);
+    jobs.push(renderer.compileAsync(this.marchScene, camera));
+    renderer.setRenderTarget(prev);
+    await Promise.all(jobs);
+  }
+
+  /**
    * Soft cloud shadow for the planet surface, in the equirectangular layout
    * documented by {@link CLOUD_SHADOW_SAMPLE_GLSL}. `r` = sun transmittance,
    * `g` = overhead cloud opacity. Null before the first `update()`.
@@ -999,6 +1027,14 @@ export class CloudRenderer {
 
     this.sunDir.copy(view.sunDirection);
     (u.uCameraLocal.value as Vector3).copy(view.cameraLocal);
+    // Same floor as Atmosphere.ts: an eye inside the analytic planet sphere
+    // clips every ray to nothing and the deck vanishes for that frame.
+    {
+      const c = u.uCameraLocal.value as Vector3;
+      const r = c.length();
+      const floor = this.rPlanet + 0.02;
+      if (r > 1e-6 && r < floor) c.multiplyScalar(floor / r);
+    }
     (u.uSunColor.value as Color).copy(view.sunColor);
 
     const sunLum =

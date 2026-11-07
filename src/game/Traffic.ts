@@ -26,7 +26,8 @@ import { Rng, hashSeed } from '@/math/rng';
 import { AU, type ScanResult } from '@/gen/types';
 import { lodForDistance } from '@/gen/ships/types';
 import type { ShipBlueprint } from '@/gen/ships/types';
-import { generateShip } from '@/gen/ships/blueprint';
+import type { ShipParams } from '@/gen/ships/blueprint';
+import { shipGen } from '@/gen/ships/shipGenClient';
 import { shipScan } from '@/gen/ships/physics';
 import { FACTIONS } from '@/gen/ships/families';
 
@@ -42,6 +43,12 @@ import type { Universe, UniverseBody } from '@/game/Universe';
  * skybox full of dots.
  */
 const MAX_TRAFFIC = 4;
+/**
+ * Mesh builds (`createShipVisual`, 20-70 ms) allowed per frame. Blueprints no
+ * longer count: they are generated on a worker (`shipGen`), and when there is
+ * no worker the client's own fallback paces them one per task.
+ */
+const HEAVY_BUILDS_PER_FRAME = 1;
 
 /** Beyond this the mesh is released entirely; the ship still exists as data. */
 const RELEASE_DISTANCE_KM = 6e5;
@@ -73,7 +80,15 @@ interface CoOrbit {
 }
 
 interface Vessel {
-  readonly blueprint: ShipBlueprint;
+  /**
+   * What to build. Generation is deferred: one `generateShip` is 40-75 ms and
+   * a system carries up to four, which v1 built in a single frame on arrival.
+   */
+  readonly params: ShipParams;
+  /** Null until the worker's answer arrives. The vessel is not drawn before. */
+  blueprint: ShipBlueprint | null;
+  /** The blueprint has been asked for; the answer lands in `blueprint`. */
+  requested: boolean;
   /** World position, kilometres. Same frame as Universe's bodies. */
   readonly world: Vector3;
   /** The body it orbits, or null for a vessel in open space. */
@@ -163,7 +178,7 @@ export class Traffic implements GameModule {
       const seed = hashSeed(sys.seed, `vessel:${i}`);
       const faction = rng.pick(FACTIONS);
       const role = rng.pick(PARKED_ROLES);
-      const blueprint = generateShip({
+      const params: ShipParams = {
         seed,
         factionId: faction.id,
         role,
@@ -171,7 +186,7 @@ export class Traffic implements GameModule {
         ageYears: rng.range(8, 60),
         damageLevel: rng.range(0.05, 0.45),
         maintenance: rng.range(0.2, 0.8),
-      });
+      };
 
       // The FIRST vessel always anchors to the world the player is at — which
       // is now a well-defined thing: the ship's SOI parent. Picking anchors
@@ -210,7 +225,9 @@ export class Traffic implements GameModule {
             : AU * rng.range(0.2, 0.8);
 
       this.vessels.push({
-        blueprint,
+        params,
+        blueprint: null,
+        requested: false,
         world: new Vector3(),
         anchor,
         orbitRadiusKm: radius,
@@ -286,8 +303,34 @@ export class Traffic implements GameModule {
   }
 
   private clear(): void {
-    for (const v of this.vessels) this.release(v);
+    for (const v of this.vessels) {
+      this.release(v);
+      // A system left before its hulls arrived: drop the work still queued.
+      // One already on a worker finishes into the client's cache, and the
+      // answer is ignored here because `this.vessels` no longer holds `v`.
+      if (v.requested && !v.blueprint) shipGen.cancel(v.params);
+    }
     this.vessels = [];
+  }
+
+  /**
+   * Ask the worker for a vessel's blueprint. Once per vessel, never per frame:
+   * the closure is the only allocation, and it is paid when the hull first
+   * comes in range.
+   */
+  private requestBlueprint(v: Vessel): void {
+    v.requested = true;
+    shipGen.request(v.params).then(
+      (bp) => {
+        // Stale if the system changed while it was being built.
+        if (this.vessels.includes(v)) v.blueprint = bp;
+      },
+      () => {
+        // Cancelled (we left) or the generator threw. Either way this vessel
+        // stays undrawn rather than taking the frame down; a throw would
+        // have thrown identically on the main thread.
+      },
+    );
   }
 
   private release(v: Vessel): void {
@@ -310,7 +353,10 @@ export class Traffic implements GameModule {
       return;
     }
     this.root.visible = true;
-    this.time += dt;
+    // Simulated time, not wall time (review-p4): at 100× a co-orbiting hull
+    // ran at 1× and fell behind the player it is meant to share an orbit with.
+    // `dt` stays for the visuals below.
+    this.time += this.universe.simulatedSeconds;
 
     if (this.pendingPopulate && this.universe.nearest) {
       this.pendingPopulate = false;
@@ -319,9 +365,23 @@ export class Traffic implements GameModule {
 
     this.camWorld.copy(this.universe.flight.worldPosition);
 
+    // At most one mesh build per frame (20-70 ms). Spread over a few frames
+    // it is invisible; in one frame, together with the blueprints that now
+    // run on a worker, it was the ~600 ms hitch the v2 audit measured just
+    // after boot.
+    let heavyBudget = HEAVY_BUILDS_PER_FRAME;
+
     for (const v of this.vessels) {
       this.placeVessel(v);
       v.distanceKm = this.camWorld.distanceTo(v.world);
+
+      if (!v.blueprint) {
+        // A hull 0.2-0.8 AU away is never drawn; building it would spend a
+        // 40-75 ms frame on nothing. It is built when it comes in range.
+        if (v.distanceKm > RELEASE_DISTANCE_KM) continue;
+        if (!v.requested) this.requestBlueprint(v);
+        continue;
+      }
 
       const wanted =
         v.distanceKm > RELEASE_DISTANCE_KM
@@ -334,6 +394,8 @@ export class Traffic implements GameModule {
       }
 
       if (!v.visual) {
+        if (heavyBudget <= 0) continue;
+        heavyBudget--;
         v.visual = createShipVisual(v.blueprint, config.quality);
         this.root.add(v.visual.object3d);
         v.lod = -1;
@@ -423,10 +485,38 @@ export class Traffic implements GameModule {
   nearest(): { id: string; name: string; distanceKm: number } | null {
     let best: Vessel | null = null;
     for (const v of this.vessels) {
+      if (!v.blueprint) continue;
       if (!best || v.distanceKm < best.distanceKm) best = v;
     }
-    if (!best) return null;
+    if (!best?.blueprint) return null;
     return { id: best.blueprint.id, name: best.blueprint.name, distanceKm: best.distanceKm };
+  }
+
+  /**
+   * Built vessels, for targeting. Read-only: `contactAt` hands back the live
+   * world vector, which the caller must not write or retain past the frame.
+   * Unbuilt vessels have no id yet and are skipped by returning null.
+   */
+  get contactCount(): number {
+    return this.vessels.length;
+  }
+
+  contactAt(i: number): { readonly id: string; readonly name: string; readonly world: Vector3 } | null {
+    const v = this.vessels[i];
+    if (!v?.blueprint) return null;
+    return { id: v.blueprint.id, name: v.blueprint.name, world: v.world };
+  }
+
+  /** Copy a vessel's world position into `out`; false if it is not (yet) here. */
+  vesselWorld(id: string, out: Vector3): boolean {
+    for (let i = 0; i < this.vessels.length; i++) {
+      const v = this.vessels[i]!;
+      if (v.blueprint?.id === id) {
+        out.copy(v.world);
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -434,8 +524,8 @@ export class Traffic implements GameModule {
    * and never change, and shipScan walks the whole mass model to build them.
    */
   scan(id: string): ScanResult | null {
-    const v = this.vessels.find((x) => x.blueprint.id === id);
-    if (!v) return null;
+    const v = this.vessels.find((x) => x.blueprint?.id === id);
+    if (!v?.blueprint) return null;
     if (!v.scan) v.scan = shipScan(v.blueprint);
     return v.scan;
   }

@@ -146,6 +146,8 @@ import {
   ZeroFactor,
   type IUniform,
   type Texture,
+  type Camera,
+  type WebGLRenderer,
 } from 'three';
 
 import type { EngineContext } from '@/core/Engine';
@@ -1098,6 +1100,22 @@ export class AtmosphereRenderer {
     return this.lut;
   }
 
+  /**
+   * Link the scattering march ahead of its first use, without blocking where
+   * the driver supports KHR_parallel_shader_compile. It renders in a private
+   * scene that renderer.compileAsync(object3d) never traverses, into its own
+   * target, which is bound here because the program key includes the
+   * target's output colour space. The side flip in update() is render state,
+   * not a program change (three only rekeys on needsUpdate).
+   */
+  async compileAsync(renderer: WebGLRenderer, camera: Camera): Promise<void> {
+    const prev = renderer.getRenderTarget();
+    renderer.setRenderTarget(this.scatterRT);
+    const job = renderer.compileAsync(this.marchScene, camera);
+    renderer.setRenderTarget(prev);
+    await job;
+  }
+
   update(dt: number, ctx: EngineContext, view: ViewState): void {
     // Re-binding freed GPU handles is a use-after-free, not a graceful
     // degradation.
@@ -1107,6 +1125,17 @@ export class AtmosphereRenderer {
     const u = this.mu;
 
     this.camLocal.copy(view.cameraLocal);
+    // Keep the ray origin a little above the analytic sphere. Every view ray is
+    // clipped against that sphere, so an eye inside it — a valley floor below
+    // the mean radius, or float32 noise on an eye sitting at sea level — gets
+    // every ray cut to zero length and a black sky. Twenty metres moves no
+    // visible air and puts the sphere test well clear of float32 at Earth
+    // radii (|ro|^2 - R^2 ~ 2Rh against an ulp of ~4 km^2).
+    {
+      const r = this.camLocal.length();
+      const floor = this.rPlanet + 0.02;
+      if (r > 1e-6 && r < floor) this.camLocal.multiplyScalar(floor / r);
+    }
     this.sunDir.copy(view.sunDirection);
     this.sunColor.copy(view.sunColor);
     this.shared.uLogFar.value = Math.log2(ctx.camera.far + 1);

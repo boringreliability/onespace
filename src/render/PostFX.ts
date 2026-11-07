@@ -1262,6 +1262,23 @@ export function sceneDepthTexture(): Texture | null {
   return publishedSceneDepth;
 }
 
+/**
+ * How far the ground under the ship moved through render space since the last
+ * frame, km (see render/motionReference.ts). The motion-blur reprojection
+ * assumes a world that stands still in render space; between floating-origin
+ * rebases a world and the ship on it travel together at orbital speed, and on
+ * the ground that read as a 0.9 km per frame dolly which smeared the hull and
+ * the near terrain (measured, v2-landed). Universe publishes it once per frame;
+ * the pipeline consumes it and zeroes it, so a frame nobody describes is
+ * treated as a still world, which is what it was before this existed.
+ */
+const motionReference = new Vector3();
+
+export function setMotionReferenceDisplacement(d: Vector3 | null): void {
+  if (d) motionReference.copy(d);
+  else motionReference.set(0, 0, 0);
+}
+
 // ---------------------------------------------------------------------------
 // The pipeline
 // ---------------------------------------------------------------------------
@@ -1287,6 +1304,8 @@ export class PostFX implements RenderPipeline {
   private readonly viewInverse = new Matrix4();
   private readonly camWorldPos = new Vector3();
   private readonly prevCamWorldPos = new Vector3();
+  private readonly refScratch = new Vector3();
+  private readonly refMatrix = new Matrix4();
 
   private exposureBias = 1;
   private exposureBiasTarget = 1;
@@ -1401,6 +1420,30 @@ export class PostFX implements RenderPipeline {
     this.exposureBiasTarget = Math.max(0.02, v);
   }
 
+  /**
+   * Photo-mode grade overrides; null restores the authored grade. Values are
+   * expected pre-clamped (game/photo/flycam.ts clampGrade). Exposure rides
+   * the eased bias, so even a photo adjustment never snaps.
+   */
+  setGrade(g: { exposure?: number; grain?: number; ca?: number; vignette?: number } | null): void {
+    const gu = this.gradePass.material.uniforms;
+    const fu = this.finalPass.material.uniforms;
+    if (!this.gradeDefaults) {
+      this.gradeDefaults = {
+        grain: fu.uGrain.value as number,
+        ca: gu.uCa.value as number,
+        vignette: (gu.uVignette.value as Vector3).x,
+      };
+    }
+    const d = this.gradeDefaults;
+    fu.uGrain.value = g?.grain ?? d.grain;
+    gu.uCa.value = g?.ca ?? d.ca;
+    (gu.uVignette.value as Vector3).x = g?.vignette ?? d.vignette;
+    this.setExposureBias(g?.exposure ?? 1);
+  }
+
+  private gradeDefaults: { grain: number; ca: number; vignette: number } | null = null;
+
   /** Blow the frame out — jump entry, hull breach, a very close star. */
   flash(intensity: number, durationSeconds: number): void {
     this.flashPeak = Math.max(this.flashPeak, intensity);
@@ -1500,10 +1543,24 @@ export class PostFX implements RenderPipeline {
     // then meaningless and reprojection would smear the whole frame. Same for
     // the first frame after a resize or a warp jump.
     const rebased = ctx.origin.version !== this.prevOriginVersion;
-    const jumped = this.prevCamWorldPos.distanceToSquared(this.camWorldPos) > 25 * 25;
+    // Measured against the ground under the ship, not render space: a landed
+    // camera sweeps ~1 km per frame through render space without moving at all.
+    const jumped =
+      this.refScratch.copy(this.camWorldPos).sub(this.prevCamWorldPos).sub(motionReference).lengthSq() >
+      25 * 25;
     motion.x = this.hasPrevFrame && !rebased && !jumped ? MOTION_SHUTTER : 0;
 
-    (u.uPrevViewProj.value as Matrix4).copy(this.hasPrevFrame ? this.prevViewProj : this.curViewProj);
+    // A point at X now was at X - d a frame ago, so reproject through
+    // prevViewProj * T(-d). Zero d leaves the old behaviour bit-for-bit.
+    const prev = u.uPrevViewProj.value as Matrix4;
+    if (this.hasPrevFrame) {
+      prev.copy(this.prevViewProj).multiply(
+        this.refMatrix.makeTranslation(-motionReference.x, -motionReference.y, -motionReference.z),
+      );
+    } else {
+      prev.copy(this.curViewProj);
+    }
+    motionReference.set(0, 0, 0);
 
     this.prevViewProj.copy(this.curViewProj);
     this.prevCamWorldPos.copy(this.camWorldPos);

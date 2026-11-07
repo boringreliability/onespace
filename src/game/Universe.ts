@@ -16,10 +16,7 @@
  *   4. Publish what the HUD and audio need to know.
  */
 
-import { Color, Group, Matrix4, Object3D, Quaternion, Vector3 } from 'three';
-
-/** Reused zero vector for basis construction; never mutated. */
-const ZERO = new Vector3(0, 0, 0);
+import { Color, Group, Object3D, Quaternion, Vector3 } from 'three';
 
 import type { EngineContext, GameModule } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
@@ -28,7 +25,6 @@ import { Rng, hashSeed } from '@/math/rng';
 
 import {
   AU,
-  SOLAR_RADIUS,
   type GalaxySpec,
   type PlanetSpec,
   type StarSystemSpec,
@@ -45,7 +41,12 @@ import { CloudRenderer } from '@/render/Clouds';
 import { RingRenderer } from '@/render/Rings';
 import { StarRenderer } from '@/render/Star';
 import { AtmosphereRenderer } from '@/render/Atmosphere';
-import { sceneDepthTexture } from '@/render/PostFX';
+import { sceneDepthTexture, setMotionReferenceDisplacement } from '@/render/PostFX';
+import { publishSceneDepth } from '@/game/sceneDepth';
+import { referenceDisplacement } from '@/render/motionReference';
+import { planStreaming, type StreamCandidate } from '@/game/streaming';
+import { simSlices } from '@/game/timeCompression'; // [v2-p4]
+import { circularOrbitState, insideStar, openingAttitude, progradeAttitude, starRadiusKm } from '@/game/recovery';
 
 import {
   DEFAULT_SHIP_CONFIG,
@@ -178,6 +179,29 @@ export class Universe implements GameModule {
    */
   paused = false;
 
+  /**
+   * Set by the pause overlay and by the recovery fade. Unlike `paused` (which
+   * MapMode rewrites every frame and which hides the world for the chart),
+   * this freezes the simulation and leaves the scene on screen behind it.
+   */
+  frozen = false;
+
+  /**
+   * [v2-p4] Time-compression factor applied to simulated time (1, 10, 100).
+   * Written only by game/TimeCompression.ts, which owns when it is legal.
+   */
+  simRate = 1;
+  private readonly slices = { count: 0, slice: 0 };
+  /**
+   * Simulated seconds the last update advanced: dt × simRate within the
+   * per-frame budget, 0 while paused, frozen or under a shot. Traffic runs
+   * its clock on this so co-orbiting hulls keep pace under compression.
+   */
+  simulatedSeconds = 0;
+
+  /** True while the ship is at or below the star's photosphere (GAMEPLAY F7). */
+  insideStar = false;
+
   /** Nearest body, recomputed each frame — the HUD and audio both want it. */
   nearest: Body | null = null;
   nearestAltitudeKm: number | null = null;
@@ -200,8 +224,12 @@ export class Universe implements GameModule {
   private readonly tmpB = new Vector3();
   private readonly tmpDir = new Vector3();
   private readonly camWorld = new Vector3();
+  /** Camera minus hull, render/world axes, km — see update(). */
+  private readonly eyeOffset = new Vector3();
   private readonly sunDir = new Vector3();
   private readonly sunColor = new Color();
+  private readonly bodySun = new Color();
+  private readonly spinInv = new Quaternion();
   private readonly starWorld = new Vector3();
   /** The star does not move in its own system's frame. Never written. */
   private readonly starVelocity = new Vector3();
@@ -297,7 +325,9 @@ export class Universe implements GameModule {
       position: this.starWorld,
       velocity: this.starVelocity,
       mu: MU_SUN * primary.mass,
-      radius: primary.radius,
+      // StarSpec.radius is in SOLAR radii; ParentBody.radius is km. Passing it
+      // raw made the star-frame altimeter measure to a 1 km ball.
+      radius: starRadiusKm(primary),
     };
 
     // Flatten planets and moons into one list. Moons carry a parent pointer so
@@ -390,32 +420,18 @@ export class Universe implements GameModule {
     this.tmpA.y += 0.35;
     this.tmpA.normalize().multiplyScalar(alt);
 
-    // Point the nose at the world we just arrived at. Position alone is not
-    // enough: dropping in with a default orientation aims the camera at empty
-    // space, and the opening frame is the one frame that has to earn the next
-    // ten minutes.
-    this.arrivalLook.copy(this.tmpA).normalize().multiplyScalar(-1);
-    // "Up" here is radial from the STAR, not from the planet — the latter is
-    // antiparallel to the look direction and degenerates the basis.
-    this.arrivalUp.copy(target.world).add(this.tmpA).normalize();
-    // Orthogonalise the up vector against the view direction, otherwise a
-    // near-radial approach degenerates the basis and the roll snaps.
-    this.arrivalUp.addScaledVector(this.arrivalLook, -this.arrivalLook.dot(this.arrivalUp));
-    if (this.arrivalUp.lengthSq() < 1e-6) this.arrivalUp.set(0, 1, 0);
-    this.arrivalUp.normalize();
-
-    this.arrivalMat.identity();
-    // Matrix4.lookAt(eye, target, up) already builds a basis whose -Z points
-    // from eye towards target, and -Z is the ship's nose. Negating the target
-    // as well flips the nose onto the star and puts the chase camera inside
-    // the hull.
-    this.arrivalMat.lookAt(ZERO, this.arrivalLook, this.arrivalUp);
-    this.arrivalQuat.setFromRotationMatrix(this.arrivalMat);
-
     // Circular velocity about the planet — and nothing else. The planet's own
     // 49 km/s about the star used to be added here by hand; it is now implicit
     // in the parent frame, which is the whole point of the change.
     this.flight.orbitalVelocityAt(this.tmpA, this.tmpB);
+    // Nose prograde, roof radially out (GAMEPLAY F8). It used to point at the
+    // planet's centre, which framed the world nicely and made the first press
+    // of W a dive. Prograde keeps the world filling the lower frame and makes
+    // the throttle mean "faster along the orbit".
+    // …pitched 30° down towards the limb (v2 merge): a purely prograde nose
+    // put the limb 51° below it, outside the chase view — the opening shot
+    // was empty sky. See game/openingAttitude.test.ts.
+    openingAttitude(this.tmpB, this.tmpA, this.arrivalQuat);
     this.flight.teleport(this.tmpA, this.tmpB, this.arrivalQuat);
     this.syncGroundSampler();
   }
@@ -429,10 +445,7 @@ export class Universe implements GameModule {
     return out.copy(body.worldVelocity);
   }
 
-  private readonly arrivalLook = new Vector3();
-  private readonly arrivalUp = new Vector3();
   private readonly arrivalQuat = new Quaternion();
-  private readonly arrivalMat = new Matrix4();
 
   private pickHeroBody(): Body | null {
     let best: Body | null = null;
@@ -492,6 +505,7 @@ export class Universe implements GameModule {
   // -------------------------------------------------------------------------
 
   update(dt: number, ctx: EngineContext): void {
+    this.simulatedSeconds = 0;
     // A review shot has placed its own fixtures and camera; touching the scene
     // now would undo all of it before the frame is captured.
     if (shotOwnsScene()) {
@@ -503,16 +517,53 @@ export class Universe implements GameModule {
       return;
     }
     this.root.visible = true;
+    if (this.frozen) {
+      // The world still draws while frozen (an overlay is up), so the shells
+      // must still follow the composer's ping-pong; see game/sceneDepth.ts.
+      publishSceneDepth(this.bodies, sceneDepthTexture());
+      return;
+    }
 
-    this.orbitTime += dt * ORBIT_TIME_SCALE;
-    this.updateOrbits();
+    // [v2-p4] Time compression: `simRate` (1/10/100, set only by
+    // game/TimeCompression.ts) scales SIMULATED time, here and nowhere else —
+    // renderers, camera and UI below keep real dt. Advanced in slices because
+    // FlightModel drops anything past 8 substeps a call; see
+    // game/timeCompression.ts. At 1× this is one slice of exactly dt, i.e.
+    // the previous code path.
+    // Where the lens is relative to the hull, measured on last frame's poses
+    // (the rig runs after us). Every renderer's `cameraLocal` used to be the
+    // SHIP's position, which is a fine approximation in flight and a fatal one
+    // on the ground: a ship sitting at sea level put the atmosphere's and the
+    // clouds' ray origin exactly on the analytic planet sphere, float32 then
+    // decided frame by frame whether the eye was inside the planet, and when
+    // it was every sky ray was clipped to zero length — the whole sky blinked
+    // black (measured: 1 frame in 12 on the home world). It also aimed the
+    // sea's Fresnel and glint from 70 m beside the real eye.
+    if (!this.options.headless) {
+      ctx.origin.toRender(this.flight.renderWorldPosition, this.tmpA);
+      this.eyeOffset.copy(ctx.camera.position).sub(this.tmpA);
+      // A warp, a recovery or the first frame: the camera is somewhere else
+      // entirely and the offset means nothing. Photo mode stays within this.
+      if (this.eyeOffset.lengthSq() > 50 * 50) this.eyeOffset.set(0, 0, 0);
+    }
+
+    simSlices(dt, this.simRate, this.slices);
+    this.simulatedSeconds = this.slices.count * this.slices.slice;
+    for (let i = 0; i < this.slices.count; i++) {
+      const h = this.slices.slice;
+      this.orbitTime += h * ORBIT_TIME_SCALE;
+      this.updateOrbits();
+      if (!this.options.headless) {
+        this.flight.update(h);
+        // Transitions are checked AFTER integration, so a substep is never
+        // taken with the state vector and the frame disagreeing.
+        this.updateShipParent();
+      }
+    }
+    // [/v2-p4]
 
     if (!this.options.headless) {
-      this.flight.update(dt);
-      // Transitions are checked AFTER integration, so a substep is never taken
-      // with the state vector and the frame disagreeing.
-      this.updateShipParent();
-      this.camWorld.copy(this.flight.worldPosition);
+      this.camWorld.copy(this.flight.worldPosition).add(this.eyeOffset);
     } else {
       ctx.origin.toWorld(ctx.camera.position, this.camWorld);
     }
@@ -524,7 +575,33 @@ export class Universe implements GameModule {
     this.updateBodies(dt, ctx);
     this.updateStar(dt, ctx);
     this.updateNearest();
+    this.publishMotionReference();
   }
+
+  /**
+   * Tell the motion blur where the ground under the ship went this frame
+   * (render/motionReference.ts). Without it a landed frame reprojects as a
+   * ~1 km per frame dolly and the hull and the near ground smear.
+   */
+  private publishMotionReference(): void {
+    const b = this.options.headless ? null : this.shipParent;
+    if (b && b === this.refBody) {
+      referenceDisplacement(this.refWorld, this.refSpin, b.world, b.spin, this.flight.position, this.refOut);
+      setMotionReferenceDisplacement(this.refOut);
+    } else {
+      setMotionReferenceDisplacement(null);
+    }
+    this.refBody = b;
+    if (b) {
+      this.refWorld.copy(b.world);
+      this.refSpin.copy(b.spin);
+    }
+  }
+
+  private refBody: Body | null = null;
+  private readonly refWorld = new Vector3();
+  private readonly refSpin = new Quaternion();
+  private readonly refOut = new Vector3();
 
   /**
    * Advance every body's Keplerian position and velocity. Moons compose onto
@@ -558,7 +635,11 @@ export class Universe implements GameModule {
         ? (this.orbitTime / b.spec.rotationPeriod) * Math.PI * 2
         : 0;
       this.tmpDir.set(Math.sin(b.spec.axialTilt), Math.cos(b.spec.axialTilt), 0).normalize();
+      const carry = b === this.shipParent && this.flight.grounded;
+      if (carry) this.spinDelta.copy(b.spin).invert();
       b.spin.setFromAxisAngle(this.tmpDir, spin);
+      // A landed ship turns with its world (FlightModel.carryWithSurface).
+      if (carry) this.flight.carryWithSurface(this.spinDelta.premultiply(b.spin));
     }
   }
 
@@ -632,24 +713,31 @@ export class Universe implements GameModule {
       b.distanceSq = this.camWorld.distanceToSquared(b.world);
     }
 
-    // Partial selection: we only need the top N, not a full sort.
-    const wanted = new Set<Body>();
-    const pool = this.bodies.slice();
-    pool.sort((a, z) => a.distanceSq - z.distanceSq);
-    for (let i = 0; i < Math.min(PLANET_RENDER_BUDGET, pool.length); i++) {
-      const b = pool[i]!;
-      // Beyond ~60 planet radii a world is a dot; a full quadtree for a dot is
-      // waste. The star renderer's point-light impostor covers those.
-      if (b.distanceSq < Math.pow(b.spec.radius * 60, 2)) wanted.add(b);
+    // Acquire at 60 radii, release at 75 — see game/streaming.ts for why the
+    // two thresholds differ. The candidate array is reused across frames.
+    const cands = this.streamCandidates;
+    while (cands.length < this.bodies.length) cands.push({ distanceKm: 0, radiusKm: 1, streamed: false });
+    cands.length = this.bodies.length;
+    for (let i = 0; i < this.bodies.length; i++) {
+      const b = this.bodies[i]!;
+      const c = cands[i]!;
+      c.distanceKm = Math.sqrt(b.distanceSq);
+      c.radiusKm = b.spec.radius;
+      c.streamed = b.planet !== null;
     }
+    const wanted = planStreaming(cands, PLANET_RENDER_BUDGET, this.streamWanted);
 
-    for (const b of this.bodies) {
-      if (wanted.has(b)) this.acquireRenderers(b, ctx);
+    for (let i = 0; i < this.bodies.length; i++) {
+      const b = this.bodies[i]!;
+      if (wanted[i]) this.acquireRenderers(b, ctx);
       else if (b.planet) this.releaseRenderers(b);
     }
   }
 
-  private acquireRenderers(b: Body, _ctx: EngineContext): void {
+  private streamCandidates: Array<{ -readonly [K in keyof StreamCandidate]: StreamCandidate[K] }> = [];
+  private streamWanted: boolean[] = [];
+
+  private acquireRenderers(b: Body, ctx: EngineContext): void {
     if (b.planet) return;
     const q = config.quality;
 
@@ -674,32 +762,75 @@ export class Universe implements GameModule {
       b.planet.setAtmosphereShell(true);
     }
 
+    // Compile the new world's programs off the critical path. Without this
+    // the first frame that draws it links them synchronously — 140-740 ms of
+    // frozen screen at exactly the moment a planet comes into view. The
+    // object stays hidden until its programs are ready; at 60 radii it is a
+    // few pixels across, so a frame or two of absence is invisible.
+    const obj = b.planet.object3d;
+    obj.visible = false;
+    const planet = b.planet;
+    // The scene graph alone misses the heaviest programs: the terrain bake
+    // and shadow clipmap, and the cloud/atmosphere marches, live in private
+    // scenes (phase-0 review #4). Each renderer compiles its own.
+    const settled = Promise.all([
+      ctx.renderer.compileAsync(obj, ctx.camera, ctx.scene),
+      planet.compileAsync(ctx.renderer, ctx.camera),
+      b.clouds?.compileAsync(ctx.renderer, ctx.camera),
+      b.atmosphere?.compileAsync(ctx.renderer, ctx.camera),
+    ])
+      .catch(() => undefined)
+      .then(() => {
+        this.pendingCompile.delete(planet);
+        // Released while compiling: a new renderer may now own the slot.
+        if (b.planet === planet) obj.visible = true;
+      });
+    this.pendingCompile.set(planet, settled);
+
     bus.emit('planet:approached', {
       planet: b.spec,
       altitudeKm: Math.sqrt(b.distanceSq) - b.spec.radius,
     });
   }
 
+  /**
+   * Programs still compiling, per planet renderer. Disposing a material while
+   * three's compileAsync is polling it throws inside a setTimeout (its
+   * properties are gone) and the promise never settles — so a release that
+   * lands mid-compile detaches at once and disposes when the compile is done.
+   */
+  private pendingCompile = new Map<PlanetRenderer, Promise<void>>();
+
+  private afterCompile(planet: PlanetRenderer | null, fn: () => void): void {
+    const pending = planet ? this.pendingCompile.get(planet) : undefined;
+    if (pending) void pending.then(fn);
+    else fn();
+  }
+
   private releaseRenderers(b: Body): void {
+    const planet = b.planet;
     if (b.clouds) {
-      b.clouds.object3d.removeFromParent();
-      b.clouds.dispose();
+      const clouds = b.clouds;
+      clouds.object3d.removeFromParent();
+      this.afterCompile(planet, () => clouds.dispose());
       b.clouds = null;
     }
     if (b.rings) {
-      b.rings.object3d.removeFromParent();
-      b.rings.dispose();
+      const rings = b.rings;
+      rings.object3d.removeFromParent();
+      this.afterCompile(planet, () => rings.dispose());
       b.rings = null;
     }
     if (b.atmosphere) {
-      b.atmosphere.object3d.removeFromParent();
-      b.atmosphere.dispose();
+      const atmosphere = b.atmosphere;
+      atmosphere.object3d.removeFromParent();
+      this.afterCompile(planet, () => atmosphere.dispose());
       b.atmosphere = null;
       b.planet?.setAtmosphereShell(false);
     }
-    if (b.planet) {
-      this.root.remove(b.planet.object3d);
-      b.planet.dispose();
+    if (planet) {
+      this.root.remove(planet.object3d);
+      this.afterCompile(planet, () => planet.dispose());
       b.planet = null;
       bus.emit('planet:left', { planet: b.spec });
     }
@@ -728,20 +859,34 @@ export class Universe implements GameModule {
       b.planet.object3d.position.copy(this.tmpA);
       b.planet.object3d.quaternion.copy(b.spin);
 
-      // Local view: camera and sun expressed in the body's own frame.
-      this.tmpB.copy(this.camWorld).sub(b.world);
-      this.sunDir.copy(b.world).multiplyScalar(-1).normalize();
+      // Local view: camera and sun expressed in the body's own frame — which
+      // turns. The mesh carries `spin` (above), so a world-axes camera and sun
+      // handed to it are off by the spin angle. That was invisible at boot
+      // and grew with play: by touchdown on the home world it was 0.054
+      // degrees, i.e. the planet's idea of where the eye stood was 6.8 km
+      // from the eye. Its LOD ring was centred there and every fragment near
+      // the lens measured its pixel footprint from 6.8 km away, so the fine
+      // detail faded out exactly where the landed frame looks (v2-landed).
+      this.spinInv.copy(b.spin).invert();
+      this.tmpB.copy(this.camWorld).sub(b.world).applyQuaternion(this.spinInv);
+      this.sunDir.copy(b.world).multiplyScalar(-1).normalize().applyQuaternion(this.spinInv);
 
-      // Inverse-square falloff so a planet at 30 AU is genuinely dim.
+      // Inverse-square falloff so a planet at 30 AU is genuinely dim. Into a
+      // per-body colour: scaling the shared one in place compounded every
+      // earlier body's irradiance into the next (a moon after its planet got
+      // both).
       const auDist = b.world.length() / AU;
       const irradiance = primary.luminosity / Math.max(auDist * auDist, 1e-6);
-      this.tmpDir.set(this.sunColor.r, this.sunColor.g, this.sunColor.b).multiplyScalar(irradiance);
-      this.sunColor.setRGB(this.tmpDir.x, this.tmpDir.y, this.tmpDir.z);
+      this.bodySun.setRGB(
+        this.sunColor.r * irradiance,
+        this.sunColor.g * irradiance,
+        this.sunColor.b * irradiance,
+      );
 
       b.view.set(
         this.tmpB,
         this.sunDir,
-        this.sunColor,
+        this.bodySun,
         ctx.elapsed,
         (ctx.camera.fov * Math.PI) / 180,
         ctx.height,
@@ -810,12 +955,18 @@ export class Universe implements GameModule {
       // clearance everywhere and the ship flew straight through the ground.
       const dist = relPos.length();
       if (dist < 1e-9) return -body.spec.radius;
-      this.tmpDir.copy(relPos).divideScalar(dist);
+      // Into the planet's own frame: the mesh is rotated by `spin`, the parent
+      // frame is not. Sampling the unrotated direction put collision terrain
+      // and drawn terrain out of step, drifting ~0.5 km/s at the surface.
+      this.samplerQuat.copy(body.spin).invert();
+      this.tmpDir.copy(relPos).divideScalar(dist).applyQuaternion(this.samplerQuat);
       return dist - renderer.surfaceRadius(this.tmpDir);
     });
   }
 
   private samplerBody: Body | null = null;
+  private readonly samplerQuat = new Quaternion();
+  private readonly spinDelta = new Quaternion();
   private samplerRenderer: PlanetRenderer | null = null;
 
   /**
@@ -840,9 +991,10 @@ export class Universe implements GameModule {
     // most want a fast drive to notice. The altimeter deliberately reports
     // null once a body is far away; the cruise drive needs the number at every
     // range, because the number IS its speed limit.
-    const starGap =
-      this.tmpA.subVectors(this.flight.worldPosition, this.starWorld).length() -
-      (this.system.stars[0]?.radius ?? 0) * SOLAR_RADIUS;
+    const starDist = this.tmpA.subVectors(this.flight.worldPosition, this.starWorld).length();
+    const starR = starRadiusKm(this.system.stars[0]);
+    const starGap = starDist - starR;
+    this.insideStar = !this.options.headless && insideStar(starDist, starR);
     this.nearestGapKm = Math.max(0, Math.min(bestGap, starGap));
 
     this.syncGroundSampler();
@@ -865,6 +1017,34 @@ export class Universe implements GameModule {
   // -------------------------------------------------------------------------
   // Queries used by UI and audio
   // -------------------------------------------------------------------------
+
+  /**
+   * Put the ship back into a stable circular orbit (GAMEPLAY F6/F7, P5) —
+   * 0.6 R above where it came down, nose prograde. Around the parent world,
+   * or the nearest body when the parent is the star (a star contact), or the
+   * opening world as a last resort. A teleport: call it behind black.
+   */
+  recoverToOrbit(): void {
+    if (this.options.headless) return;
+    const body = this.shipParent ?? this.nearest ?? this.pickHeroBody();
+    this.flight.setCruise(null);
+    if (!body) {
+      this.setShipParent(null);
+      this.flight.teleport(this.tmpA.set(0, 0, 6 * AU), this.tmpB.set(0, 0, 0));
+      this.insideStar = false;
+      return;
+    }
+    const radial = this.tmpA.subVectors(this.flight.worldPosition, body.world);
+    const state = circularOrbitState(radial, body.spec.radius, body.frame.mu);
+    this.setShipParent(body);
+    this.flight.teleport(state.position, state.velocity, state.orientation);
+    this.syncGroundSampler();
+    this.insideStar = false;
+    // review-p4: the same parent comes back, so nothing else told a flying
+    // autopilot that its leg was cut — it dived straight back in. The one
+    // caller, RecoveryCut, emits `ship:recovered` (with its cause) right after
+    // this; AutoPilot, TimeControl and Cruise all listen to that one event.
+  }
 
   /** Nearby systems for the star map, without generating them all. */
   neighbours(radiusLy = 120, max = 200): StarSystemStub[] {

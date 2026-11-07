@@ -33,6 +33,7 @@ import { Euler, Matrix4, PerspectiveCamera, Quaternion, Vector3 } from 'three';
 import type { EngineContext } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
 import { registerShot } from '@/game/Shots';
+import { composeLandedFrame, LANDED_CLEARANCE, type LandedFramingInput } from '@/ship/landedFraming';
 
 export type CameraMode = 'cockpit' | 'chase' | 'cinematic' | 'orbit';
 
@@ -51,6 +52,22 @@ const ORBIT_MIN_SURFACE_ELEVATION = 0.30;
 
 const TWO_PI = Math.PI * 2;
 const EPS = 1e-4;
+
+/**
+ * What the landed frame needs from the world, supplied by whoever knows it
+ * (game/Pilot.ts). Read every frame; the rig keeps no copies.
+ */
+export interface LandedFrameSource {
+  /** Unit direction to the star, render/world axes. */
+  readonly sunDir: Vector3;
+  /** 0 airless .. 1 full sky (see ship/landedFraming.ts). */
+  readonly skyWeight: number;
+  /**
+   * Height of the terrain at `offset` from the hull (km, render axes) above the
+   * ground the hull stands on, km. Positive where the ground rises.
+   */
+  groundRiseAt(offset: Vector3): number;
+}
 
 // ---------------------------------------------------------------------------
 // Damped spring
@@ -319,6 +336,23 @@ export class CameraRig {
   orbitInputSpeed = 1.5;
   orbitFov = 50;
 
+  // --- tuning: landed ------------------------------------------------------
+
+  /**
+   * Natural frequency of the landed eye, Hz. Slow on purpose: on touchdown the
+   * camera walks from the chase position round to the composed frame over
+   * about five seconds (peak pan ~65 deg/s, measured), which reads as the
+   * reveal it is, and the drift inside the composition is felt rather than
+   * seen.
+   */
+  landedFrequency = 0.22;
+  /** The aim settles a touch faster than the eye, so the move leads with the look. */
+  landedLookFrequency = 0.28;
+  /** Slightly wider than the orbit view: this is a landscape, not an inspection. */
+  landedFov = 52;
+  /** Limit on the pilot's pitch on top of the composition, radians. */
+  landedPitchLimit = 0.35;
+
   // --- tuning: fov breathing ----------------------------------------------
 
   /** Base and wide-open vertical fov, degrees, for the flight views. */
@@ -402,6 +436,43 @@ export class CameraRig {
   private orbitDistance = 1;
   private orbitDistanceCur = 1;
   private orbitDistanceVel = 0;
+
+  // landed state (see stepLanded). Eye kept in cylindrical coordinates about
+  // the hull so the reveal swings round it instead of cutting through it.
+  private landedSource: LandedFrameSource | null = null;
+  /** The source being released, kept for one transition (setLandedFrame). */
+  private landedHold: LandedFrameSource | null = null;
+  private landedReleaseT = 1;
+  private readonly poseRelease = new Pose();
+  private landedSeeded = false;
+  private landedTime = 0;
+  private landedYaw = 0;
+  private landedPitch = 0;
+  private landedAz = 0;
+  private landedAzVel = 0;
+  private landedR = 0;
+  private landedRVel = 0;
+  private landedH = 0;
+  private landedHVel = 0;
+  private readonly landedLook = new Vector3(0, 0, -1);
+  private readonly landedLookVel = new Vector3();
+  private readonly landedTarget = new Vector3();
+  private readonly landedRef = new Vector3();
+  private readonly landedSide = new Vector3();
+  private readonly landedIn: {
+    -readonly [K in keyof LandedFramingInput]: LandedFramingInput[K];
+  } = {
+    up: new Vector3(0, 1, 0),
+    sunDir: new Vector3(1, 0, 0),
+    shipForward: new Vector3(0, 0, -1),
+    skyWeight: 0,
+    time: 0,
+    yaw: 0,
+    pitch: 0,
+    groundRise: 0,
+    halfFovY: 0.45,
+  };
+  private readonly landedOut = { offset: new Vector3(), look: new Vector3(0, 0, -1) };
 
   // cinematic state
   private readonly cinematicSubject = new Vector3();
@@ -546,6 +617,32 @@ export class CameraRig {
     this.orbitDistance = Math.max(distanceKm, 1e-4);
     if (!this.orbitTargetSet) this.orbitDistanceCur = this.orbitDistance;
     this.orbitTargetSet = true;
+  }
+
+  /**
+   * Compose the orbit view as a landed frame (ship/landedFraming.ts) while a
+   * source is set; null goes back to the plain inspection orbit. The frame is
+   * seeded from wherever the camera is when it starts, so switching it on is
+   * never a cut.
+   */
+  setLandedFrame(source: LandedFrameSource | null): void {
+    if (!source && this.landedSource && this.landedSeeded) {
+      // Leaving is a move too. Keep composing for one transition so whatever
+      // view comes next blends out of the frame on screen — dropping it at
+      // once cut 70 m -> 200 m and 40 degrees in one frame (review-landed).
+      this.landedHold = this.landedSource;
+      this.landedReleaseT = 0;
+    } else {
+      this.landedHold = null;
+      this.landedReleaseT = 1;
+      this.landedSeeded = false;
+    }
+    this.landedSource = source;
+  }
+
+  /** True while the orbit view is composing a landed frame. */
+  get landedFrameActive(): boolean {
+    return this.landedSource !== null;
   }
 
   /** Map/scan UI drag and zoom. Deltas are radians and a distance multiplier. */
@@ -932,6 +1029,57 @@ export class CameraRig {
       this.orbitDistanceCur = 0.2;
       this.orbitTargetSet = true;
     }
+    if (this.landedSource && this.hasReferenceUp) {
+      this.stepLanded(dt, shipPosition, shipOrientation, ctx, this.landedSource);
+      return;
+    }
+    if (this.landedHold && this.landedReleaseT < 1 && this.hasReferenceUp) {
+      // Releasing (setLandedFrame): the composition keeps running for one
+      // transition. Another mode's blend carries the view away from it on its
+      // own; staying in orbit, the rig blends to the plain orbit itself.
+      const first = this.landedReleaseT === 0;
+      this.landedReleaseT = Math.min(1, this.landedReleaseT + dt / Math.max(this.transitionSeconds, 1e-3));
+      this.stepLanded(dt, shipPosition, shipOrientation, ctx, this.landedHold);
+      if (this.mode_ !== 'orbit') return;
+      // Start the plain orbit on the landed eye's bearing, so the hand-over
+      // is a short tilt rather than a swing round the hull.
+      if (first) this.seedOrbitAngles(shipPosition);
+      this.poseRelease.copy(this.poseOrbit);
+      this.stepPlainOrbit(dt, shipPosition, shipOrientation, ctx);
+      // Into the scratch pose: lerpFrom's slerp copies its first argument
+      // into the target before reading the second, so it must not alias `b`.
+      this.poseRelease.lerpFrom(this.poseRelease, this.poseOrbit, smootherstep(this.landedReleaseT));
+      this.poseOrbit.copy(this.poseRelease);
+      return;
+    }
+    this.landedHold = null;
+    this.landedSeeded = false;
+    this.stepPlainOrbit(dt, shipPosition, shipOrientation, ctx);
+  }
+
+  /** Orbit azimuth/elevation that put the plain orbit where poseOrbit is now. */
+  private seedOrbitAngles(shipPosition: Vector3): void {
+    const up = this.tmpA.copy(this.referenceUp).normalize();
+    const seed = Math.abs(up.y) > 0.95 ? this.tmpB.set(1, 0, 0) : this.tmpB.set(0, 1, 0);
+    const right = this.tmpC.copy(seed).cross(up).normalize();
+    const fwd = this.tmpD.copy(up).cross(right).normalize();
+    const off = this.tmpB.copy(this.poseOrbit.position).sub(shipPosition);
+    const d = off.length();
+    if (d < 1e-9) return;
+    const az = Math.atan2(off.dot(right), off.dot(fwd));
+    const el = Math.asin(clamp(off.dot(up) / d, -1, 1));
+    this.orbitAzimuth = this.orbitAzimuthCur = az;
+    this.orbitElevation = this.orbitElevationCur = el;
+    this.orbitAzimuthVel = this.orbitElevationVel = 0;
+  }
+
+  private stepPlainOrbit(
+    dt: number,
+    shipPosition: Vector3,
+    shipOrientation: Quaternion,
+    ctx: EngineContext,
+  ): void {
+
     // The target FOLLOWS the ship. It used to be captured once behind the latch
     // above, which is wrong in a game where render space is rebased by the
     // floating origin and the world itself travels at tens of km/s: the target
@@ -1010,6 +1158,130 @@ export class CameraRig {
     if (Math.abs(this.tmpB.dot(dir)) > 0.999) this.tmpB.set(0, 1, 0);
     this.lookRotation(this.poseOrbit.quaternion, pos, dir, this.tmpB);
     this.poseOrbit.fov = this.orbitFov;
+  }
+
+  // -- landed --------------------------------------------------------------
+
+  /**
+   * The composed landed frame. The composition is pure (landedFraming.ts);
+   * this only springs towards it. Everything is ship-relative: render space
+   * sweeps past at orbital speed between rebases, and a spring on absolute
+   * positions would trail the hull by kilometres.
+   */
+  private stepLanded(
+    dt: number,
+    shipPosition: Vector3,
+    shipOrientation: Quaternion,
+    ctx: EngineContext,
+    source: LandedFrameSource,
+  ): void {
+    const up = this.tmpA.copy(this.referenceUp).normalize();
+    // Cylindrical basis about the local vertical. The reference azimuth is
+    // world X laid onto the horizon (world Z where X is vertical); it turns
+    // only as fast as the world does, so angles stay continuous.
+    //
+    // Carried from frame to frame (last frame's reference laid onto this
+    // frame's horizon), not re-derived from world X: near X that projection
+    // spins through 180 degrees and the fallback switch jumps outright, and
+    // the eye — held at an angle in this basis — whipped round the hull with
+    // it (review-landed). World X only seeds it.
+    const ref = this.landedRef;
+    if (this.landedSeeded) ref.addScaledVector(up, -ref.dot(up));
+    if (!this.landedSeeded || ref.lengthSq() < 1e-4) {
+      ref.set(1, 0, 0).addScaledVector(up, -up.x);
+      if (ref.lengthSq() < 1e-4) ref.set(0, 0, 1).addScaledVector(up, -up.z);
+    }
+    ref.normalize();
+    const side = this.landedSide.crossVectors(up, ref);
+
+    if (!this.landedSeeded) {
+      // Start from wherever the camera is now, so touchdown is a move, not a
+      // cut. "Now" has to mean THIS frame's pose: the ship sweeps ~1 km through
+      // render space per frame between rebases, so last frame's camera
+      // position minus this frame's ship position is a kilometre wrong. The
+      // other modes have already been stepped this frame; the orbit pose has
+      // not, so it is never the seed.
+      const fromMode = this.blendT < 1 ? this.blendFrom : this.mode_;
+      const seed = fromMode === 'orbit' ? this.poseChase : this.poseFor(fromMode);
+      const off = this.tmpB.copy(seed.position).sub(shipPosition);
+      this.landedH = off.dot(up);
+      off.addScaledVector(up, -this.landedH);
+      this.landedR = Math.max(off.length(), 1e-3);
+      this.landedAz = Math.atan2(off.dot(side), off.dot(ref));
+      this.landedLook.set(0, 0, -1).applyQuaternion(seed.quaternion);
+      this.landedAzVel = this.landedRVel = this.landedHVel = 0;
+      this.landedLookVel.set(0, 0, 0);
+      this.landedTarget.copy(seed.position).sub(shipPosition);
+      this.landedTime = 0;
+      this.landedYaw = 0;
+      this.landedPitch = 0;
+      this.landedSeeded = true;
+    }
+
+    this.landedTime += dt;
+    if (this.mode_ === 'orbit' && dt > 0) {
+      this.landedYaw -= ctx.input.axes.yaw * this.orbitInputSpeed * 0.6 * dt;
+      this.landedPitch = clamp(
+        this.landedPitch + ctx.input.axes.pitch * this.orbitInputSpeed * 0.4 * dt,
+        -this.landedPitchLimit,
+        this.landedPitchLimit,
+      );
+    }
+
+    const li = this.landedIn;
+    li.up.copy(up);
+    li.sunDir.copy(source.sunDir);
+    li.shipForward.set(0, 0, -1).applyQuaternion(shipOrientation);
+    li.skyWeight = source.skyWeight;
+    li.time = this.landedTime;
+    li.yaw = this.landedYaw;
+    li.pitch = this.landedPitch;
+    // Sampled where the eye is heading, a frame late: the spot depends on the
+    // composition and the composition on the spot. Terrain does not move.
+    li.groundRise = source.groundRiseAt(this.landedTarget);
+    li.halfFovY = (this.landedFov * Math.PI) / 360;
+    const f = composeLandedFrame(li, this.landedOut);
+    this.landedTarget.copy(f.offset);
+
+    // Target in cylindrical coordinates, azimuth unwrapped to the near side.
+    const tH = f.offset.dot(up);
+    const tx = f.offset.dot(ref);
+    const ty = f.offset.dot(side);
+    const tR = Math.hypot(tx, ty);
+    let tAz = Math.atan2(ty, tx);
+    tAz = this.landedAz + Math.atan2(Math.sin(tAz - this.landedAz), Math.cos(tAz - this.landedAz));
+
+    if (dt > 1e-6) {
+      this.spring.compute(dt, this.landedFrequency, 1.0);
+      this.spring.stepScalar(this.landedAz, this.landedAzVel, tAz);
+      this.landedAz = this.spring.outPos;
+      this.landedAzVel = this.spring.outVel;
+      this.spring.stepScalar(this.landedR, this.landedRVel, tR);
+      this.landedR = this.spring.outPos;
+      this.landedRVel = this.spring.outVel;
+      this.spring.stepScalar(this.landedH, this.landedHVel, tH);
+      this.landedH = this.spring.outPos;
+      this.landedHVel = this.spring.outVel;
+
+      this.spring2.compute(dt, this.landedLookFrequency, 1.0);
+      this.spring2.step(this.landedLook, this.landedLookVel, f.look);
+      const l = this.landedLook.length();
+      if (l > 1e-9) this.landedLook.divideScalar(l);
+      else this.landedLook.copy(f.look);
+    }
+
+    // The spring lags the terrain sample; never let the eye sink into it.
+    const h = Math.max(this.landedH, li.groundRise + LANDED_CLEARANCE * 0.5);
+    const pos = this.poseOrbit.position;
+    pos
+      .copy(ref)
+      .multiplyScalar(Math.cos(this.landedAz) * this.landedR)
+      .addScaledVector(side, Math.sin(this.landedAz) * this.landedR)
+      .addScaledVector(up, h)
+      .add(shipPosition);
+    this.tmpB.copy(up);
+    this.lookRotation(this.poseOrbit.quaternion, pos, this.landedLook, this.tmpB);
+    this.poseOrbit.fov = this.landedFov;
   }
 
   // -- shake ---------------------------------------------------------------

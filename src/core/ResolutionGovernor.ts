@@ -1,0 +1,131 @@
+/**
+ * ResolutionGovernor — holds the frame rate by trading pixels.
+ *
+ * Fed the wall-clock interval between frames. That is the one number that
+ * includes the GPU: timing `step()` measures only CPU work and command
+ * submission, because the GPU runs asynchronously after the call returns. v1
+ * did exactly that, read 1-3 ms on a 112 ms frame, and never moved.
+ *
+ * Shape of the controller:
+ * - Samples are averaged over a window. Every change reallocates the post
+ *   stack's render targets, so the scale may move at most once per window.
+ * - Down is fast and proportional (pixel cost is ~area, so scale goes with
+ *   sqrt of the overshoot). Up is slow, small, and waits out a cooldown after
+ *   any drop — rising straight back into the load that caused the drop is how
+ *   a controller oscillates.
+ * - Between the two thresholds it holds still. With vsync a frame is either
+ *   one or two refresh intervals; a dead band is what stops it chattering.
+ * - A sample over `spikeMs` is a tab switch, a GC or a shader compile, not
+ *   load. It is dropped rather than averaged in — unless `spikeRunLimit` of
+ *   them arrive back to back. Then it is a GPU that cannot keep up, which is
+ *   exactly the case the governor exists for; those count, clamped to
+ *   `spikeMs` so one frozen frame cannot dominate the window.
+ */
+
+export interface GovernorConfig {
+  readonly targetMs: number;
+  readonly minScale: number;
+  readonly maxScale: number;
+  /** Average frame time above target × this lowers the scale. */
+  readonly downRatio: number;
+  /** Average frame time below target × this may raise the scale. */
+  readonly upRatio: number;
+  /** Largest single drop. */
+  readonly maxDownStep: number;
+  readonly upStep: number;
+  readonly windowMs: number;
+  /** Minimum wait after a drop before any rise. */
+  readonly upCooldownMs: number;
+  readonly spikeMs: number;
+  /** Consecutive over-`spikeMs` samples after which they count as load. */
+  readonly spikeRunLimit: number;
+}
+
+export const GOVERNOR_DEFAULTS: GovernorConfig = {
+  targetMs: 1000 / 60,
+  minScale: 0.5,
+  maxScale: 1,
+  downRatio: 1.2,
+  upRatio: 1.05,
+  maxDownStep: 0.15,
+  upStep: 0.05,
+  windowMs: 500,
+  upCooldownMs: 3000,
+  spikeMs: 250,
+  spikeRunLimit: 3,
+};
+
+export class ResolutionGovernor {
+  readonly config: GovernorConfig;
+  scale: number;
+
+  private windowSum = 0;
+  private windowCount = 0;
+  private sinceDropMs = Infinity;
+  private spikeRun = 0;
+  /** Window average that triggered the last drop; null after any rise. */
+  private avgAtLastDrop: number | null = null;
+
+  constructor(config: Partial<GovernorConfig> = {}) {
+    this.config = { ...GOVERNOR_DEFAULTS, ...config };
+    this.scale = this.config.maxScale;
+  }
+
+  /** Feed one frame interval in ms. Returns true when `scale` changed. */
+  sample(frameMs: number): boolean {
+    const c = this.config;
+    if (!Number.isFinite(frameMs) || frameMs <= 0) return false;
+    if (frameMs > c.spikeMs) {
+      // A lone long interval is a hitch. A run of them is a 3 fps GPU: v2.0
+      // dropped every one and so held full scale on the slowest machines.
+      if (++this.spikeRun < c.spikeRunLimit) return false;
+      frameMs = c.spikeMs;
+    } else {
+      this.spikeRun = 0;
+    }
+
+    this.windowSum += frameMs;
+    this.windowCount++;
+    this.sinceDropMs += frameMs;
+    if (this.windowSum < c.windowMs) return false;
+
+    const avg = this.windowSum / this.windowCount;
+    this.windowSum = 0;
+    this.windowCount = 0;
+
+    let next = this.scale;
+    if (avg > c.targetMs * c.downRatio) {
+      // Pixel cost scales with area, i.e. with scale²: to bring avg back to
+      // target, multiply scale by sqrt(target/avg). Clamp the step so one bad
+      // window cannot halve the image.
+      //
+      // But only if the last drop bought anything. On a display capped at
+      // 30 Hz every frame is 33 ms however few pixels are drawn; when the
+      // average is unchanged (±5 %) since the last drop, pixels are not the
+      // bottleneck and dropping more would only blur the image for nothing.
+      // A load that got WORSE since then is new information, so it may drop.
+      const prev = this.avgAtLastDrop;
+      // Only plausible for a refresh cap (≤ 2.5 × target, i.e. 24-30 Hz and
+      // up); a machine at 5 fps is better served blurry than unplayable.
+      const futile =
+        prev !== null && avg <= c.targetMs * 2.5 && Math.abs(avg - prev) < prev * 0.05;
+      if (!futile) {
+        const ideal = this.scale * Math.sqrt(c.targetMs / avg);
+        next = Math.max(ideal, this.scale - c.maxDownStep);
+      }
+    } else if (avg < c.targetMs * c.upRatio && this.sinceDropMs >= c.upCooldownMs) {
+      next = this.scale + c.upStep;
+    }
+
+    next = Math.min(c.maxScale, Math.max(c.minScale, next));
+    if (Math.abs(next - this.scale) < 1e-6) return false;
+    if (next < this.scale) {
+      this.sinceDropMs = 0;
+      this.avgAtLastDrop = avg;
+    } else {
+      this.avgAtLastDrop = null;
+    }
+    this.scale = next;
+    return true;
+  }
+}

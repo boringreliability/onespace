@@ -25,6 +25,7 @@ import { bus } from '@/core/EventBus';
 import { registerShot } from '@/game/Shots';
 import type { SpectralClass, Vec3 } from '@/gen/types';
 import { hashSeed, Rng } from '@/math/rng';
+import { jumpEstimateSeconds } from '@/ship/warpTimeline';
 
 // ---------------------------------------------------------------------------
 // Public interface
@@ -67,9 +68,6 @@ export type SystemDetailsProvider = (systemId: string) => SystemDetails | null;
 export interface StarMapOptions {
   /** Defaults to `#ui-root`, then `document.body`. */
   mount?: HTMLElement;
-  /** Jump drive model: fixed spool-up plus a per-light-year cruise cost. */
-  jumpSpoolSeconds?: number;
-  jumpSecondsPerLy?: number;
   /** Hard cap on label nodes. Beyond this the chart shows GalaxyView's stars only. */
   maxLabels?: number;
 }
@@ -274,8 +272,6 @@ export class StarMap implements GameModule {
     this.adapter = adapter;
     this.opts = {
       mount: options.mount ?? (document.getElementById('ui-root') as HTMLElement) ?? document.body,
-      jumpSpoolSeconds: options.jumpSpoolSeconds ?? 22,
-      jumpSecondsPerLy: options.jumpSecondsPerLy ?? 41,
       maxLabels: options.maxLabels ?? 160,
     };
     for (let i = 0; i <= ROUTE_SEGMENTS; i++) this.routePoints.push([0, 0, 0]);
@@ -321,6 +317,20 @@ export class StarMap implements GameModule {
 
   get selection(): string | null {
     return this.selectedId;
+  }
+
+  /**
+   * The selected system with what a jump needs to know about it, or null.
+   * The `J` key reads this, so a jump no longer has to go through Enter here.
+   */
+  selectedTarget(): { id: string; name: string; distanceLy: number } | null {
+    const e = this.selectedId ? this.findEntry(this.selectedId) : null;
+    return e ? { id: e.id, name: e.name, distanceLy: e.distanceLy } : null;
+  }
+
+  /** The system the chart is measured from — where the ship is. */
+  get origin(): string | null {
+    return this.originId;
   }
 
   /** Plot a course to whatever sits nearest the middle of the chart. */
@@ -1032,8 +1042,12 @@ export class StarMap implements GameModule {
     this.routeTagW = tag.length * 7.6;
   }
 
+  /**
+   * The same timeline the warp runs (GAMEPLAY F5). This used to be its own
+   * model — 22 s + 41 s/ly — and promised a minute for a jump that took 7.4 s.
+   */
   private jumpSeconds(distanceLy: number): number {
-    return this.opts.jumpSpoolSeconds + distanceLy * this.opts.jumpSecondsPerLy;
+    return jumpEstimateSeconds(distanceLy);
   }
 
   // ---------------------------------------------------------------- panels
