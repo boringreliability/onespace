@@ -440,6 +440,10 @@ export class CameraRig {
   // landed state (see stepLanded). Eye kept in cylindrical coordinates about
   // the hull so the reveal swings round it instead of cutting through it.
   private landedSource: LandedFrameSource | null = null;
+  /** The source being released, kept for one transition (setLandedFrame). */
+  private landedHold: LandedFrameSource | null = null;
+  private landedReleaseT = 1;
+  private readonly poseRelease = new Pose();
   private landedSeeded = false;
   private landedTime = 0;
   private landedYaw = 0;
@@ -622,8 +626,18 @@ export class CameraRig {
    * never a cut.
    */
   setLandedFrame(source: LandedFrameSource | null): void {
+    if (!source && this.landedSource && this.landedSeeded) {
+      // Leaving is a move too. Keep composing for one transition so whatever
+      // view comes next blends out of the frame on screen — dropping it at
+      // once cut 70 m -> 200 m and 40 degrees in one frame (review-landed).
+      this.landedHold = this.landedSource;
+      this.landedReleaseT = 0;
+    } else {
+      this.landedHold = null;
+      this.landedReleaseT = 1;
+      this.landedSeeded = false;
+    }
     this.landedSource = source;
-    this.landedSeeded = false;
   }
 
   /** True while the orbit view is composing a landed frame. */
@@ -1019,7 +1033,52 @@ export class CameraRig {
       this.stepLanded(dt, shipPosition, shipOrientation, ctx, this.landedSource);
       return;
     }
+    if (this.landedHold && this.landedReleaseT < 1 && this.hasReferenceUp) {
+      // Releasing (setLandedFrame): the composition keeps running for one
+      // transition. Another mode's blend carries the view away from it on its
+      // own; staying in orbit, the rig blends to the plain orbit itself.
+      const first = this.landedReleaseT === 0;
+      this.landedReleaseT = Math.min(1, this.landedReleaseT + dt / Math.max(this.transitionSeconds, 1e-3));
+      this.stepLanded(dt, shipPosition, shipOrientation, ctx, this.landedHold);
+      if (this.mode_ !== 'orbit') return;
+      // Start the plain orbit on the landed eye's bearing, so the hand-over
+      // is a short tilt rather than a swing round the hull.
+      if (first) this.seedOrbitAngles(shipPosition);
+      this.poseRelease.copy(this.poseOrbit);
+      this.stepPlainOrbit(dt, shipPosition, shipOrientation, ctx);
+      // Into the scratch pose: lerpFrom's slerp copies its first argument
+      // into the target before reading the second, so it must not alias `b`.
+      this.poseRelease.lerpFrom(this.poseRelease, this.poseOrbit, smootherstep(this.landedReleaseT));
+      this.poseOrbit.copy(this.poseRelease);
+      return;
+    }
+    this.landedHold = null;
     this.landedSeeded = false;
+    this.stepPlainOrbit(dt, shipPosition, shipOrientation, ctx);
+  }
+
+  /** Orbit azimuth/elevation that put the plain orbit where poseOrbit is now. */
+  private seedOrbitAngles(shipPosition: Vector3): void {
+    const up = this.tmpA.copy(this.referenceUp).normalize();
+    const seed = Math.abs(up.y) > 0.95 ? this.tmpB.set(1, 0, 0) : this.tmpB.set(0, 1, 0);
+    const right = this.tmpC.copy(seed).cross(up).normalize();
+    const fwd = this.tmpD.copy(up).cross(right).normalize();
+    const off = this.tmpB.copy(this.poseOrbit.position).sub(shipPosition);
+    const d = off.length();
+    if (d < 1e-9) return;
+    const az = Math.atan2(off.dot(right), off.dot(fwd));
+    const el = Math.asin(clamp(off.dot(up) / d, -1, 1));
+    this.orbitAzimuth = this.orbitAzimuthCur = az;
+    this.orbitElevation = this.orbitElevationCur = el;
+    this.orbitAzimuthVel = this.orbitElevationVel = 0;
+  }
+
+  private stepPlainOrbit(
+    dt: number,
+    shipPosition: Vector3,
+    shipOrientation: Quaternion,
+    ctx: EngineContext,
+  ): void {
 
     // The target FOLLOWS the ship. It used to be captured once behind the latch
     // above, which is wrong in a game where render space is rebased by the
@@ -1120,8 +1179,18 @@ export class CameraRig {
     // Cylindrical basis about the local vertical. The reference azimuth is
     // world X laid onto the horizon (world Z where X is vertical); it turns
     // only as fast as the world does, so angles stay continuous.
-    const ref = this.landedRef.set(1, 0, 0).addScaledVector(up, -up.x);
-    if (ref.lengthSq() < 1e-4) ref.set(0, 0, 1).addScaledVector(up, -up.z);
+    //
+    // Carried from frame to frame (last frame's reference laid onto this
+    // frame's horizon), not re-derived from world X: near X that projection
+    // spins through 180 degrees and the fallback switch jumps outright, and
+    // the eye — held at an angle in this basis — whipped round the hull with
+    // it (review-landed). World X only seeds it.
+    const ref = this.landedRef;
+    if (this.landedSeeded) ref.addScaledVector(up, -ref.dot(up));
+    if (!this.landedSeeded || ref.lengthSq() < 1e-4) {
+      ref.set(1, 0, 0).addScaledVector(up, -up.x);
+      if (ref.lengthSq() < 1e-4) ref.set(0, 0, 1).addScaledVector(up, -up.z);
+    }
     ref.normalize();
     const side = this.landedSide.crossVectors(up, ref);
 
