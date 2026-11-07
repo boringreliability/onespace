@@ -939,7 +939,7 @@ export class Warp implements GameModule {
       // universe here and the collapse reveals it.
       bus.emit('warp:arrived', this.namePayload);
       this.hooks.flash?.(3.4, 0.5);
-      this.log(`ARRIVED — ${(this.target?.name ?? '').toUpperCase()}`, 'good');
+      // ARRIVED is logged by Universe on system:entered — once (review-p1).
       this.resolveJump?.();
       this.resolveJump = null;
       this.rejectJump = null;

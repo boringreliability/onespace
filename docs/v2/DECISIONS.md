@@ -62,6 +62,33 @@ mutation testing."* Hver beslutning har en kort begrundelse og en konsekvens.
 | D46 | 02:55 | Yard bruger et sort DOM-slør som fade (ikke lys eller exposure) og capture-phase input. Derelicts viser "no active drive signature" | Skjuler build-tiden (≤94 ms) og lækker ingen input til flight | ⚠ **Generator-fund (ikke rettet):** alle derelicts har aktive motorer, og nogle skrog bygges uden for deres size-bånd (medium → 151 m). Skal rettes med et version-bump |
 | D47 | 03:00 | Boot-mode: `?mode=flight` eller `?mode=yard`, ellers titel. `map` og `review` er ikke boot-mål for spillere | — | — |
 
+| D48 | 03:30 | Fase 4 er merget: auto-land og auto-orbit på L, time compression (`,` `.` 1×/10×/100×, kun på jorden eller i stabil bane, sim i slices af 1/20 s, energidrift 2,3e-9 %/bane), presets SURVEY/PILOT/NEWTONIAN | Browser: TOUCHDOWN CLEAN 0,1 m/s efter 290 s, ORBIT efter 250 s | Tykke atmosfærer tager ~8 min pr. leg |
+| D49 | 03:30 | Autopiloten flyver FA-OFF og gendanner pilotens FA bagefter. Under 2 km er nedstigningen clampet til 30 m/s. Recovery er aktiv i alle presets | Fase 4-agentens valg, accepteret | — |
+| D50 ⚠ | 03:40 | **Eksisterende fejl rettet:** ground-sampleren ignorerede planetens spin, mens mesh'et roteres med den. Kollision og tegnet terræn gled fra hinanden med ~0,5 km/s. Et landet skib følger nu overfladen (`carryWithSurface`) | Browser: skibets overflade-relative position er identisk efter 60 s | Ved letning har skibet ikke overfladens tangentialfart (≤0,5 km/s), hvilket er acceptabelt |
+| D51 | 03:40 | Fase 4-modulerne er gated til `flight, map` | — | — |
+
+| D52 ⚠ | 04:00 | Det samlede review af fase 1 er merget. **Kritisk fejl fanget:** cruise med throttle 0 (FA-ON's hvileposition) gav "CRUISE ENGAGED" ved 0 m/s, så de første 10 minutter brød ved 2:40. Nu rider throttle 0 på cruise-loftet, og Space holder skibet stille. Desuden: cruise styrer uden om en verden i vejen, recovery/pause/hop annullerer cruise, settings virker live, og der er 157 mutanter | Playtesten kører nu ende-til-ende: scan → cruise til Vassa (83 s) → cirkulær bane (e = 2e-8) → pause/recovery → hop | — |
+| D53 | 04:05 | Arrival er kun armet, efter skibet har forladt den verden, det startede ved. Indsættelsen giver skibet åbningsattituden, så verden er i billedet ved ankomst. Den dobbelte ARRIVED-log er fjernet | Review-p1's åbne fund. Spillets money shot var tom himmel | Attitude-skiftet ved indsættelsen er et snap, men kamera-rig'en dæmper det |
+| D54 ⚠ | 04:15 | **Fase 3 er merget:** bagt terrain-atlas pr. planet (tile = geometri-slot), skygge-clipmap 4×256², hav i surface-passet, sky-cubemap pr. galakse. `patchResolution` forbliver 33 (65 målt til +5-6 ms) | Den største gevinst i hele planen | Kystlinjer lidt blødere fra kredsløb. Hukommelse: ~5 MB atlas pr. planet, 4 MB clipmap, ~48 MB cubemap på high |
+| D55 | 04:15 | Universe kalder nu `compileAsync` på Planet, Clouds og Atmosphere ved acquire (de private scener fra review #4) | Fjerner de sidste synkrone links ved approach i rigtigt gameplay | — |
+| D56 ⚠ | 04:20 | **Udskudt:** skibsgenerering i Web Worker og faste render targets | Alle scener er nu under 16,7 ms. Tilbageværende hak er én skibs-build (40-75 ms) pr. kontakt og sjældne governor-reallokeringer | Kandidater til v2.1 |
+
+**Slutmåling, fase 0-3 (prod, M4 Pro, samme probe som auditten, `?mode=flight`):**
+
+| Scene | v1 | v2 |
+|---|---|---|
+| Opening | 112 ms | **8,3 ms** (120 Hz-loft, skala 1,0) |
+| Planet-approach | 211-264 ms | **11,3 ms** |
+| Atmosphere-sunset | 165 ms | **15,2 ms** |
+| Planet-orbit | 64-74 ms | **8,3 ms** |
+| Clouds-orbit | 109 ms | **15,7 ms** |
+
+**Åbne punkter til ejeren (ikke rettet):**
+- Auto-land dykker ærligt med ~39 km/s og en rød "IMPACT 0:13", før den bremser. Det er korrekt fysik, men kan virke hensynsløst. Overvej lavere `BRAKE_FRACTION`, eller 10× time compression under autopilot.
+- Billedet på jorden er en flad grå mark (orbit-kamera ved terræn med dis). Visuelt arbejde i fase 3 eller senere.
+- Generator: derelicts har aktive motorer, og nogle skrog bygges uden for size-båndet. Kræver version-bump (D46).
+- L under cruise afviser autopiloten og dropper samtidig cruise.
+
 **Browser-flow verificeret (03:00):** titel (2 planeter streamet, intet hint eller HUD) → Enter → flight (hint og HUD) → Y → Yard (skjult) → Esc → flight → P → foto → P → flight; `?mode=yard&ship=…` booter med `gen=1` pinnet. 0 konsolfejl.
 
 **Fase 0-måling** (prod, M4 Pro, DPR 2-viewport, samme probe som i auditten): opening 112 → **28 ms**, planet-approach 211-264 → **67 ms**, sunset 165 → **43 ms**. Ingen nye shader-links ved approach. Governoren lander på sin bund (0,5), så terrain er stadig flaskehalsen, og det tages i fase 3.

@@ -57,20 +57,30 @@
 
 import {
   BufferGeometry,
+  type Camera,
   Color,
   Float32BufferAttribute,
+  FloatType,
+  HalfFloatType,
+  NearestFilter,
+  OrthographicCamera,
+  PlaneGeometry,
+  RGBAFormat,
+  Scene,
+  WebGLRenderTarget,
+  type WebGLRenderer,
   FrontSide,
   Frustum,
   Group,
   Matrix4,
   Mesh,
-  NormalBlending,
   Object3D,
   Quaternion,
   ShaderMaterial,
   Sphere,
   SphereGeometry,
   Uint16BufferAttribute,
+  Vector2,
   Vector3,
   Vector4,
   type IUniform,
@@ -90,6 +100,17 @@ import {
 } from '@/gen/terrain';
 import type { ViewState } from './ViewState';
 import { MutableViewState } from './ViewState';
+import {
+  atlasLayout,
+  bakeNormalEps,
+  clipNeedsRecentre,
+  gridTexel,
+  selectBuilds,
+  shadowClipExtents,
+  SlotPool,
+  tileOrigin,
+  type AtlasLayout,
+} from './terrainBake';
 
 // ---------------------------------------------------------------------------
 // Cube-sphere geometry
@@ -215,6 +236,120 @@ float os_detailFade(float wavelength, float pixelKm) {
 }
 `;
 
+/**
+ * The camera-centred shadow height map (see terrainBake.shadowClipExtents for
+ * why a clipmap and not the patch tiles). OS_CLIP_LEVELS square levels sit
+ * side by side in one float texture; level l is a gnomonic projection onto the
+ * plane tangent at uClipC[l], which — unlike the spherified cube — inverts in
+ * two dot products. Bilinear by hand with texelFetch: a float32 texture is not
+ * filterable without OES_texture_float_linear.
+ */
+const CLIP_GLSL = /* glsl */ `
+uniform highp sampler2D uShadowMap;
+uniform vec3  uClipC[OS_CLIP_LEVELS];
+uniform vec3  uClipT1[OS_CLIP_LEVELS];
+uniform vec3  uClipT2[OS_CLIP_LEVELS];
+uniform float uClipH[OS_CLIP_LEVELS];   // half extent km; 0 until baked
+uniform float uClipN;                   // texels per level side
+
+/** Plane coordinates in km of a unit direction, in level l. */
+vec2 os_clipCoord(int l, vec3 dir) {
+  vec3 c = uClipC[l];
+  vec3 q = dir / max(dot(dir, c), 1e-6) - c;
+  return vec2(dot(q, uClipT1[l]), dot(q, uClipT2[l])) * uRadius;
+}
+
+float os_clipHeight(int l, vec2 xy) {
+  float n  = uClipN;
+  vec2  x  = clamp((xy / uClipH[l] * 0.5 + 0.5) * n - 0.5, vec2(0.0), vec2(n - 1.001));
+  vec2  x0 = floor(x);
+  vec2  f  = x - x0;
+  ivec2 i0 = ivec2(x0) + ivec2(l * int(n), 0);
+  float h00 = texelFetch(uShadowMap, i0, 0).x;
+  float h10 = texelFetch(uShadowMap, i0 + ivec2(1, 0), 0).x;
+  float h01 = texelFetch(uShadowMap, i0 + ivec2(0, 1), 0).x;
+  float h11 = texelFetch(uShadowMap, i0 + ivec2(1, 1), 0).x;
+  return mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
+}
+`;
+
+const BAKE_VERT = /* glsl */ `
+void main() {
+  // A 2x2 plane in clip space: one fullscreen triangle pair. The viewport and
+  // scissor restrict it to the one tile being baked.
+  gl_Position = vec4(position.xy, 0.0, 1.0);
+}
+`;
+
+/**
+ * The bake: one fragment per grid vertex, running exactly the height and
+ * normal the vertex shader used to run per frame. Every quantity on the way
+ * to the direction is dyadic — a0, b0, size are k/2^level, the grid step is
+ * 1/(res-1) = 1/2^m — so the face parameters are exact in float32 and a vertex
+ * shared by two patches (same level or not) bakes the bit-identical direction
+ * and therefore the bit-identical height. That is what keeps the seams
+ * watertight without relying on the skirts.
+ */
+function bakeFragmentShader(terrain: string): string {
+  return /* glsl */ `
+precision highp float;
+#include <onespace_noise>
+${terrain}
+
+uniform float uRadius;
+uniform vec3  uFaceN;
+uniform vec3  uFaceR;
+uniform vec3  uFaceU;
+uniform vec3  uBakeRect;    // a0, b0, size in face parameters
+uniform vec2  uBakeOrigin;  // tile's lower-left texel in the atlas
+uniform float uBakeInvN;    // 1 / (res - 1)
+uniform float uBakeEps;     // normal step, km along the surface
+
+// Cousins' spherified cube — identical to spherify() in Planet.ts.
+vec3 os_spherify(vec3 p) {
+  vec3 q = p * p;
+  return p * sqrt(max(vec3(0.0), vec3(
+    1.0 - q.y * 0.5 - q.z * 0.5 + q.y * q.z / 3.0,
+    1.0 - q.z * 0.5 - q.x * 0.5 + q.z * q.x / 3.0,
+    1.0 - q.x * 0.5 - q.y * 0.5 + q.x * q.y / 3.0)));
+}
+
+void main() {
+  vec2 ij = floor(gl_FragCoord.xy - uBakeOrigin);
+  vec2 ab = uBakeRect.xy + uBakeRect.z * (ij * uBakeInvN);
+  vec2 st = ab * 2.0 - 1.0;
+  vec3 d  = normalize(os_spherify(uFaceN + uFaceR * st.x + uFaceU * st.y));
+  float h = os_terrainHeight(d, uTerrainSeedOffset);
+  vec3  n = os_terrainNormal(d, uTerrainSeedOffset, uRadius, uBakeEps);
+  gl_FragColor = vec4(h, n);
+}
+`;
+}
+
+/** One level of the shadow clipmap: heights on a gnomonic grid. */
+function clipBakeFragmentShader(terrain: string): string {
+  return /* glsl */ `
+precision highp float;
+#include <onespace_noise>
+${terrain}
+
+uniform float uRadius;
+uniform vec3  uClipBakeC;
+uniform vec3  uClipBakeT1;
+uniform vec3  uClipBakeT2;
+uniform float uClipBakeH;     // half extent km
+uniform float uClipBakeX;     // level's first texel column
+uniform float uClipN;
+
+void main() {
+  vec2 ij = floor(gl_FragCoord.xy) - vec2(uClipBakeX, 0.0);
+  vec2 xy = ((ij + 0.5) / uClipN * 2.0 - 1.0) * uClipBakeH;
+  vec3 d  = normalize(uClipBakeC + (uClipBakeT1 * xy.x + uClipBakeT2 * xy.y) / uRadius);
+  gl_FragColor = vec4(os_terrainHeight(d, uTerrainSeedOffset), 0.0, 0.0, 1.0);
+}
+`;
+}
+
 // The engine runs with logarithmicDepthBuffer, which is not free: every
 // ShaderMaterial has to opt in via three's logdepthbuf chunks or it writes
 // LINEAR depth while the rest of the scene writes logarithmic depth, and the
@@ -235,10 +370,16 @@ bool isPerspectiveMatrix(mat4 m) { return m[2][3] == -1.0; }
 ${terrain}
 
 attribute vec3 aDir;
+// Integer texel of this vertex in the height atlas (skirt vertices share their
+// edge neighbour's texel; see terrainBake.gridTexel).
+attribute vec2 aTexel;
 
 uniform float uRadius;
 uniform vec3  uCamLocal;
-uniform float uPixelAngle;
+// RGBA = height km, outward normal. Baked once per patch from the very same
+// os_terrainHeight / os_terrainNormal this shader used to run five times per
+// vertex per frame (docs/v2/PERFORMANCE.md, root cause #1).
+uniform highp sampler2D uHeightAtlas;
 
 varying vec3  vDir;
 varying vec3  vNrm;
@@ -246,32 +387,44 @@ varying float vH;
 varying float vDist;
 varying vec3  vLocal;
 varying vec3  vView;
+#if OS_OCEAN == 1
+varying float vDepth;
+#endif
 
 void main() {
   vec3 d = normalize(aDir);
-  float h = os_terrainHeight(d, uTerrainSeedOffset);
+  vec4 baked = texelFetch(uHeightAtlas, ivec2(aTexel), 0);
+  float h = baked.x;
+
+#if OS_OCEAN == 1
+  // The sea is drawn in this same pass: the surface is held at sea level
+  // wherever the ground is below it, and the fragment shader paints water
+  // there, mixing the floor in through the shallows. The old separate shell
+  // evaluated the full terrain per PIXEL for its depth and cost a second,
+  // blended draw; here the depth is the baked height, interpolated across the
+  // very triangle the coastline is cut from.
+  vDepth = -h;
+  float hs = max(h, 0.0);
+#else
+  float hs = h;
+#endif
 
   // 'position' is the undisplaced sphere point relative to the patch centre;
   // skirt vertices already carry their inward offset, so one add serves both.
-  vec3 p = position + d * h;
+  vec3 p = position + d * hs;
   gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
   #include <logdepthbuf_vertex>
 
-  vec3 local = d * (uRadius + h);
+  vec3 local = d * (uRadius + hs);
   vec3 toCam = uCamLocal - local;
   float dist = length(toCam);
-
-  // The finite-difference step tracks the pixel footprint: fine normals under
-  // the nose, coarse ones on the far limb. Sampling finer than a pixel only
-  // buys shimmer.
-  float eps = clamp(dist * uPixelAngle * 1.5, uRadius * 3.0e-6, uRadius * 1.5e-3);
 
   vDir   = d;
   vH     = h;
   vLocal = local;
   vDist  = dist;
   vView  = toCam / max(dist, 1e-6);
-  vNrm   = os_terrainNormal(d, uTerrainSeedOffset, uRadius, eps);
+  vNrm   = baked.yzw;
 }
 `;
 }
@@ -337,6 +490,13 @@ varying float vDist;
 varying vec3  vLocal;
 varying vec3  vView;
 
+#if OS_SHADOW_STEPS > 0
+${CLIP_GLSL}
+#endif
+#if OS_OCEAN == 1
+${OCEAN_GLSL}
+#endif
+
 /**
  * The fine displacement the mesh does not carry, in kilometres. Only the
  * scales that survive the pixel-footprint fade are evaluated, so this costs
@@ -362,8 +522,8 @@ float os_microHeight(vec3 p, vec3 k) {
        + k.z * os_snoise(p * (1.0 / OS_W4)) * (OS_W4 * 0.021);
 }
 
-void main() {
-  #include <logdepthbuf_fragment>
+/** The ground: rock, ice, sand, lights. Also the sea floor under shallows. */
+vec3 os_landColor() {
   vec3  up   = normalize(vDir);
   vec3  N    = normalize(vNrm);
   vec3  V    = normalize(vView);
@@ -555,14 +715,34 @@ void main() {
     // is pepper, not shadow. Samples are packed quadratically towards the
     // shading point, where the occluders that matter actually are.
     float travel = min(uTerrainAmplitude * 2.5 / max(ndlGeo, 0.12), uTerrainAmplitude * 3.0);
-    for (int i = 1; i <= OS_SHADOW_STEPS; i++) {
-      float f  = float(i) / float(OS_SHADOW_STEPS);
-      float t  = travel * f * f;
-      vec3  q  = P + uSunDir * t;
-      float rq = length(q);
-      vec3  dq = q / rq;
-      float hq = uRadius + os_terrainHeight(dq, uTerrainSeedOffset);
-      shadow = min(shadow, smoothstep(0.0, uTerrainAmplitude * 0.16, rq - hq));
+    // The heights come from the camera-centred shadow clipmap, not a fresh
+    // terrain evaluation per step (PERFORMANCE.md: those were four full
+    // evaluations per pixel). The whole ray reads ONE level, the finest that
+    // holds both ends, and every comparison is RELATIVE to the shading point's
+    // height read from that same level: a coarse level smooths valleys
+    // upwards, and an absolute test would put every valley floor in its own
+    // shadow. When P is exact this is the old test, (rq - rP) - (hq - hP).
+    vec3  pEnd = normalize(P + uSunDir * travel);
+    vec2  xyP  = vec2(0.0);
+    int   lvl  = -1;
+    for (int l = 0; l < OS_CLIP_LEVELS; l++) {
+      if (uClipH[l] <= 0.0) continue;
+      vec2 a = os_clipCoord(l, up);
+      vec2 b = os_clipCoord(l, pEnd);
+      vec2 m = max(abs(a), abs(b));
+      if (max(m.x, m.y) < uClipH[l] * 0.9) { lvl = l; xyP = a; break; }
+    }
+    if (lvl >= 0) {
+      float rP = length(P);
+      float hP = os_clipHeight(lvl, xyP);
+      for (int i = 1; i <= OS_SHADOW_STEPS; i++) {
+        float f  = float(i) / float(OS_SHADOW_STEPS);
+        float t  = travel * f * f;
+        vec3  q  = P + uSunDir * t;
+        float rq = length(q);
+        float rise = os_clipHeight(lvl, os_clipCoord(lvl, q / rq)) - hP;
+        shadow = min(shadow, smoothstep(0.0, uTerrainAmplitude * 0.16, (rq - rP) - rise));
+      }
     }
     shadow = mix(1.0, shadow, smoothstep(uRadius * 0.06, uRadius * 0.02, vDist));
   }
@@ -731,6 +911,24 @@ void main() {
     col = mix(col, ins, haze * 0.80);
   }
 
+  return col;
+}
+
+void main() {
+  #include <logdepthbuf_fragment>
+#if OS_OCEAN == 1
+  vec3 col;
+  if (vDepth > 0.0) {
+    vec4 sea = os_seaColor(vDepth);
+    // Deep water is opaque, so the ground under it is never shaded at all.
+    col = sea.a > 0.999 ? sea.rgb : mix(os_landColor(), sea.rgb, sea.a);
+  } else {
+    col = os_landColor();
+  }
+#else
+  vec3 col = os_landColor();
+#endif
+
   // Linear HDR out. PostFX owns the tone map and the noir grade (see
   // ARCHITECTURE §6 "Grade"), so this material is toneMapped:false and must
   // NOT include <tonemapping_fragment> — ACES here would clamp to 1.0, and the
@@ -749,64 +947,20 @@ void main() {
 // Ocean shader
 // ---------------------------------------------------------------------------
 
-const OCEAN_VERT = /* glsl */ `
-precision highp float;
-// three's logdepthbuf_vertex chunk calls isPerspectiveMatrix(), which lives in
-// its <common> chunk. Pulling all of <common> in would collide with names this
-// file already defines, so declare just the one function it needs.
-bool isPerspectiveMatrix(mat4 m) { return m[2][3] == -1.0; }
-#include <logdepthbuf_pars_vertex>
-
-uniform vec3  uCamLocal;
-
-varying vec3  vDir;
-varying vec3  vLocal;
-varying vec3  vView;
-varying float vDist;
-
-void main() {
-  vec3 d = normalize(position);
-  vDir   = d;
-  vLocal = position;
-  vec3 toCam = uCamLocal - position;
-  vDist = length(toCam);
-  vView = toCam / max(vDist, 1e-6);
-  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-  #include <logdepthbuf_vertex>
-}
-`;
-
-function oceanFragmentShader(terrain: string): string {
-  return /* glsl */ `
-precision highp float;
-#include <logdepthbuf_pars_fragment>
-
-#include <onespace_noise>
-#include <onespace_color>
-${terrain}
-
-uniform float uRadius;
-uniform float uTime;
-uniform float uPixelAngle;
-uniform vec3  uCamLocal;
-uniform vec3  uSunDir;
-uniform vec3  uSunColor;
-uniform vec3  uAtmosTint;
-// See surfaceFragmentShader for the split. uAtmos lights the water (sun
-// reddening, terminator width, the sky it mirrors); uAtmosOuter draws the air
-// in front of it and is zeroed when Atmosphere.ts is drawing that air instead.
-uniform float uAtmos;
-uniform float uAtmosOuter;
+/**
+ * The sea, as a function the surface shader calls where the ground is below
+ * sea level (see the vertex shader). It shares the surface's uniforms; see
+ * the uAtmos/uAtmosOuter note there — uAtmos lights the water (sun reddening,
+ * terminator width, the sky it mirrors), uAtmosOuter draws the air in front
+ * of it and is zeroed when Atmosphere.ts is drawing that air instead.
+ */
+const OCEAN_GLSL = /* glsl */ `
 uniform vec3  uShallow;
 uniform vec3  uDeep;
 uniform vec3  uEmissive;
 uniform float uSpecular;
 uniform float uWave;
-
-varying vec3  vDir;
-varying vec3  vLocal;
-varying vec3  vView;
-varying float vDist;
+varying float vDepth;
 
 /** Two drifting swell trains plus chop. Returns a height in kilometres. */
 float os_waveHeight(vec3 p, float t, vec2 k) {
@@ -815,16 +969,17 @@ float os_waveHeight(vec3 p, float t, vec2 k) {
   return (a * 0.9 * k.x + b * 0.35 * k.y) * uWave;
 }
 
-void main() {
-  #include <logdepthbuf_fragment>
+/**
+ * Water colour and coverage at this fragment. 'depth' is how far the ground
+ * sits below sea level, km — sea level is exactly the mean radius (see
+ * gen/terrain.ts) — baked and interpolated across the triangle the coastline
+ * is cut from. Alpha is coverage: below 1 only in the shallows, where the
+ * caller mixes the sea floor in.
+ */
+vec4 os_seaColor(float depth) {
   vec3  d     = normalize(vDir);
   vec3  V     = normalize(vView);
   float pxKm  = vDist * uPixelAngle;
-
-  // Sea level is exactly the mean radius (see gen/terrain.ts), so the depth of
-  // water at this point is simply how far the terrain sits below it.
-  float depth = -os_terrainHeight(d, uTerrainSeedOffset);
-  if (depth <= 0.0) discard;
 
   vec3 N = d;
 
@@ -938,14 +1093,9 @@ void main() {
   // floor keeps a close pass from aliasing the shoreline to a single texel.
   float alpha = smoothstep(0.0, max(uTerrainAmplitude * 3.0e-3, pxKm * 0.04), depth);
 
-  gl_FragColor = vec4(col, alpha);
-
-  #include <colorspace_fragment>
-
-  gl_FragColor.rgb = os_dither(gl_FragColor.rgb, gl_FragCoord.xy);
+  return vec4(col, alpha);
 }
 `;
-}
 
 // ---------------------------------------------------------------------------
 // Gas giant shader
@@ -1283,6 +1433,15 @@ function toColor(c: RGB): Color {
   return new Color(c[0], c[1], c[2]);
 }
 
+/**
+ * Shadow clipmap shape. Four levels, each 4x the last, put the outermost at
+ * 0.07 R + 3 x amplitude (everything a shadow ray can touch) while the finest
+ * is 1/64 of that: ~60 m texels under the camera on an Earth-sized world,
+ * finer than the first march step, so the near shadows lose nothing.
+ */
+const CLIP_LEVELS = 4;
+const CLIP_TEXELS = 256;
+
 /** Shadow-march steps per tier. Zero on `low`, where the cost is not affordable. */
 function shadowSteps(q: QualitySettings): number {
   switch (q.tier) {
@@ -1366,14 +1525,37 @@ export class PlanetRenderer {
   // --- GPU resources -------------------------------------------------------
   private readonly uniforms: Record<string, IUniform> = {};
   private surfaceMat: ShaderMaterial | null = null;
-  private oceanMat: ShaderMaterial | null = null;
   private gasMat: ShaderMaterial | null = null;
-  private oceanMesh: Mesh | null = null;
   private gasMesh: Mesh | null = null;
   private indexAttr: Uint16BufferAttribute | null = null;
   private readonly geometries: BufferGeometry[] = [];
   private readonly meshes: Mesh[] = [];
-  private readonly freeSlots: number[] = [];
+  private slots: SlotPool = new SlotPool(0);
+
+  // --- baked terrain (see terrainBake.ts) -----------------------------------
+  private layout: AtlasLayout = atlasLayout(1, 2);
+  private atlas: WebGLRenderTarget | null = null;
+  private bakeMat: ShaderMaterial | null = null;
+  private bakeGeo: PlaneGeometry | null = null;
+  private readonly bakeScene = new Scene();
+  private readonly bakeCam = new OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  private readonly bakeU: Record<string, IUniform> = {};
+  private bakePrevTarget: WebGLRenderTarget | null = null;
+  private bakePrevAutoClear = true;
+  private bakeOpen = false;
+  private bakesThisFrame = 0;
+  private bakeSel = new Int32Array(0);
+
+  // --- shadow clipmap (see terrainBake.shadowClipExtents) -------------------
+  private readonly clipLevels: number;
+  private readonly clipExtents: number[];
+  private shadowMap: WebGLRenderTarget | null = null;
+  private clipMat: ShaderMaterial | null = null;
+  private readonly clipScene = new Scene();
+  private readonly clipU: Record<string, IUniform> = {};
+  /** Ground direction each level was last baked around; null = never. */
+  private readonly clipCentre: Array<[number, number, number] | null> = [];
+  private readonly camDir: [number, number, number] = [0, 0, 0];
 
   // --- quadtree ------------------------------------------------------------
   private readonly nodePool: Patch[] = [];
@@ -1431,6 +1613,10 @@ export class PlanetRenderer {
     // or the test would cull patches that are actually peeking over the edge.
     this.occluderRadius = this.radius - this.amplitude * this.seaLevel;
 
+    this.clipLevels = this.isGasGiant || shadowSteps(quality) === 0 ? 0 : CLIP_LEVELS;
+    this.clipExtents = shadowClipExtents(this.radius, this.amplitude, this.clipLevels);
+    for (let i = 0; i < this.clipLevels; i++) this.clipCentre.push(null);
+
     this.buildUniforms();
 
     if (this.isGasGiant) this.buildGasGiant();
@@ -1478,6 +1664,14 @@ export class PlanetRenderer {
       s.type === 'ice' ? 0.45 : s.type === 'ocean' || s.type === 'terran' ? 0.72 : 0.92;
 
     u.uRadius = { value: this.radius };
+    u.uHeightAtlas = { value: null };
+    u.uShadowMap = { value: null };
+    u.uClipN = { value: CLIP_TEXELS };
+    u.uClipC = { value: Array.from({ length: Math.max(1, this.clipLevels) }, () => new Vector3(0, 1, 0)) };
+    u.uClipT1 = { value: Array.from({ length: Math.max(1, this.clipLevels) }, () => new Vector3(1, 0, 0)) };
+    u.uClipT2 = { value: Array.from({ length: Math.max(1, this.clipLevels) }, () => new Vector3(0, 0, 1)) };
+    // Zero marks a level as not yet baked; the shader skips it.
+    u.uClipH = { value: new Array<number>(Math.max(1, this.clipLevels)).fill(0) };
     u.uCamLocal = { value: new Vector3(0, 0, this.radius * 3) };
     u.uPixelAngle = { value: 1 / 900 };
     u.uTime = { value: 0 };
@@ -1509,12 +1703,21 @@ export class PlanetRenderer {
 
   private buildSurface(): void {
     const terrain = terrainGlsl();
+    const ocean = this.spec.ocean;
+    if (ocean) this.buildOceanUniforms();
 
     this.surfaceMat = new ShaderMaterial({
       uniforms: this.uniforms,
       vertexShader: surfaceVertexShader(terrain),
       fragmentShader: surfaceFragmentShader(terrain),
-      defines: { OS_SHADOW_STEPS: shadowSteps(this.quality) },
+      defines: {
+        OS_SHADOW_STEPS: shadowSteps(this.quality),
+        OS_CLIP_LEVELS: Math.max(1, this.clipLevels),
+        OS_OCEAN: ocean ? 1 : 0,
+        // A four-octave fBm for the lava glow is pure waste on the ~90% of
+        // oceans that are water, and it runs on every shaded water pixel.
+        OS_EMISSIVE: ocean?.emissive ? 1 : 0,
+      },
       side: FrontSide,
       transparent: false,
       depthWrite: true,
@@ -1546,10 +1749,26 @@ export class PlanetRenderer {
     }
     this.indexAttr = new Uint16BufferAttribute(idx, 1);
 
+    // One atlas tile per geometry slot, so a tile lives exactly as long as the
+    // patch holding the slot. Each vertex's texel depends only on the slot and
+    // its grid index, so aTexel is written here once and never again.
+    this.layout = atlasLayout(this.poolSize, this.res);
+    this.slots = new SlotPool(this.poolSize);
+    this.bakeSel = new Int32Array(Math.max(1, this.poolSize));
     for (let i = 0; i < this.poolSize; i++) {
       const geo = new BufferGeometry();
       geo.setAttribute('position', new Float32BufferAttribute(new Float32Array(this.vertCount * 3), 3));
       geo.setAttribute('aDir', new Float32BufferAttribute(new Float32Array(this.vertCount * 3), 3));
+      const texel = new Float32Array(this.vertCount * 2);
+      const [tx, ty] = tileOrigin(this.layout, i);
+      let t = 0;
+      for (let j = 0; j < g; j++) {
+        for (let k = 0; k < g; k++) {
+          texel[t++] = tx + gridTexel(k, g);
+          texel[t++] = ty + gridTexel(j, g);
+        }
+      }
+      geo.setAttribute('aTexel', new Float32BufferAttribute(texel, 2));
       geo.setIndex(this.indexAttr);
       geo.boundingSphere = new Sphere(new Vector3(), this.radius);
       const mesh = new Mesh(geo, this.surfaceMat);
@@ -1559,10 +1778,11 @@ export class PlanetRenderer {
       this.geometries.push(geo);
       this.meshes.push(mesh);
       this.patchRoot.add(mesh);
-      this.freeSlots.push(i);
       this.reqNodes.push(null);
     }
     this.root.add(this.patchRoot);
+
+    this.buildBakeResources(terrain);
 
     // Node pool: every resident patch plus the internal nodes above it.
     const nodeCount = this.poolSize * 2 + 16;
@@ -1577,16 +1797,17 @@ export class PlanetRenderer {
       const p = this.allocNode();
       if (!p) break;
       this.initNode(p, f, 0, 0, 0, 1);
+      // The roots are baked on the first update() regardless of budget: they
+      // are the fallback that guarantees the planet is never a hole while
+      // deeper patches stream in. (Baking needs the renderer, which a
+      // constructor does not have.)
       this.roots.push(p);
-      // The roots are built eagerly: they are the fallback that guarantees the
-      // planet is never a hole while deeper patches stream in.
-      this.buildPatch(p);
     }
 
-    if (this.spec.ocean) this.buildOcean();
   }
 
-  private buildOcean(): void {
+  /** The sea's uniforms; it is drawn by the surface material (OCEAN_GLSL). */
+  private buildOceanUniforms(): void {
     const ocean = this.spec.ocean;
     if (!ocean) return;
     const u = this.uniforms;
@@ -1595,34 +1816,146 @@ export class PlanetRenderer {
     u.uEmissive = { value: ocean.emissive ? toColor(ocean.emissive) : new Color(0, 0, 0) };
     u.uSpecular = { value: ocean.specular };
     u.uWave = { value: Math.max(1e-5, ocean.waveHeight) };
+  }
 
-    this.oceanMat = new ShaderMaterial({
-      uniforms: this.uniforms,
-      vertexShader: OCEAN_VERT,
-      fragmentShader: oceanFragmentShader(terrainGlsl()),
-      // A four-octave fBm for the lava glow is pure waste on the ~90% of
-      // oceans that are water, and it runs on every shaded water pixel.
-      defines: { OS_EMISSIVE: ocean.emissive ? 1 : 0 },
-      transparent: true,
-      blending: NormalBlending,
+  /**
+   * The bake passes: fullscreen quads whose materials run the terrain GLSL per
+   * texel, in private scenes. compileAsync(object3d) never sees those, so
+   * PlanetRenderer.compileAsync() links them against their real targets.
+   */
+  private buildBakeResources(terrain: string): void {
+    const b = this.bakeU;
+    for (const name of TERRAIN_UNIFORM_NAMES) {
+      const v = this.uniforms[name];
+      if (v) b[name] = v;
+    }
+    b.uRadius = this.uniforms.uRadius!;
+    b.uFaceN = { value: new Vector3() };
+    b.uFaceR = { value: new Vector3() };
+    b.uFaceU = { value: new Vector3() };
+    b.uBakeRect = { value: new Vector3() };
+    b.uBakeOrigin = { value: new Vector2() };
+    b.uBakeInvN = { value: 1 / (this.res - 1) };
+    b.uBakeEps = { value: 1 };
+    this.bakeMat = new ShaderMaterial({
+      name: 'os-terrain-bake',
+      uniforms: b,
+      vertexShader: BAKE_VERT,
+      fragmentShader: bakeFragmentShader(terrain),
+      depthTest: false,
       depthWrite: false,
-      side: FrontSide,
       toneMapped: false,
     });
+    this.bakeGeo = new PlaneGeometry(2, 2);
+    const quad = new Mesh(this.bakeGeo, this.bakeMat);
+    quad.frustumCulled = false;
+    this.bakeScene.add(quad);
+    if (this.clipLevels > 0) {
+      const c = this.clipU;
+      for (const name of TERRAIN_UNIFORM_NAMES) {
+        const v = this.uniforms[name];
+        if (v) c[name] = v;
+      }
+      c.uRadius = this.uniforms.uRadius!;
+      c.uClipN = this.uniforms.uClipN!;
+      c.uClipBakeC = { value: new Vector3() };
+      c.uClipBakeT1 = { value: new Vector3() };
+      c.uClipBakeT2 = { value: new Vector3() };
+      c.uClipBakeH = { value: 1 };
+      c.uClipBakeX = { value: 0 };
+      this.clipMat = new ShaderMaterial({
+        name: 'os-terrain-clip-bake',
+        uniforms: c,
+        vertexShader: BAKE_VERT,
+        fragmentShader: clipBakeFragmentShader(terrain),
+        depthTest: false,
+        depthWrite: false,
+        toneMapped: false,
+      });
+      const cq = new Mesh(this.bakeGeo, this.clipMat);
+      cq.frustumCulled = false;
+      this.clipScene.add(cq);
+    }
+  }
 
-    const seg = this.quality.tier === 'low' ? 128 : this.quality.tier === 'medium' ? 256 : 384;
-    // A tessellated sphere sags *inside* the true one by the sagitta of one
-    // facet, which lets sea-floor terrain poke through the water in a stair
-    // pattern at low altitude. Inflating by exactly that much puts every facet
-    // on or outside sea level; the depth test below still uses the true radius,
-    // so the coastline does not move.
-    const sag = (this.radius * (2 * Math.PI / seg) ** 2) / 8;
-    const geo = new SphereGeometry(this.radius + sag, seg, seg / 2);
-    geo.deleteAttribute('uv');
-    geo.deleteAttribute('normal');
-    this.oceanMesh = new Mesh(geo, this.oceanMat);
-    this.oceanMesh.renderOrder = 2;
-    this.root.add(this.oceanMesh);
+  /** The atlas needs the renderer (for its float support), so it is lazy. */
+  private ensureAtlas(renderer: WebGLRenderer): WebGLRenderTarget {
+    if (this.atlas) return this.atlas;
+    // float32: a half float quantises a 10 km height to ~8 m, which steps the
+    // silhouette on a low pass. Half is the fallback where float32 colour
+    // buffers are not renderable.
+    const float = renderer.extensions.has('EXT_color_buffer_float');
+    const rt = new WebGLRenderTarget(this.layout.width, this.layout.height, {
+      type: float ? FloatType : HalfFloatType,
+      format: RGBAFormat,
+      minFilter: NearestFilter,
+      magFilter: NearestFilter,
+      generateMipmaps: false,
+      depthBuffer: false,
+      stencilBuffer: false,
+    });
+    rt.texture.name = 'os-terrain-atlas';
+    rt.scissorTest = true;
+    this.atlas = rt;
+    this.uniforms.uHeightAtlas!.value = rt.texture;
+    return rt;
+  }
+
+  private ensureShadowMap(renderer: WebGLRenderer): WebGLRenderTarget {
+    if (this.shadowMap) return this.shadowMap;
+    const n = CLIP_TEXELS;
+    const rt = new WebGLRenderTarget(n * Math.max(1, this.clipLevels), n, {
+      type: renderer.extensions.has('EXT_color_buffer_float') ? FloatType : HalfFloatType,
+      format: RGBAFormat,
+      minFilter: NearestFilter,
+      magFilter: NearestFilter,
+      generateMipmaps: false,
+      depthBuffer: false,
+      stencilBuffer: false,
+    });
+    rt.texture.name = 'os-terrain-shadow-clip';
+    rt.scissorTest = true;
+    this.shadowMap = rt;
+    this.uniforms.uShadowMap!.value = rt.texture;
+    return rt;
+  }
+
+  /**
+   * Link the bake programs ahead of the first bake, without blocking where the
+   * driver supports KHR_parallel_shader_compile. Call alongside
+   * renderer.compileAsync(object3d): the bake scenes are private, so that call
+   * never reaches them. Each is compiled with its own render target bound,
+   * because the program key includes the output colour space of the target.
+   */
+  async compileAsync(renderer: WebGLRenderer, _camera?: Camera): Promise<void> {
+    if (this.disposed || this.isGasGiant || !this.bakeMat) return;
+    const prev = renderer.getRenderTarget();
+    const jobs: Array<Promise<unknown>> = [];
+    renderer.setRenderTarget(this.ensureAtlas(renderer));
+    jobs.push(renderer.compileAsync(this.bakeScene, this.bakeCam));
+    if (this.clipMat) {
+      renderer.setRenderTarget(this.ensureShadowMap(renderer));
+      jobs.push(renderer.compileAsync(this.clipScene, this.bakeCam));
+    }
+    renderer.setRenderTarget(prev);
+    await Promise.all(jobs);
+  }
+
+  private bakeBegin(renderer: WebGLRenderer): void {
+    if (this.bakeOpen) return;
+    this.ensureAtlas(renderer);
+    this.bakePrevTarget = renderer.getRenderTarget();
+    this.bakePrevAutoClear = renderer.autoClear;
+    renderer.autoClear = false;
+    this.bakeOpen = true;
+  }
+
+  private bakeEnd(renderer: WebGLRenderer): void {
+    if (!this.bakeOpen) return;
+    renderer.setRenderTarget(this.bakePrevTarget);
+    renderer.autoClear = this.bakePrevAutoClear;
+    this.bakePrevTarget = null;
+    this.bakeOpen = false;
   }
 
   private buildGasGiant(): void {
@@ -1737,7 +2070,7 @@ export class PlanetRenderer {
   private releaseSlot(p: Patch): void {
     if (p.slot < 0) return;
     this.meshes[p.slot]!.visible = false;
-    this.freeSlots.push(p.slot);
+    this.slots.release(p.slot);
     p.slot = -1;
     p.built = false;
   }
@@ -1791,10 +2124,10 @@ export class PlanetRenderer {
     p.geoError = Math.max(side / (this.res - 1), 1e-6);
   }
 
-  private buildPatch(p: Patch): boolean {
+  private buildPatch(p: Patch, renderer: WebGLRenderer): boolean {
     if (p.built) return true;
-    const slot = this.freeSlots.pop();
-    if (slot === undefined) return false;
+    const slot = this.slots.alloc();
+    if (slot < 0) return false;
 
     const geo = this.geometries[slot]!;
     const pos = (geo.getAttribute('position') as Float32BufferAttribute).array as Float32Array;
@@ -1844,8 +2177,84 @@ export class PlanetRenderer {
     mesh.visible = false;
 
     p.slot = slot;
+    this.bakeTile(p, renderer);
     p.built = true;
     return true;
+  }
+
+  /** Render this patch's heights and normals into its atlas tile. */
+  private bakeTile(p: Patch, renderer: WebGLRenderer): void {
+    this.bakeBegin(renderer);
+    const rt = this.atlas!;
+    const [x, y] = tileOrigin(this.layout, p.slot);
+    const n = this.layout.tile;
+    const f = FACES[p.face]!;
+    const b = this.bakeU;
+    (b.uFaceN!.value as Vector3).set(f.n[0], f.n[1], f.n[2]);
+    (b.uFaceR!.value as Vector3).set(f.r[0], f.r[1], f.r[2]);
+    (b.uFaceU!.value as Vector3).set(f.u[0], f.u[1], f.u[2]);
+    (b.uBakeRect!.value as Vector3).set(p.a0, p.b0, p.size);
+    (b.uBakeOrigin!.value as Vector2).set(x, y);
+    b.uBakeEps!.value = bakeNormalEps(p.arcSide / (this.res - 1), this.radius);
+    rt.viewport.set(x, y, n, n);
+    rt.scissor.set(x, y, n, n);
+    renderer.setRenderTarget(rt);
+    renderer.render(this.bakeScene, this.bakeCam);
+    this.bakesThisFrame++;
+  }
+
+  /**
+   * Re-centre any shadow clipmap level the camera has drifted out of. Only
+   * near the ground, where the surface shader actually marches shadows.
+   */
+  private updateShadowClip(renderer: WebGLRenderer, view: ViewState): void {
+    if (this.clipLevels === 0 || !this.clipMat) return;
+    const cam = view.cameraLocal;
+    const len = cam.length();
+    // The march runs for fragments within 0.06 R of the camera, so nothing
+    // above that (plus the tallest peak) can need it.
+    if (len - this.radius > this.radius * 0.06 + this.amplitude) return;
+    this.camDir[0] = cam.x / len;
+    this.camDir[1] = cam.y / len;
+    this.camDir[2] = cam.z / len;
+
+    const n = CLIP_TEXELS;
+    const u = this.uniforms;
+    const C = u.uClipC!.value as Vector3[];
+    const T1 = u.uClipT1!.value as Vector3[];
+    const T2 = u.uClipT2!.value as Vector3[];
+    const H = u.uClipH!.value as number[];
+    const b = this.clipU;
+    for (let l = 0; l < this.clipLevels; l++) {
+      const prev = this.clipCentre[l] ?? null;
+      if (!clipNeedsRecentre(prev, this.camDir, this.clipExtents[l]!, this.radius)) continue;
+
+      // Tangent basis at the new centre, built off whichever axis is least
+      // parallel to it so it never degenerates.
+      const c = C[l]!.set(this.camDir[0], this.camDir[1], this.camDir[2]);
+      const ax = Math.abs(c.x) < 0.6 ? this.v3a.set(1, 0, 0) : this.v3a.set(0, 1, 0);
+      T1[l]!.crossVectors(c, ax).normalize();
+      T2[l]!.crossVectors(c, T1[l]!).normalize();
+
+      this.bakeBegin(renderer);
+      (b.uClipBakeC!.value as Vector3).copy(c);
+      (b.uClipBakeT1!.value as Vector3).copy(T1[l]!);
+      (b.uClipBakeT2!.value as Vector3).copy(T2[l]!);
+      b.uClipBakeH!.value = this.clipExtents[l]!;
+      b.uClipBakeX!.value = l * n;
+      const rt = this.ensureShadowMap(renderer);
+      rt.viewport.set(l * n, 0, n, n);
+      rt.scissor.set(l * n, 0, n, n);
+      renderer.setRenderTarget(rt);
+      renderer.render(this.clipScene, this.bakeCam);
+      H[l] = this.clipExtents[l]!;
+
+      const keep = this.clipCentre[l] ?? [0, 0, 0];
+      keep[0] = this.camDir[0];
+      keep[1] = this.camDir[1];
+      keep[2] = this.camDir[2];
+      this.clipCentre[l] = keep;
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -1888,7 +2297,7 @@ export class PlanetRenderer {
     if (!this.isVisible(p, view)) {
       // Reclaim off-screen subtrees only when the pool is getting tight, so a
       // camera sweep does not thrash the build queue.
-      if (p.hasChildren && this.freeSlots.length < this.poolSize * 0.25) this.collapse(p);
+      if (p.hasChildren && this.slots.free < this.poolSize * 0.25) this.collapse(p);
       return;
     }
 
@@ -1908,7 +2317,7 @@ export class PlanetRenderer {
           for (let i = 0; i < 4; i++) this.select(p.children[i]!, view);
           return;
         }
-      } else if (this.freeNodes.length >= 4 && this.freeSlots.length > 4) {
+      } else if (this.freeNodes.length >= 4 && this.slots.free > 4) {
         const h = p.size * 0.5;
         for (let i = 0; i < 4; i++) {
           const c = this.allocNode();
@@ -1938,29 +2347,22 @@ export class PlanetRenderer {
 
     // Draw this node: either it is the chosen LOD, or it is the deepest level
     // that is ready and stands in until its children arrive.
-    if (p.built) this.meshes[p.slot]!.visible = true;
-    else this.request(p, err * 1e3); // a hole is worse than any refinement
+    if (p.built) {
+      this.meshes[p.slot]!.visible = true;
+    } else this.request(p, err * 1e3); // a hole is worse than any refinement
   }
 
-  private processBuilds(): void {
+  private processBuilds(renderer: WebGLRenderer): void {
+    // Highest screen error first: the patch the player is staring at wins.
+    // A few spare picks cover duplicate or already-built requests without
+    // spending the budget on them.
+    const picks = selectBuilds(this.reqErr, this.reqCount, this.buildBudget + 4, this.bakeSel);
     let budget = this.buildBudget;
-    while (budget > 0 && this.reqCount > 0) {
-      // Highest screen error first: the patch the player is staring at wins.
-      let best = -1;
-      let bestErr = -1;
-      for (let i = 0; i < this.reqCount; i++) {
-        if (this.reqNodes[i] && this.reqErr[i]! > bestErr) {
-          bestErr = this.reqErr[i]!;
-          best = i;
-        }
-      }
-      if (best < 0) break;
-      const node = this.reqNodes[best]!;
-      this.reqNodes[best] = null;
-      if (node.inUse && !node.built) {
-        if (!this.buildPatch(node)) break; // pool exhausted; try again next frame
-        budget--;
-      }
+    for (let i = 0; i < picks && budget > 0; i++) {
+      const node = this.reqNodes[this.bakeSel[i]!];
+      if (!node || !node.inUse || node.built) continue;
+      if (!this.buildPatch(node, renderer)) break; // pool exhausted; try again next frame
+      budget--;
     }
     for (let i = 0; i < this.reqCount; i++) this.reqNodes[i] = null;
     this.reqCount = 0;
@@ -1994,9 +2396,18 @@ export class PlanetRenderer {
     this.m4.multiply(this.root.matrixWorld);
     this.frustum.setFromProjectionMatrix(this.m4);
 
+    const renderer = ctx.renderer;
+    this.bakesThisFrame = 0;
+    for (let i = 0; i < this.roots.length; i++) {
+      const r = this.roots[i]!;
+      if (!r.built) this.buildPatch(r, renderer);
+    }
+
     for (let i = 0; i < this.meshes.length; i++) this.meshes[i]!.visible = false;
     for (let i = 0; i < this.roots.length; i++) this.select(this.roots[i]!, view);
-    this.processBuilds();
+    this.processBuilds(renderer);
+    this.updateShadowClip(renderer, view);
+    this.bakeEnd(renderer);
   }
 
   // -------------------------------------------------------------------------
@@ -2077,14 +2488,14 @@ export class PlanetRenderer {
   stats(): { resident: number; drawn: number; depth: number } {
     // The ocean and gas shells are not in the patch pool but they are still
     // draw calls, and this number is what the §5 budget is checked against.
-    let drawn = (this.gasMesh ? 1 : 0) + (this.oceanMesh ? 1 : 0);
+    let drawn = this.gasMesh ? 1 : 0;
     let depth = 0;
     for (let i = 0; i < this.meshes.length; i++) if (this.meshes[i]!.visible) drawn++;
     for (let i = 0; i < this.nodePool.length; i++) {
       const p = this.nodePool[i]!;
       if (p.inUse && p.built && p.level > depth) depth = p.level;
     }
-    return { resident: this.poolSize - this.freeSlots.length, drawn, depth };
+    return { resident: this.poolSize - this.slots.free, drawn, depth };
   }
 
   dispose(): void {
@@ -2101,13 +2512,18 @@ export class PlanetRenderer {
     this.surfaceMat?.dispose();
     this.surfaceMat = null;
 
-    if (this.oceanMesh) {
-      this.oceanMesh.geometry.dispose();
-      this.root.remove(this.oceanMesh);
-      this.oceanMesh = null;
-    }
-    this.oceanMat?.dispose();
-    this.oceanMat = null;
+    this.atlas?.dispose();
+    this.atlas = null;
+    this.shadowMap?.dispose();
+    this.shadowMap = null;
+    this.clipMat?.dispose();
+    this.clipMat = null;
+    this.clipScene.clear();
+    this.bakeMat?.dispose();
+    this.bakeMat = null;
+    this.bakeGeo?.dispose();
+    this.bakeGeo = null;
+    this.bakeScene.clear();
 
     if (this.gasMesh) {
       this.gasMesh.geometry.dispose();
@@ -2122,7 +2538,6 @@ export class PlanetRenderer {
     this.roots.length = 0;
     this.nodePool.length = 0;
     this.freeNodes.length = 0;
-    this.freeSlots.length = 0;
   }
 }
 

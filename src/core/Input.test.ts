@@ -268,6 +268,27 @@ describe('Input: new actions', () => {
     expect(input.axes.throttle).toBe(0);
   });
 
+  it('Given the lever at full, When code cuts it with setThrottle(0) (recovery, touchdown), Then the axis is 0 at once — it does not ease down through FA-ON speed holds', () => {
+    // review-p1: the easing never reaches exactly 0 for minutes, and under
+    // FA-ON any lever > 0 is a speed hold — at ~0 the computer brakes a 5 km/s
+    // recovery orbit to a hover.
+    const input = makeInput();
+    input.setThrottle(1);
+    for (let i = 0; i < 120; i++) frame(input, 1 / 60);
+    input.setThrottle(0);
+    expect(input.axes.throttle).toBe(0);
+    frame(input, 1 / 60);
+    expect(input.axes.throttle).toBe(0);
+  });
+
+  it('Given the lever at 0, When code sets it to 0.5, Then the lever still eases towards it (only the detent snaps)', () => {
+    const input = makeInput();
+    input.setThrottle(0.5);
+    frame(input, 1 / 60);
+    expect(input.axes.throttle).toBeGreaterThan(0);
+    expect(input.axes.throttle).toBeLessThan(0.5);
+  });
+
   it('Given Z is pressed, Then flightAssist fires exactly once', () => {
     const input = makeInput();
     key('KeyZ');

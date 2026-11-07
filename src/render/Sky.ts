@@ -39,7 +39,15 @@ import {
   AdditiveBlending,
   BackSide,
   BufferGeometry,
+  Camera,
   Color,
+  CubeCamera,
+  HalfFloatType,
+  LinearFilter,
+  Scene,
+  WebGLCubeRenderTarget,
+  type CoordinateSystem,
+  type WebGLRenderer,
   DoubleSide,
   Float32BufferAttribute,
   Group,
@@ -59,6 +67,7 @@ import type { GalaxySpec } from '@/gen/types';
 import { hashSeed, Rng } from '@/math/rng';
 import { registerShot } from '@/game/Shots';
 import type { ViewState } from './ViewState';
+import { SkyBakeSchedule } from './skyBake';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -210,24 +219,11 @@ const float MAX_T = 2.35;
  */
 const float TAU_CHROMA = 1.25;
 
-void main() {
-  // Re-normalise: vDir is a unit vector at each vertex but the interpolant
-  // between them is a chord, not an arc, so it is ~0.2% short in the middle of
-  // every quad of the 64x32 shell. That error is not uniform — it is zero at
-  // the vertices and peaks at the centres — so it rescales the noise lookups
-  // discontinuously across quad edges and prints the sphere's own tessellation
-  // faintly across the band.
-  vec3 dir = normalize(vDir);
-
+/** Band light (rgb) and the void's 0..1 noise (a) along one direction. */
+vec4 os_skyTerms(vec3 dir, float jitter) {
   // Observer sits inside the disc, offset from the centre along -X so that +X
   // is the direction of the galactic centre.
   vec3 obs = vec3(-uObsRadius, 0.0, 0.0);
-
-  // Per-pixel jitter on the march. Without it the quadratic step spacing
-  // prints visible shells across the band. It must be WHITE noise: an
-  // interleaved-gradient dither has visible structure at this amplitude and
-  // prints a halftone screen straight across the brightest part of the band.
-  float jitter = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
 
   vec3 lum = vec3(0.0);
   // Grey optical depth. Accumulating a scalar and colouring it at use time is
@@ -266,7 +262,10 @@ void main() {
     float rSafe = max(r, max(uBulgeR * 0.85, 0.03));
     float theta = atan(p.z, p.x);
     float phase = uArmCount * (theta + log(rSafe) / max(uArmTwist, 0.06));
-    float arms = 0.5 + 0.5 * cos(phase);
+    // max(): a GPU cos may return a hair under -1, and pow() of a negative
+    // base is NaN. It printed black specks across the core, one pixel each
+    // live and a magnified blotch once baked into the cubemap.
+    float arms = max(0.5 + 0.5 * cos(phase), 0.0);
     arms = pow(arms, 1.0 + 4.5 * uArmContrast);
     float armFade = smoothstep(0.0, uBulgeR * 2.2, r);
     float armF = mix(1.0, 0.30 + 2.1 * arms, uArmStrength * armFade);
@@ -439,15 +438,74 @@ void main() {
   // --- void ---------------------------------------------------------------
   // Intergalactic background: near black, faintly steel-blue, never flat.
   float voidN = os_fbm(dir * 1.7 + 31.7, 3, 2.1, 0.5);
-  vec3 base = uVoidColor * (0.7 + 0.6 * (voidN * 0.5 + 0.5));
+  return vec4(lum, voidN * 0.5 + 0.5);
+}
 
-  vec3 col = base + lum * uBrightness;
+void main() {
+  // Per-pixel jitter on the march. Without it the quadratic step spacing
+  // prints visible shells across the band. It must be WHITE noise: an
+  // interleaved-gradient dither has visible structure at this amplitude and
+  // prints a halftone screen straight across the brightest part of the band.
+  float jitter = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+
+#ifdef OS_SKY_BAKE
+  // A baked texel is magnified to 2-4 px, so the integral's pixel-scale grain
+  // and the march jitter would come out as blotches (measured: black specks
+  // across the core). 2x2 supersampling with stratified jitter box-filters
+  // both. Linear, pre-brightness: brightness is a live, damped control, and
+  // the void is stored as its 0..1 noise so the void colour stays a uniform.
+  vec3 dx = dFdx(vDir);
+  vec3 dy = dFdy(vDir);
+  vec4 acc = vec4(0.0);
+  for (int s = 0; s < 4; s++) {
+    vec2 o = vec2(float(s - (s / 2) * 2), float(s / 2)) * 0.5 - 0.25;
+    acc += os_skyTerms(normalize(vDir + dx * o.x + dy * o.y), fract(jitter + float(s) * 0.25));
+  }
+  gl_FragColor = acc * 0.25;
+#else
+  // Re-normalise: vDir is a unit vector at each vertex but the interpolant
+  // between them is a chord, not an arc, so it is ~0.2% short in the middle of
+  // every quad of the 64x32 shell. That error is not uniform — it is zero at
+  // the vertices and peaks at the centres — so it rescales the noise lookups
+  // discontinuously across quad edges and prints the sphere's own tessellation
+  // faintly across the band.
+  vec4 t = os_skyTerms(normalize(vDir), jitter);
+  vec3 base = uVoidColor * (0.7 + 0.6 * t.a);
+
+  vec3 col = base + t.rgb * uBrightness;
 
   gl_FragColor = vec4(max(col, 0.0), 1.0);
   #include <colorspace_fragment>
   // Dither AFTER the output transform: a 1/255 step is only meaningful in the
   // space the framebuffer actually quantises. This is the difference between a
   // nebulous band and six visible contour rings.
+  gl_FragColor.rgb = os_dither(gl_FragColor.rgb, gl_FragCoord.xy);
+#endif
+}
+`;
+
+/**
+ * The backdrop once baked: one cubemap fetch instead of the integral. The
+ * integral depends on nothing but the galaxy (PERFORMANCE.md measured it at
+ * 7 % of every frame for a picture that never changes), so it is baked into a
+ * cubemap per galaxy, a face per frame, and sampled from then on.
+ */
+const BACKDROP_BAKED_FRAG = /* glsl */ `
+#include <onespace_color>
+
+varying vec3 vDir;
+uniform samplerCube uSkyCube;
+uniform float uBrightness;
+uniform vec3  uVoidColor;
+
+void main() {
+  vec4 s = textureCube(uSkyCube, normalize(vDir));
+  vec3 base = uVoidColor * (0.7 + 0.6 * s.a);
+  vec3 col = base + s.rgb * uBrightness;
+  gl_FragColor = vec4(max(col, 0.0), 1.0);
+  #include <colorspace_fragment>
+  // Dither after the output transform, exactly as the live path does: the
+  // cubemap is half float, the banding risk is in the 8-bit framebuffer.
   gl_FragColor.rgb = os_dither(gl_FragColor.rgb, gl_FragCoord.xy);
 }
 `;
@@ -752,6 +810,15 @@ export class Sky {
   private readonly canopy: Mesh;
 
   private readonly backdropMat: ShaderMaterial;
+  /** Runs BACKDROP_FRAG into the cubemap; see BACKDROP_BAKED_FRAG. */
+  private readonly bakeMat: ShaderMaterial;
+  private readonly bakedMat: ShaderMaterial;
+  private readonly bakeScene = new Scene();
+  private readonly cubeRT: WebGLCubeRenderTarget;
+  private readonly cubeCam: CubeCamera;
+  private readonly schedule = new SkyBakeSchedule();
+  private galaxyGen = 0;
+  private cubeSystem: CoordinateSystem | null = null;
   private readonly starMat: ShaderMaterial;
   private readonly galaxyMat: ShaderMaterial;
   private readonly canopyMat: ShaderMaterial;
@@ -836,6 +903,62 @@ export class Sky {
     this.backdrop.renderOrder = ORDER_BACKDROP;
     this.group.add(this.backdrop);
 
+    // --- backdrop cubemap --------------------------------------------------
+    // Face size per tier. The band's finest structure (grain, filaments) is
+    // ~1 degree; 1024 puts ~11 texels across it and a wide frame magnifies a
+    // texel to ~2 px, under the film grain. Half float: the void is ~1e-3 and
+    // 8 bits would band it before the dither ever runs.
+    const face = quality.tier === 'low' ? 512 : quality.tier === 'medium' ? 768 : 1024;
+    this.cubeRT = new WebGLCubeRenderTarget(face, {
+      type: HalfFloatType,
+      generateMipmaps: false,
+      minFilter: LinearFilter,
+      magFilter: LinearFilter,
+      depthBuffer: false,
+    });
+    this.cubeRT.texture.name = 'os-sky-cube';
+    this.cubeCam = new CubeCamera(0.1, 10, this.cubeRT);
+    // The bake supersamples 2x2 (see BACKDROP_FRAG) at the live step count.
+    const bakeU = { ...this.backdropMat.uniforms };
+    this.bakeMat = new ShaderMaterial({
+      name: 'os-sky-backdrop-bake',
+      side: BackSide,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+      defines: { ...this.backdropMat.defines, OS_SKY_BAKE: '1' },
+      uniforms: bakeU,
+      vertexShader: BACKDROP_VERT,
+      fragmentShader: BACKDROP_FRAG,
+    });
+    this.bakedMat = new ShaderMaterial({
+      name: 'os-sky-backdrop-baked',
+      side: BackSide,
+      depthTest: false,
+      depthWrite: false,
+      transparent: false,
+      toneMapped: false,
+      uniforms: {
+        uSkyCube: { value: this.cubeRT.texture },
+        uBrightness: this.uBrightness,
+        uVoidColor: this.backdropMat.uniforms.uVoidColor!,
+      },
+      vertexShader: BACKDROP_VERT,
+      fragmentShader: BACKDROP_BAKED_FRAG,
+    });
+    const bakeShell = new Mesh(geoBackdrop, this.bakeMat);
+    bakeShell.frustumCulled = false;
+    this.bakeScene.add(bakeShell);
+    this.bakeScene.add(this.cubeCam);
+    // Hidden copies so a compile/compileAsync of object3d links both
+    // programs up front (three's compile traverses hidden meshes).
+    for (const m of [this.bakeMat, this.bakedMat]) {
+      const warm = new Mesh(geoBackdrop, m);
+      warm.visible = false;
+      warm.frustumCulled = false;
+      this.group.add(warm);
+    }
+
     // --- stars ------------------------------------------------------------
     this.starMat = new ShaderMaterial({
       name: 'os-sky-stars',
@@ -917,6 +1040,8 @@ export class Sky {
     if (this.spec === spec && this.builtStarCount > 0) return;
     this.spec = spec;
     this.writeBackdropUniforms(spec);
+    // A new galaxy is a new sky: draw it live until its cubemap is rebaked.
+    if (this.schedule.invalidate(`galaxy-${++this.galaxyGen}`)) this.backdrop.material = this.backdropMat;
 
     const rng = new Rng(hashSeed(spec.seed, 'sky'));
     // Deliberately a fraction of the budget, not the whole thing. See the flux
@@ -1268,6 +1393,8 @@ export class Sky {
     this.canopy.visible = this.canopyLease;
     this.canopyLease = false;
 
+    this.bakeSkyFace(ctx.renderer);
+
     this.uTime.value = view.time;
     // gl_PointSize is in framebuffer pixels, so the PSF must follow the pixel
     // ratio (which already folds in renderScale and the adaptive controller).
@@ -1280,7 +1407,31 @@ export class Sky {
     this.uTwinkle.value += (this.twinkleTarget - this.uTwinkle.value) * kT;
   }
 
+  /** One cubemap face per frame until the current galaxy's sky is baked. */
+  private bakeSkyFace(renderer: WebGLRenderer): void {
+    const face = this.schedule.nextFace();
+    if (face < 0) return;
+    if (this.cubeSystem !== renderer.coordinateSystem) {
+      this.cubeCam.coordinateSystem = renderer.coordinateSystem;
+      this.cubeCam.updateCoordinateSystem();
+      this.cubeSystem = renderer.coordinateSystem;
+    }
+    const prev = renderer.getRenderTarget();
+    const prevFace = renderer.getActiveCubeFace();
+    const prevMip = renderer.getActiveMipmapLevel();
+    this.bakeScene.updateMatrixWorld();
+    renderer.setRenderTarget(this.cubeRT, face);
+    renderer.render(this.bakeScene, this.cubeCam.children[face] as Camera);
+    renderer.setRenderTarget(prev, prevFace, prevMip);
+    this.schedule.faceDone(face);
+    if (this.schedule.ready) this.backdrop.material = this.bakedMat;
+  }
+
   dispose(): void {
+    this.cubeRT.dispose();
+    this.bakeMat.dispose();
+    this.bakedMat.dispose();
+    this.bakeScene.clear();
     this.backdrop.geometry.dispose();
     this.stars.geometry.dispose();
     this.galaxies.geometry.dispose();

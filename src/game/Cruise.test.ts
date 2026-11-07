@@ -31,6 +31,8 @@ interface Rig {
   press: Set<ActionName>;
   logs: string[];
   step: (seconds?: number) => void;
+  /** Space held (the pilot's brake). */
+  brake: boolean;
 }
 
 function facing(dir: Vector3): Quaternion {
@@ -87,15 +89,16 @@ function build(pos: Vector3, nose: Vector3): Rig {
     for (let t = 0; t < seconds - 1e-9; t += H) {
       flight.update(H); // Universe
       (world as { nearestGapKm: number }).nearestGapKm = flight.position.length() - R;
-      flight.applyInput(axes, false, false); // Pilot
+      flight.applyInput(axes, false, r.brake); // Pilot
       cruise.update(H, ctx);
       press.clear();
       elapsed += H;
     }
   };
 
-  rig = { cruise, flight, world, axes, press, logs, step };
-  return rig;
+  const r: Rig = { cruise, flight, world, axes, press, logs, step, brake: false };
+  rig = r;
+  return r;
 }
 
 beforeEach(() => {
@@ -132,7 +135,10 @@ describe('steering to the locked target', () => {
     // settles asin(0.9·3R / d) off the centre line — ~5.6° from here.
     const r = build(new Vector3(200_000, 0, 0), new Vector3(0, 0, 1));
     bus.emit('target:changed', { id: 'body:Remit 31', name: 'Remit 31' });
-    r.axes.throttle = 0; // hold position; this measures the turn
+    // Hold position; this measures the turn. Since review-p1 the lever's
+    // detent rides the ceiling under cruise, so holding still is the brake.
+    r.axes.throttle = 0;
+    r.brake = true;
     const centre = r.world.allBodies()[0]!.world;
     const before = noseErrorRad(r.flight, centre);
     r.press.add('cruise');
@@ -149,8 +155,10 @@ describe('steering to the locked target', () => {
     const r = build(new Vector3(200_000, 0, 0), new Vector3(0, 0, 1));
     bus.emit('target:changed', { id: 'body:Remit 31', name: 'Remit 31' });
     r.axes.throttle = 0;
+    r.brake = true;
     r.press.add('cruise');
     r.step(CRUISE_DEFAULTS.spoolTime + 4); // charge and turn on the spot
+    r.brake = false;
     r.axes.throttle = 1;
     let fromTangential = NaN;
     for (let i = 0; i < 60 * 60 && Number.isNaN(fromTangential); i++) {
@@ -246,3 +254,211 @@ describe('arriving through the module', () => {
     expect(r.flight.command.throttle).toBe(0.5);
   });
 });
+
+// ---------------------------------------------------------------------------
+// review-p1: seams between the tracks, found by the first-10-minutes playtest
+// ---------------------------------------------------------------------------
+
+describe('review-p1: the lever at its coast detent under cruise', () => {
+  it('Given the opening orbit with the lever at the coast detent (0, as spawn, recovery and arrival leave it), When G is pressed, Then the drive actually carries the ship — not CRUISE ENGAGED at 0 m/s', () => {
+    // Playtest: G from the opening orbit engaged and then hung motionless for
+    // 240 s with VEL 0 — stepCruise flies `cap × lever`, and FA-ON makes 0 the
+    // resting lever.
+    const r = opening();
+    r.axes.throttle = 0;
+    r.press.add('cruise');
+    r.step(CRUISE_DEFAULTS.spoolTime + 1.5);
+    expect(r.cruise.drive.phase).toBe('cruise');
+    expect(r.flight.velocity.length()).toBeGreaterThan(100);
+  });
+
+  it('Given cruise engaged at the detent, When Space is held, Then the drive holds the ship still so the nose can be turned on the spot', () => {
+    const r = opening();
+    r.axes.throttle = 0;
+    r.brake = true;
+    r.press.add('cruise');
+    r.step(CRUISE_DEFAULTS.spoolTime + 3);
+    expect(r.cruise.drive.engaged).toBe(true);
+    expect(r.flight.velocity.length()).toBeLessThan(1);
+  });
+
+  it('Given cruise engaged with the lever at 25 %, Then the lever still chooses a fraction of the ceiling (only the detent means NAV hold)', () => {
+    const r = opening();
+    r.axes.throttle = 0.25;
+    r.press.add('cruise');
+    r.step(CRUISE_DEFAULTS.spoolTime + 0.1);
+    r.step(1);
+    expect(r.flight.command.throttle).toBe(0.25);
+  });
+});
+
+describe('review-p1: cruise against pause, the galaxy chart and recovery', () => {
+  it('Given cruise engaged at speed, When the galaxy chart pauses the universe and closes again, Then the drive is still carrying the ship — it never leaves a cruise-speed Newtonian velocity behind', () => {
+    const r = opening();
+    r.press.add('cruise');
+    r.step(CRUISE_DEFAULTS.spoolTime + 1);
+    expect(r.flight.velocity.length()).toBeGreaterThan(100);
+    (r.world as { paused: boolean }).paused = true;
+    r.step(H);
+    (r.world as { paused: boolean }).paused = false;
+    // Before the fix the pause cancelled the drive with setCruise(null), which
+    // keeps the velocity: thousands of km/s under ordinary physics.
+    expect(r.flight.cruising).toBe(true);
+    expect(r.cruise.drive.engaged).toBe(true);
+  });
+
+  it('Given the drive spooling, When the pause sheet freezes the world for 3 s, Then the spool does not advance behind the sheet', () => {
+    const r = opening();
+    r.press.add('cruise');
+    r.step(0.5);
+    expect(r.cruise.drive.phase).toBe('spooling');
+    const p = r.cruise.drive.progress;
+    (r.world as { frozen: boolean }).frozen = true;
+    r.step(3);
+    expect(r.cruise.drive.phase).toBe('spooling');
+    expect(r.cruise.drive.progress).toBe(p);
+    (r.world as { frozen: boolean }).frozen = false;
+  });
+
+  it('Given cruise engaged, When the ship is recovered to orbit (RETURN TO ORBIT, crash, star), Then the drive is cold and stays cold — the recovery orbit is not flown out of', () => {
+    // Playtest: after RETURN TO ORBIT mid-cruise the drive was still 'cruise'
+    // and the ship left the orbit it had just been given (e = 0.997).
+    const r = opening();
+    r.press.add('cruise');
+    r.step(CRUISE_DEFAULTS.spoolTime + 0.5);
+    expect(r.cruise.drive.engaged).toBe(true);
+    bus.emit('ship:recovered', { cause: 'requested' });
+    expect(r.cruise.drive.phase).toBe('idle');
+    expect(r.flight.cruising).toBe(false);
+    r.step(1);
+    expect(r.cruise.drive.phase).toBe('idle');
+    expect(r.flight.cruising).toBe(false);
+  });
+});
+
+describe('review-p1: arriving in a new system', () => {
+  it('Given the lever left at 100 % through a jump, When the new system is entered, Then the engine is held at idle (FA-ON would otherwise speed-hold out of the arrival orbit) until the lever moves', () => {
+    const r = opening();
+    r.axes.throttle = 1;
+    r.flight.command.throttle = 1;
+    bus.emit('system:entered', { system: {} as never });
+    // At once: the next physics step runs before Pilot and Cruise.
+    expect(r.flight.command.throttle).toBe(0);
+    r.step(H);
+    expect(r.flight.command.throttle).toBe(0);
+    r.step(1);
+    expect(r.flight.command.throttle).toBe(0);
+    r.axes.throttle = 0.9;
+    r.step(H);
+    expect(r.flight.command.throttle).toBe(0.9);
+  });
+});
+
+describe('review-p1: a target behind the world being orbited', () => {
+  /**
+   * Two bodies: the home world at the origin (the parent) and a target far
+   * behind it on the −X axis. The ship opens on +X, so the straight line to
+   * the target runs through the home world — the playtest's Vassa/Remit 31.
+   */
+  function behind(): { cruise: Cruise; flight: FlightModel; logs: string[]; run: (s: number) => string[] } {
+    const frame: ParentBody = { position: new Vector3(), velocity: new Vector3(), mu: MU, radius: R };
+    const flight = new FlightModel(DEFAULT_SHIP_CONFIG);
+    flight.setParent(frame);
+    flight.teleport(new Vector3(R + OPENING_ALT, 0, 0), new Vector3(), facing(new Vector3(0, 0, 1)));
+    const home = { spec: { name: 'Remit 31', id: 'remit', radius: R }, world: frame.position, frame, soiRadius: 1e6, parent: null };
+    const far = { spec: { name: 'Vassa', id: 'vassa', radius: 5_000 }, world: new Vector3(-2e7, 0, 0), frame, soiRadius: 1e6, parent: null };
+    const bodies = [home, far];
+    const world = {
+      flight, paused: false, frozen: false, nearestGapKm: 0, nearest: home, shipParent: home,
+      allBodies: () => bodies, system: { stars: [{ name: 'Sol', radius: 0 }] },
+    } as unknown as CruiseWorld & { nearestGapKm: number; nearest: unknown };
+    const axes = { pitch: 0, yaw: 0, roll: 0, throttle: 0, strafeX: 0, strafeY: 0, strafeZ: 0 };
+    const press = new Set<ActionName>();
+    const ctx = { input: { axes, pressed: (a: ActionName) => press.has(a), held: () => false }, elapsed: 0 } as unknown as EngineContext;
+    const logs: string[] = [];
+    const off = bus.on('log', (e) => logs.push(e.text));
+    const cruise = new Cruise({ universe: world });
+    cruise.init();
+    bus.emit('target:changed', { id: 'body:Vassa', name: 'Vassa' });
+    press.add('cruise');
+    const reasons: string[] = [];
+    const run = (seconds: number): string[] => {
+      for (let t = 0; t < seconds; t += H) {
+        flight.update(H);
+        const p = flight.worldPosition;
+        let best = Infinity;
+        for (const b of bodies) {
+          const g = p.distanceTo(b.world) - b.spec.radius;
+          if (g < best) {
+            best = g;
+            (world as { nearest: unknown }).nearest = b;
+          }
+        }
+        world.nearestGapKm = best;
+        flight.applyInput(axes, false, false);
+        const before = cruise.drive.phase;
+        cruise.update(H, ctx);
+        press.clear();
+        if (before === 'cruise' && cruise.drive.phase === 'dropping') reasons.push(cruise.drive.dropReason ?? '?');
+        if (reasons.length) break;
+      }
+      return reasons;
+    };
+    cleanups.push(() => {
+      cruise.dispose();
+      off();
+    });
+    return { cruise, flight, logs, run };
+  }
+  const cleanups: Array<() => void> = [];
+  afterEach(() => {
+    for (const c of cleanups.splice(0)) c();
+  });
+
+  it('Given the target exactly behind the home world, When G is pressed with the lever at the detent, Then the drive skirts the world and arrives at the target — no MASS drop at the world in the way', () => {
+    const r = behind();
+    const reasons = r.run(120);
+    expect(reasons).toEqual(['arrival']);
+    expect(r.flight.worldPosition.distanceTo(new Vector3(-2e7, 0, 0))).toBeLessThan(5_000 * 4);
+    expect(r.logs.some((t) => t.includes('MASS'))).toBe(false);
+  });
+});
+
+describe('v2 merge: leaving the home world, and the arrival frame', () => {
+  it('Given the opening orbit with the nose 30° down (the opening attitude), When G is pressed with no target, Then the drive carries the ship away instead of dropping for "arrival" at the world it is leaving', () => {
+    // review-p1: the home world counted as "closing" inside 2 R, so G from
+    // the opening frame span up for 2 s and dropped at once — ORBIT — REMIT 31.
+    const pos = new Vector3(R + OPENING_ALT, 0, 0);
+    const nose = new Vector3(0, 0, 1).multiplyScalar(Math.cos(Math.PI / 6)).add(new Vector3(-Math.sin(Math.PI / 6), 0, 0));
+    const r = build(pos, nose);
+    r.axes.throttle = 0;
+    r.press.add('cruise');
+    r.step(CRUISE_DEFAULTS.spoolTime + 3);
+    expect(r.cruise.drive.dropReason).not.toBe('arrival');
+    expect(r.logs.some((t) => t.startsWith('ORBIT —'))).toBe(false);
+  });
+
+  it('Given a ship that has left and comes back to the same world, When it closes inside the arrival sphere, Then arrival is armed again', () => {
+    const r = build(new Vector3(6 * R, 0, 0), new Vector3(-1, 0, 0));
+    r.axes.throttle = 0;
+    r.press.add('cruise');
+    r.step(40);
+    expect(r.logs.some((t) => t.startsWith('ORBIT —'))).toBe(true);
+  });
+
+  it('Given an arrival into orbit, Then the ship faces the world (nose pitched down towards the limb), not empty sky', () => {
+    // review-p1: the arrival "money shot" kept the approach attitude and the
+    // world was off-screen. Insertion applies the opening attitude.
+    const r = build(new Vector3(3.5 * R, 0, 0), new Vector3(-1, 0, 0));
+    r.axes.throttle = 0;
+    r.press.add('cruise');
+    r.step(15);
+    expect(r.logs.some((t) => t.startsWith('ORBIT —'))).toBe(true);
+    const nose = r.flight.forward.clone().normalize();
+    const down = r.flight.position.clone().normalize().negate();
+    const v = r.flight.velocity.clone().normalize();
+    expect(nose.dot(down)).toBeCloseTo(Math.sin(Math.PI / 6), 2);
+    expect(nose.dot(v)).toBeCloseTo(Math.cos(Math.PI / 6), 2);
+  });
+});
+

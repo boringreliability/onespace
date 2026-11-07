@@ -37,6 +37,9 @@ const MOVE_KEYS: Record<string, [number, number, number]> = {
   KeyF: [0, -1, 0],
 };
 
+/** Anything up that owns the screen; photo mode does not open over it. */
+export const PHOTO_BLOCKERS = '.os-pause.is-live, .os-codex.is-live, .os-sysmap.is-live, .os-starmap.is-live';
+
 export class Photo implements GameModule {
   readonly name = 'photo';
   readonly activeIn = ['photo'] as const;
@@ -207,12 +210,11 @@ export class Photo implements GameModule {
   };
 
   /**
-   * The pause sheet, the codex, or either chart. The live classes are what
-   * those modules set (`.os-pause-open` / `.os-codex-open`, which this used
-   * to look for, exist nowhere).
+   * The pause sheet, the codex, or either chart: the live classes those
+   * modules really set (PHOTO_BLOCKERS, review-p1), plus the chart event.
    */
   private menuOpen(): boolean {
-    return this.chartOpen || document.querySelector('.os-pause.is-live, .os-codex.is-live') !== null;
+    return this.chartOpen || document.querySelector(PHOTO_BLOCKERS) !== null;
   }
 
   private onPointerDown = (e: PointerEvent): void => {

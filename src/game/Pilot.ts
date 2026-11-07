@@ -20,6 +20,7 @@ import { shotOwnsScene } from '@/game/Shots';
 import type { Hud } from '@/ui/Hud';
 import type { Audio } from '@/audio/Audio';
 import { resolveJumpKey, type JumpSelection } from '@/game/jumpKey';
+import { activeFlightPreset } from '@/game/flightPreset'; // [v2-p4]
 
 /** What `J` needs from the galaxy chart. `StarMap` satisfies it. */
 export interface JumpChart {
@@ -242,7 +243,8 @@ export class Pilot implements GameModule {
     // The FlightModel class defaults to FA-OFF so headless physics stays
     // Newtonian; the first frame turns it on (once) for the player's ship.
     if (!this.faDefaulted) {
-      flight.flightAssist = true;
+      // [v2-p4] the flight preset decides the default (NEWTONIAN = FA-OFF).
+      flight.flightAssist = activeFlightPreset().flightAssist;
       this.faDefaulted = true;
     }
     if (input.pressed('flightAssist')) flight.flightAssist = !flight.flightAssist;
@@ -253,9 +255,9 @@ export class Pilot implements GameModule {
     if (input.pressed('map')) bus.emit('ui:toggle-map');
     if (input.pressed('codex')) bus.emit('ui:toggle-codex');
     if (input.pressed('warp')) this.onJumpKey();
-    // `L` (land) is deliberately unbound in flight for now: auto-land/lift is
-    // phase 4 (PLAN P4). Cruise still reads it as "stop cruising", which is
-    // the honest subset of what landing will mean.
+    // `L` (land) belongs to game/AutoPilot.ts [v2-p4], which runs after this
+    // and overwrites the command while it flies. Cruise also reads it, as
+    // "stop cruising".
 
     // 2. Physics already ran inside Universe.update(); read the interpolated
     //    render state so the hull does not stutter between fixed substeps.
