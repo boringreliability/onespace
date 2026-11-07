@@ -14,6 +14,12 @@ export const LEVEL_VS_KMS = 1e-4;
  * wanders with every substep of ground contact. 0.5 m/s.
  */
 export const MARKER_MIN_SPEED_KMS = 5e-4;
+/**
+ * v3 polish (review low): an impact further off than this is not shown, s.
+ * A stable orbit breathes a few m/s of V/S, and IMPACT read ">99h" for an
+ * impact the orbit never delivers; a real deorbit is well under the hour.
+ */
+export const TTI_MAX_S = 3600;
 /** The altimeter's reach, in the body's own radii — same as Universe's. */
 export const ALT_RANGE_RADII = 40;
 
@@ -42,7 +48,8 @@ export function verticalReadout(
     return out;
   }
   out.vsiKmS = vsKmS;
-  out.ttiS = altKm !== null && vsKmS < -LEVEL_VS_KMS ? Math.max(0, altKm) / -vsKmS : null;
+  const tti = altKm !== null && vsKmS < -LEVEL_VS_KMS ? Math.max(0, altKm) / -vsKmS : null;
+  out.ttiS = tti !== null && tti <= TTI_MAX_S ? tti : null;
   return out;
 }
 

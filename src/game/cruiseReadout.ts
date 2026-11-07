@@ -42,6 +42,12 @@ export interface CruiseReadoutInput {
   readonly speedKmS: number;
   readonly etaS: number | null;
   readonly destination: string | null;
+  /**
+   * v3 polish (D22b): the world the drive is steering round, or null/absent.
+   * While set there is no ETA: the straight-line law under-reported the
+   * skirt ~2× (Remit 31 → Vassa: 0:40 shown, 79 s flown).
+   */
+  readonly skirting?: string | null;
 }
 
 export interface CruiseReadout {
@@ -57,6 +63,8 @@ export function cruiseReadout(i: CruiseReadoutInput): CruiseReadout | null {
       : i.phase === 'dropping'
         ? 'CRUISE · DROP'
         : `CRUISE · ${cruiseSpeedText(i.speedKmS)}`;
+  // The drop is not steered past anything, so it always counts down.
+  if (i.skirting && i.phase !== 'dropping') return { primary, secondary: `SKIRTING · ${i.skirting.toUpperCase()}` };
   const eta = i.etaS !== null && Number.isFinite(i.etaS) ? clockText(i.etaS) : '—';
   const dest = i.destination ? ` · ${i.destination.toUpperCase()}` : '';
   return { primary, secondary: `ETA ${eta}${dest}` };

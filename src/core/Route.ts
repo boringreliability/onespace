@@ -164,13 +164,21 @@ export function companionShip(r: Route): RouteShip | null {
   return r.ship;
 }
 
-/** Query keys a ship route owns; everything else in the URL is someone else's. */
-const SHIP_ROUTE_KEYS: readonly string[] = ['mode', 'ship', 'faction', 'role', 'size', 'gen'];
+/**
+ * v3 polish (review low): the developer overrides SEE IN FLIGHT carries over
+ * from the current URL. A whitelist — it used to keep every key that was not
+ * a ship-route key, whatever it was.
+ */
+const CARRIED_KEYS: readonly string[] = ['tier', 'dpr', 'seed', 'dev'];
 
-/** `search` with its route replaced by a generation-pinned flight route for `ship`. */
+/** A generation-pinned flight route for `ship`, keeping only `search`'s developer overrides. */
 export function seeInFlightSearch(search: string, ship: RouteShip): string {
-  const q = new URLSearchParams(search);
-  for (const k of SHIP_ROUTE_KEYS) q.delete(k);
+  const from = new URLSearchParams(search);
+  const q = new URLSearchParams();
+  for (const k of CARRIED_KEYS) {
+    const v = from.get(k);
+    if (v !== null) q.set(k, v);
+  }
   for (const [k, v] of new URLSearchParams(serializeRoute({ mode: 'flight', ship, warnings: [] }))) q.set(k, v);
   const out = q.toString().replace(/(^|&)dev=(?=&|$)/, '$1dev');
   return out ? `?${out}` : '';

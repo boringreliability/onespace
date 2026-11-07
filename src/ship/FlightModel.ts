@@ -69,6 +69,7 @@ import type { PlanetSpec } from '@/gen/types';
 import { FIXED_H, MAX_SUBSTEPS, substepBudget } from '@/core/substeps';
 // [v3-T2] rotation and assist shaping live in their own pure modules.
 import { MAX_RATE, rateCommand, rateTuning, type RateTuning } from './rateCommand';
+import { groundVelocity, spinAngularVelocity } from './surfaceSpin'; // v3 polish (D22a)
 import {
   ASSIST_ACTUATOR_TAU,
   OVERSPEED_CUT,
@@ -1244,7 +1245,7 @@ export class FlightModel {
     // worst case leaves us clear, the terrain does not need evaluating.
     this.altCache -= this.velocity.length() * h;
     if (this.altCache > GROUND_RELEASE) {
-      this._grounded = false;
+      this.leaveGround();
       return;
     }
 
@@ -1252,7 +1253,7 @@ export class FlightModel {
     this.altCache = alt;
 
     if (alt > GROUND_RELEASE) {
-      this._grounded = false;
+      this.leaveGround();
       return;
     }
     if (alt > 0) return; // inside the hysteresis band but not penetrating
@@ -1267,6 +1268,24 @@ export class FlightModel {
 
     const vn = this.velocity.dot(this.localUp);
     const wasGrounded = this._grounded;
+
+    // v3 polish (D22a): a grounded ship's velocity is SURFACE-relative —
+    // friction pulls it to 0 while Universe's carryWithSurface moves it with
+    // the world — and an airborne one's is the centre frame's. At first
+    // contact the frame changes, so the ground's own velocity ω×r comes off
+    // the tangential part here: a hull that matched the ground arrives at
+    // rest on it (it used to skid on at the ground's speed), one that did not
+    // keeps the slip it really had (it used to be stopped dead, silently).
+    let slip = 0;
+    if (!wasGrounded) {
+      const spec = this.landingPlanet;
+      if (spec) groundVelocity(spinAngularVelocity(spec.rotationPeriod, spec.axialTilt, this.sOmega), this.position, this.sGround);
+      else this.sGround.set(0, 0, 0);
+      this.sGround.addScaledVector(this.localUp, -this.sGround.dot(this.localUp));
+      this.velocity.sub(this.sGround);
+      this.sGround.copy(this.velocity).addScaledVector(this.localUp, -this.velocity.dot(this.localUp));
+      slip = this.sGround.length();
+    }
 
     if (vn < 0) {
       const impact = -vn;
@@ -1302,15 +1321,33 @@ export class FlightModel {
       bus.emit('ship:touchdown', {
         speed: this.velocity.length(),
         vertical: impact,
+        slip,
         planetId: this.landingPlanet?.id ?? null,
       });
       if (this.landingPlanet) bus.emit('planet:landed', { planet: this.landingPlanet });
-      bus.emit('log', {
-        text: impact > c.landingSpeed ? 'HARD LANDING' : 'TOUCHDOWN',
-        tone: impact > c.landingSpeed ? 'warn' : 'good',
-      });
+      // v3 polish: no log line here. Pilot grades the touchdown and says so
+      // (one line, as HULL BREACH is); this one followed it as a bare "TOUCHDOWN".
     }
   }
+
+  /**
+   * v3 polish (D22a): the reverse of the touchdown switch. A hull leaving the
+   * ground takes the ground's velocity with it into the centre frame, so the
+   * world does not slide out from under a ship that has just lifted off (and
+   * a bounce does not take ω×r off twice).
+   */
+  private leaveGround(): void {
+    if (this._grounded && this.landingPlanet) {
+      const spec = this.landingPlanet;
+      groundVelocity(spinAngularVelocity(spec.rotationPeriod, spec.axialTilt, this.sOmega), this.position, this.sGround);
+      this.velocity.add(this.sGround);
+    }
+    this._grounded = false;
+  }
+
+  /** v3 polish (D22a): scratch for the touchdown frame switch. */
+  private readonly sOmega = new Vector3();
+  private readonly sGround = new Vector3();
 
   // -------------------------------------------------------------------------
   // Helpers

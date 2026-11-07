@@ -118,6 +118,26 @@ export interface CruiseOptions {
   readonly universe: CruiseWorld;
 }
 
+/**
+ * v3 polish (D22b): does the straight line from `ship` to `target` pass
+ * inside a sphere of `safeKm` about `body`, with the body between them?
+ * Pure; the geometry `Cruise.occluder` steers by and the readout reports.
+ */
+export function lineBlockedBy(ship: Vector3, target: Vector3, body: Vector3, safeKm: number): boolean {
+  const tx = target.x - ship.x;
+  const ty = target.y - ship.y;
+  const tz = target.z - ship.z;
+  const dT = Math.sqrt(tx * tx + ty * ty + tz * tz);
+  if (dT < 1e-9) return false;
+  const bx = body.x - ship.x;
+  const by = body.y - ship.y;
+  const bz = body.z - ship.z;
+  const along = (bx * tx + by * ty + bz * tz) / dT;
+  if (along <= 0 || along >= dT) return false;
+  const perp2 = bx * bx + by * by + bz * bz - along * along;
+  return perp2 < safeKm * safeKm;
+}
+
 export class Cruise implements GameModule {
   readonly name = 'cruise';
 
@@ -215,6 +235,16 @@ export class Cruise implements GameModule {
   get busy(): boolean {
     return this.drive.phase !== 'idle' || this.settling;
   }
+
+  /**
+   * v3 polish (D22b): the world the drive is steering round to reach the
+   * locked target, or null while the line is clear (or nothing is steered).
+   * The cruise readout shows it instead of an ETA it cannot honestly give.
+   */
+  get skirting(): string | null {
+    return this._skirting;
+  }
+  private _skirting: string | null = null;
 
   /**
    * The insertion attitude: nose along the tangent the handover will use,
@@ -436,6 +466,7 @@ export class Cruise implements GameModule {
 
     // Steering to the locked target, while charging and while carried — not
     // during the drop, whose direction is the insertion's business.
+    this._skirting = null;
     if (target && (this.drive.phase === 'spooling' || this.drive.phase === 'cruise')) {
       // review-p1: the straight line to the target often runs through the
       // world being orbited (the playtest's Vassa sat behind Remit 31). The
@@ -443,6 +474,7 @@ export class Cruise implements GameModule {
       // While a world is in the way, skirt it along the tangent of a sphere
       // safely above its hold threshold; once the line is clear, aim as before.
       const occ = this.occluder(target);
+      this._skirting = occ ? occ.spec.name : null;
       if (occ) {
         steerToward(flight, occ.world, occ.spec.radius + OCCLUDER_HOLD_MARGIN * holdClearanceKm(occ.spec.radius, this.drive.config));
       } else {
@@ -487,21 +519,8 @@ export class Cruise implements GameModule {
   private occluder(target: Body): Body | null {
     const b = this.universe.nearest;
     if (!b || b === target) return null;
-    const ship = this.universe.flight.worldPosition;
-    const toT = this.sRel.subVectors(target.world, ship);
-    const dT = toT.length();
-    if (dT < 1e-9) return null;
-    const ux = toT.x / dT;
-    const uy = toT.y / dT;
-    const uz = toT.z / dT;
-    const bx = b.world.x - ship.x;
-    const by = b.world.y - ship.y;
-    const bz = b.world.z - ship.z;
-    const along = bx * ux + by * uy + bz * uz;
-    if (along <= 0 || along >= dT) return null;
-    const perp2 = bx * bx + by * by + bz * bz - along * along;
     const safe = b.spec.radius + OCCLUDER_HOLD_MARGIN * holdClearanceKm(b.spec.radius, this.drive.config);
-    return perp2 < safe * safe ? b : null;
+    return lineBlockedBy(this.universe.flight.worldPosition, target.world, b.world, safe) ? b : null;
   }
 
   /** Stop wanting it, and let go this frame rather than easing out. */
@@ -509,6 +528,7 @@ export class Cruise implements GameModule {
     this.wanted = false;
     this.heldLever = null;
     this.settling = false;
+    this._skirting = null;
     this.drive.reset();
     this.universe.flight.setCruise(null);
     this.lastPhase = 'idle';

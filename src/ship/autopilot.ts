@@ -150,6 +150,30 @@ const SETPOINT_SLEW_FRACTION = 0.92;
  */
 const JERK_MAX_KMS3 = 1.18;
 
+// --- v3 polish (D22a): land WITH the ground ------------------------------------
+/**
+ * Terrain altitude above which the landing field ignores the world's spin,
+ * km: the deorbit and the 10× braking legs (D0) fly exactly as before.
+ */
+export const SPIN_MATCH_TOP_KM = HOVER_LOCK_ALT_KM;
+/**
+ * Terrain altitude below which the field's horizontal target is the
+ * ground's whole velocity ω×r, km. Above the final segment, so the last
+ * 0.6 km is flown in the ground's frame from the start.
+ */
+export const SPIN_MATCH_FULL_KM = 3;
+
+/**
+ * How much of the ground's velocity the landing field asks for at terrain
+ * altitude `altKm`: 0 at and above SPIN_MATCH_TOP_KM, 1 at and below
+ * SPIN_MATCH_FULL_KM, smoothstep between. NaN reads as the ground (1), as
+ * `descentSpeedKmS` reads it.
+ */
+export function spinMatchWeight(altKm: number): number {
+  if (!(altKm > SPIN_MATCH_FULL_KM)) return 1;
+  return 1 - smoothstep((altKm - SPIN_MATCH_FULL_KM) / (SPIN_MATCH_TOP_KM - SPIN_MATCH_FULL_KM));
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -172,6 +196,11 @@ export interface AutopilotWorld {
   readonly mu: number;
   /** Top of the atmosphere above the datum, km; 0 for vacuum. */
   readonly atmosphereTopKm: number;
+  /**
+   * v3 polish (D22a): the world's angular velocity, rad/s, in the parent
+   * frame (`surfaceSpin.spinAngularVelocity`). Absent or zero = it does not turn.
+   */
+  readonly spinRadS?: Vector3;
 }
 
 export interface Apsides {
@@ -321,6 +350,8 @@ const ZERO = new Vector3();
 const WORLD_UP = new Vector3(0, 1, 0);
 const WORLD_X = new Vector3(1, 0, 0);
 const sApsides: Apsides = { periapsis: 0, apoapsis: 0, eccentricity: 0 };
+const sGround = new Vector3();
+const sRel = new Vector3();
 
 // ---------------------------------------------------------------------------
 // The computer
@@ -450,7 +481,12 @@ export class Autopilot {
     if (goal === 'land') {
       // Phases only move forward: they are a story for the log, not state the
       // controller depends on.
-      if (this._phase === 'deorbit' && vh2 < 0.05 * 0.05) this._phase = 'descent';
+      // v3 polish: horizontal speed against what the field wants there (the
+      // ground's, below the blend); above it, the centre frame's as before.
+      this.groundTarget(p, alt, world, sGround);
+      sRel.subVectors(v, sGround);
+      sRel.addScaledVector(sUp, -sRel.dot(sUp));
+      if (this._phase === 'deorbit' && sRel.lengthSq() < 0.05 * 0.05) this._phase = 'descent';
       if (alt <= FINAL_ALTITUDE_KM && this._phase !== 'final') this._phase = 'final';
     } else {
       if (this._phase === 'liftoff' && alt > 1) this._phase = 'ascent';
@@ -501,8 +537,19 @@ export class Autopilot {
     // the full relief on top counted the centripetal term twice — an inward
     // demand of ~1 g_local in a circular orbit, hidden until v3 by the √
     // field's chatter (D61) and exposed once the field was rounded.
-    const relief = goal === 'orbit' ? 1 - this.lastBlend : 1;
+    // v3 polish: likewise the landing field's ground-velocity part turns with
+    // the ship (ω×v in the feed-forward), so its centripetal term is not
+    // relieved a second time.
+    const spinW = goal === 'land' && hasSpin(world) ? spinMatchWeight(alt) : 0;
+    const relief = goal === 'orbit' ? 1 - this.lastBlend : 1 - spinW;
     sAcc.addScaledVector(sUp, g - relief * (vh2 / r));
+    // v3 polish: matching a turning ground in air means flying sideways
+    // through still air (FlightModel's drag is centre-frame). Carry the
+    // horizontal drag the hull feels, or the loop trails it by τ·drag.
+    if (spinW > 0 && rho > 0) {
+      const k = spinW * cfg.dragCoefficient * rho * flight.speed;
+      sAcc.addScaledVector(sHoriz, k);
+    }
     // v3: jerk limit. The hull's acceleration follows the demand at a bounded
     // rate, whatever the field does from one step to the next.
     sRes.subVectors(sAcc, this.lastAcc);
@@ -629,7 +676,10 @@ export class Autopilot {
     if (this._goal === 'land') {
       // v3: once HOVER is locked the envelope is the one RCS alone can fly.
       const b = this.hoverLocked ? Math.min(brake, this.hoverBrake) : brake;
-      return out.copy(sUpF).multiplyScalar(-descentSpeedKmS(altKm, b));
+      // v3 polish (D22a): plus the ground's velocity, blended in below 20 km —
+      // a landing is a landing on the ground, not on the centre frame.
+      this.groundTarget(pos, altKm, world, out);
+      return out.addScaledVector(sUpF, -descentSpeedKmS(altKm, b));
     }
     const rTarget = orbitTargetRadius(world);
     const dr = rTarget - r;
@@ -644,6 +694,17 @@ export class Autopilot {
     // Prograde in the fixed plane: n × r̂.
     sTanF.crossVectors(this.normal, sUpF).normalize();
     return out.copy(sUpF).multiplyScalar(vRad).addScaledVector(sTanF, w * Math.sqrt(world.mu / r));
+  }
+
+  /**
+   * v3 polish (D22a): the horizontal velocity the landing field wants at
+   * `pos` — `spinMatchWeight(altKm)` of the ground's ω×r — into `out`.
+   * Zero on a world that does not turn, and on the orbit leg.
+   */
+  private groundTarget(pos: Vector3, altKm: number, world: AutopilotWorld, out: Vector3): Vector3 {
+    const w = world.spinRadS;
+    if (this._goal !== 'land' || !w || !hasSpin(world)) return out.set(0, 0, 0);
+    return out.crossVectors(w, pos).multiplyScalar(spinMatchWeight(altKm));
   }
 
   private idle(cmd: FlightModel['command']): void {
@@ -720,6 +781,11 @@ const sRates: AxisCommand = { pitch: 0, yaw: 0, roll: 0 };
 export function orbitTargetRadius(world: AutopilotWorld): number {
   const R = world.radiusKm;
   return Math.max(R * ORBIT_TARGET_RADII, R + 1.2 * world.atmosphereTopKm + 50);
+}
+
+function hasSpin(world: AutopilotWorld): boolean {
+  const w = world.spinRadS;
+  return w !== undefined && (w.x !== 0 || w.y !== 0 || w.z !== 0);
 }
 
 function smoothstep(x: number): number {

@@ -36,6 +36,8 @@ import type { CruisePhase } from '@/ship/CruiseDrive';
 /** What Instruments reads of the cruise drive (T3's public state). Read-only. */
 export interface InstrumentsCruise {
   readonly drive: { readonly phase: CruisePhase; readonly progress: number };
+  /** v3 polish (D22b): the world being skirted, if any. */
+  readonly skirting?: string | null;
 }
 
 /** What Instruments reads of Targeting. Read-only. */
@@ -233,6 +235,7 @@ export class Instruments implements GameModule {
         // A locked target is always named; the nearest-body fallback only
         // while closing on it, or the line names the world being left behind.
         destination: toward && (locked || closing) ? toward.spec.name : null,
+        skirting: c!.skirting ?? null,
       }),
     );
   }

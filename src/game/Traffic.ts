@@ -39,7 +39,9 @@ import type { Universe, UniverseBody } from '@/game/Universe';
 // v3 T4: legibility, scale through motion, SEE IN FLIGHT.
 import {
   coOrbitVelocity,
+  apparentExtentKm,
   contactRangeKm,
+  hullContactRangeKm,
   hullAttitude,
   hullSway,
   openingContactOffset,
@@ -89,6 +91,13 @@ interface CoOrbit {
   readonly rate: number;
   /** `Traffic.time` at capture. */
   readonly epoch: number;
+  /**
+   * v3 polish (D22c): the offset from the player at epoch, km (r0 is the
+   * player's position plus this), and the range draw — so the range can be
+   * set from the hull's size once its blueprint arrives.
+   */
+  readonly offset0: Vector3;
+  readonly rangeDraw: number;
 }
 
 interface Vessel {
@@ -280,7 +289,8 @@ export class Traffic implements GameModule {
         inclination: i === 0 ? 0 : rng.gaussian(0, 0.4),
         // v3 T4: contact 0 sits inside the opening composition, ~15° above
         // the nose at 1.5-2.5 km (audit V2: it was just over the top edge).
-        coOrbit: coOrbital ? this.captureCoOrbit(anchor!, contactRangeKm(rng.next())) : null,
+        // v3 polish (D22c): provisional; resized by the hull once it is built.
+        coOrbit: coOrbital ? this.captureCoOrbit(anchor!, rng.next()) : null,
         visual: null,
         view: new MutableViewState(),
         drive: { throttle: 0.2, boost: 0, heating: 0, rcs: new Vector3() },
@@ -312,7 +322,8 @@ export class Traffic implements GameModule {
    * `flight.velocity` are ALREADY anchor-relative — nothing is converted here,
    * and there is nothing left to forget to convert.
    */
-  private captureCoOrbit(anchor: UniverseBody, separationKm: number): CoOrbit | null {
+  private captureCoOrbit(anchor: UniverseBody, rangeDraw: number): CoOrbit | null {
+    const separationKm = contactRangeKm(rangeDraw);
     const flight = this.universe.flight;
     const r = flight.position.clone();
     const radiusKm = r.length();
@@ -338,6 +349,8 @@ export class Traffic implements GameModule {
     const offset = openingContactOffset(flight.forward, flight.up, separationKm, new Vector3());
     return {
       r0: r.add(offset),
+      offset0: offset,
+      rangeDraw,
       axis: new Vector3().crossVectors(rHat, tHat).normalize(),
       // Mean motion of a circular orbit through the player's current state. It
       // is a genuine orbit, so a coasting player and this vessel stay together
@@ -376,6 +389,21 @@ export class Traffic implements GameModule {
         // Stale if the system changed while it was being built.
         if (this.vessels.includes(v)) {
           v.blueprint = bp;
+          // v3 polish (D22c): now the hull's size is known, put it where it
+          // reads — 6-10° of the frame, by the extent it actually shows the
+          // player (it flies prograde, ahead on the track: nearly end-on) —
+          // along the same ray. The co-orbit is rigid, so moving r0 at epoch
+          // moves it now; it has not been drawn yet.
+          const c = v.coOrbit;
+          if (c && !v.visual) {
+            const d = bp.dimensions;
+            const axis = new Vector3(0, 0, -1).applyQuaternion(v.attitude);
+            const los = new Vector3().subVectors(v.world, this.universe.flight.worldPosition);
+            const face = apparentExtentKm(d.lengthKm, d.beamKm, d.heightKm, axis, los);
+            c.r0.sub(c.offset0);
+            c.offset0.setLength(hullContactRangeKm(c.rangeDraw, face, d.boundingRadius));
+            c.r0.add(c.offset0);
+          }
           // v3 T4: SEE IN FLIGHT names what it put beside you.
           if (v.companion) bus.emit('log', { text: `ALONGSIDE — ${bp.name.toUpperCase()}`, tone: 'good' });
         }

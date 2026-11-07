@@ -26,7 +26,9 @@ import { flightActivity } from '@/core/flightActivity'; // [v3-T1]
 import type { InputAxes } from '@/core/Input';
 import { shotOwnsScene } from '@/game/Shots';
 import { activeFlightPreset, type FlightPresetSpec } from '@/game/flightPreset';
+import { Vector3 } from 'three';
 import type { FlightModel } from '@/ship/FlightModel';
+import { spinAngularVelocity } from '@/ship/surfaceSpin';
 import {
   Autopilot,
   autopilotRefusal,
@@ -49,6 +51,9 @@ export interface AutoPilotWorld {
       readonly name: string;
       readonly radius: number;
       readonly atmosphere: { readonly thickness: number } | null;
+      /** v3 polish (D22a): the world turns, and the landing flies with its ground. Absent = still. */
+      readonly rotationPeriod?: number;
+      readonly axialTilt?: number;
     };
     readonly frame: { readonly mu: number };
   } | null;
@@ -121,7 +126,7 @@ export class AutoPilot implements GameModule {
   /** Last frame's axes, so a takeover is a *change*, not a residue. */
   private readonly prev: InputAxes = { pitch: 0, yaw: 0, roll: 0, throttle: 0, strafeX: 0, strafeY: 0, strafeZ: 0 };
   private readonly keys = { throttleKeys: false, brake: false, boost: false, zeroThrottle: false };
-  private readonly world = { radiusKm: 1, mu: 0, atmosphereTopKm: 0 };
+  private readonly world = { radiusKm: 1, mu: 0, atmosphereTopKm: 0, spinRadS: new Vector3() };
 
   constructor(opts: AutoPilotOptions) {
     this.universe = opts.universe;
@@ -309,6 +314,7 @@ export class AutoPilot implements GameModule {
     this.world.radiusKm = p.spec.radius;
     this.world.mu = p.frame.mu;
     this.world.atmosphereTopKm = p.spec.atmosphere?.thickness ?? 0;
+    spinAngularVelocity(p.spec.rotationPeriod ?? 0, p.spec.axialTilt ?? 0, this.world.spinRadS);
   }
 
   /** Hand back. `announce` = the pilot (or the world) took it, not completion. */

@@ -22,6 +22,7 @@ import type { Hud } from '@/ui/Hud';
 import type { Audio } from '@/audio/Audio';
 import { resolveJumpKey, type JumpSelection } from '@/game/jumpKey';
 import { activeFlightPreset } from '@/game/flightPreset'; // [v2-p4]
+import { touchdownGrade } from '@/game/touchdownGrade'; // v3 polish (D22a)
 
 /** What `J` needs from the galaxy chart. `StarMap` satisfies it. */
 export interface JumpChart {
@@ -107,7 +108,7 @@ export class Pilot implements GameModule {
 
     bus.on('camera:shake', ({ intensity, duration }) => this.rig.shake(intensity, duration));
 
-    bus.on('ship:touchdown', ({ speed, vertical }) => this.onTouchdown(speed, vertical));
+    bus.on('ship:touchdown', ({ vertical, slip }) => this.onTouchdown(vertical, slip));
     // A crash is not a landing: the recovery module fades to black and puts
     // the ship back in orbit (GAMEPLAY F6). Entering the landed state here
     // would swing the camera to orbit and then log AIRBORNE on the respawn.
@@ -124,15 +125,11 @@ export class Pilot implements GameModule {
    * Grade the arrival and say so. A pilot knows the difference between setting
    * a hull down and arriving at it, and the log is where the game admits it.
    */
-  private onTouchdown(speed: number, vertical: number): void {
+  private onTouchdown(vertical: number, slip: number): void {
     this.enterLanded();
-    const mps = Math.abs(vertical) * 1000;
-    const grade =
-      mps < 2 ? 'TOUCHDOWN — CLEAN' : mps < 8 ? 'TOUCHDOWN' : 'TOUCHDOWN — HARD';
-    bus.emit('log', {
-      text: `${grade} · ${mps.toFixed(1)} M/S`,
-      tone: mps < 8 ? 'good' : 'warn',
-    });
+    // v3 polish (D22a): graded on the worse of the sink rate and the slip
+    // against the (turning) ground; the only touchdown line in the log.
+    bus.emit('log', touchdownGrade(vertical, slip));
   }
 
   private enterLanded(): void {

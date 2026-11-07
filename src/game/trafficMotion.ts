@@ -21,6 +21,59 @@ export function contactRangeKm(u01: number): number {
   return CONTACT_RANGE_KM[0] + (CONTACT_RANGE_KM[1] - CONTACT_RANGE_KM[0]) * u;
 }
 
+// --- v3 polish (D22c): placed by the size of the hull ------------------------
+/**
+ * Angle the hull's length should subtend in the opening frame, degrees: 7-11 %
+ * of the 88° horizontal fov. At 1.6 km a 30 m companion was a few pixels.
+ */
+export const HULL_ANGLE_DEG: readonly [number, number] = [6, 10];
+/** Never nearer than this many × (bounding radius + the player's 30 m). */
+export const CONTACT_CLEARANCE_FACTOR = 3;
+export const CONTACT_CLEARANCE_PAD_KM = 0.03;
+
+/**
+ * Range for contact 0 (and the SEE IN FLIGHT companion), km, once its hull
+ * is known: where `lengthKm` of hull — its length, or the extent it presents
+ * (`apparentExtentKm`) — subtends 6-10° (the draw `u01`
+ * picks where in the band), capped at 2.5 km, and never inside
+ * 3 × (bounding radius + 30 m) — clearance beats both. With no usable
+ * length, the old 1.5-2.5 km band.
+ */
+/**
+ * The extent of a hull presented to an eye looking along `lineOfSight`, km:
+ * its length foreshortened by the angle to its own axis, but never less than
+ * its cross-section (beam or height). Contact 0 flies prograde and sits ahead
+ * along the track, so it is seen nearly end-on (measured on the GPU: a 62 m
+ * hull placed by its length showed ~10 px of stern). Degenerate directions
+ * count as broadside.
+ */
+export function apparentExtentKm(
+  lengthKm: number,
+  beamKm: number,
+  heightKm: number,
+  hullAxis: Vector3,
+  lineOfSight: Vector3,
+): number {
+  const a = hullAxis.length();
+  const l = lineOfSight.length();
+  let sin = 1;
+  if (a > 1e-12 && l > 1e-12) {
+    const cos = Math.min(1, Math.abs(hullAxis.dot(lineOfSight)) / (a * l));
+    sin = Math.sqrt(1 - cos * cos);
+  }
+  return Math.max(lengthKm * sin, beamKm, heightKm);
+}
+
+export function hullContactRangeKm(u01: number, lengthKm: number, boundingRadiusKm: number): number {
+  if (!(lengthKm > 0) || !Number.isFinite(lengthKm)) return contactRangeKm(u01);
+  const u = Number.isFinite(u01) ? Math.min(1, Math.max(0, u01)) : 0.5;
+  const deg = HULL_ANGLE_DEG[0] + (HULL_ANGLE_DEG[1] - HULL_ANGLE_DEG[0]) * u;
+  const ideal = lengthKm / (2 * Math.tan((deg * Math.PI) / 360));
+  const bound = boundingRadiusKm > 0 && Number.isFinite(boundingRadiusKm) ? boundingRadiusKm : lengthKm / 2;
+  const clearance = CONTACT_CLEARANCE_FACTOR * (bound + CONTACT_CLEARANCE_PAD_KM);
+  return Math.max(Math.min(ideal, CONTACT_RANGE_KM[1]), clearance);
+}
+
 /** Offset (km) from the player to contact 0: `elevation` above the nose, in the nose-roof plane. */
 export function openingContactOffset(nose: Vector3, roof: Vector3, rangeKm: number, out: Vector3): Vector3 {
   const f = out.copy(nose).normalize();

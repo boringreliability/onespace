@@ -64,7 +64,8 @@ export interface GameEvents {
   'camera:shake': { intensity: number; duration: number };
 
   /** Ship met the ground softly enough to survive. `vertical` is impact speed along the surface normal, km/s. */
-  'ship:touchdown': { speed: number; vertical: number; planetId: string | null };
+  /** `slip`: horizontal speed against the (turning) ground at first contact, km/s. */
+  'ship:touchdown': { speed: number; vertical: number; slip: number; planetId: string | null };
   /** Ship met the ground too fast. The hull is gone. */
   'ship:crashed': { speed: number; planetId: string | null };
   /**
