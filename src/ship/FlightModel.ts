@@ -40,8 +40,9 @@
  *   velocity. Clamping reads as hitting an invisible wall; fading reads as an
  *   engine running out of breath, which is what it is.
  * - Two separate computers, two switches.
- *   `attitudeHold` bleeds off rotation in about a second so the ship handles
- *   like an aeroplane; off, you rotate until you rotate back.
+ *   `attitudeHold` makes the stick a RATE demand ([v3-T2], `rateCommand.ts`):
+ *   35/28/75 °/s at full deflection, and letting go stops the nose within a
+ *   few degrees; off, the stick is torque and you rotate until you rotate back.
  *   `flightAssist` (FA, the Z key) is the translational computer. FA-OFF is
  *   plain Newtonian: the lever is thrust, and drift is yours to manage. FA-ON
  *   makes the lever a *set speed* along the nose, relative to the parent, and
@@ -66,6 +67,14 @@ import { bus } from '@/core/EventBus';
 import type { InputAxes } from '@/core/Input';
 import type { PlanetSpec } from '@/gen/types';
 import { FIXED_H, MAX_SUBSTEPS, substepBudget } from '@/core/substeps';
+// [v3-T2] rotation and assist shaping live in their own pure modules.
+import { MAX_RATE, rateCommand, rateTuning, type RateTuning } from './rateCommand';
+import {
+  ASSIST_ACTUATOR_TAU,
+  OVERSPEED_CUT,
+  actuatorStep,
+  stopDecel,
+} from './assistShape';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -199,9 +208,9 @@ export interface ShipConfig {
   /** Peak RCS couple per axis, N·km. */
   readonly rcsTorque: AxisTriple;
   /**
-   * Time constant of the flight computer's attitude hold, seconds. Rotation
-   * decays as exp(-t/tau), so ~0.35 s means the stick is fully "let go" after
-   * about a second. Also sets the steady-state rate: rate = alpha · tau.
+   * v2's attitude-hold time constant (rate = alpha · tau). [v3-T2] No longer
+   * read by FlightModel — attitude hold is the rate command in
+   * `rateCommand.ts` — but kept: generated hulls still derive and report it.
    */
   readonly assistDampTime: number;
   /** Cruise ceiling, km/s. Thrust fades to nothing here. */
@@ -262,8 +271,10 @@ export const DEFAULT_SHIP_CONFIG: ShipConfig = {
   brakeThrust: 4.0e7,
   // I ≈ m·r² for a 30 m hull: heavy in pitch/yaw, light about the roll axis.
   inertia: { pitch: 18, yaw: 18, roll: 7 },
-  // alpha = torque·1e-3 / I  →  2.0, 1.8 and 3.2 rad/s².
-  rcsTorque: { pitch: 3.6e4, yaw: 3.24e4, roll: 2.24e4 },
+  // alpha = torque·1e-3 / I  →  2.5, 2.5 and 4 rad/s² ([v3-T2] D0 α_max; was
+  // 2.0/1.8/3.2). The rate command's spin-up limit and the FA-OFF torque are
+  // the same α by construction.
+  rcsTorque: { pitch: 4.5e4, yaw: 4.5e4, roll: 2.8e4 },
   assistDampTime: 0.35,
   // 60 km/s in the local frame. Orbital distances are enormous — 11,000 km to
   // a planet you can see filling the screen — and at a physically honest few
@@ -435,6 +446,10 @@ export class FlightModel {
   private readonly alphaPitch: number;
   private readonly alphaYaw: number;
   private readonly alphaRoll: number;
+  // [v3-T2] rate command
+  private readonly ratePitch: RateTuning;
+  private readonly rateYaw: RateTuning;
+  private readonly rateRoll: RateTuning;
 
   // --- world hooks --------------------------------------------------------
   private parentBody: ParentBody = NO_PARENT;
@@ -490,6 +505,9 @@ export class FlightModel {
   private readonly sAxis = new Vector3();
   private readonly sInvQ = new Quaternion();
   private readonly sDeltaQ = new Quaternion();
+  // [v3-T2] FA actuator output, body axes (x fwd, y right, z up), km/s².
+  private readonly assistAct = new Vector3();
+  private readonly sVp = new Vector3();
 
   constructor(config: Partial<ShipConfig> = {}) {
     this.config = {
@@ -506,6 +524,10 @@ export class FlightModel {
     this.alphaPitch = (c.rcsTorque.pitch / c.inertia.pitch) * M_TO_KM;
     this.alphaYaw = (c.rcsTorque.yaw / c.inertia.yaw) * M_TO_KM;
     this.alphaRoll = (c.rcsTorque.roll / c.inertia.roll) * M_TO_KM;
+    // [v3-T2] rate-command tuning per axis, spin-up α = this hull's RCS α.
+    this.ratePitch = rateTuning('pitch', this.alphaPitch);
+    this.rateYaw = rateTuning('yaw', this.alphaYaw);
+    this.rateRoll = rateTuning('roll', this.alphaRoll);
   }
 
   // -------------------------------------------------------------------------
@@ -565,6 +587,7 @@ export class FlightModel {
     this._fa = on;
     if (!on) {
       this._assistState = 'off';
+      this.assistAct.set(0, 0, 0); // [v3-T2]
       this._assistTarget = 0;
     }
     bus.emit('log', {
@@ -877,9 +900,13 @@ export class FlightModel {
     const limiter = clamp01(1 - Math.pow(Math.min(speed / vmax, 1), c.speedFalloffExponent));
 
     if (active) {
-      this.stepAssist(vmax, boostMul, limiter);
+      this.stepAssist(vmax, boostMul, limiter, h);
     } else {
       if (this._fa) this._assistTarget = 0;
+      // [v3-T2] The detent cuts the drive at once: no actuator tail (D39).
+      // [seam:T4 formation] "ref set => the detent holds towards ref" belongs
+      // in the assist-state decision above, not here.
+      this.assistAct.set(0, 0, 0);
 
       const main = this._throttle * this.mainAccel * boostMul * limiter;
       this.sAcc.addScaledVector(this.forward, main);
@@ -940,37 +967,95 @@ export class FlightModel {
    * and the drive, and a controller wrapped round a 0.7 s lag overshoots.
    * The computer throttles the drive directly, and the readout says so.
    */
-  private stepAssist(vmax: number, boostMul: number, limiter: number): void {
+  // [v3-T2] BEGIN assist (T2 owns stepAssist; T4's formation seam is marked)
+  private stepAssist(vmax: number, boostMul: number, limiter: number, h: number): void {
     const cmd = this.command;
     const v = this.velocity;
+    const act = this.assistAct;
 
     const vset = this._assistState === 'hold' ? assistTargetSpeed(cmd.throttle, vmax) : 0;
     this._assistTarget = vset;
 
-    // a_des = (nose·vset − v)/τ − g, in sTmp.
-    const d = this.sTmp.copy(this.forward).multiplyScalar(vset).sub(v);
-    d.multiplyScalar(1 / ASSIST_TAU);
-    if (!this._grounded) d.sub(this.sGrav);
+    // Velocity the computer flies to: nose·vset in a hold, rest in a stop.
+    // [seam:T4 formation] the reference velocity is added HERE and only here
+    // (target = ref + nose·vset); the overspeed cut below then measures
+    // |v_p − ref| instead of |v_p|.
+    const target = this.sTmp2.copy(this.forward).multiplyScalar(vset);
 
-    const f = d.dot(this.forward);
+    // Lead-compensated velocity v_p = v + τa·(a_out + g): where v settles if
+    // the actuator stopped changing now. For a first-order actuator
+    // d/dt v_p = demand, so the lag cannot make the loop overshoot.
+    const vp = this.sVp.copy(v);
+    vp.addScaledVector(this.forward, act.x * ASSIST_ACTUATOR_TAU);
+    vp.addScaledVector(this.right, act.y * ASSIST_ACTUATOR_TAU);
+    vp.addScaledVector(this.up, act.z * ASSIST_ACTUATOR_TAU);
+    if (!this._grounded) vp.addScaledVector(this.sGrav, ASSIST_ACTUATOR_TAU);
+
+    // Error in body axes.
+    const e = this.sTmp.copy(target).sub(vp);
+    const ef = e.dot(this.forward);
+    const er = e.dot(this.right);
+    const eu = e.dot(this.up);
+
     const mainCap = this.mainAccel * boostMul;
-    const main = f > 0 ? Math.min(f, mainCap * limiter) : 0;
+    const rcs = this.rcsAccel;
+    let f: number;
+    let r: number;
+    let u: number;
+    if (this._assistState === 'stop') {
+      // Rounded-√ stop per axis: full authority, then a jerk-limited taper.
+      f = ef >= 0 ? stopDecel(ef, mainCap * limiter) : -stopDecel(-ef, this.brakeAccel);
+      r = Math.sign(er) * stopDecel(Math.abs(er), rcs);
+      u = Math.sign(eu) * stopDecel(Math.abs(eu), rcs);
+    } else {
+      f = ef / ASSIST_TAU;
+      r = er / ASSIST_TAU;
+      u = eu / ASSIST_TAU;
+    }
+    // Gravity is cancelled in the demand, which is what makes 'stop' a hover
+    // and 'hold' a straight line near a body. Not on the ground, where the
+    // gear already carries the weight and cancelling it would float the ship off.
+    if (!this._grounded) {
+      f -= this.sGrav.dot(this.forward);
+      r -= this.sGrav.dot(this.right);
+      u -= this.sGrav.dot(this.up);
+    }
+
+    let main = f > 0 ? Math.min(f, mainCap * limiter) : 0;
     const retro = f < 0 ? Math.min(-f, this.brakeAccel) : 0;
+    // Overspeed: no main drive while the settled speed is past 1.02·v_set
+    // (audit: +20 % after a 55° turn — main built speed along the new nose
+    // before RCS had killed the old velocity).
+    // Judged on the speed now AND on where the main drive's lagging output
+    // will still carry it (v + τa·a_main along the nose): either past the cut
+    // is too fast, so the actuator tail cannot push |v| over it.
+    if (vset > 0) {
+      const tail = this.sTmp.copy(v).addScaledVector(this.forward, Math.max(0, act.x) * ASSIST_ACTUATOR_TAU);
+      if (Math.max(v.length(), tail.length()) > OVERSPEED_CUT * vset) main = 0;
+    }
 
     // The pilot's strafe wins on its own axis: the computer must not fight
     // the stick, or strafing under FA would be impossible.
-    const rcs = this.rcsAccel;
-    const rx = cmd.strafeX !== 0 ? cmd.strafeX * rcs : clampAbs(d.dot(this.right), rcs);
-    const uy = cmd.strafeY !== 0 ? cmd.strafeY * rcs : clampAbs(d.dot(this.up), rcs);
+    const rx = cmd.strafeX !== 0 ? cmd.strafeX * rcs : clampAbs(r, rcs);
+    const uy = cmd.strafeY !== 0 ? cmd.strafeY * rcs : clampAbs(u, rcs);
 
-    this.sAcc.addScaledVector(this.forward, main - retro);
-    this.sAcc.addScaledVector(this.right, rx);
-    this.sAcc.addScaledVector(this.up, uy);
+    // Actuator: first-order lag with a slew bound, per body axis. The
+    // pilot's own strafe is direct, as in FA-OFF — the lag models the
+    // computer, not the hand — and leaves the actuator where the hand put it,
+    // so the hand-back is continuous.
+    act.x = actuatorStep(act.x, main - retro, h, Math.max(mainCap, this.brakeAccel));
+    act.y = cmd.strafeX !== 0 ? rx : actuatorStep(act.y, rx, h, rcs);
+    act.z = cmd.strafeY !== 0 ? uy : actuatorStep(act.z, uy, h, rcs);
+
+    this.sAcc.addScaledVector(this.forward, act.x);
+    this.sAcc.addScaledVector(this.right, act.y);
+    this.sAcc.addScaledVector(this.up, act.z);
 
     // The readout is what the main drive is actually doing, not the lever:
     // holding a speed in vacuum reads idle, which is the truth.
-    this._throttle = mainCap > 0 ? main / mainCap : 0;
+    this._throttle = mainCap > 0 ? Math.max(0, act.x) / mainCap : 0;
   }
+  // [v3-T2] END assist
 
   /**
    * One substep under the cruise drive.
@@ -1019,17 +1104,23 @@ export class FlightModel {
 
   // -------------------------------------------------------------------------
 
+  // [v3-T2] BEGIN rotation (T2 owns this function)
   private stepRotation(h: number, speed: number): void {
     const c = this.config;
     const w = this.angularVelocity;
+    const hold = this._attitudeHold;
 
-    // Pilot torque, body axes. See `yawAxisSign` / `rollAxisSign` for why the
-    // last two are negated by default.
-    this.sTorque.set(
-      this.command.pitch * this.alphaPitch,
-      this.command.yaw * this.alphaYaw * c.yawAxisSign,
-      this.command.roll * this.alphaRoll * c.rollAxisSign,
-    );
+    // Pilot torque, body axes — only with attitude hold off. With it on the
+    // stick is a rate demand flown by `rateCommand` below. See `yawAxisSign` /
+    // `rollAxisSign` for why the last two are negated by default.
+    if (hold) this.sTorque.set(0, 0, 0);
+    else {
+      this.sTorque.set(
+        this.command.pitch * this.alphaPitch,
+        this.command.yaw * this.alphaYaw * c.yawAxisSign,
+        this.command.roll * this.alphaRoll * c.rollAxisSign,
+      );
+    }
 
     if (this.density > 0 && speed > 1e-9) {
       // Weathercock: a body with fins wants its nose down the relative wind.
@@ -1058,12 +1149,15 @@ export class FlightModel {
 
     w.addScaledVector(this.sTorque, h);
 
-    if (this._attitudeHold) {
-      // Exponential decay towards zero — not a rate controller. Steady state
-      // under a held stick is alpha·tau, and letting go bleeds off in ~1 s.
-      // Landing gear locked on the ground stiffens it considerably.
-      const tau = this._grounded ? c.assistDampTime * 0.25 : c.assistDampTime;
-      w.multiplyScalar(Math.exp(-h / tau));
+    if (hold) {
+      // Rate command: the disturbances above are integrated first and then
+      // flown out like any other rate error. Landing gear locked on the ground
+      // stiffens the loop (τ × 0.25), as the v2 damping did.
+      const k = this._grounded ? 0.25 : 1;
+      const cmd = this.command;
+      w.x = rateCommand(w.x, clampAbs(cmd.pitch, 1) * MAX_RATE.pitch, h, this.ratePitch, k);
+      w.y = rateCommand(w.y, clampAbs(cmd.yaw, 1) * MAX_RATE.yaw * c.yawAxisSign, h, this.rateYaw, k);
+      w.z = rateCommand(w.z, clampAbs(cmd.roll, 1) * MAX_RATE.roll * c.rollAxisSign, h, this.rateRoll, k);
     }
 
     // Exponential map: exact for a constant ω over the substep, and it keeps
@@ -1076,6 +1170,7 @@ export class FlightModel {
       this.orientation.multiply(this.sDeltaQ);
     }
   }
+  // [v3-T2] END rotation
 
   // -------------------------------------------------------------------------
 
