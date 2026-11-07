@@ -68,14 +68,22 @@ export function dustReferenceVelocity(
   return out.copy(h).multiplyScalar((vc * w) / hs);
 }
 
-/** Ship velocity relative to the dust frame, km/s. Writes and returns `out`. */
+/**
+ * Ship velocity relative to the dust frame, km/s. Writes and returns `out`.
+ *
+ * `grounded`: a landed ship is held at zero frame velocity and turned with
+ * its world kinematically (FlightModel.carryWithSurface), so it sits still in
+ * the surface frame whatever its velocity vector says — and so does the dust.
+ */
 export function dustRelativeVelocity(
   r: Vector3,
   v: Vector3,
   mu: number | null,
   spin: Vector3 | null,
   out: Vector3,
+  grounded = false,
 ): Vector3 {
+  if (grounded) return out.set(0, 0, 0);
   dustReferenceVelocity(r, v, mu, spin, out);
   if (!finite3(v)) return out.set(0, 0, 0);
   // No frame at all (no parent): nothing to stream against.

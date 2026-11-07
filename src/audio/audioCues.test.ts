@@ -116,6 +116,13 @@ describe('vesselHum / loudestHull: a passing ship is heard', () => {
     expect(vesselHum(1, 0.2)).toBeGreaterThan(0.4);
   });
 
+  // review-v3b (mutation AU4): the size weighting must not carry a capital
+  // ship's hum out to the cutoff — the hard fade starts at 20 km.
+  it('Given a capital hull (2 km) at 55 km, Then the hard fade has it nearly silent (< 0.1), not cut off at full voice at 60 km', () => {
+    expect(vesselHum(55, 2)).toBeLessThan(0.1);
+    expect(vesselHum(20, 2)).toBeGreaterThan(0.3);
+  });
+
   it('Given distance growing, Then the hum fades monotonically to silence well before 100 km', () => {
     let prev = 2;
     for (const d of [0.3, 1, 2, 5, 10, 30]) {

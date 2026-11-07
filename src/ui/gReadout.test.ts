@@ -30,6 +30,12 @@ describe('gReadout', () => {
     expect(gReadout(9.96).text).toBe('10 g');
   });
 
+  // review-v3b (mutation GR2): one decimal right up to the rounding edge.
+  it('Given 9.7 g, Then "9.7 g" — whole numbers only once the decimal would read 10.0', () => {
+    expect(gReadout(9.7).text).toBe('9.7 g');
+    expect(gReadout(9.94).text).toBe('9.9 g');
+  });
+
   it('Given the high threshold, Then just below it is normal and at it is high', () => {
     expect(gReadout(G_HIGH - 0.01).tone).toBe('normal');
     expect(gReadout(G_HIGH).tone).toBe('high');

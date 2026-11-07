@@ -114,6 +114,16 @@ export function altitudeContext(i: AltitudeInput, frameName: string): AltitudeCo
 }
 
 /**
+ * V/S and time-to-impact are shown only with a parent to measure against and
+ * while the cruise drive is idle (review-v3b): under cruise "vertical" speed
+ * is the drive's 10^3-10^5 km/s along whatever the nose points at, and the
+ * impact countdown runs towards a world the drive drops out in front of.
+ */
+export function verticalShown(hasParent: boolean, cruisePhase: 'idle' | 'spooling' | 'cruise' | 'dropping'): boolean {
+  return hasParent && cruisePhase === 'idle';
+}
+
+/**
  * The title names where the ship IS — its parent — not whichever renderer was
  * streamed in last (that was the moon, every time the moon was acquired after
  * the planet).

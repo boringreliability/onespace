@@ -66,5 +66,19 @@ describe('seeInFlightSearch: the Yard button’s URL', () => {
     expect(q.has('dev')).toBe(true);
     expect(q.get('mode')).toBe('flight');
     expect(q.get('ship')).toBe('5a17c0de');
+    // review-v3b (mutation RT4): the bare flag stays bare, as the user typed it.
+    expect(seeInFlightSearch('?dev', ship)).toMatch(/(^\?|&)dev(&|$)/);
+    expect(seeInFlightSearch('?dev', ship)).not.toContain('dev=');
+  });
+
+  // review-v3b (mutation RT3): the previous selection's route keys must not
+  // leak into the new one — a plain-seed hull would otherwise inherit the
+  // last hull's faction/role/size and spawn as a different ship.
+  it('Given the URL still naming the previous hull, When a bare-seed hull is sent, Then none of the previous route keys survive', () => {
+    const q = new URLSearchParams(seeInFlightSearch('?mode=yard&ship=2&faction=kessler&role=freighter&size=large&gen=0', { seed: 7 }));
+    expect(q.has('faction')).toBe(false);
+    expect(q.has('role')).toBe(false);
+    expect(q.has('size')).toBe(false);
+    expect(companionShip(parseRoute(`?${q.toString()}`))).toEqual({ seed: 7 });
   });
 });

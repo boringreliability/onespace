@@ -173,3 +173,11 @@ describe('tickLabel', () => {
     expect(tickLabel(0, 1)).toBe('0');
   });
 });
+
+// review-v3b (mutation ST2): the crowd fade is what keeps the knee legible.
+describe('tapeTicks: crowded ticks fade out', () => {
+  it('Given the tape at rest (0 m/s), Then no two drawn ticks sit closer than 10 px — the sub-knee 1-2-5 ticks that crowd onto zero are faded away', () => {
+    const offs = [...ticksAt(0).values()].map((t) => t.offsetPx).sort((a, b) => a - b);
+    for (let i = 1; i < offs.length; i++) expect(offs[i]! - offs[i - 1]!).toBeGreaterThanOrEqual(10);
+  });
+});

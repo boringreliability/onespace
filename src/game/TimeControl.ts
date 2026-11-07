@@ -25,7 +25,8 @@ import { bus } from '@/core/EventBus';
 import { shotOwnsScene } from '@/game/Shots';
 import type { Universe } from '@/game/Universe';
 import type { Hud } from '@/ui/Hud';
-import { orbitApsides, type Apsides } from '@/ship/autopilot';
+import { orbitApsides, pilotIntervened, type Apsides } from '@/ship/autopilot';
+import type { InputAxes } from '@/core/Input';
 import {
   compressionBlock,
   pilotTouching,
@@ -83,6 +84,8 @@ export class TimeControl implements GameModule {
     soiRadiusKm: 0,
   };
   private readonly offs: Array<() => void> = [];
+  /** review-v3b: last frame's axes, so a resting stick is told from a moving one. */
+  private readonly prevAxes: InputAxes = { pitch: 0, yaw: 0, roll: 0, throttle: 0, strafeX: 0, strafeY: 0, strafeZ: 0 };
 
   constructor(opts: TimeControlOptions) {
     this.opts = opts;
@@ -122,6 +125,22 @@ export class TimeControl implements GameModule {
       input.pressed('cruise') ||
       input.pressed('warp');
 
+    // review-v3b: the autopilot's own notion of a hand (pilotIntervened): the
+    // v3 mouse stick HOLDS a deflection (D4), so a stick resting off centre
+    // is not a touch; only one that grows is. pilotTouching read the resting
+    // deflection as hands-on and the autopilot was never compressed.
+    const moved =
+      pilotIntervened(input.axes, this.prevAxes, {
+        throttleKeys: input.isDown('KeyW') || input.isDown('KeyS'),
+        brake: input.held('brake'),
+        boost: input.held('boost'),
+        zeroThrottle: input.pressed('zeroThrottle'),
+      }) ||
+      input.pressed('land') ||
+      input.pressed('cruise') ||
+      input.pressed('warp');
+    Object.assign(this.prevAxes, input.axes);
+
     // [v3-t3] the autopilot's rate
     const ap = this.opts.autopilot;
     if (ap.active) {
@@ -129,10 +148,10 @@ export class TimeControl implements GameModule {
         altKm: u.flight.altitude,
         rho: u.flight.atmosphericDensity,
         phase: ap.phase ?? 'descent',
-        hands: touching,
+        hands: moved,
       });
       if (want !== this.rate) {
-        this.set(want, want === 1 && touching ? 'CONTROLS' : null, want > 1 ? 'AUTOPILOT' : null);
+        this.set(want, want === 1 && moved ? 'CONTROLS' : null, want > 1 ? 'AUTOPILOT' : null);
       }
       this.autoRate = true;
       if (input.pressed('timeFaster') || input.pressed('timeSlower')) this.refuse(BLOCK_TEXT.autopilot);

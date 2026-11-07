@@ -244,6 +244,35 @@ describe('the insertion is flown, not cut', () => {
     expect(t.handoverStep).toBeLessThan(2 * DEG);
   });
 
+  // review-v3b (mutation survivors): the two properties D16 measured — the
+  // orbit plane is fixed once (re-deriving it from a velocity the turn itself
+  // moves made the target chase the nose), and the handover writes the very
+  // tangent the drop flew to (0.00°), not the ecliptic-blended one.
+  it('Given a dead-radial arrival (90° to turn), When the drive drops, Then the turn finishes inside the bleed: the handover needs at most 0.5 s of the bounded align hold, not all of it', () => {
+    const r = build(new Vector3(3.5 * R, 0, 0), new Vector3(-1, 0, 0));
+    r.press.add('cruise');
+    r.step(CRUISE_DEFAULTS.spoolTime + 0.2);
+    const t = traceArrival(r, 0.5);
+    expect(t.inserted).toBe(true);
+    expect(t.dropFrames * r.H).toBeLessThanOrEqual(CRUISE_DEFAULTS.dropTime + 0.5);
+  });
+
+  it('Given a locked-target arrival, When cruise lets go, Then the handover is the remainder of the flown turn only (< 0.5°), not a re-pick of the tangent', () => {
+    const r = lockedArrival(1 / 60);
+    const t = traceArrival(r, 0.2);
+    expect(t.inserted).toBe(true);
+    expect(t.handoverStep).toBeLessThan(0.5 * DEG);
+  });
+
+  it('Given a polar arrival (the orbit plane far from the ecliptic), When cruise lets go, Then the handover is still < 0.5° — the ecliptic blend must not re-pick the tangent (~3° here)', () => {
+    const r = build(new Vector3(3.5 * R, 0, 0), new Vector3(-1, 0.35, 0).normalize());
+    r.press.add('cruise');
+    r.step(CRUISE_DEFAULTS.spoolTime + 0.2);
+    const t = traceArrival(r, 0.2);
+    expect(t.inserted).toBe(true);
+    expect(t.handoverStep).toBeLessThan(0.5 * DEG);
+  });
+
   it('Given the handover, Then the ship is still left in a circular orbit (e < 0.01) — flying the turn costs the insertion nothing', () => {
     const r = lockedArrival(1 / 60);
     traceArrival(r, 0.1);

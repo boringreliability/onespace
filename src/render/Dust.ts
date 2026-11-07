@@ -240,7 +240,7 @@ export class Dust implements GameModule {
       this.rShip.copy(flight.position);
       if (inPlanetShadow(this.rShip, this.toStar, parent.spec.radius)) lit = 0;
     }
-    dustRelativeVelocity(flight.position, flight.velocity, parent ? parent.frame.mu : null, spin, this.rel);
+    dustRelativeVelocity(flight.position, flight.velocity, parent ? parent.frame.mu : null, spin, this.rel, flight.grounded);
     // Simulated time: under time compression the field moves as the ship does.
     const simDt = this.universe.simulatedSeconds > 0 ? this.universe.simulatedSeconds : 0;
     this.drift.advance(this.rel, simDt);

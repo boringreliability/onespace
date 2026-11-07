@@ -496,6 +496,24 @@ describe('v3: the autopilot is stepped per sim slice', () => {
     expect(h.logs.filter((l) => l === 'AUTOPILOT OFF — LANDED').length).toBe(1);
   });
 
+  // review-v3b: Universe re-parents the ship AFTER each slice (updateShipParent),
+  // but AutoPilot.update — which ends the leg on an SOI change — runs once per
+  // frame. At 10× the remaining slices of that frame were flown with the old
+  // world's radius and μ against a state vector already in the new frame.
+  it('Given an engaged leg at 10×, When a slice carries the ship across an SOI boundary, Then the very next slice ends the leg instead of flying the new frame with the old world', () => {
+    const h = harness();
+    h.input.press('land');
+    h.tick(30);
+    expect(h.ap.active).toBe(true);
+    // Universe's slice loop: the parent changed after the previous slice.
+    h.world.shipParent = { spec: { name: 'Fyss I a', radius: 50, atmosphere: null }, frame: { mu: 5 } };
+    h.ap.sliceStep(1 / 60);
+    expect(h.ap.active).toBe(false);
+    expect(h.logs).toContain('AUTOPILOT DISENGAGED');
+    // Handed back clean: the computer's lever is not left burning in the new frame.
+    expect(h.fm.command.throttle).toBe(0);
+  });
+
   it('Given an engaged leg, Then its phase is readable by TimeControl (phase getter)', () => {
     const h = harness();
     expect(h.ap.phase).toBe('idle');

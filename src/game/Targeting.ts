@@ -34,7 +34,7 @@ import {
   TargetSelection,
   bodyTargetId,
   closingSpeed,
-  etaSeconds,
+  targetEtaSeconds,
   nextTargetId,
   orderByNoseAngle,
   targetRangeKm,
@@ -294,7 +294,7 @@ export class Targeting implements GameModule {
     h.behind = this.screen.behind;
     h.distanceKm = range;
     h.closingKmS = closing;
-    h.etaS = etaSeconds(range, closing);
+    h.etaS = targetEtaSeconds(range, closing, this.universe.flight.cruising);
     this.hud!.setTarget(h);
   }
 

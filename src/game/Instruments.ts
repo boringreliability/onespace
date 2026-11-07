@@ -23,6 +23,7 @@ import {
   projectToScreen,
   velocityMarkers,
   verticalReadout,
+  verticalShown,
   type ScreenPoint,
   type VerticalReadout,
 } from '@/game/flightAids';
@@ -149,13 +150,14 @@ export class Instruments implements GameModule {
     // Time-to-impact only counts against the parent: that is the surface the
     // vertical speed is measured towards.
     const onParent = ac.verticalApplies;
-    if (parent) {
+    if (verticalShown(parent !== null, this.cruise ? this.cruise.drive.phase : 'idle')) {
       verticalReadout(flight.verticalSpeed, onParent ? alt!.altitudeKm : null, flight.grounded, this.vertical);
       p.vsiKmS = this.vertical.vsiKmS;
       p.ttiS = this.vertical.ttiS;
     } else {
       // In the star's frame "vertical" is radial from the star: a true number
-      // that answers no question a pilot is asking.
+      // that answers no question a pilot is asking. Under cruise likewise
+      // (review-v3b): the drive's speed along the nose, not a descent rate.
       p.vsiKmS = null;
       p.ttiS = null;
     }

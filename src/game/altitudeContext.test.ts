@@ -15,7 +15,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { ALT_RANGE_RADII, altitudeContext } from './flightAids';
+import { ALT_RANGE_RADII, altitudeContext, verticalShown } from './flightAids';
 
 describe('altitudeContext', () => {
   it('Given orbit around Fyss with Fyss nearest, Then ALT is Fyss, VEL needs no frame label, there is no proximity line, and V/S applies', () => {
@@ -87,5 +87,23 @@ describe('altitudeContext', () => {
     );
     expect(r.alt).toEqual({ altitudeKm: 0.004, bodyName: 'Fyss' });
     expect(r.proximity).toBeNull();
+  });
+});
+
+// review-v3b (D14 open point, a bug): under cruise V/S read "−104.36 km/s"
+// and IMPACT counted down "0:44" (amber under 30 s) towards a world the drive
+// drops out in front of by itself. Neither answers a question while the drive
+// flies; both return the moment it is idle.
+describe('verticalShown: V/S and impact only when they answer a question', () => {
+  it('Given a parent and the cruise drive idle, Then V/S is shown', () => {
+    expect(verticalShown(true, 'idle')).toBe(true);
+  });
+
+  it('Given the drive spooling, cruising or dropping, Then V/S and impact are hidden', () => {
+    for (const phase of ['spooling', 'cruise', 'dropping'] as const) expect(verticalShown(true, phase)).toBe(false);
+  });
+
+  it('Given no parent (the star frame), Then hidden, as before', () => {
+    expect(verticalShown(false, 'idle')).toBe(false);
   });
 });

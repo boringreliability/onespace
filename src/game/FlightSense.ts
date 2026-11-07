@@ -73,6 +73,9 @@ export class FlightSense implements GameModule {
   }
 
   onModeChange(_from: Mode, to: Mode): void {
+    // review-v3b: the window listener hears K in every mode; a press latched
+    // while the Yard or the title was up must not fire on the next flight frame.
+    this.wantToggle = false;
     if (ACTIVE.includes(to)) return;
     // Leaving flight (the Yard, the title): nothing of this may linger.
     this.release(null);

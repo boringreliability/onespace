@@ -78,6 +78,9 @@ class StubInput {
   held(a: ActionName): boolean {
     return this.heldActions.has(a);
   }
+  isDown(_code: string): boolean {
+    return false;
+  }
   endFrame(): void {
     this.presses.clear();
   }
@@ -160,6 +163,30 @@ describe('TimeControl applies the autopilot rate', () => {
     r.setAlt(100);
     r.tick();
     r.input.axes.pitch = 0.5;
+    r.tick();
+    expect(r.universe.simRate).toBe(1);
+  });
+
+  // review-v3b (T2 × T3 seam): since v3 the mouse stick HOLDS its deflection
+  // (no recentring, D4). A pilot who pressed L with the stick resting off
+  // centre was never compressed: TimeControl read the resting deflection as a
+  // hand on the controls, while the autopilot (pilotIntervened) rightly does
+  // not. Same rule for both: only a deflection that GROWS is a touch.
+  it('Given the mouse stick resting deflected (not moving) when the autopilot flies at 100 km, Then the autopilot still gets its 10× — a resting stick is not a hand', () => {
+    const r = rig();
+    r.input.axes.pitch = 0.3;
+    r.input.axes.yaw = -0.2;
+    r.setAlt(100);
+    r.tick(3);
+    expect(r.universe.simRate).toBe(10);
+  });
+
+  it('Given auto-10× with the stick resting deflected, When the stick moves further out, Then 1× that frame', () => {
+    const r = rig();
+    r.input.axes.pitch = 0.3;
+    r.setAlt(100);
+    r.tick(2);
+    r.input.axes.pitch = 0.45;
     r.tick();
     expect(r.universe.simRate).toBe(1);
   });

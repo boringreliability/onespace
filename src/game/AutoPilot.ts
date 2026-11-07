@@ -171,6 +171,12 @@ export class AutoPilot implements GameModule {
    */
   sliceStep(h: number): void {
     if (!this.core.active) return;
+    // review-v3b: Universe re-parents after each slice; at 10× the rest of
+    // the frame must not be flown with the old world against the new frame.
+    if (this.universe.shipParent !== this.parent) {
+      this.disengage(true);
+      return;
+    }
     const flight = this.universe.flight;
     this.syncWorld();
     const result = this.core.step(flight, this.world, h);

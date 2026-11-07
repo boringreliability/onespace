@@ -67,6 +67,8 @@ describe('mayHoldFormation: only against a real, near, targeted vessel', () => {
   });
   it('Given the vessel beyond the formation range, Then not', () => {
     expect(mayHoldFormation({ ...ok, distanceKm: FORMATION_RANGE_KM + 1 })).toBe(false);
+    // review-v3b (mutation FO3): the range is inclusive — the same 50 km the contact brackets use.
+    expect(mayHoldFormation({ ...ok, distanceKm: FORMATION_RANGE_KM })).toBe(true);
     expect(mayHoldFormation({ ...ok, distanceKm: Number.NaN })).toBe(false);
   });
   it('Given the cruise drive, Then not', () => {

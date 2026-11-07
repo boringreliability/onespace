@@ -91,6 +91,22 @@ describe('dustReferenceVelocity / dustRelativeVelocity: the local circular-orbit
     expect(dustRelativeVelocity(surf, resting, MU, spin, new Vector3()).length()).toBeLessThan(1e-12);
   });
 
+  // review-v3b: FlightModel holds a LANDED ship at zero frame velocity and
+  // turns it with the world kinematically (carryWithSurface) — it does not
+  // carry ω × r in its velocity, as the test above assumes. Landed in air the
+  // reference is ω × r, so the dust streamed past a parked ship at |ω × r|.
+  it('Given a ship LANDED in an atmosphere (FlightModel: velocity 0, carried kinematically), Then the dust is still', () => {
+    const spin = new Vector3(0, 2 * Math.PI / 86400, 0);
+    const surf = new Vector3(6371, 0, 0);
+    const parked = new Vector3(0, 0, 0);
+    expect(dustRelativeVelocity(surf, parked, MU, spin, new Vector3(), true).length()).toBe(0);
+  });
+
+  it('Given a ship landed on an airless world, Then the dust is still too', () => {
+    const surf = new Vector3(6371, 0, 0);
+    expect(dustRelativeVelocity(surf, new Vector3(0, 0, 0), MU, null, new Vector3(), true).length()).toBe(0);
+  });
+
   it('Given no parent to orbit (mu 0 or null), Then the dust is still whatever the ship does (no frame to stream against)', () => {
     const rel = dustRelativeVelocity(r, new Vector3(30, 0, 0), null, null, new Vector3());
     expect(rel.length()).toBe(0);
