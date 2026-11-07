@@ -238,6 +238,104 @@ float os_detailFade(float wavelength, float pixelKm) {
 `;
 
 /**
+ * METRE-SCALE DETAIL — the band the landed frame lives in.
+ *
+ * Everything above stops at 75 m (OS_W4), and could not go further: vLocal is
+ * a float32 position a planet radius from the origin, whose last bit is half a
+ * metre at Earth radii, so noise evaluated on it at metre wavelengths is a
+ * staircase. A ship on the ground, seen from 70 m, therefore stood on a field
+ * with no structure at all between the 220 m mesh quad and the pixel.
+ *
+ * The fix is the usual one for planetary precision: split the position. The
+ * CPU snaps a planet-fixed ANCHOR to a 1 m integer lattice near the eye and
+ * hands over the cell (as integers, offset by 2^30 so GLSL's integer division
+ * never sees a negative) and the anchor's VIEW-space position (small, so
+ * float32 holds it to a fraction of a millimetre). The vertex shader measures
+ * each vertex from the anchor in view space — a difference of two small
+ * numbers — and rotates it into the planet frame. The lattice index is then
+ * exact integer arithmetic and only the fraction is float, so the noise is
+ * planet-fixed, continuous across anchor moves, and sharp at a metre.
+ *
+ * Value noise with an analytic gradient (Quilez): one evaluation per octave
+ * gives the height and its slope, where finite differences would cost four.
+ * Every octave fades out by pixel footprint like the rest of this file, so off
+ * the ground none of it runs.
+ */
+/** METRE_GLSL's lattice cell, km, and the offset that keeps its indices positive. */
+const METRE_CELL = 0.001;
+const METRE_OFFSET = 2 ** 30;
+
+const METRE_GLSL = /* glsl */ `
+#define OS_CELL 0.001
+uniform ivec3 uAnchorCell;
+varying vec3  vRel;
+
+uint os_mHash(ivec3 c, uint seed) {
+  uvec3 v = uvec3(c) * uvec3(1597334673u, 3812015801u, 2798796415u);
+  uint n = (v.x ^ v.y ^ v.z ^ seed) * 1597334673u;
+  n ^= n >> 16u;
+  n *= 2246822519u;
+  n ^= n >> 13u;
+  return n;
+}
+
+float os_mCorner(ivec3 c, uint seed) {
+  return float(os_mHash(c, seed) & 0xffffffu) * (2.0 / 16777215.0) - 1.0;
+}
+
+/**
+ * One octave, wavelength S lattice cells (S metres). Returns (value, gradient
+ * per km). 'drift' is in octave cells and animates the field (the sea).
+ */
+vec4 os_mNoise(int S, uint seed, vec3 drift) {
+  ivec3 a    = uAnchorCell;
+  ivec3 base = a / S;
+  vec3  rem  = vec3(a - base * S);
+  vec3  q    = (rem + vRel * (1.0 / OS_CELL)) / float(S) + drift;
+  vec3  fl   = floor(q);
+  ivec3 i    = base + ivec3(fl);
+  vec3  f    = q - fl;
+
+  vec3 u  = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+  vec3 du = 30.0 * f * f * (f * (f - 2.0) + 1.0);
+
+  float va = os_mCorner(i,                  seed);
+  float vb = os_mCorner(i + ivec3(1, 0, 0), seed);
+  float vc = os_mCorner(i + ivec3(0, 1, 0), seed);
+  float vd = os_mCorner(i + ivec3(1, 1, 0), seed);
+  float ve = os_mCorner(i + ivec3(0, 0, 1), seed);
+  float vf = os_mCorner(i + ivec3(1, 0, 1), seed);
+  float vg = os_mCorner(i + ivec3(0, 1, 1), seed);
+  float vh = os_mCorner(i + ivec3(1, 1, 1), seed);
+
+  float k1 = vb - va;
+  float k2 = vc - va;
+  float k3 = ve - va;
+  float k4 = va - vb - vc + vd;
+  float k5 = va - vc - ve + vg;
+  float k6 = va - vb - ve + vf;
+  float k7 = -va + vb + vc - vd + ve - vf - vg + vh;
+
+  float v = va + k1 * u.x + k2 * u.y + k3 * u.z
+          + k4 * u.x * u.y + k5 * u.y * u.z + k6 * u.z * u.x + k7 * u.x * u.y * u.z;
+  vec3 g = du * vec3(k1 + k4 * u.y + k6 * u.z + k7 * u.y * u.z,
+                     k2 + k5 * u.z + k4 * u.x + k7 * u.z * u.x,
+                     k3 + k6 * u.x + k5 * u.y + k7 * u.x * u.y);
+  return vec4(v, g / (float(S) * OS_CELL));
+}
+
+/**
+ * Footprint of a pixel on the ground, km, widened at grazing incidence: a
+ * pixel looking along the ground covers far more of it in depth than across,
+ * and the isotropic footprint alone lets metre detail alias into crawling
+ * pepper a few tens of metres from a low lens.
+ */
+float os_mFootprint(float pxKm, vec3 up, vec3 V) {
+  return pxKm / max(abs(dot(up, V)), 0.18);
+}
+`;
+
+/**
  * The camera-centred shadow height map (see terrainBake.shadowClipExtents for
  * why a clipmap and not the patch tiles). OS_CLIP_LEVELS square levels sit
  * side by side in one float texture; level l is a gnomonic projection onto the
@@ -377,6 +475,9 @@ attribute vec2 aTexel;
 
 uniform float uRadius;
 uniform vec3  uCamLocal;
+// Planet-fixed anchor for METRE_GLSL, in VIEW space (see there).
+uniform vec3  uAnchorView;
+varying vec3  vRel;
 // RGBA = height km, outward normal. Baked once per patch from the very same
 // os_terrainHeight / os_terrainNormal this shader used to run five times per
 // vertex per frame (docs/v2/PERFORMANCE.md, root cause #1).
@@ -416,6 +517,16 @@ void main() {
   gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
   #include <logdepthbuf_vertex>
 
+  // Offset from the metre anchor, planet axes. Measured in VIEW space, where
+  // both terms are small near the eye: three builds modelViewMatrix in double
+  // on the CPU, so its translation for a nearby patch is metres, not the
+  // thousands of kilometres render space can sit from its own origin between
+  // rebases (measured 7,500 km on a landed moon — float32's half-metre ulp
+  // again). The rotation part of modelViewMatrix is orthonormal, so its
+  // transpose takes the offset back into the planet's frame.
+  vec3 vp = (modelViewMatrix * vec4(p, 1.0)).xyz;
+  vRel = transpose(mat3(modelViewMatrix)) * (vp - uAnchorView);
+
   vec3 local = d * (uRadius + hs);
   vec3 toCam = uCamLocal - local;
   float dist = length(toCam);
@@ -439,6 +550,7 @@ precision highp float;
 #include <onespace_color>
 ${terrain}
 ${DETAIL_GLSL}
+${METRE_GLSL}
 
 uniform float uRadius;
 uniform float uPixelAngle;
@@ -579,6 +691,37 @@ vec3 os_landColor() {
     g /= (4.0 * s);
     vec3 gT = g - N * dot(g, N);
     N = normalize(N - gT * dstr);
+  }
+
+  // --- metre scale (METRE_GLSL) -------------------------------------------
+  // Three octaves at 18, 6 and 2 m: boulders and hummocks, stones, grit. The
+  // ratios are 3 rather than 2 so the bands do not lock into a visible grid.
+  // Slopes ~9 degrees, the same honest-rock ceiling os_microHeight keeps, and
+  // for the same reason. They also mottle the albedo: at this range the
+  // material is what reads, and a uniform albedo is the flat field.
+  float mGrit = 0.0;
+  {
+    float fp = os_mFootprint(pxKm, up, V);
+    vec3 km = vec3(os_detailFade(0.018, fp), os_detailFade(0.006, fp), os_detailFade(0.002, fp));
+    if (km.x > 0.002) {
+      vec4 n0 = os_mNoise(18, 0x9e37u, vec3(0.0));
+      vec4 n1 = km.y > 0.002 ? os_mNoise(6, 0x7f4au, vec3(0.0)) : vec4(0.0);
+      vec4 n2 = km.z > 0.002 ? os_mNoise(2, 0x2c1bu, vec3(0.0)) : vec4(0.0);
+      // Stones: the top of the 2 m field, thresholded, so the finest band is
+      // discrete objects rather than one more soft blur. They stand proud
+      // (their slope is steepened) and are darker than the fines around them.
+      // The stone's own height is the smoothstep, so its slope is the
+      // smoothstep's derivative times the field's: steep at the rim, flat on
+      // top — a lit edge and a shadowed edge, which is what reads as a stone.
+      float sx    = clamp((n2.x - 0.55) / 0.25, 0.0, 1.0);
+      float stone = km.z * sx * sx * (3.0 - 2.0 * sx);
+      float dSt   = km.z * 6.0 * sx * (1.0 - sx) / 0.25;
+      vec3 g = n0.yzw * (km.x * 0.018 * 0.030)
+             + n1.yzw * (km.y * 0.006 * 0.030)
+             + n2.yzw * (km.z * 0.002 * 0.020 + dSt * 0.002 * 0.16);
+      N = normalize(N - (g - N * dot(g, N)) * dstr);
+      mGrit = km.x * n0.x * 0.55 + km.y * n1.x * 0.30 - stone * 0.6;
+    }
   }
 
   // --- palette ------------------------------------------------------------
@@ -752,6 +895,10 @@ vec3 os_landColor() {
   // Sunlight reddens as it grazes: the atmosphere is a long filter at the
   // terminator. This is what stops the day side looking like a flat map.
   vec3 sun = uSunColor * mix(vec3(1.0), uAtmosTint, uAtmos * (1.0 - smoothstep(0.0, 0.30, ndlGeo)));
+
+  // Metre-scale mottling (see above): about +/-30% albedo, the dirt §6 asks
+  // for. The grade's contrast curve compresses anything gentler into grain.
+  alb *= clamp(1.0 + 0.32 * mGrit, 0.45, 1.5);
 
   vec3 col = alb * sun * shade * shadow;
 
@@ -961,6 +1108,11 @@ uniform vec3  uDeep;
 uniform vec3  uEmissive;
 uniform float uSpecular;
 uniform float uWave;
+// Rayleigh colour of this world's sky, normalised to its strongest channel.
+// What a calm sea mirrors overhead is the star's light through THIS air, not
+// a fixed Earth blue: under a K star the old constant put a cold blue sea
+// under an amber sky.
+uniform vec3  uSkyTint;
 varying float vDepth;
 
 /** Two drifting swell trains plus chop. Returns a height in kilometres. */
@@ -998,6 +1150,24 @@ vec4 os_seaColor(float depth) {
     N = normalize(N - (g - d * dot(g, d)));
   }
 
+  // Metre ripples (METRE_GLSL). The swell above stops at 220 m; from a lens
+  // ten metres over the water that left a mirror-smooth sheet, and a smooth
+  // sheet at grazing incidence is one flat reflected colour. Two drifting
+  // octaves at 12 and 3 m break the reflection into the cat's-paw texture
+  // that tells the eye it is looking at water. Scaled with the sea state.
+  {
+    float fp = os_mFootprint(pxKm, d, V);
+    vec2 km = vec2(os_detailFade(0.012, fp), os_detailFade(0.003, fp));
+    if (km.x > 0.002) {
+      float t  = uTime;
+      float kw = clamp(uWave / 0.0016, 0.3, 2.0);
+      vec4 r0 = os_mNoise(12, 0x51edu, vec3(t * 0.11, t * 0.021, t * 0.07));
+      vec4 r1 = km.y > 0.002 ? os_mNoise(3, 0x1b87u, vec3(-t * 0.31, t * 0.047, t * 0.23)) : vec4(0.0);
+      vec3 g = r0.yzw * (km.x * 0.012 * 0.020 * kw) + r1.yzw * (km.y * 0.003 * 0.022 * kw);
+      N = normalize(N - (g - d * dot(g, d)));
+    }
+  }
+
   float ndlGeo = dot(d, uSunDir);
   // Must match surfaceFragmentShader exactly, or the sea's terminator stays a
   // grey dissolve while the land's tightens and the two disagree along every
@@ -1019,11 +1189,19 @@ vec4 os_seaColor(float depth) {
 
   // What it mirrors is the sky, and the sky is not one grey. Cold overhead,
   // warm towards the star — without this the sea reads as sheet metal.
+  //
+  // Built from the star's own colour: dim and Rayleigh-tinted overhead, the
+  // star's colour itself towards the horizon (where the air is optically
+  // thick and every channel saturates), brighter towards the star. Gated on
+  // the geometric day, not on 'shade': a ripple facing away from the star
+  // still mirrors a lit sky. No air, no sky — an airless sea mirrors black.
   vec3  refl = reflect(-V, N);
   float rs   = clamp(dot(refl, uSunDir), 0.0, 1.0);
-  vec3  sky  = mix(vec3(0.045, 0.085, 0.185), uAtmosTint * 1.15, pow(rs, 3.0));
-  sky = mix(sky * 0.35, sky, uAtmos);
-  col += sky * fres * uSpecular * shade * 1.15;
+  float rUp  = clamp(dot(refl, d), 0.0, 1.0);
+  vec3  sky  = mix(uSunColor * 0.12, uSunColor * uSkyTint * 0.05, sqrt(rUp));
+  sky += uSunColor * uAtmosTint * 0.45 * pow(rs, 6.0);
+  sky *= mix(0.06, 1.0, uAtmos) * smoothstep(-0.10, 0.22, ndlGeo);
+  col += sky * fres * uSpecular * 1.15;
 
   // Volume scattering. Water is not a black mirror: most of what an ocean
   // sends back to orbit is light that went in, bounced around and came out
@@ -1677,6 +1855,10 @@ export class PlanetRenderer {
     // Zero marks a level as not yet baked; the shader skips it.
     u.uClipH = { value: new Array<number>(Math.max(1, this.clipLevels)).fill(0) };
     u.uCamLocal = { value: new Vector3(0, 0, this.radius * 3) };
+    // METRE_GLSL's anchor: integer lattice cell (1 m, offset by 2^30), set in
+    // update(), and its view-space position, set per draw (onBeforeRender).
+    u.uAnchorCell = { value: new Vector3(METRE_OFFSET, METRE_OFFSET, METRE_OFFSET) };
+    u.uAnchorView = { value: new Vector3() };
     u.uPixelAngle = { value: 1 / 900 };
     u.uTime = { value: 0 };
     u.uSunDir = { value: new Vector3(1, 0, 0) };
@@ -1730,6 +1912,14 @@ export class PlanetRenderer {
       // tone-maps itself clamps to 1.0 and its highlights never reach bloom.
       toneMapped: false,
     });
+    // METRE_GLSL's anchor in view space, for whichever camera is drawing:
+    // planet frame -> render (root.matrixWorld) -> view, all in double. Runs
+    // before three uploads this draw's uniforms. Matrices are final by now,
+    // which they are not when update() runs (the camera moves after us).
+    const anchorView = this.uniforms.uAnchorView!.value as Vector3;
+    this.surfaceMat.onBeforeRender = (_r, _s, camera) => {
+      anchorView.copy(this.anchorLocal).applyMatrix4(this.root.matrixWorld).applyMatrix4(camera.matrixWorldInverse);
+    };
 
     // One index buffer for every patch: the grid topology is identical, only
     // the vertex positions differ. Saves ~50 kB of upload per patch.
@@ -1820,6 +2010,9 @@ export class PlanetRenderer {
     u.uEmissive = { value: ocean.emissive ? toColor(ocean.emissive) : new Color(0, 0, 0) };
     u.uSpecular = { value: ocean.specular };
     u.uWave = { value: Math.max(1e-5, ocean.waveHeight) };
+    const ray = this.spec.atmosphere?.rayleigh ?? [0.3, 0.5, 1];
+    const rm = Math.max(ray[0], ray[1], ray[2], 1e-6);
+    u.uSkyTint = { value: new Color(ray[0] / rm, ray[1] / rm, ray[2] / rm) };
   }
 
   /**
@@ -2263,6 +2456,24 @@ export class PlanetRenderer {
     }
   }
 
+  /**
+   * Snap METRE_GLSL's anchor to the 1 m lattice cell under the eye. Its view
+   * position is filled in per draw (see the surface material's
+   * onBeforeRender), because the camera has not been placed yet when the
+   * planet updates. Doubles throughout: this is the one place the precision
+   * the shader cannot have is spent.
+   */
+  private updateMetreAnchor(view: ViewState): void {
+    const c = view.cameraLocal;
+    const ix = Math.round(c.x / METRE_CELL);
+    const iy = Math.round(c.y / METRE_CELL);
+    const iz = Math.round(c.z / METRE_CELL);
+    (this.uniforms.uAnchorCell!.value as Vector3).set(ix + METRE_OFFSET, iy + METRE_OFFSET, iz + METRE_OFFSET);
+    this.anchorLocal.set(ix * METRE_CELL, iy * METRE_CELL, iz * METRE_CELL);
+  }
+
+  private readonly anchorLocal = new Vector3();
+
   // -------------------------------------------------------------------------
   // LOD selection
   // -------------------------------------------------------------------------
@@ -2387,6 +2598,8 @@ export class PlanetRenderer {
     (u.uCamLocal!.value as Vector3).copy(view.cameraLocal);
     (u.uSunDir!.value as Vector3).copy(view.sunDirection);
     (u.uSunColor!.value as Color).copy(view.sunColor);
+
+    this.updateMetreAnchor(view);
 
     // Radians per pixel: the whole screen-space error metric in one number.
     const pixelAngle = (2 * Math.tan(view.fovY * 0.5)) / Math.max(1, view.viewportHeight);
