@@ -109,6 +109,37 @@ describe('FlightModel.assistReferenceVelocity: the one optional hook', () => {
     expect(fm.assistState).toBe('coast');
   });
 
+  it('Given ref = null, Then the assist is bit-identical to a model that never had the hook touched (T2 seam)', () => {
+    const a = deepSpace();
+    const b = deepSpace();
+    b.assistReferenceVelocity = new Vector3(0.3, 0, 0);
+    b.assistReferenceVelocity = null;
+    for (const fm of [a, b]) {
+      fm.command.throttle = 0.4;
+      fm.command.yaw = 0.3;
+      run(fm, 3);
+      fm.command.yaw = 0;
+      fm.command.brake = true;
+      run(fm, 2);
+      fm.command.brake = false;
+      fm.command.throttle = 0;
+      run(fm, 1);
+    }
+    expect(b.velocity.toArray()).toEqual(a.velocity.toArray());
+    expect(b.position.toArray()).toEqual(a.position.toArray());
+  });
+
+  it('Given a reference and lever speed, Then the hold settles at ref + nose·vset (closing speed is relative to the target)', () => {
+    const fm = deepSpace();
+    const ref = new Vector3(0.02, 0, 0);
+    fm.assistReferenceVelocity = ref;
+    fm.command.throttle = 0.05;
+    run(fm, 40);
+    const rel = fm.velocity.clone().sub(ref);
+    expect(rel.x).toBeCloseTo(0, 3);
+    expect(-rel.z).toBeCloseTo(fm.assistTargetKmS, 3);
+  });
+
   it('Given FA off, Then the reference is ignored (Newtonian is Newtonian)', () => {
     const fm = deepSpace();
     fm.flightAssist = false;
