@@ -75,6 +75,7 @@ import { Rng } from '@/math/rng';
 import { activeShot, registerShot } from '@/game/Shots';
 import { registerShaderChunks } from '@/shaders/chunks';
 import { motionJumped } from './motionJump';
+import { MAX_MOTION_EXCLUSIONS, motionExclusionBuffer } from './motionExclusion'; // v3 T4
 
 // ---------------------------------------------------------------------------
 // Shared GLSL
@@ -195,6 +196,8 @@ class SceneSpacePass extends Pass {
         /** x: world radius (km), y: bias, z: intensity, w: far fade (km). */
         uAo: { value: new Vector4(0.05, 0.04, 0.9, 60) },
         uTexel: { value: new Vector2(1 / 1920, 1 / 1080) },
+        // v3 T4: render-space spheres left sharp (render/motionExclusion.ts).
+        uExclude: { value: motionExclusionBuffer },
       },
       vertexShader: FS_VERT,
       fragmentShader: /* glsl */ `
@@ -209,6 +212,7 @@ class SceneSpacePass extends Pass {
         uniform vec3 uMotion;
         uniform vec4 uAo;
         uniform vec2 uTexel;
+        uniform vec4 uExclude[${MAX_MOTION_EXCLUSIONS}]; // v3 T4
         varying vec2 vUv;
 
         float viewDist(vec2 uv) {
@@ -250,6 +254,14 @@ class SceneSpacePass extends Pass {
             vec2 vel = (vUv - prevUv) * uMotion.x;
             float near = smoothstep(uMotion.z * 0.5, uMotion.z * 2.0, w);
             vel *= near;
+            // --- v3 T4: per-object exclusion (traffic) ------------------------
+            // A co-orbiting hull moves with the ship, not with the ground the
+            // blur is referenced to; inside its sphere the pixel stays sharp.
+            for (int k = 0; k < ${MAX_MOTION_EXCLUSIONS}; k++) {
+              vec4 ex = uExclude[k];
+              if (ex.w > 0.0) vel *= smoothstep(ex.w * 0.85, ex.w, distance(world.xyz, ex.xyz));
+            }
+            // --- end v3 T4 ----------------------------------------------------
             float len = length(vel);
             if (len > uMotion.y) vel *= uMotion.y / len;
             if (len > 1e-5) {

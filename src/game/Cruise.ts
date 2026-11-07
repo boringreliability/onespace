@@ -22,11 +22,28 @@
  * - **Steering.** With a target locked (`target:changed`), the nose is flown
  *   to the limb of the arrival sphere while spooling and cruising. Any pilot
  *   rotation input passes straight through.
+ *
+ * v3 (T3, PLAN §1 mechanism 3 and §2 A6): the insertion is flown, not cut.
+ * It used to change the velocity's direction by ~30° (90° on a dead-radial
+ * arrival) on one frame and teleport the attitude on the same frame. Now:
+ *
+ * - **During the drop** the nose — and with it the velocity the drive
+ *   carries — is turned onto the insertion tangent at ≤ DROP_SLEW_RAD_S and
+ *   ≤ 3° a frame, scheduled to arrive before the bleed ends. The drive is
+ *   told `aligned` and waits (bounded) if the turn is not done, so the
+ *   handover itself is a < 2° remainder.
+ * - **After an arrival** D53's opening attitude (facing the world) is still
+ *   the end state, reached by a settle at ≤ SETTLE_RATE_RAD_S with a rounded
+ *   start and stop instead of a teleport. The pilot's stick ends it at once.
+ *
+ * Both turns are kinematic: part of the cruise model's one declared cheat
+ * (`cruiseOrbit.ts`), which already bleeds 500c to orbital speed in 0.9 s.
  */
 
 import type { EngineContext, GameModule } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
-import { Quaternion, Vector3 } from 'three';
+import { flightActivity } from '@/core/flightActivity'; // [v3-T1]
+import { Matrix4, Quaternion, Vector3 } from 'three';
 import { openingAttitude } from '@/game/recovery';
 
 /** Sentinel: arrival is armed (the departure body no longer matters). */
@@ -39,7 +56,7 @@ import {
   type CruiseBlock,
   type CruiseInputs,
 } from '@/ship/CruiseDrive';
-import { circularSpeed, insertIntoOrbit } from '@/ship/cruiseOrbit';
+import { circularExitVelocity, circularSpeed, insertIntoOrbit } from '@/ship/cruiseOrbit';
 import { steerToward } from '@/ship/cruiseSteer';
 import type { Universe } from '@/game/Universe';
 import { shotOwnsScene } from '@/game/Shots';
@@ -81,6 +98,22 @@ const LIMB_FRACTION = 0.9;
  */
 const OCCLUDER_HOLD_MARGIN = 1.5;
 
+const DEG = Math.PI / 180;
+/** v3: fastest the drop turns the nose onto the tangent, rad/s. */
+const DROP_SLEW_RAD_S = 90 * DEG;
+/** v3: never more than this per frame, whatever the frame rate (PLAN acceptance). */
+const MAX_TURN_PER_FRAME = 2.9 * DEG; // a hair under the 3° the acceptance allows
+/** v3: the handover waits until velocity and nose are this close to the tangent. */
+const ALIGN_TOL = 0.75 * DEG;
+/** v3: the post-arrival settle's top rate and its angular acceleration. */
+const SETTLE_RATE_RAD_S = 40 * DEG;
+const SETTLE_ACCEL_RAD_S2 = 60 * DEG;
+/** Stick deflection that counts as the pilot taking the attitude back. */
+const STICK_DEADZONE = 0.02;
+
+const NOSE = new Vector3(0, 0, -1);
+const ZERO3 = new Vector3();
+
 export interface CruiseOptions {
   readonly universe: CruiseWorld;
 }
@@ -116,6 +149,18 @@ export class Cruise implements GameModule {
   /** The body the drive was engaged beside, or NOBODY once that no longer matters. */
   private departedFrom: object | null = null;
   private readonly arrivalQuat = new Quaternion();
+  // v3: the flown insertion.
+  private readonly dropQuat = new Quaternion();
+  private readonly sExit = new Vector3();
+  private readonly sUp = new Vector3();
+  private readonly sMat = new Matrix4();
+  private readonly sFwd = new Vector3();
+  /** Post-arrival settle towards `arrivalQuat` is running. */
+  private settling = false;
+  private settleRate = 0;
+  /** The insertion orbit's plane normal, fixed when the drop starts. */
+  private readonly dropNormal = new Vector3();
+  private dropPlaneSet = false;
 
   private readonly arrivalIn: Mutable<CruiseArrival> = {
     clearanceKm: 0,
@@ -163,6 +208,58 @@ export class Cruise implements GameModule {
     this.offs.length = 0;
   }
 
+  /**
+   * v3: the drive is doing something, or the ship is still being turned to
+   * face the world after an arrival. The autopilot's L queue waits on it.
+   */
+  get busy(): boolean {
+    return this.drive.phase !== 'idle' || this.settling;
+  }
+
+  /**
+   * The insertion attitude: nose along the tangent the handover will use,
+   * roof radial-out. False when there is nothing to orbit (no turn to fly).
+   */
+  private insertionAttitude(out: Quaternion): boolean {
+    const flight = this.universe.flight;
+    this.sUp.copy(flight.position).normalize();
+    if (!this.dropPlaneSet) {
+      // The orbit plane is chosen ONCE, at the start of the drop, from the
+      // velocity as it was. Re-deriving it every frame from a velocity that
+      // the turn itself is moving made the target chase the nose (measured:
+      // a 90° turn still circling after 2.5 s).
+      circularExitVelocity(flight, this.sExit);
+      if (this.sExit.lengthSq() === 0) return false;
+      this.dropNormal.crossVectors(this.sUp, this.sExit);
+      if (this.dropNormal.lengthSq() < 1e-24) return false;
+      this.dropNormal.normalize();
+      this.dropPlaneSet = true;
+    }
+    // Prograde in that plane where the ship is now; roof radial-out.
+    this.sFwd.crossVectors(this.dropNormal, this.sUp).normalize();
+    this.sMat.lookAt(ZERO3, this.sFwd, this.sUp);
+    out.setFromRotationMatrix(this.sMat).normalize();
+    return true;
+  }
+
+  /** Turn the hull towards `target` by at most `maxStep` rad; returns the angle left. */
+  private turnToward(target: Quaternion, maxStep: number): number {
+    const flight = this.universe.flight;
+    const q = flight.orientation;
+    const angle = q.angleTo(target);
+    if (angle <= maxStep || angle < 1e-9) q.copy(target);
+    else q.slerp(target, maxStep / angle);
+    q.normalize();
+    // The turn is the drive's; nothing else spins the hull meanwhile.
+    flight.angularVelocity.set(0, 0, 0);
+    return Math.max(0, angle - maxStep);
+  }
+
+  private pilotOnStick(ctx: EngineContext): boolean {
+    const a = ctx.input.axes;
+    return Math.abs(a.pitch) > STICK_DEADZONE || Math.abs(a.yaw) > STICK_DEADZONE || Math.abs(a.roll) > STICK_DEADZONE;
+  }
+
   private target(): Body | null {
     const id = this.targetId;
     if (id === null) return null;
@@ -192,6 +289,8 @@ export class Cruise implements GameModule {
   }
 
   update(dt: number, ctx: EngineContext): void {
+    // [v3-T1] camera FOV breathing + governor hold read this (core/flightActivity.ts).
+    flightActivity.cruise = this.busy; flightActivity.cruiseSpool = this.drive.phase === 'idle' ? 0 : this.drive.progress;
     if (shotOwnsScene()) {
       if (this.wanted) this.cancel();
       return;
@@ -250,6 +349,19 @@ export class Cruise implements GameModule {
     di.nearestRadiusKm = this.nearestRadiusKm();
     di.arrival = arrival;
     di.exitSpeedKmS = circularSpeed(flight.parent?.mu ?? 0, flight.position.length()) || undefined;
+    // v3: during the drop, is the carried velocity (and the nose) on the
+    // insertion tangent yet? The drive waits for it.
+    let haveDropTarget = false;
+    di.aligned = undefined;
+    if (this.drive.phase !== 'dropping') this.dropPlaneSet = false;
+    if (this.drive.phase === 'dropping') {
+      haveDropTarget = this.insertionAttitude(this.dropQuat);
+      if (haveDropTarget) {
+        this.sFwd.copy(NOSE).applyQuaternion(this.dropQuat);
+        const velOff = flight.velocity.lengthSq() > 1e-18 ? flight.velocity.angleTo(this.sFwd) : 0;
+        di.aligned = velOff < ALIGN_TOL && flight.orientation.angleTo(this.dropQuat) < ALIGN_TOL;
+      }
+    }
     this.drive.update(dt, di);
     // A drop is an answer, not a pause: whatever started it, the toggle is
     // released so the drive does not spool up again by itself.
@@ -265,15 +377,18 @@ export class Cruise implements GameModule {
     if (wasEngaged && !this.drive.engaged) {
       // The handover. In orbit if there is anything to orbit, else the
       // legacy sublight exit along the nose.
-      if (insertIntoOrbit(flight)) {
+      // v3: along the tangent the drop has been flying to, when it had one.
+      if (insertIntoOrbit(flight, this.dropPlaneSet ? this.sFwd.crossVectors(this.dropNormal, this.sUp.copy(flight.position).normalize()) : undefined)) {
+        this.dropPlaneSet = false;
         this.heldLever = ctx.input.axes.throttle;
         if (this.drive.dropReason === 'arrival' && toward) {
           // Face the world, as the opening frame does: the insertion kept the
           // approach attitude and the arrival — the game's money shot — was
-          // framed on empty sky (review-p1, ARCHITECTURE §6). The camera rig
-          // is damped, so the swing reads as a turn, not a cut.
+          // framed on empty sky (review-p1, ARCHITECTURE §6). v3: reached by
+          // a settle over the next ~1.5 s, not a teleport on this frame.
           openingAttitude(flight.velocity, flight.position, this.arrivalQuat);
-          flight.teleport(flight.position, flight.velocity, this.arrivalQuat);
+          this.settling = true;
+          this.settleRate = 0;
           bus.emit('log', { text: `ORBIT — ${toward.spec.name.toUpperCase()}`, tone: 'good' });
         }
       } else {
@@ -283,6 +398,40 @@ export class Cruise implements GameModule {
       // The flight model is told the ceiling, not the phase. It has no opinion
       // about why it is allowed to go fast.
       flight.setCruise(this.drive.engaged ? this.drive.capKmS : null);
+    }
+
+    // v3: fly the nose onto the insertion tangent while the drop bleeds.
+    if (this.drive.phase === 'dropping') {
+      if (!haveDropTarget) haveDropTarget = this.insertionAttitude(this.dropQuat);
+      if (haveDropTarget) {
+        const c = this.drive.config;
+        // Time left in the bleed, less two frames so the velocity (which
+        // follows the nose one integration later) is on it too.
+        const left = Math.max(this.drive.progress * c.dropTime - 2 * dt, dt);
+        const angle = flight.orientation.angleTo(this.dropQuat);
+        const scheduled = (angle * dt) / left;
+        // The last degrees ease in (a third of what is left), so the frame the
+        // drive lets go never follows a full-rate step.
+        const step = Math.min(Math.max(scheduled, 0.25 * DROP_SLEW_RAD_S * dt), DROP_SLEW_RAD_S * dt, MAX_TURN_PER_FRAME, 0.35 * angle + 0.1 * DEG);
+        this.turnToward(this.dropQuat, step);
+        flight.command.pitch = 0;
+        flight.command.yaw = 0;
+        flight.command.roll = 0;
+      }
+    }
+
+    // v3: the post-arrival settle to the opening attitude (D53's end state).
+    if (this.settling) {
+      if (this.pilotOnStick(ctx) || this.drive.phase !== 'idle' || flight.cruising) {
+        this.settling = false;
+      } else {
+        const angle = flight.orientation.angleTo(this.arrivalQuat);
+        // Rounded start (accel-limited) and stop (√ of the angle left).
+        const stopRate = Math.sqrt(2 * SETTLE_ACCEL_RAD_S2 * angle);
+        this.settleRate = Math.min(this.settleRate + SETTLE_ACCEL_RAD_S2 * dt, SETTLE_RATE_RAD_S, Math.max(stopRate, 0.5 * DEG));
+        const left = this.turnToward(this.arrivalQuat, Math.min(this.settleRate * dt, MAX_TURN_PER_FRAME));
+        if (left < 0.01 * DEG) this.settling = false;
+      }
     }
 
     // Steering to the locked target, while charging and while carried — not
@@ -359,6 +508,7 @@ export class Cruise implements GameModule {
   private cancel(): void {
     this.wanted = false;
     this.heldLever = null;
+    this.settling = false;
     this.drive.reset();
     this.universe.flight.setCruise(null);
     this.lastPhase = 'idle';

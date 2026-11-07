@@ -16,7 +16,7 @@
  * isolation has broken on contact with integration.
  */
 
-import { Color, Group, Vector3 } from 'three';
+import { Color, Group, Quaternion, Vector3 } from 'three';
 
 import type { EngineContext, GameModule } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
@@ -36,6 +36,18 @@ import { createShipVisual } from '@/render/ships/ShipMesh';
 import type { ShipVisual } from '@/game/Showroom';
 import { shotOwnsScene } from '@/game/Shots';
 import type { Universe, UniverseBody } from '@/game/Universe';
+// v3 T4: legibility, scale through motion, SEE IN FLIGHT.
+import {
+  coOrbitVelocity,
+  contactRangeKm,
+  hullAttitude,
+  hullSway,
+  openingContactOffset,
+  trafficThrottle,
+  type HullSway,
+} from '@/game/trafficMotion';
+import { motionExclusionBuffer, packMotionExclusions, type MotionExclusionSphere } from '@/render/motionExclusion';
+import { loudestHull } from '@/audio/audioCues';
 
 /**
  * How many vessels a system carries. Small on purpose: this is the first
@@ -109,6 +121,21 @@ interface Vessel {
   readonly coOrbit: CoOrbit | null;
   visual: ShipVisual | null;
   readonly view: MutableViewState;
+  // -- v3 T4 ------------------------------------------------------------------
+  /** Per-vessel drive: powered, plume breathing (audit V2: it was throttle 0). */
+  readonly drive: { throttle: number; boost: number; heating: number; rcs: Vector3 };
+  /** Orientation along the orbit, plus the slow sway. World axes. */
+  readonly attitude: Quaternion;
+  /** Parent-relative velocity, km/s (co-orbital vessels only; zero otherwise). */
+  readonly velocity: Vector3;
+  /** Phase for the throttle breathe and the sway, 0..1. */
+  readonly phase01: number;
+  readonly sway: HullSway;
+  /** Render-space exclusion sphere for the ground-referenced blur. */
+  readonly exclusion: { readonly center: Vector3; radiusKm: number };
+  /** SEE IN FLIGHT: this is the companion the player asked for. */
+  readonly companion: boolean;
+  // ---------------------------------------------------------------------------
   distanceKm: number;
   lod: number;
   scan: ScanResult | null;
@@ -127,9 +154,18 @@ export class Traffic implements GameModule {
   private readonly local = new Vector3();
   private readonly sunDir = new Vector3(0, 0, 1);
   private readonly sunColor = new Color(1, 0.96, 0.9);
+  private readonly sunBase = new Color(1, 0.96, 0.9); // v3 T4
   private readonly fill = new Color(0.01, 0.014, 0.022);
-  private readonly drive = { throttle: 0, boost: 0, heating: 0, rcs: new Vector3() };
   private time = 0;
+  // -- v3 T4 ------------------------------------------------------------------
+  private readonly invQ = new Quaternion();
+  private readonly yawQ = new Quaternion();
+  private static readonly Y = new Vector3(0, 1, 0);
+  private readonly xAxis = new Vector3();
+  private companionParams: ShipParams | null = null;
+  private readonly exclusions: MotionExclusionSphere[] = [];
+  private readonly humList: Array<{ distanceKm: number; radiusKm: number }> = [];
+  // ---------------------------------------------------------------------------
 
   constructor(private readonly universe: Universe) {
     this.root.name = 'traffic';
@@ -149,6 +185,9 @@ export class Traffic implements GameModule {
     ctx.scene.add(this.root);
     this.disposers.push(
       bus.on('system:entered', () => {
+        // v3 T4: a companion is spawned beside you in the system you asked
+        // for it in; it does not follow you through a jump.
+        this.companionParams = null;
         this.pendingPopulate = true;
       }),
     );
@@ -178,7 +217,8 @@ export class Traffic implements GameModule {
       const seed = hashSeed(sys.seed, `vessel:${i}`);
       const faction = rng.pick(FACTIONS);
       const role = rng.pick(PARKED_ROLES);
-      const params: ShipParams = {
+      const isCompanion = i === 0 && this.companionParams !== null;
+      const params: ShipParams = isCompanion ? this.companionParams! : {
         seed,
         factionId: faction.id,
         role,
@@ -238,9 +278,18 @@ export class Traffic implements GameModule {
             ? this.playerPhase(anchor) + 40 / Math.max(radius, 1)
             : rng.range(0, Math.PI * 2),
         inclination: i === 0 ? 0 : rng.gaussian(0, 0.4),
-        coOrbit: coOrbital ? this.captureCoOrbit(anchor!, rng.range(1.6, 4.2)) : null,
+        // v3 T4: contact 0 sits inside the opening composition, ~15° above
+        // the nose at 1.5-2.5 km (audit V2: it was just over the top edge).
+        coOrbit: coOrbital ? this.captureCoOrbit(anchor!, contactRangeKm(rng.next())) : null,
         visual: null,
         view: new MutableViewState(),
+        drive: { throttle: 0.2, boost: 0, heating: 0, rcs: new Vector3() },
+        attitude: new Quaternion(),
+        velocity: new Vector3(),
+        phase01: rng.next(),
+        sway: { yawRad: 0, lateralM: 0, rcsYaw: 0, rcs: new Vector3() },
+        exclusion: { center: new Vector3(), radiusKm: 0 },
+        companion: isCompanion,
         distanceKm: Infinity,
         lod: -1,
         scan: null,
@@ -282,11 +331,13 @@ export class Traffic implements GameModule {
     const speed = v.length();
     const tHat = v.clone().divideScalar(speed);
 
+    // v3 T4: placed in the opening composition — `separationKm` along a ray
+    // ~15° above the player's nose — rather than along the track, where the
+    // tipped-down opening frame never saw it. It is still a rigid co-orbit, so
+    // it stays where it was put for as long as both coast.
+    const offset = openingContactOffset(flight.forward, flight.up, separationKm, new Vector3());
     return {
-      // Ahead along the track, and a little higher so the contact reads against
-      // the planet rather than against the same patch of black the player is
-      // already looking at.
-      r0: r.addScaledVector(tHat, separationKm).addScaledVector(rHat, separationKm * 0.35),
+      r0: r.add(offset),
       axis: new Vector3().crossVectors(rHat, tHat).normalize(),
       // Mean motion of a circular orbit through the player's current state. It
       // is a genuine orbit, so a coasting player and this vessel stay together
@@ -323,7 +374,11 @@ export class Traffic implements GameModule {
     shipGen.request(v.params).then(
       (bp) => {
         // Stale if the system changed while it was being built.
-        if (this.vessels.includes(v)) v.blueprint = bp;
+        if (this.vessels.includes(v)) {
+          v.blueprint = bp;
+          // v3 T4: SEE IN FLIGHT names what it put beside you.
+          if (v.companion) bus.emit('log', { text: `ALONGSIDE — ${bp.name.toUpperCase()}`, tone: 'good' });
+        }
       },
       () => {
         // Cancelled (we left) or the generator threw. Either way this vessel
@@ -350,6 +405,7 @@ export class Traffic implements GameModule {
     // supposed to contain one subject. Same rule as Universe and Pilot.
     if (shotOwnsScene() || this.universe.paused) {
       this.root.visible = false;
+      motionExclusionBuffer.fill(0); // v3 T4: nothing to keep sharp
       return;
     }
     this.root.visible = true;
@@ -406,13 +462,35 @@ export class Traffic implements GameModule {
         v.lod = level;
       }
 
-      // Render-space placement through the floating origin.
-      ctx.origin.toRender(v.world, this.tmp);
-      v.visual.object3d.position.copy(this.tmp);
+      // -- v3 T4: oriented along the orbit, swaying slowly, powered ---------
+      const lengthKm = v.blueprint.dimensions.lengthKm;
+      hullSway(this.time, lengthKm, v.phase01, v.sway);
+      this.yawQ.setFromAxisAngle(Traffic.Y, v.sway.yawRad);
+      v.attitude.multiply(this.yawQ);
+      v.drive.throttle = trafficThrottle(this.time, v.phase01);
+      v.drive.rcs.copy(v.sway.rcs);
+      v.visual.object3d.quaternion.copy(v.attitude);
 
-      // The view packet, in the vessel's own local frame.
-      this.local.copy(this.camWorld).sub(v.world);
-      this.sunDir.copy(v.world).multiplyScalar(-1).normalize();
+      // Render-space placement through the floating origin, plus the slow
+      // lateral station-keeping drift (metres, along the hull's own +X).
+      ctx.origin.toRender(v.world, this.tmp);
+      this.xAxis.set(1, 0, 0).applyQuaternion(v.attitude);
+      this.tmp.addScaledVector(this.xAxis, v.sway.lateralM * 1e-3);
+      v.visual.object3d.position.copy(this.tmp);
+      v.exclusion.center.copy(this.tmp);
+      v.exclusion.radiusKm = v.blueprint.dimensions.boundingRadius;
+
+      // The view packet, in the vessel's OWN local frame — now that the hull
+      // is rotated, camera and sun must be carried into its axes too.
+      this.invQ.copy(v.attitude).invert();
+      this.local.copy(this.camWorld).sub(v.world).applyQuaternion(this.invQ);
+      this.sunDir.copy(v.world).multiplyScalar(-1).normalize().applyQuaternion(this.invQ);
+      // The same key light the worlds get (Universe.updateBodies): the star's
+      // luminosity over distance². A flat 1.0 left every hull near-black next
+      // to the planet it orbits once the iris adapted to that planet (v3 T4,
+      // measured: the same hull at 8× read as a grey hull, at 1× as a hole).
+      this.sunColor.copy(this.sunBase).multiplyScalar(this.irradiance(v.world));
+      // ---------------------------------------------------------------------
       v.view.set(
         this.local,
         this.sunDir,
@@ -425,7 +503,7 @@ export class Traffic implements GameModule {
       // Planetshine, so a hull in orbit does not read as a cut-out against its
       // own world. This is the term the showroom could never supply.
       v.visual.setFillLight?.(this.fillFor(v));
-      v.visual.update(dt, ctx, v.view, this.drive);
+      v.visual.update(dt, ctx, v.view, v.drive);
     }
   }
 
@@ -445,6 +523,9 @@ export class Traffic implements GameModule {
       const c = v.coOrbit;
       this.local.copy(c.r0).applyAxisAngle(c.axis, c.rate * (this.time - c.epoch));
       v.world.addVectors(v.anchor.world, this.local);
+      // v3 T4: nose along the orbital velocity, roof radially out.
+      coOrbitVelocity(c.axis, c.rate, this.local, v.velocity);
+      hullAttitude(v.velocity, this.local, v.attitude);
       return;
     }
     if (!v.anchor) {
@@ -453,6 +534,9 @@ export class Traffic implements GameModule {
         Math.sin(v.inclination) * v.orbitRadiusKm * 0.1,
         Math.sin(v.phase) * v.orbitRadiusKm,
       );
+      v.velocity.set(0, 0, 0);
+      this.tmp.set(-Math.sin(v.phase), 0, Math.cos(v.phase));
+      hullAttitude(this.tmp, v.world, v.attitude);
       return;
     }
     // Orbital period from the anchor's mass, so a close parking orbit visibly
@@ -467,6 +551,24 @@ export class Traffic implements GameModule {
       v.anchor.world.y + Math.sin(a) * v.orbitRadiusKm * si,
       v.anchor.world.z + Math.sin(a) * v.orbitRadiusKm * ci,
     );
+    // v3 T4: along the (anchor-relative) orbit; d/da of the placement above.
+    this.tmp.set(-Math.sin(a), Math.cos(a) * si, Math.cos(a) * ci);
+    this.local.copy(v.world).sub(v.anchor.world);
+    hullAttitude(this.tmp, this.local, v.attitude);
+    v.velocity.set(0, 0, 0); // not in the player's frame; formation refuses it
+  }
+
+  /** v3 T4: hand PostFX the hulls its ground-referenced blur must not smear. */
+  lateUpdate(_dt: number, ctx: EngineContext): void {
+    packMotionExclusions(this.motionExclusions(), ctx.camera.position, motionExclusionBuffer);
+  }
+
+  /** v3 T4: inverse-square irradiance from the primary, as the worlds are lit. */
+  private irradiance(world: Vector3): number {
+    const star = this.universe.system?.stars[0];
+    const lum = star && Number.isFinite(star.luminosity) && star.luminosity > 0 ? star.luminosity : 1;
+    const au = world.length() / AU;
+    return lum / Math.max(au * au, 1e-6);
   }
 
   /** Planetshine falls off with distance from the lit body below. */
@@ -528,6 +630,66 @@ export class Traffic implements GameModule {
     if (!v?.blueprint) return null;
     if (!v.scan) v.scan = shipScan(v.blueprint);
     return v.scan;
+  }
+
+  // -------------------------------------------------------------------------
+  // v3 T4 — SEE IN FLIGHT, formation, blur exclusion, proximity hum
+  // -------------------------------------------------------------------------
+
+  /**
+   * Spawn this exact hull as contact 0, co-orbital beside the player, in
+   * frame. `null` returns contact 0 to the system's own traffic. The hull is
+   * generated on the worker like any other; the route pinned its generation.
+   */
+  setCompanion(params: ShipParams | null): void {
+    this.companionParams = params;
+    this.pendingPopulate = true;
+  }
+
+  /** The companion's blueprint id once it has been built, else null. */
+  companionId(): string | null {
+    const v = this.vessels[0];
+    return v?.companion && v.blueprint ? v.blueprint.id : null;
+  }
+
+  /**
+   * Parent-relative velocity of a vessel, km/s — only for a co-orbital
+   * vessel, whose frame IS the player's (its anchor is the ship's parent).
+   */
+  vesselVelocity(id: string, out: Vector3): boolean {
+    for (const v of this.vessels) {
+      if (v.blueprint?.id !== id) continue;
+      if (!v.coOrbit || v.anchor !== this.universe.shipParent) return false;
+      out.copy(v.velocity);
+      return true;
+    }
+    return false;
+  }
+
+  /** Render-space spheres the ground-referenced motion blur must leave sharp. */
+  motionExclusions(): ReadonlyArray<MotionExclusionSphere> {
+    this.exclusions.length = 0;
+    if (!this.root.visible) return this.exclusions;
+    for (const v of this.vessels) {
+      if (v.visual && v.exclusion.radiusKm > 0) this.exclusions.push(v.exclusion);
+    }
+    return this.exclusions;
+  }
+
+  /** The hull that looms largest (for the proximity hum), or null. */
+  loudest(): { readonly distanceKm: number; readonly radiusKm: number } | null {
+    const list = this.humList;
+    let n = 0;
+    for (const v of this.vessels) {
+      if (!v.blueprint) continue;
+      const slot = list[n] ?? (list[n] = { distanceKm: 0, radiusKm: 0 });
+      slot.distanceKm = v.distanceKm;
+      slot.radiusKm = v.blueprint.dimensions.boundingRadius;
+      n++;
+    }
+    list.length = n;
+    const i = loudestHull(list);
+    return i < 0 ? null : list[i]!;
   }
 
   /** Diagnostics for the review harness. */

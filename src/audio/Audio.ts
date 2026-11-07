@@ -70,6 +70,16 @@ import type { EngineContext, GameModule } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
 import { Rng } from '@/math/rng';
 import type { GameScale } from '@/gen/types';
+// v3 T4 (PLAN E5): the flight events that were silent.
+import {
+  crashCue,
+  creakLevel,
+  cruiseCue,
+  rcsHiss,
+  touchdownThud,
+  vesselHum,
+  type CruisePhaseName,
+} from './audioCues';
 
 // --- Time constants for setTargetAtTime, in seconds. -----------------------
 // These ARE the feel. A time constant is how long the parameter takes to cover
@@ -161,6 +171,22 @@ interface Graph {
   readonly uiOut: GainNode;
   readonly uiHp: BiquadFilterNode;
 
+  // v3 T4 ---------------------------------------------------------------------
+  /** RCS hiss: band-limited noise, panned with the push. */
+  readonly rcsBp: BiquadFilterNode;
+  readonly rcsG: GainNode;
+  readonly rcsPan: StereoPannerNode;
+  /** Passing-vessel hum: a reactor you are not sitting on. */
+  readonly hullOsc: OscillatorNode;
+  readonly hullPartial: OscillatorNode;
+  readonly hullLp: BiquadFilterNode;
+  readonly hullG: GainNode;
+  /** Cruise drive bed: a held, airless tone that rises with the field. */
+  readonly cruiseOsc: OscillatorNode;
+  readonly cruiseBp: BiquadFilterNode;
+  readonly cruiseG: GainNode;
+  // ---------------------------------------------------------------------------
+
   /** Everything that must be stopped before the context is closed. */
   readonly sources: AudioScheduledSourceNode[];
   readonly noiseBuffer: AudioBuffer;
@@ -182,6 +208,17 @@ export class Audio implements GameModule {
   private proxSize = 0;
   private masterVolume = 0.8;
   private scale: GameScale = 'system';
+
+  // v3 T4 ---------------------------------------------------------------------
+  private cruisePhase: CruisePhaseName = 'idle';
+  private cruiseAmount = 0;
+  private rcsLevel = 0;
+  private rcsPanV = 0;
+  private hullHum = 0;
+  private creak = 0;
+  private cockpit = false;
+  private creakClock = 0;
+  // ---------------------------------------------------------------------------
 
   private warpPhase: WarpPhase = 'idle';
   private warpCharge = 0;
@@ -390,6 +427,100 @@ export class Audio implements GameModule {
     this.proxPresence = clamp01(Math.pow(clamp01(subtend * 1.3), 1.6) * (0.35 + 0.65 * this.proxSize));
   }
 
+  // --- v3 T4 (PLAN E5) -------------------------------------------------------
+
+  /**
+   * The cruise drive's phase and field amount (0..1, render/driveField.ts).
+   * Transitions fire one-shots (spool, engage, drop, abort); the amount
+   * drives a held bed under the cruise.
+   */
+  setCruise(phase: CruisePhaseName, amount: number): void {
+    const cue = cruiseCue(this.cruisePhase, phase);
+    this.cruisePhase = phase;
+    this.cruiseAmount = clamp01(amount);
+    if (cue) this.cruiseOneShot(cue);
+  }
+
+  /** Ship-local RCS command (x starboard, y up, z aft), roughly -1..1 per axis. */
+  setRcs(x: number, y: number, z: number): void {
+    const h = rcsHiss(x, y, z);
+    this.rcsLevel = h.level;
+    this.rcsPanV = h.pan;
+  }
+
+  /** The vessel that looms largest: distance and bounding radius, km. */
+  setVesselProximity(distanceKm: number, radiusKm: number): void {
+    this.hullHum = vesselHum(distanceKm, radiusKm);
+  }
+
+  /** Proper acceleration in g; creaks only from the cockpit. */
+  setHullStress(gForce: number): void {
+    this.creak = creakLevel(gForce, this.cockpit);
+  }
+
+  private cruiseOneShot(cue: NonNullable<ReturnType<typeof cruiseCue>>): void {
+    switch (cue) {
+      case 'spool':
+        // A heavy flywheel winding up, under the engine.
+        this.sweep(38, 140, 2.2, 0.16, 0.25);
+        break;
+      case 'engage':
+        // The warp's snap, a size smaller.
+        this.crack(2100, 0.18, 0.16, 0.35);
+        this.sweep(520, 46, 0.45, 0.20, 0.3);
+        break;
+      case 'drop':
+        // Space closing back in: a falling tone and a dull, wet thump.
+        this.sweep(260, 32, 1.1, 0.22, 0.55);
+        this.crack(700, 0.30, 0.18, 0.6);
+        break;
+      case 'abort':
+        this.sweep(140, 40, 0.6, 0.10);
+        break;
+    }
+  }
+
+  private thud(gainV: number, freqHz: number, wet: number): void {
+    if (gainV <= 0) return;
+    this.sweep(freqHz * 1.7, freqHz, 0.35 + gainV * 0.4, gainV * 0.55, wet);
+    this.crack(320 + gainV * 300, 0.12 + gainV * 0.2, gainV * 0.28, wet * 0.5);
+  }
+
+  /** One creak: narrow band noise, slow attack, a stressed structure. */
+  private creakVoice(level: number): void {
+    const ac = this.ac;
+    const g = this.g;
+    if (!ac || !g || ac.state !== 'running' || this.voices > 14) return;
+    const t0 = ac.currentTime;
+    const dur = 0.18 + 0.3 * (0.5 + 0.5 * Math.sin(this.driftT * 7.3));
+    const src = ac.createBufferSource();
+    src.buffer = g.noiseBuffer;
+    src.loop = true;
+    const bp = ac.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.Q.setValueAtTime(9, t0);
+    const f = 380 + 420 * (0.5 + 0.5 * Math.sin(this.driftT * 3.1 + 1.7));
+    bp.frequency.setValueAtTime(f, t0);
+    bp.frequency.linearRampToValueAtTime(f * 0.82, t0 + dur);
+    const env = ac.createGain();
+    env.gain.setValueAtTime(0, t0);
+    env.gain.linearRampToValueAtTime(0.10 * level, t0 + dur * 0.4);
+    env.gain.setTargetAtTime(0, t0 + dur * 0.5, dur * 0.25);
+    src.connect(bp);
+    bp.connect(env);
+    env.connect(g.sum);
+    this.voices++;
+    src.onended = () => {
+      this.voices--;
+      src.disconnect();
+      bp.disconnect();
+      env.disconnect();
+    };
+    src.start(t0, (this.driftT * 0.53) % 3);
+    src.stop(t0 + dur + 0.4);
+  }
+  // --- end v3 T4 -------------------------------------------------------------
+
   /** 0..1. Safe to call before start(). */
   setMasterVolume(v: number): void {
     this.masterVolume = clamp01(v);
@@ -476,6 +607,29 @@ export class Audio implements GameModule {
       const cents = Math.sin(t * (0.0043 + i * 0.0017) + i * 1.7) * (5 + i * 3);
       this.set(g.droneOsc[i]!.detune, cents, TC_DRONE);
       this.set(g.droneG[i]!.gain, DRONE_BASE_GAIN[i]! * (0.6 + openness * 0.6), TC_DRONE);
+    }
+
+    // --- v3 T4: RCS, passing vessels, cruise bed, creak --------------------
+    this.set(g.rcsG.gain, this.rcsLevel * 0.085, 0.05);
+    this.set(g.rcsPan.pan, this.rcsPanV, 0.05);
+    this.set(g.rcsBp.frequency, 2600 + this.rcsLevel * 1800, 0.08);
+    const hh = this.hullHum;
+    this.set(g.hullG.gain, hh * 0.16, TC_PROX);
+    this.set(g.hullOsc.frequency, 52 + hh * 6, TC_PROX);
+    this.set(g.hullPartial.frequency, (52 + hh * 6) * 1.498, TC_PROX);
+    this.set(g.hullLp.frequency, 160 + hh * 260, TC_PROX);
+    const cruiseOn = this.cruisePhase === 'cruise' || this.cruisePhase === 'spooling';
+    const ca = cruiseOn ? 0.25 + 0.75 * this.cruiseAmount : 0;
+    this.set(g.cruiseG.gain, ca * 0.07, cruiseOn ? 0.8 : 0.5);
+    this.set(g.cruiseOsc.frequency, 44 + this.cruiseAmount * 38, 1.2);
+    this.set(g.cruiseBp.frequency, 300 + this.cruiseAmount * 900, 1.2);
+    if (this.creak > 0) {
+      // Poisson-ish: roughly 0.3-1.6 creaks a second as the load climbs.
+      this.creakClock -= dt * (0.3 + 1.3 * this.creak);
+      if (this.creakClock <= 0) {
+        this.creakVoice(this.creak);
+        this.creakClock = 0.6 + 0.8 * (0.5 + 0.5 * Math.sin(this.driftT * 5.17));
+      }
     }
 
     // --- warp --------------------------------------------------------------
@@ -607,6 +761,24 @@ export class Audio implements GameModule {
         this.warpTail = 6;
         this.droneBloom = 0.26;
         this.warpArriveTransient();
+      }),
+
+      // v3 T4: touchdown and crash were silent.
+      bus.on('ship:touchdown', ({ vertical }) => {
+        const th = touchdownThud(vertical);
+        this.thud(th.gain, th.freqHz, 0.2);
+      }),
+
+      bus.on('ship:crashed', ({ speed }) => {
+        const c = crashCue(speed);
+        this.thud(c.gain, c.freqHz, 0.6);
+        this.crack(2600, 0.6, 0.30 * c.gain, 0.7);
+        this.sweep(90, 22, 1.6, 0.30 * c.gain, 0.8);
+      }),
+
+      bus.on('camera:mode', ({ mode }) => {
+        this.cockpit = mode === 'cockpit';
+        if (!this.cockpit) this.creak = 0;
       }),
 
       bus.on('warp:aborted', () => {
@@ -1012,6 +1184,57 @@ function buildGraph(ac: AudioContext): Graph {
   uiOut.connect(uiHp);
   uiHp.connect(sum);
 
+  // --- v3 T4: RCS hiss, vessel hum, cruise bed -------------------------------
+  const rcsNoise = looper(ac, noiseBufferB);
+  const rcsBp = ac.createBiquadFilter();
+  rcsBp.type = 'bandpass';
+  rcsBp.frequency.setValueAtTime(2600, t0);
+  rcsBp.Q.setValueAtTime(0.9, t0);
+  const rcsG = gain(ac, 0.0001);
+  const rcsPan = ac.createStereoPanner();
+  rcsPan.pan.setValueAtTime(0, t0);
+  rcsNoise.connect(rcsBp);
+  rcsBp.connect(rcsG);
+  rcsG.connect(rcsPan);
+  rcsPan.connect(sum);
+
+  const hullLp = ac.createBiquadFilter();
+  hullLp.type = 'lowpass';
+  hullLp.frequency.setValueAtTime(160, t0);
+  hullLp.Q.setValueAtTime(2.2, t0);
+  const hullG = gain(ac, 0.0001);
+  hullLp.connect(hullG);
+  hullG.connect(sum);
+  hullG.connect(reverbSend);
+  const hullOsc = osc(ac, 'sawtooth', 52);
+  const hullPartial = osc(ac, 'triangle', 78);
+  const hullOscG = gain(ac, 0.6);
+  const hullPartialG = gain(ac, 0.35);
+  connectChain(hullOsc, hullOscG, hullLp);
+  connectChain(hullPartial, hullPartialG, hullLp);
+  // Slow beating: a big machine's mains hum is never perfectly steady.
+  const hullLfo = osc(ac, 'sine', 0.21);
+  const hullLfoG = gain(ac, 4);
+  hullLfo.connect(hullLfoG);
+  hullLfoG.connect(hullPartial.detune);
+
+  const cruiseOsc = osc(ac, 'triangle', 44);
+  const cruiseBed = looper(ac, noiseBuffer);
+  const cruiseBp = ac.createBiquadFilter();
+  cruiseBp.type = 'bandpass';
+  cruiseBp.frequency.setValueAtTime(300, t0);
+  cruiseBp.Q.setValueAtTime(3.5, t0);
+  const cruiseG = gain(ac, 0.0001);
+  const cruiseOscG = gain(ac, 0.8);
+  const cruiseBedG = gain(ac, 0.5);
+  connectChain(cruiseOsc, cruiseOscG, cruiseG);
+  connectChain(cruiseBed, cruiseBp, cruiseBedG);
+  cruiseBedG.connect(cruiseG);
+  cruiseG.connect(sum);
+  cruiseG.connect(reverbSend);
+  sources.push(rcsNoise, hullOsc, hullPartial, hullLfo, cruiseOsc, cruiseBed);
+  // ---------------------------------------------------------------------------
+
   for (let i = 0; i < sources.length; i++) sources[i]!.start(t0);
 
   return {
@@ -1023,6 +1246,7 @@ function buildGraph(ac: AudioContext): Graph {
     proxOsc, proxOscG, proxPartial, proxPartialG, proxLp, proxOut,
     warpSub, warpSubG, warpSubLp, warpBed, warpBp, warpBedG,
     uiOut, uiHp,
+    rcsBp, rcsG, rcsPan, hullOsc, hullPartial, hullLp, hullG, cruiseOsc, cruiseBp, cruiseG,
     sources, noiseBuffer,
   };
 }

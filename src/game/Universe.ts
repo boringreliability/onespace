@@ -46,6 +46,7 @@ import { publishSceneDepth } from '@/game/sceneDepth';
 import { referenceDisplacement } from '@/render/motionReference';
 import { planStreaming, type StreamCandidate } from '@/game/streaming';
 import { simSlices } from '@/game/timeCompression'; // [v2-p4]
+import { openSpaceArrivalAttitude } from '@/ship/arrivalFraming'; // [v3-T4]
 import { circularOrbitState, insideStar, openingAttitude, progradeAttitude, starRadiusKm } from '@/game/recovery';
 
 import {
@@ -192,6 +193,12 @@ export class Universe implements GameModule {
    */
   simRate = 1;
   private readonly slices = { count: 0, slice: 0 };
+  /**
+   * [v3-t3] Called before each sim slice is integrated, with its length.
+   * The autopilot flies here (registry wires `AutoPilot.sliceStep`), so at
+   * 10× it writes a fresh command every slice instead of one per frame.
+   */
+  beforeSlice: ((h: number) => void) | null = null;
   /**
    * Simulated seconds the last update advanced: dt × simRate within the
    * per-frame budget, 0 while paused, frozen or under a shot. Traffic runs
@@ -404,7 +411,15 @@ export class Universe implements GameModule {
     const target = this.pickHeroBody();
     if (!target) {
       this.setShipParent(null);
-      this.flight.teleport(new Vector3(0, 0, 6 * AU));
+      // [v3-T4] arrival framing (PLAN E6): a system with no world used to put
+      // the nose dead on the star, which the chase camera then hid exactly
+      // behind the hull — 20 s of empty sky, measured. Hold the star in frame
+      // above the hull instead; there is no orbit, so no prograde to keep.
+      this.tmpA.set(0, 0, 6 * AU);
+      this.tmpB.copy(this.tmpA).multiplyScalar(-1).normalize();
+      openSpaceArrivalAttitude(this.tmpB, this.arrivalQuat);
+      this.flight.teleport(this.tmpA, this.tmpB.set(0, 0, 0), this.arrivalQuat);
+      // [/v3-T4]
       return;
     }
     // The world we arrive at becomes the parent, so everything below is stated
@@ -554,6 +569,11 @@ export class Universe implements GameModule {
       this.orbitTime += h * ORBIT_TIME_SCALE;
       this.updateOrbits();
       if (!this.options.headless) {
+        // [v3-t3] per-slice air and guidance: at 10× a frame is several
+        // slices, and both used to be one frame stale for all of them.
+        if (this.slices.count > 1) this.refreshAtmosphere();
+        this.beforeSlice?.(h);
+        // [/v3-t3]
         this.flight.update(h);
         // Transitions are checked AFTER integration, so a substep is never
         // taken with the state vector and the frame disagreeing.
@@ -1004,6 +1024,11 @@ export class Universe implements GameModule {
     // whose frame the ship's velocity is already expressed in. Taking it from
     // `nearest` would let a moon you are flying past brake you against a
     // planet's atmosphere.
+    this.refreshAtmosphere();
+  }
+
+  /** Hand the flight model the parent's air density at the ship (see above). */
+  private refreshAtmosphere(): void {
     const air = this.shipParent?.spec.atmosphere;
     if (air) {
       const altitude = this.flight.position.length() - this.shipParent!.spec.radius;
