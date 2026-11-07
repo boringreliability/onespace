@@ -69,7 +69,7 @@ describe('tapeScale', () => {
   });
 
   it('Given far below v0, Then the scale is linear (a hover at 0.3 m/s still moves the tape)', () => {
-    const v = TAPE_V0_KMS * 1e-3;
+    const v = TAPE_V0_KMS * 1e-4; // log1p(2x)/log1p(x) = 2 − x/2 + …: x must be small for 4 digits
     expect(tapeScale(2 * v) / tapeScale(v)).toBeCloseTo(2, 3);
   });
 

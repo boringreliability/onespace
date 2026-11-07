@@ -10,7 +10,12 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { cruiseEtaSeconds } from '@/ship/CruiseDrive';
+import {
+  CRUISE_DEFAULTS,
+  arrivalClearanceKm,
+  cruiseEtaSeconds,
+  cruiseTravelSeconds,
+} from '@/ship/CruiseDrive';
 
 import { clockText, cruiseArrivalEta, cruiseReadout, cruiseSpeedText } from './cruiseReadout';
 
@@ -103,6 +108,22 @@ describe('cruiseArrivalEta', () => {
 
   it('Given the ship is not closing, Then there is no ETA (the drive will never arrive)', () => {
     expect(cruiseArrivalEta(2e7, 6000, 9e5, false)).toBeNull();
+  });
+
+  it('Given the ship is still climbing out of ANOTHER body’s well (drive clearance 2 000 km, target 13.4 Mkm away), Then the ETA includes that climb — the target-only law said a constant 0:18 for the first half minute (GPU run)', () => {
+    const d = 13.4e6;
+    const R = 11324;
+    const soi = 101421;
+    const gap = d - R;
+    const mid = gap / 2;
+    const climb = Math.log(mid / 2000) / CRUISE_DEFAULTS.rate;
+    const eta = cruiseArrivalEta(d, R, soi, true, 2000)!;
+    expect(eta).toBeGreaterThan(cruiseEtaSeconds(d, R, soi) + 10);
+    expect(eta).toBeCloseTo(climb + cruiseTravelSeconds(mid, arrivalClearanceKm(R, soi)), 6);
+  });
+
+  it('Given the drive clearance is the target itself (nothing else nearer), Then the ETA is exactly the target-only law', () => {
+    expect(cruiseArrivalEta(2e7, 6000, 9e5, true, 2e7 - 6000)).toBeCloseTo(cruiseEtaSeconds(2e7, 6000, 9e5), 9);
   });
 
   it('Given a non-finite distance, Then there is no ETA', () => {

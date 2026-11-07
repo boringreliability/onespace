@@ -40,10 +40,13 @@ function rotateCamera(c: PerspectiveCamera, yawDeg: number, pitchDeg: number, ro
 const pt = (): ScreenPoint => ({ x: 0, y: 0, behind: false });
 
 function angleBetween(a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }): number {
+  // atan2(|a×b|, a·b): acos cannot resolve angles below ~1.5e-8 rad, so two
+  // identical unit vectors could measure 2e-8 apart.
   const d = a.x * b.x + a.y * b.y + a.z * b.z;
-  const la = Math.hypot(a.x, a.y, a.z);
-  const lb = Math.hypot(b.x, b.y, b.z);
-  return Math.acos(Math.max(-1, Math.min(1, d / (la * lb))));
+  const cx = a.y * b.z - a.z * b.y;
+  const cy = a.z * b.x - a.x * b.z;
+  const cz = a.x * b.y - a.y * b.x;
+  return Math.atan2(Math.hypot(cx, cy, cz), d);
 }
 
 // ---------------------------------------------------------------------------
