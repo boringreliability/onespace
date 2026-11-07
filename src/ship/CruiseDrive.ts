@@ -220,7 +220,21 @@ export interface CruiseInputs {
    * parent where it is. Omitted = `config.exitSpeedKmS`.
    */
   readonly exitSpeedKmS?: number;
+  /**
+   * v3: the nose (and so the carried velocity) is on the insertion tangent,
+   * to within the handover's tolerance. While false the drop does not let go
+   * at the end of its bleed — it holds at the exit speed and waits, at most
+   * MAX_ALIGN_HOLD_S. Omitted = aligned (the v2 behaviour).
+   */
+  readonly aligned?: boolean;
 }
+
+/**
+ * Longest a drop waits past its bleed for the nose to reach the tangent, s.
+ * A 90° turn at the slew's 90°/s needs ~1 s; this is the bound for a pilot
+ * or a world that keeps moving the target.
+ */
+export const MAX_ALIGN_HOLD_S = 2.5;
 
 export interface CruiseArrival {
   /** Clearance to this body's surface, km. */
@@ -248,6 +262,8 @@ export class CruiseDrive {
   private dropped = false;
   /** Ceiling at the moment the drop started, so the bleed has somewhere to start. */
   private dropFrom = 0;
+  /** Seconds the current drop has waited past its bleed for alignment. */
+  private alignHeld = 0;
 
   constructor(config: CruiseConfig = CRUISE_DEFAULTS) {
     this.config = config;
@@ -309,6 +325,10 @@ export class CruiseDrive {
         if (this.progress >= 1) {
           this.phase = 'cruise';
           this.progress = 1;
+          // B1 (v3): the engage frame already flies under the law. A 0 here
+          // reached FlightModel's hard clamp and took the ship 5 → 0 km/s for
+          // one frame before the drive picked it back up.
+          this.capKmS = cruiseCapKmS(i.clearanceKm, c);
         }
         break;
       }
@@ -323,6 +343,7 @@ export class CruiseDrive {
           this.dropFrom = Math.max(this.capKmS, this.exitSpeed(i));
           this.phase = 'dropping';
           this.progress = 1;
+          this.alignHeld = 0;
           this.dropped = true;
           // Fall through to the drop's first step so the ceiling starts moving
           // this frame rather than holding for one more.
@@ -347,6 +368,14 @@ export class CruiseDrive {
   private stepDrop(dt: number, i: CruiseInputs): void {
     const c = this.config;
     this.progress = Math.max(0, this.progress - dt / Math.max(c.dropTime, 1e-6));
+    if (this.progress <= 0 && i.aligned === false && this.alignHeld < MAX_ALIGN_HOLD_S) {
+      // v3: the bleed is done but the nose is not on the tangent yet. Hold at
+      // the exit speed (k = 0 below) rather than hand over a snapped velocity.
+      this.alignHeld += dt;
+      this.progress = 0;
+      this.capKmS = Math.min(this.exitSpeed(i), cruiseCapKmS(i.clearanceKm, c));
+      return;
+    }
     if (this.progress <= 0) {
       this.phase = 'idle';
       this.capKmS = 0;
