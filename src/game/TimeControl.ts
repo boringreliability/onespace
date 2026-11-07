@@ -87,7 +87,12 @@ export class TimeControl implements GameModule {
   init(): void {
     // A jump or a new system is never something to fast-forward into.
     const reset = (): void => this.set(1, null);
-    this.offs.push(bus.on('system:entered', reset), bus.on('warp:engaged', reset), bus.on('ship:crashed', reset));
+    this.offs.push(
+      bus.on('system:entered', reset),
+      bus.on('warp:engaged', reset),
+      bus.on('ship:crashed', reset),
+      bus.on('ship:recovered', reset), // a cut is never fast-forwarded out of
+    );
   }
 
   dispose(): void {

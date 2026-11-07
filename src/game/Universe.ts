@@ -190,6 +190,12 @@ export class Universe implements GameModule {
    */
   simRate = 1;
   private readonly slices = { count: 0, slice: 0 };
+  /**
+   * Simulated seconds the last update advanced: dt × simRate within the
+   * per-frame budget, 0 while paused, frozen or under a shot. Traffic runs
+   * its clock on this so co-orbiting hulls keep pace under compression.
+   */
+  simulatedSeconds = 0;
 
   /** True while the ship is at or below the star's photosphere (GAMEPLAY F7). */
   insideStar = false;
@@ -493,6 +499,7 @@ export class Universe implements GameModule {
   // -------------------------------------------------------------------------
 
   update(dt: number, ctx: EngineContext): void {
+    this.simulatedSeconds = 0;
     // A review shot has placed its own fixtures and camera; touching the scene
     // now would undo all of it before the frame is captured.
     if (shotOwnsScene()) {
@@ -513,6 +520,7 @@ export class Universe implements GameModule {
     // game/timeCompression.ts. At 1× this is one slice of exactly dt, i.e.
     // the previous code path.
     simSlices(dt, this.simRate, this.slices);
+    this.simulatedSeconds = this.slices.count * this.slices.slice;
     for (let i = 0; i < this.slices.count; i++) {
       const h = this.slices.slice;
       this.orbitTime += h * ORBIT_TIME_SCALE;
@@ -949,6 +957,7 @@ export class Universe implements GameModule {
       this.setShipParent(null);
       this.flight.teleport(this.tmpA.set(0, 0, 6 * AU), this.tmpB.set(0, 0, 0));
       this.insideStar = false;
+      bus.emit('ship:recovered');
       return;
     }
     const radial = this.tmpA.subVectors(this.flight.worldPosition, body.world);
@@ -957,6 +966,9 @@ export class Universe implements GameModule {
     this.flight.teleport(state.position, state.velocity, state.orientation);
     this.syncGroundSampler();
     this.insideStar = false;
+    // review-p4: the same parent comes back, so nothing else tells a flying
+    // autopilot that its leg was cut — it dived straight back in.
+    bus.emit('ship:recovered');
   }
 
   /** Nearby systems for the star map, without generating them all. */

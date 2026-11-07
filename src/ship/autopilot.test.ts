@@ -146,6 +146,8 @@ interface Flight {
   worstUnexplained: number;
   touchdowns: Array<{ vertical: number; speed: number }>;
   crashes: number;
+  /** Worst drag deceleration flown into, km/s² (review-p4). */
+  worstDrag: number;
 }
 
 const offs: Array<() => void> = [];
@@ -165,6 +167,7 @@ function fly(r: Rig, ap: Autopilot, maxSeconds: number): Flight {
     worstUnexplained: 0,
     touchdowns: [],
     crashes: 0,
+    worstDrag: 0,
   };
   offs.push(
     bus.on('ship:touchdown', ({ vertical, speed }) => out.touchdowns.push({ vertical, speed })),
@@ -190,6 +193,7 @@ function fly(r: Rig, ap: Autopilot, maxSeconds: number): Flight {
     prevV.copy(r.fm.velocity);
     const wasGrounded = r.fm.grounded;
     const speedBefore = r.fm.speed;
+    out.worstDrag = Math.max(out.worstDrag, c.dragCoefficient * r.fm.atmosphericDensity * speedBefore * speedBefore);
     r.fm.update(FRAME);
     out.seconds += FRAME;
 
@@ -431,5 +435,97 @@ describe('autopilot refusals', () => {
   it('Given a world far beyond landing range, Then it refuses with "no-world"', () => {
     expect(autopilotRefusal({ ...ok, distanceRadii: 50 })).toBe('no-world');
     expect(autopilotRefusal({ ...ok, distanceRadii: Number.NaN })).toBe('no-world');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// review-p4: properties the first cut asserted in prose only
+// ---------------------------------------------------------------------------
+
+/** DRAG_CAP in autopilot.ts: the most drag the field will fly into, km/s². */
+const DRAG_CAP_KMS2 = 0.2;
+
+describe('review-p4: the field stays out of the thick of the air', () => {
+  for (const goal of ['land', 'orbit'] as const) {
+    it(`Given the thick-atmosphere world, When the autopilot flies the ${goal} leg, Then drag never exceeds the field's cap (${DRAG_CAP_KMS2} km/s², +25 % for one-frame lag)`, () => {
+      const r = goal === 'land' ? rig(THICK) : landed(THICK);
+      if (goal === 'land') openingOrbit(r);
+      const ap = new Autopilot();
+      ap.engage(goal, r.fm, THICK);
+      const f = fly(r, ap, LEG_LIMIT_S);
+      console.info(`[autopilot] ${goal} thick: worst drag ${f.worstDrag.toFixed(4)} km/s²`);
+      expect(f.worstDrag).toBeLessThan(DRAG_CAP_KMS2 * 1.25);
+    });
+  }
+});
+
+describe('review-p4: an orbit that is already (nearly) circular costs nothing', () => {
+  it('Given a vacuum ship 1.2 % fast on a circular orbit AT the target radius, When the orbit leg flies 1 s, Then its radial velocity stays within 0.15 m/s of a pure coast — no net hover-thrust against gravity', () => {
+    const w = MOON;
+    const rT = w.radiusKm * ORBIT_TARGET_RADII;
+    const make = (): Rig => {
+      const r = rig(w);
+      const p = new Vector3(rT, 0, 0);
+      const v = r.fm.orbitalVelocityAt(p).multiplyScalar(1.012);
+      r.fm.teleport(p, v, openingAttitude(v, p, new Quaternion()));
+      return r;
+    };
+    const coast = make();
+    const flown = make();
+    const ap = new Autopilot();
+    ap.engage('orbit', flown.fm, w);
+    for (let i = 0; i < 60; i++) {
+      expect(ap.step(flown.fm, w)).toBe('flying');
+      flown.fm.update(FRAME);
+      coast.fm.update(FRAME);
+    }
+    const up = flown.fm.position.clone().normalize();
+    const dvr = flown.fm.velocity.dot(up) - coast.fm.velocity.dot(up);
+    // NB (review-p4): this does NOT isolate the centrifugal term — near the
+    // target radius the feed-forward of the √ envelope chatters at ~0.012 km/s²
+    // radially, 20× gravity, and swamps it. Mutation AP6 survives for that reason.
+    expect(Math.abs(dvr)).toBeLessThan(1.5e-4);
+  });
+});
+
+describe('review-p4: hand-back hygiene (core)', () => {
+  it('Given an engaged leg re-engaged with another goal, When it finally disengages, Then the FA restored is the pilot one from the first engage, not the leg own FA-OFF', () => {
+    const r = rig(MOON);
+    openingOrbit(r);
+    r.fm.flightAssist = true;
+    const ap = new Autopilot();
+    ap.engage('land', r.fm, MOON);
+    ap.engage('orbit', r.fm, MOON);
+    ap.disengage(r.fm);
+    expect(r.fm.flightAssist).toBe(true);
+  });
+
+  it('Given the computer was boosting, When it disengages, Then every channel is handed back zeroed — boost included', () => {
+    const r = rig(MOON);
+    openingOrbit(r);
+    const ap = new Autopilot();
+    ap.engage('land', r.fm, MOON);
+    const c = r.fm.command;
+    c.boost = true;
+    c.brake = true;
+    c.throttle = 0.7;
+    c.strafeY = 0.3;
+    c.pitch = 0.2;
+    ap.disengage(r.fm);
+    expect([c.boost, c.brake]).toEqual([false, false]);
+    expect([c.throttle, c.strafeX, c.strafeY, c.strafeZ, c.pitch, c.yaw, c.roll]).toEqual([0, 0, 0, 0, 0, 0, 0]);
+  });
+});
+
+describe('review-p4: orbitApsides on an eccentric orbit', () => {
+  it('Given a state at periapsis 10 % faster than circular, Then periapsis is that radius and apoapsis is a(1+e)', () => {
+    const mu = 1_500;
+    const rp = 2_000;
+    const vc = Math.sqrt(mu / rp);
+    const o = orbitApsides(new Vector3(rp, 0, 0), new Vector3(0, 0, 1.1 * vc), mu, { periapsis: 0, apoapsis: 0, eccentricity: 0 });
+    const e = 1.1 * 1.1 - 1; // v_p² r_p / μ − 1
+    expect(o.eccentricity).toBeCloseTo(e, 9);
+    expect(o.periapsis).toBeCloseTo(rp, 6);
+    expect(o.apoapsis).toBeCloseTo((rp * (1 + e)) / (1 - e), 4);
   });
 });

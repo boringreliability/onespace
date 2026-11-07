@@ -120,7 +120,12 @@ export class AutoPilot implements GameModule {
   init(): void {
     // Anything that moves the ship out from under the leg ends it.
     const end = (): void => this.disengage(true);
-    this.offs.push(bus.on('ship:crashed', end), bus.on('system:entered', end), bus.on('warp:engaged', end));
+    this.offs.push(
+      bus.on('ship:crashed', end),
+      bus.on('ship:recovered', end), // RETURN TO ORBIT keeps the parent: nothing else ends the leg
+      bus.on('system:entered', end),
+      bus.on('warp:engaged', end),
+    );
   }
 
   dispose(): void {
@@ -140,15 +145,25 @@ export class AutoPilot implements GameModule {
       k.boost = input.held('boost');
       k.zeroThrottle = input.pressed('zeroThrottle');
 
+      // The leg flies FA-OFF. FA found ON means someone else set it this
+      // frame — Z (Pilot runs first) or the pause sheet's preset — and the
+      // computer must not keep flying raw thrust through the assist.
+      const faTaken = flight.flightAssist;
+      const preset = this.preset();
       if (
         input.pressed('land') ||
         pilotIntervened(input.axes, this.prev, k) ||
-        !this.preset().autopilot ||
+        faTaken ||
+        !preset.autopilot ||
         this.warp.phase !== 'idle' ||
         flight.cruising ||
         this.universe.shipParent !== this.parent
       ) {
         this.disengage(true);
+        // Whoever turned FA on wins over the FA saved at engage; a preset
+        // that removed the autopilot brings its own FA default.
+        if (faTaken) flight.flightAssist = true;
+        else if (!preset.autopilot) flight.flightAssist = preset.flightAssist;
       } else {
         this.fly(flight);
       }

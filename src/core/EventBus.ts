@@ -67,6 +67,8 @@ export interface GameEvents {
   'ship:touchdown': { speed: number; vertical: number; planetId: string | null };
   /** Ship met the ground too fast. The hull is gone. */
   'ship:crashed': { speed: number; planetId: string | null };
+  /** The recovery cut (a crash, the star, or RETURN TO ORBIT) has put the ship back in orbit. */
+  'ship:recovered': void;
 
   /** The star map's open transition started/ended. Flight input should stand down. */
   'ui:map-opened': void;
