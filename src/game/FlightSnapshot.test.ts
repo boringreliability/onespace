@@ -6,7 +6,7 @@
 import { describe, expect, it } from 'vitest';
 import { PerspectiveCamera } from 'three';
 
-import { FlightSnapshot } from './FlightSnapshot';
+import { FlightSnapshot, restoresFlightTo, snapshotsFlightFrom } from './FlightSnapshot';
 
 function clock(fixedDt: number | null) {
   return {
@@ -112,5 +112,23 @@ describe('FlightSnapshot', () => {
     cam.position.x += 100;
     snap.restore(cam, clock(null));
     expect(cam.position.equals(p)).toBe(true);
+  });
+});
+
+describe('snapshot policy (review-p2)', () => {
+  it.each(['flight', 'title', 'boot'] as const)('Given the Yard is entered from %s, Then the flight camera is snapshotted', (from) => {
+    expect(snapshotsFlightFrom(from)).toBe(true);
+  });
+
+  it.each(['review', 'map', 'yard', 'photo'] as const)('Given the Yard is entered from %s, Then the earlier snapshot is kept, not overwritten', (from) => {
+    expect(snapshotsFlightFrom(from)).toBe(false);
+  });
+
+  it.each(['flight', 'title'] as const)('Given the Yard hands over to %s, Then the flight camera is restored', (to) => {
+    expect(restoresFlightTo(to)).toBe(true);
+  });
+
+  it('Given a review shot takes the scene from the Yard, Then the snapshot is kept for the way back', () => {
+    expect(restoresFlightTo('review')).toBe(false);
   });
 });

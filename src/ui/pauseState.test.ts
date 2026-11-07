@@ -16,6 +16,7 @@ import { describe, expect, it } from 'vitest';
 import {
   ESC_DEBOUNCE_MS,
   PAUSE_CLOSED,
+  pauseContextFor,
   pauseStep,
   type PauseContext,
   type PauseState,
@@ -101,5 +102,30 @@ describe('pauseStep — the buttons', () => {
     const s = openAt(10);
     pauseStep(s, { type: 'resume' }, flying);
     expect(s).toEqual(openAt(10));
+  });
+});
+
+describe('pauseContextFor — pause belongs to flight (review-p2)', () => {
+  it('Given flight is shown, When the pointer lock is lost, Then the pause opens', () => {
+    const ctx = pauseContextFor({ flightShown: true, menuOpen: false, busy: false });
+    expect(pauseStep(PAUSE_CLOSED, { type: 'lockLost', t: 5 }, ctx).state.open).toBe(true);
+  });
+
+  it('Given the Yard or photo mode just released the pointer, When the lock-loss arrives, Then the pause stays closed', () => {
+    const ctx = pauseContextFor({ flightShown: false, menuOpen: false, busy: false });
+    expect(pauseStep(PAUSE_CLOSED, { type: 'lockLost', t: 5 }, ctx).state.open).toBe(false);
+  });
+
+  it('Given a chart or the codex is up, Then it counts as an overlay', () => {
+    expect(pauseContextFor({ flightShown: true, menuOpen: true, busy: false }).overlayOpen).toBe(true);
+  });
+
+  it('Given a jump or recovery, Then busy is passed through', () => {
+    expect(pauseContextFor({ flightShown: true, menuOpen: false, busy: true }).busy).toBe(true);
+  });
+
+  it('Given the pause is open and flight is no longer shown, When Esc arrives, Then it still closes', () => {
+    const ctx = pauseContextFor({ flightShown: false, menuOpen: false, busy: false });
+    expect(pauseStep(openAt(0), { type: 'escKey', t: ESC_DEBOUNCE_MS + 1 }, ctx).state.open).toBe(false);
   });
 });

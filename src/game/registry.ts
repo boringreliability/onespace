@@ -372,6 +372,9 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
     panel: new YardPanel({ factions: YARD_FACTIONS, lights: YARD_LIGHTS, drives: YARD_DRIVES, views: YARD_VIEWS }),
     clock: engine,
     audio,
+    // review-p2: Y mid-jump froze the tunnel; Y mid-recovery hung its black
+    // veil (z 40) over the whole Yard.
+    busy: () => warp.phase !== 'idle' || recovery.active,
   });
   await engine.add(yard);
   // ---------------------------------------------------------------------------

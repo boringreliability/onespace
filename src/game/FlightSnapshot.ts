@@ -22,6 +22,22 @@
  */
 
 import { Quaternion, Vector3, type PerspectiveCamera } from 'three';
+import type { BaseMode, Mode } from '@/core/Modes';
+
+/**
+ * Modes whose camera IS the flight camera: the title runs flight behind the
+ * menu, and boot has stepped it once (Engine.prewarm). Entering the Yard from
+ * any of them must snapshot it (review-p2: only `flight` did, so a Yard
+ * opened from the title or a link handed back a camera parked at the hull).
+ */
+export function snapshotsFlightFrom(from: Mode): boolean {
+  return from === 'flight' || from === 'title' || from === 'boot';
+}
+
+/** Modes that get the flight camera back when the Yard hands over to them. */
+export function restoresFlightTo(to: BaseMode): boolean {
+  return to === 'flight' || to === 'title';
+}
 
 /** The slice of `Engine` this needs. */
 export interface FlightClock {

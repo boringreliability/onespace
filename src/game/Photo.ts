@@ -12,7 +12,7 @@
  * P or Esc = leave. The camera pose is restored exactly on exit.
  */
 
-import { Euler, Quaternion, Vector3 } from 'three';
+import { Quaternion, Vector3 } from 'three';
 import type { Engine, EngineContext, GameModule } from '@/core/Engine';
 import { modes } from '@/core/Modes';
 import { bus } from '@/core/EventBus';
@@ -25,6 +25,8 @@ import {
   type FlyCamState,
   type Grade,
 } from './photo/flycam';
+import { mayEnterPhoto } from './entryGuards';
+import { PhotoFrame } from './photo/pose';
 
 const MOVE_KEYS: Record<string, [number, number, number]> = {
   KeyW: [0, 0, -1],
@@ -48,8 +50,11 @@ export class Photo implements GameModule {
   private bar: HTMLDivElement | null = null;
   private style: HTMLStyleElement | null = null;
   private idleFor = 0;
-  private readonly euler = new Euler(0, 0, 0, 'YXZ');
+  /** The fly-cam runs in the entry camera's frame, so P never rolls the shot. */
+  private readonly frame = new PhotoFrame();
   private input: FlyCamInput = { move: [0, 0, 0], lookDx: 0, lookDy: 0, zoom: 0, fast: false };
+  private chartOpen = false;
+  private offChart: (() => void) | null = null;
 
   constructor(
     private readonly engine: Engine,
@@ -63,6 +68,10 @@ export class Photo implements GameModule {
     window.addEventListener('pointermove', this.onPointerMove);
     window.addEventListener('pointerup', this.onPointerUp);
     window.addEventListener('wheel', this.onWheel, { passive: false });
+    window.addEventListener('blur', this.onBlur);
+    this.offChart = bus.on('ui:chart', ({ chart }) => {
+      this.chartOpen = chart !== null;
+    });
     this.style = document.createElement('style');
     this.style.textContent = CSS;
     document.head.appendChild(this.style);
@@ -76,13 +85,8 @@ export class Photo implements GameModule {
     this.saved.quat.copy(camera.quaternion);
     this.saved.up.copy(camera.up);
     this.saved.fov = camera.fov;
-    this.euler.setFromQuaternion(camera.quaternion, 'YXZ');
-    this.cam = createFlyCam(
-      [camera.position.x, camera.position.y, camera.position.z],
-      this.euler.y,
-      this.euler.x,
-      camera.fov,
-    );
+    this.frame.anchor(camera.position, camera.quaternion);
+    this.cam = createFlyCam([0, 0, 0], 0, 0, camera.fov);
     this.grade = { exposure: 1, grain: 0.055, ca: 0.0055 };
     document.exitPointerLock?.();
     modes.push('photo');
@@ -139,10 +143,7 @@ export class Photo implements GameModule {
     stepFlyCam(c, inp, dt);
 
     const camera = ctx.camera;
-    camera.position.set(c.position[0], c.position[1], c.position[2]);
-    this.euler.set(c.pitch, c.yaw, 0, 'YXZ');
-    camera.quaternion.setFromEuler(this.euler);
-    camera.up.set(0, 1, 0);
+    this.frame.pose(c, camera.position, camera.quaternion);
     if (camera.fov !== c.fov) {
       camera.fov = c.fov;
       camera.updateProjectionMatrix();
@@ -161,16 +162,16 @@ export class Photo implements GameModule {
   private onKeyDown = (e: KeyboardEvent): void => {
     if (modes.overlay !== 'photo') {
       // Only from a base that can host the overlay, and never over a map/menu.
-      if (e.code === 'KeyP' && !e.repeat && modes.overlay === null && (modes.base === 'flight' || modes.base === 'yard')) {
-        if (document.querySelector('.os-pause-open, .os-codex-open')) return;
+      if (e.code === 'KeyP' && mayEnterPhoto({ base: modes.base, overlay: modes.overlay, menuOpen: this.menuOpen() }, e)) {
         e.preventDefault();
         this.enter();
       }
       return;
     }
-    // In photo mode this module owns the keyboard.
+    // In photo mode this module owns the keyboard. Immediate: the Yard's own
+    // capture listener on window sits after this one and must not see it.
     e.preventDefault();
-    e.stopPropagation();
+    e.stopImmediatePropagation();
     this.idleFor = 0;
     switch (e.code) {
       case 'KeyP':
@@ -199,6 +200,20 @@ export class Photo implements GameModule {
   private onKeyUp = (e: KeyboardEvent): void => {
     this.held.delete(e.code);
   };
+
+  /** A key released while the window is unfocused never sends keyup. */
+  private onBlur = (): void => {
+    this.held.clear();
+  };
+
+  /**
+   * The pause sheet, the codex, or either chart. The live classes are what
+   * those modules set (`.os-pause-open` / `.os-codex-open`, which this used
+   * to look for, exist nowhere).
+   */
+  private menuOpen(): boolean {
+    return this.chartOpen || document.querySelector('.os-pause.is-live, .os-codex.is-live') !== null;
+  }
 
   private onPointerDown = (e: PointerEvent): void => {
     if (modes.overlay !== 'photo') return;
@@ -285,6 +300,8 @@ export class Photo implements GameModule {
     window.removeEventListener('pointermove', this.onPointerMove);
     window.removeEventListener('pointerup', this.onPointerUp);
     window.removeEventListener('wheel', this.onWheel);
+    window.removeEventListener('blur', this.onBlur);
+    this.offChart?.();
     this.bar?.remove();
     this.style?.remove();
   }

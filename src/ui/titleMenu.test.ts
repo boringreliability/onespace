@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { TITLE_ITEMS, initialTitle, parseSeedField, titleStep } from './titleMenu';
+import { TITLE_ITEMS, initialTitle, parseSeedField, titleKey, titleStep } from './titleMenu';
 
 describe('titleStep', () => {
   it('Given a fresh title, Then UNDOCK is selected', () => {
@@ -70,5 +70,32 @@ describe('parseSeedField', () => {
 
   it('Given anything else, Then it is null', () => {
     for (const bad of ['', 'xyz', '123456789', '-1', '1.5', '0x']) expect(parseSeedField(bad)).toBeNull();
+  });
+});
+
+describe('titleKey (review-p2)', () => {
+  it.each([
+    ['ArrowUp', 'up'],
+    ['KeyW', 'up'],
+    ['ArrowDown', 'down'],
+    ['KeyS', 'down'],
+    ['Enter', 'enter'],
+    ['Space', 'enter'],
+  ] as const)('Given %s on the title, Then it is the %s event and the browser default is suppressed', (code, kind) => {
+    expect(titleKey({ code })).toEqual({ event: { kind }, preventDefault: true });
+  });
+
+  it('Given any other plain key (a flight key), Then it does nothing but is still kept from the browser', () => {
+    expect(titleKey({ code: 'KeyD' })).toEqual({ event: null, preventDefault: true });
+  });
+
+  it.each([
+    { code: 'KeyR', metaKey: true },
+    { code: 'KeyR', ctrlKey: true },
+    { code: 'KeyL', metaKey: true },
+    { code: 'ArrowLeft', altKey: true },
+    { code: 'KeyW', metaKey: true },
+  ])('Given the browser chord %o, Then the browser keeps its default and the menu does not move', (k) => {
+    expect(titleKey(k)).toEqual({ event: null, preventDefault: false });
   });
 });

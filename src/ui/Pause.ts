@@ -17,7 +17,8 @@ import { Config, config, type QualityTier } from '@/core/Config';
 import { shotOwnsScene } from '@/game/Shots';
 import type { Universe } from '@/game/Universe';
 import type { RecoveryCut } from '@/game/RecoveryCut';
-import { PAUSE_CLOSED, pauseStep, type PauseEvent, type PauseState } from '@/ui/pauseState';
+import { modes } from '@/core/Modes';
+import { PAUSE_CLOSED, pauseContextFor, pauseStep, type PauseEvent, type PauseState } from '@/ui/pauseState';
 import {
   SENSITIVITY_MAX,
   SENSITIVITY_MIN,
@@ -138,10 +139,16 @@ export class Pause implements GameModule {
 
   private dispatch(event: PauseEvent): void {
     if (shotOwnsScene()) return;
-    const r = pauseStep(this.state, event, {
-      overlayOpen: this.overlayOpen(),
-      busy: this.warp.phase !== 'idle' || this.recovery.active,
-    });
+    // The Yard and photo release the pointer on purpose; that is not an Esc.
+    const r = pauseStep(
+      this.state,
+      event,
+      pauseContextFor({
+        flightShown: modes.current === 'flight',
+        menuOpen: this.overlayOpen(),
+        busy: this.warp.phase !== 'idle' || this.recovery.active,
+      }),
+    );
     const was = this.state.open;
     this.state = r.state;
     if (r.effect === 'requestLock') this.requestLock();

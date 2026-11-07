@@ -31,6 +31,22 @@ export interface PauseContext {
   readonly busy: boolean;
 }
 
+/**
+ * Build the context from what the game is showing. Pause belongs to flight:
+ * the Yard and photo mode both release the pointer on purpose when they open
+ * (review-p2: that release used to read as "Esc" and open the pause sheet
+ * behind them, to be found on the way back to flight).
+ */
+export function pauseContextFor(s: {
+  /** `modes.current === 'flight'` — no overlay, not the Yard, not the title. */
+  readonly flightShown: boolean;
+  /** A chart or the codex is up. */
+  readonly menuOpen: boolean;
+  readonly busy: boolean;
+}): PauseContext {
+  return { overlayOpen: s.menuOpen || !s.flightShown, busy: s.busy };
+}
+
 /** What the caller must do as a result. */
 export type PauseEffect = 'none' | 'requestLock' | 'respawn';
 

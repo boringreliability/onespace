@@ -50,7 +50,8 @@ import { modes, type BaseMode, type Mode } from '@/core/Modes';
 import { parseRoute, serializeRoute } from '@/core/Route';
 import { tryFactionById } from '@/gen/ships/families';
 
-import { FlightSnapshot, type FlightClock } from './FlightSnapshot';
+import { FlightSnapshot, restoresFlightTo, snapshotsFlightFrom, type FlightClock } from './FlightSnapshot';
+import { mayEnterYard, yardOwnsInput, type EntryContext } from './entryGuards';
 import type { Showroom, ShowroomSetup, Triple } from './showroom/Stage';
 import { placeCamera, swingToFace, type CameraSpec } from './showroom/camera';
 import {
@@ -110,6 +111,8 @@ export interface YardOptions {
   readonly clock: FlightClock;
   /** Quieten the drive while the player stands in the yard. */
   readonly audio?: { setEngine(throttle: number, boost: number): void };
+  /** A jump or a recovery cut is running: the Yard does not open mid-sequence. */
+  readonly busy?: () => boolean;
 }
 
 type Phase = 'idle' | 'out' | 'settle' | 'in' | 'leaving';
@@ -125,6 +128,7 @@ export class Yard implements GameModule {
   private readonly panel: YardPanel;
   private readonly clock: FlightClock;
   private readonly audio: YardOptions['audio'];
+  private readonly busy: () => boolean;
 
   private readonly snapshot = new FlightSnapshot();
   private readonly orbit = new OrbitController();
@@ -189,6 +193,7 @@ export class Yard implements GameModule {
     this.panel = opts.panel;
     this.clock = opts.clock;
     this.audio = opts.audio;
+    this.busy = opts.busy ?? (() => false);
     const route = parseRoute(window.location.search);
     this.sel = selectionFromRoute(route.ship);
     this.stale = route.staleGeneration === true;
@@ -206,8 +211,8 @@ export class Yard implements GameModule {
     // swallow keys in the capture phase while they are open, and the yard
     // should not open over a document the player is reading.
     const onFlightKey = (e: KeyboardEvent): void => {
-      if (e.code !== 'KeyY' || e.repeat || e.metaKey || e.ctrlKey || e.altKey) return;
-      if (modes.current !== 'flight' || this.chartOpen || this.entering) return;
+      if (e.code !== 'KeyY' || this.entering) return;
+      if (!mayEnterYard(this.entryContext(), e)) return;
       this.requestEnter();
     };
     window.addEventListener('keydown', onFlightKey);
@@ -230,13 +235,18 @@ export class Yard implements GameModule {
     else if (modes.base !== 'yard' && this.inside) this.leave(modes.base, ctx);
   }
 
+  private entryContext(): EntryContext {
+    return { base: modes.base, overlay: modes.overlay, menuOpen: this.chartOpen, busy: this.busy() };
+  }
+
   /** Fade to black over flight, then cut to the yard behind it. */
   private requestEnter(): void {
     this.entering = true;
     this.panel.setVeil(1, FADE_OUT_S);
     window.setTimeout(() => {
       this.entering = false;
-      if (modes.current === 'flight' && modes.can('yard')) modes.go('yard');
+      // Re-asked: a chart, a photo or a jump may have started during the fade.
+      if (mayEnterYard(this.entryContext()) && modes.can('yard')) modes.go('yard');
       else this.panel.setVeil(0, FADE_IN_S);
     }, FADE_OUT_S * 1000 + 30);
   }
@@ -247,7 +257,7 @@ export class Yard implements GameModule {
     // review shot cleared back into the yard keeps the original answer.
     if (from === 'flight' || from === 'title') this.cameFrom = from;
     else if (from === 'boot') this.cameFrom = 'flight';
-    if (from === 'flight') {
+    if (snapshotsFlightFrom(from)) {
       this.snapshot.capture(ctx.camera, {
         exposureBias: 1,
         pointerLocked: document.pointerLockElement === this.canvas,
@@ -282,7 +292,7 @@ export class Yard implements GameModule {
     this.onStage = null;
     // Only flight is restored. A review shot taking the scene from the yard
     // keeps the snapshot for when the shot hands the yard back and Esc leaves.
-    if (to === 'flight') this.snapshot.restore(ctx.camera, this.clock);
+    if (restoresFlightTo(to)) this.snapshot.restore(ctx.camera, this.clock);
     else if (to !== 'review') this.clock.resumeRealtime();
     this.iris?.resetExposure();
     this.writeUrl(null);
@@ -301,7 +311,9 @@ export class Yard implements GameModule {
   // -------------------------------------------------------------------------
 
   update(dt: number, ctx: EngineContext): void {
-    if (!this.inside) return;
+    // Under a photo overlay the Yard is frozen, wall-clock phases included:
+    // a hull swap must not happen behind a frame being composed.
+    if (!this.inside || modes.overlay !== null) return;
     this.drainActions();
 
     const now = performance.now();
@@ -622,6 +634,10 @@ export class Yard implements GameModule {
     if (!canvas) return;
 
     const onKey = (e: KeyboardEvent): void => {
+      // Photo on top owns the keyboard. stopPropagation() in its handler does
+      // not stop this one (same target), so the Yard has to stand down itself:
+      // Esc used to leave the photo AND the Yard, ← / → swapped the hull.
+      if (!yardOwnsInput(modes)) return;
       // Browser and OS shortcuts are not ours to eat.
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       let handled = true;
@@ -653,16 +669,18 @@ export class Yard implements GameModule {
       e.stopPropagation();
     };
     const onClick = (e: MouseEvent): void => {
-      // Input requests pointer lock on a canvas click. Not here.
+      // Input requests pointer lock on a canvas click. Not here (nor in photo).
       if (e.target === canvas) e.stopPropagation();
     };
     const onWheel = (e: WheelEvent): void => {
+      // Photo's wheel is its lens; let it through to Photo's listener.
+      if (!yardOwnsInput(modes)) return;
       e.preventDefault();
       e.stopPropagation();
       if (e.deltaY !== 0) this.orbit.zoom(Math.sign(e.deltaY));
     };
     const onDown = (e: PointerEvent): void => {
-      if (e.button !== 0) return;
+      if (e.button !== 0 || !yardOwnsInput(modes)) return;
       this.dragging = true;
       this.dragId = e.pointerId;
       canvas.setPointerCapture(e.pointerId);

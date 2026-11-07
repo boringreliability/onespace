@@ -21,6 +21,33 @@ export type TitleEffect =
   | { kind: 'settings' }
   | { kind: 'reseed'; seed: number };
 
+export interface TitleKeyInput {
+  readonly code: string;
+  readonly metaKey?: boolean;
+  readonly ctrlKey?: boolean;
+  readonly altKey?: boolean;
+}
+
+/**
+ * A keydown on the title. The title swallows every key while shown (so W on
+ * the menu never throttles the ship behind it), but a modifier chord is the
+ * browser's: Cmd+R must reload, Cmd+L reach the address bar (review-p2 — the
+ * title used to preventDefault them all). Such a chord is still kept from the
+ * game, just not from the browser.
+ */
+export function titleKey(k: TitleKeyInput): { event: TitleEvent | null; preventDefault: boolean } {
+  if (k.metaKey || k.ctrlKey || k.altKey) return { event: null, preventDefault: false };
+  const event: TitleEvent | null =
+    k.code === 'ArrowUp' || k.code === 'KeyW'
+      ? { kind: 'up' }
+      : k.code === 'ArrowDown' || k.code === 'KeyS'
+        ? { kind: 'down' }
+        : k.code === 'Enter' || k.code === 'Space'
+          ? { kind: 'enter' }
+          : null;
+  return { event, preventDefault: true };
+}
+
 export function initialTitle(): TitleState {
   return { index: 0, seedError: null };
 }

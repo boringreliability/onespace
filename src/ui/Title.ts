@@ -12,7 +12,7 @@ import type { EngineContext, GameModule } from '@/core/Engine';
 import { modes } from '@/core/Modes';
 import { config } from '@/core/Config';
 import { activeShotName } from '@/game/Shots';
-import { TITLE_ITEMS, initialTitle, titleStep, type TitleEffect, type TitleEvent, type TitleState } from './titleMenu';
+import { TITLE_ITEMS, initialTitle, titleKey, titleStep, type TitleEffect, type TitleEvent, type TitleState } from './titleMenu';
 
 const LABELS: Record<(typeof TITLE_ITEMS)[number], string> = {
   undock: 'UNDOCK',
@@ -101,11 +101,10 @@ export class Title implements GameModule {
 
   private onKey = (e: KeyboardEvent): void => {
     if (!this.shown || e.target === this.seedInput) return;
-    e.preventDefault();
+    const k = titleKey(e);
+    if (k.preventDefault) e.preventDefault();
     e.stopPropagation();
-    if (e.code === 'ArrowUp' || e.code === 'KeyW') this.dispatch({ kind: 'up' });
-    else if (e.code === 'ArrowDown' || e.code === 'KeyS') this.dispatch({ kind: 'down' });
-    else if (e.code === 'Enter' || e.code === 'Space') this.dispatch({ kind: 'enter' });
+    if (k.event) this.dispatch(k.event);
   };
 
   private dispatch(e: TitleEvent): void {
