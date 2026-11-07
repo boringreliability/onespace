@@ -49,4 +49,22 @@ describe('referenceDisplacement', () => {
     const out = referenceDisplacement(new Vector3(5, 6, 7), q, new Vector3(5, 6, 7), q, new Vector3(0, R, 0), new Vector3());
     expect(out.length()).toBeLessThan(1e-12);
   });
+
+  it('Given a world spinning about a tilted axis, When asked, Then the ground last frame plus the displacement is the ground now', () => {
+    // A tilted world: the spin quaternion is tilt * turn, which does not
+    // commute — the order of the delta matters (review-landed mutant).
+    const tilt = new Quaternion().setFromAxisAngle(new Vector3(1, 0, 0), 0.41);
+    const turn = (a: number) => tilt.clone().multiply(new Quaternion().setFromAxisAngle(new Vector3(0, 1, 0), a));
+    const prev = turn(0.7);
+    const now = turn(0.7 + 1e-3);
+    const anchor = new Vector3(0.3, 0.5, -0.8).normalize().multiplyScalar(R); // body-fixed
+    const was = anchor.clone().applyQuaternion(prev).add(new Vector3(1, 2, 3));
+    const is = anchor.clone().applyQuaternion(now).add(new Vector3(1.5, 2, 3));
+    const out = referenceDisplacement(
+      new Vector3(1, 2, 3), prev, new Vector3(1.5, 2, 3), now,
+      anchor.clone().applyQuaternion(now), new Vector3(),
+    );
+    expect(was.add(out).distanceTo(is)).toBeLessThan(1e-9);
+  });
 });
+

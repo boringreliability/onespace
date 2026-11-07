@@ -166,4 +166,75 @@ describe('composeLandedFrame', () => {
     expect(turned.look.distanceTo(base.look.clone().applyQuaternion(q))).toBeLessThan(1e-6);
     expect(turned.offset.distanceTo(base.offset.clone().applyQuaternion(q))).toBeLessThan(1e-9);
   });
+
+  // --- review-landed: behaviours the mutants above showed were unpinned -----
+
+  /** Signed horizontal angle of `d` off `look`, about `up`; positive = left. */
+  function bearingOff(d: Vector3, look: Vector3, up: Vector3): number {
+    const f = look.clone().addScaledVector(up, -look.dot(up)).normalize();
+    const left = up.clone().cross(f);
+    const h = d.clone().addScaledVector(up, -d.dot(up));
+    return Math.atan2(h.dot(left), h.dot(f));
+  }
+
+  it('Given any sun, When the frame is composed, Then the hull sits off-centre on the side of the frame away from the star', () => {
+    for (const az of [0, 110, 250]) {
+      const { i, offset, look } = frame({ sunDir: sunAt(20, az) });
+      const hull = bearingOff(offset.clone().negate(), look, i.up);
+      const star = bearingOff(i.sunDir, look, i.up);
+      expect(Math.sign(hull)).toBe(-Math.sign(star));
+      expect(Math.abs(hull)).toBeGreaterThan(5 * DEG);
+    }
+  });
+
+  it('Given a high but not overhead star, When the frame is composed, Then the frame still follows the star and not the hull', () => {
+    const { i, look } = frame({ sunDir: sunAt(75, 110), shipForward: sunAt(0, 290) });
+    expect(azimuthGap(look, i.sunDir, i.up)).toBeLessThan(45 * DEG);
+  });
+
+  it('Given the star overhead and a nose pitched up, When the frame is composed, Then the look is as level as for a level nose', () => {
+    const level = frame({ sunDir: new Vector3(0, 1, 0), shipForward: new Vector3(1, 0, 0), skyWeight: 0 });
+    const noseUp = frame({ sunDir: new Vector3(0, 1, 0), shipForward: new Vector3(1, 0.6, 0).normalize(), skyWeight: 0 });
+    expect(noseUp.look.distanceTo(level.look)).toBeLessThan(1e-9);
+    expect(noseUp.offset.distanceTo(level.offset)).toBeLessThan(1e-12);
+  });
+
+  it('Given the pilot yawing right (negative yaw, as the rig feeds it), When the frame is composed, Then the view turns right', () => {
+    const a = frame({ yaw: 0 });
+    const b = frame({ yaw: -0.2 });
+    expect(bearingOff(b.look, a.look, a.i.up)).toBeLessThan(-0.15);
+  });
+
+  it('Given the pilot pitching up, When the frame is composed, Then the view rises', () => {
+    const a = frame({ skyWeight: 0, pitch: 0 });
+    const b = frame({ skyWeight: 0, pitch: 0.1 });
+    expect(elevation(b.look, b.i.up)).toBeGreaterThan(elevation(a.look, a.i.up) + 0.08);
+  });
+
+  it('Given a sky weight past full, When the frame is composed, Then it is the full-sky frame', () => {
+    expect(frame({ skyWeight: 3 }).look.distanceTo(frame({ skyWeight: 1 }).look)).toBeLessThan(1e-12);
+  });
+
+  it('Given a raised eye and the pilot pitching up as far as allowed, When the frame is composed, Then the hull stays in frame', () => {
+    const { i, offset, look } = frame({ groundRise: 0.05, pitch: 0.35 });
+    expect(inFrame(offset.clone().negate(), look, i.up, 0.95)).toBe(true);
+  });
+
+  it('Given the pilot pitching far down, When the frame is composed, Then the look stops short of the ground under the eye', () => {
+    const { i, look } = frame({ skyWeight: 0, pitch: -2 });
+    expect(elevation(look, i.up)).toBeGreaterThanOrEqual(-0.6 - 1e-9);
+  });
+
+  it('Given time passing frame by frame, When the frame is recomposed, Then no frame-to-frame step is visible', () => {
+    let worst = 0;
+    let prev = frame({ time: 0 }).look;
+    for (let t = 1 / 60; t <= 120; t += 1 / 60) {
+      const l = frame({ time: t }).look;
+      worst = Math.max(worst, l.angleTo(prev));
+      prev = l;
+    }
+    // A felt drift: well under a hundredth of a degree a frame.
+    expect(worst).toBeLessThan(0.01 * DEG);
+  });
 });
+
