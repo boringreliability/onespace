@@ -26,6 +26,7 @@ import { moduleDt, tickModules } from './tick';
 import { parseDevParams } from './Route';
 import { ENGINE_MAX_DT } from './substeps';
 import { governorHoldUp } from './flightActivity';
+import { ResizeLatch } from './resizeLatch';
 
 export interface EngineContext {
   readonly renderer: WebGLRenderer;
@@ -100,6 +101,12 @@ export class Engine {
   private governor = new ResolutionGovernor();
   private lastStepAt = 0;
   private avgWallMs = 16.7;
+  /**
+   * [v3-T1] A governor step resizes the drawing buffer, which clears it. Held
+   * here and applied at the start of the next frame, never between a render
+   * and the browser presenting it (that was a black frame per step).
+   */
+  private readonly resizeLatch = new ResizeLatch();
   /** `?dpr=` override; replaces the tier's cap when set. */
   private dprCap: number | null = null;
 
@@ -218,6 +225,9 @@ export class Engine {
     const wallMs = this.lastStepAt > 0 ? t0 - this.lastStepAt : 0;
     this.lastStepAt = t0;
 
+    // [v3-T1] A pending resolution change lands before anything is drawn.
+    if (this.resizeLatch.takeBeforeRender()) this.applySize();
+
     // Clamp dt: a background tab or a long GC pause must not teleport the ship.
     // [v3-T1] The clamp is shared with FlightModel's substep budget
     // (core/substeps.ts) so no clamped frame ever loses ship time.
@@ -331,7 +341,9 @@ export class Engine {
     if (!this.governor.sample(wallMs, governorHoldUp())) return;
     this.resolutionScale = this.governor.scale;
     config.dynamicResolution = this.resolutionScale;
-    this.applySize();
+    // [v3-T1] Not applySize() here: this runs after render(), and resizing
+    // the canvas clears what the browser is about to present.
+    this.resizeLatch.request();
   }
 
   private pixelRatioCap(q: QualitySettings): number {
