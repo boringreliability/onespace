@@ -243,3 +243,46 @@ describe('blendSeconds', () => {
     expect(blendSeconds(Number.NaN, 1.5, 90 * DEG)).toBe(1.5);
   });
 });
+
+// [review-v3a] mutation survivors: boundaries, degenerate inputs, pinned numbers.
+describe('cameraMath edges (review-v3a)', () => {
+  it('Given a change of velocity of exactly aMax·dt, When limited, Then it is still motion, not a jump', () => {
+    const r = limitAnchorVelocity(new Vector3(0, 0, 0), new Vector3(1, 0, 0), 0.5, 2, out());
+    expect(r.jumped).toBe(false);
+    expect(r.vel.x).toBe(1);
+    expect(r.teleport.length()).toBe(0);
+  });
+
+  it('Given a negative aMax, When limited, Then the velocity holds and the whole change is a teleport (never reversed)', () => {
+    const r = limitAnchorVelocity(new Vector3(1, 0, 0), new Vector3(2, 0, 0), 0.1, -5, out());
+    expect(r.vel.x).toBeCloseTo(1, 12);
+    expect(r.teleport.x).toBeCloseTo(0.1, 12);
+    expect(r.jumped).toBe(true);
+  });
+
+  it('Given a subject just past the soft radius, When constrained, Then it lands on the tanh knee (inside the margin), not on the margin', () => {
+    const half = 0.5;
+    const ang = Math.atan(0.5 * Math.tan(half)); // radius 0.5 straight up
+    const subj = new Vector3(0, Math.sin(ang), -Math.cos(ang));
+    const up = new Vector3(0, 1, 0);
+    const res = constrainAimToFrame(new Vector3(), new Vector3(0, 0, -1), subj, up, half, 1, 0.6);
+    const want = 0.4 + 0.2 * Math.tanh(0.1 / 0.2);
+    expect(subjectFrameRadius(res, subj, up, half, 1)).toBeCloseTo(want, 4);
+  });
+
+  it('Given two opposite offsets, When interpolated halfway, Then the lens swings round at full radius (perpendicular), not through or back', () => {
+    const r = sphericalLerp(new Vector3(), new Vector3(0.05, 0, 0), new Vector3(-0.05, 0, 0), 0.5);
+    expect(r.length()).toBeCloseTo(0.05, 9);
+    expect(r.x).toBeCloseTo(0, 9);
+  });
+
+  it('Given a zero-length offset at one end, When interpolated, Then it falls back to a straight lerp', () => {
+    const r = sphericalLerp(new Vector3(), new Vector3(0, 0, 0), new Vector3(2, 0, 0), 0.25);
+    expect(r.x).toBeCloseTo(0.5, 12);
+  });
+
+  it('Given smootherstep, Then its peak slope is 15/8: a 180° turn at 90°/s lasts 3.75 s', () => {
+    expect(SMOOTHERSTEP_PEAK_SLOPE).toBe(1.875);
+    expect(blendSeconds(Math.PI, 0, Math.PI / 2)).toBeCloseTo(3.75, 12);
+  });
+});

@@ -42,6 +42,12 @@ describe('[v3-T2] rampAxis (pure)', () => {
     expect(rampAxis(0.2, 0.2, 1 / 60)).toBe(0.2);
   });
 
+  // [review-v3a] mutation survivor: shrinking to a smaller target on the same side.
+  it('Given 0.9 easing to 0.2 on the same side, When 0.06 s pass, Then it stops at 0.2 on the down ramp (it does not dip through it towards 0)', () => {
+    expect(rampAxis(0.9, 0.2, 0.06)).toBe(0.2);
+    expect(rampAxis(-0.9, -0.2, 0.06)).toBe(-0.2);
+  });
+
   it('Given a reversal from +1 to −1, Then it takes 0.08 s down to 0 and then 0.15 s up to −1 (0.23 s in all)', () => {
     expect(rampAxis(1, -1, 0.08)).toBeCloseTo(0, 12);
     expect(rampAxis(1, -1, 0.08 + 0.075)).toBeCloseTo(-0.5, 12);
@@ -65,6 +71,7 @@ describe('[v3-T2] rampAxis (pure)', () => {
     expect(rampAxis(0.4, 1, 0)).toBe(0.4);
     expect(rampAxis(0.4, 1, -1)).toBe(0.4);
     expect(rampAxis(0.4, 1, Number.NaN)).toBe(0.4);
+    expect(rampAxis(0.4, 1, Infinity)).toBe(0.4); // [review-v3a] survivor
   });
 
   it('Given a non-finite current value, Then it recovers to a finite one (target or 0), never NaN', () => {

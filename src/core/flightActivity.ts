@@ -34,7 +34,20 @@ export function cruiseSpoolNow(): number {
   return Math.max(flightActivity.cruiseSpool, flightActivity.cruiseSpoolFallback);
 }
 
-/** The governor holds its rises while something other than the pilot flies. */
-export function governorHoldUp(): boolean {
+/**
+ * [review-v3a] Base modes in which the flight simulation runs — the same list
+ * as `universe` in game/gating.ts (tested). The cruise and autopilot modules
+ * stop ticking outside it (the Yard), so their flags freeze at whatever they
+ * last were: enter the Yard while cruising and the governor held its rises for
+ * the whole Yard session.
+ */
+export const FLIGHT_RUNNING_MODES: readonly string[] = ['boot', 'title', 'flight', 'map', 'review'];
+
+/**
+ * The governor holds its rises while something other than the pilot flies.
+ * `base` is the current base mode; omitted means "flight is running".
+ */
+export function governorHoldUp(base?: string): boolean {
+  if (base !== undefined && !FLIGHT_RUNNING_MODES.includes(base)) return false;
   return flightActivity.autopilot || cruiseActive();
 }

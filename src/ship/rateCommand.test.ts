@@ -26,8 +26,10 @@ import {
   MAX_RATE,
   RATE_TAU_DOWN,
   RATE_TAU_UP,
+  STEER_RATE_GAIN,
   rateCommand,
   rateTuning,
+  steerRate,
   type RateAxis,
 } from './rateCommand';
 
@@ -280,4 +282,33 @@ describe('[v3-T2] attitudeHold off stays Newtonian with the same α', () => {
       expect(Math.abs(fm.angularVelocity[BODY[axis]])).toBeCloseTo(w, 9);
     });
   }
+});
+
+// [review-v3a] mutation survivors: the through-zero split, the landed τ scale, steering.
+describe('rateCommand edges (review-v3a)', () => {
+  it('Given ω just above zero and a full reversal demand, When one substep crosses zero, Then the far side is spun up with α_max for the time left (not braked with α_brake)', () => {
+    const t = rateTuning('pitch');
+    const w0 = 0.01;
+    const next = rateCommand(w0, -MAX_RATE.pitch, H, t);
+    const rest = H - w0 / t.alphaDown;
+    expect(next).toBeCloseTo(-t.alphaUp * rest, 9);
+    expect(Math.abs(next)).toBeLessThanOrEqual(t.alphaUp * H + 1e-12);
+  });
+
+  it('Given the landed τ scale (0.25), When a small demand is flown, Then it converges four times faster than in flight', () => {
+    const t = rateTuning('yaw');
+    const cmd = 0.5 * DEG; // small: α never binds
+    const free = rateCommand(0, cmd, H, t);
+    const landed = rateCommand(0, cmd, H, t, 0.25);
+    expect(landed).toBeGreaterThan(free * 2);
+    expect(landed).toBeLessThanOrEqual(cmd);
+  });
+
+  it('Given the steering gain, Then it is the critically damped K = 1/(4·τ_down) = 2.5, and a single-axis demand saturates at full stick', () => {
+    expect(STEER_RATE_GAIN).toBe(2.5);
+    expect(STEER_RATE_GAIN).toBeCloseTo(1 / (4 * RATE_TAU_DOWN), 12);
+    expect(steerRate(10, MAX_RATE.pitch)).toBe(1);
+    expect(steerRate(-10, MAX_RATE.pitch)).toBe(-1);
+    expect(steerRate(0.01, MAX_RATE.pitch)).toBeCloseTo((2.5 * 0.01) / MAX_RATE.pitch, 12);
+  });
 });

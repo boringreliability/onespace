@@ -821,6 +821,12 @@ export class CameraRig {
       this.blendAboutShip(this.poseFor(this.blendFrom), to, smootherstep(this.blendT), shipPosition);
     }
 
+    // [review-v3a] A reseat re-frames the CHASE. stepChase detects snaps in
+    // every mode, and in the cockpit (an eye bolted to the hull) or the orbit
+    // view the blend held last frame's WORLD attitude: after a 90° snap the
+    // cockpit looked 90° off the nose and swung back over 0.5 s.
+    if (this.reseatT < 1 && this.mode_ !== 'chase') this.reseatT = 1;
+
     // [v3-T1] Blended reseat: from where the lens was to where it now belongs.
     if (this.reseatT < 1) {
       this.reseatT = Math.min(1, this.reseatT + step / this.reseatDur);

@@ -91,3 +91,33 @@ describe('fovPolicy', () => {
     for (const a of [1, 16 / 9, 2.4]) expect(vfovFromHfov(hfovFromVfov(57, a), a)).toBeCloseTo(57, 9);
   });
 });
+
+// [review-v3a] Adversarial review: narrow screens, pinned numbers, bad aspects.
+describe('fovPolicy — narrow screens and pinned numbers (review-v3a)', () => {
+  it('Given a phone in portrait (9:16), When the cruise drive spools and thrust is full, Then the vertical breathes exactly as at 16:9 (not 66 % harder)', () => {
+    for (const aspect of [9 / 16, 0.2, 1, 4 / 3]) {
+      for (const [t, s] of [[0, 0], [1, 0], [0, 1], [1, 1], [0.5, 0.3]] as const) {
+        expect(at(aspect, t, s)).toBeCloseTo(at(16 / 9, t, s), 9);
+        expect(at(aspect, t, s, 'cockpit')).toBeCloseTo(at(16 / 9, t, s, 'cockpit'), 9);
+      }
+    }
+    // Measured before the fix: 57.0° → 76.7° vertical at 9:16, 57.0° → 69.6° at 16:9.
+    expect(at(9 / 16, 1, 1)).toBeLessThan(70);
+  });
+
+  it('Given the D0 numbers, Then they are pinned as literals (88° base, +4° thrust, +10° spool, 100° Hor+ and cockpit caps)', () => {
+    expect(h(16 / 9)).toBeCloseTo(88, 6);
+    expect(h(16 / 9, 1, 0)).toBeCloseTo(92, 6);
+    expect(h(16 / 9, 0, 1)).toBeCloseTo(98, 6);
+    expect(h(32 / 9)).toBeCloseTo(100, 6);
+    expect(h(32 / 9, 1, 1, 'cockpit')).toBeCloseTo(100, 6);
+    expect(h(16 / 9, 1, 1, 'cockpit')).toBeCloseTo(100, 6);
+  });
+
+  it('Given an infinite, NaN, zero or negative aspect, Then it falls back to the 16:9 answer instead of a NaN', () => {
+    for (const aspect of [Infinity, Number.NaN, 0, -2]) {
+      const v = fovPolicy({ aspect, thrustFrac: 0.5, cruiseSpool: 0.5, mode: 'chase' });
+      expect(v).toBeCloseTo(at(16 / 9, 0.5, 0.5), 9);
+    }
+  });
+});
