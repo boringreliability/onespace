@@ -1,0 +1,50 @@
+/**
+ * [v3-T1] Field of view policy (docs/v3/DECISIONS.md D0).
+ *
+ * - 88° horizontal at 16:9. Wider screens get more horizontal view at the
+ *   same vertical (Hor+) until 100° horizontal, then the vertical narrows
+ *   (Vert-). Narrower screens keep the 16:9 vertical.
+ * - Breathing only from thrust (+4°) and cruise spool (+10°), horizontal
+ *   degrees on top of the base. NEVER from orbital speed: there is no speed
+ *   input here on purpose.
+ * - Cockpit: never wider than 100° horizontal.
+ *
+ * STAGE-1 STUB: signatures only. Implemented in stage 2.
+ */
+
+export type FovMode = 'chase' | 'cockpit';
+
+export interface FovInput {
+  /** Viewport width / height. */
+  readonly aspect: number;
+  /** 0..1 engine output. */
+  readonly thrustFrac: number;
+  /** 0..1 cruise drive spool. */
+  readonly cruiseSpool: number;
+  readonly mode: FovMode;
+}
+
+export const REFERENCE_ASPECT = 16 / 9;
+export const BASE_HFOV_DEG = 88;
+export const HOR_PLUS_MAX_HFOV_DEG = 100;
+export const COCKPIT_MAX_HFOV_DEG = 100;
+export const THRUST_BREATH_DEG = 4;
+export const CRUISE_BREATH_DEG = 10;
+
+/** Horizontal fov (deg) of a vertical fov (deg) at an aspect. */
+export function hfovFromVfov(vfovDeg: number, aspect: number): number {
+  const t = Math.tan((vfovDeg * Math.PI) / 360) * aspect;
+  return (Math.atan(t) * 360) / Math.PI;
+}
+
+/** Vertical fov (deg) of a horizontal fov (deg) at an aspect. */
+export function vfovFromHfov(hfovDeg: number, aspect: number): number {
+  const t = Math.tan((hfovDeg * Math.PI) / 360) / aspect;
+  return (Math.atan(t) * 360) / Math.PI;
+}
+
+/** Vertical fov in degrees, what `PerspectiveCamera.fov` wants. */
+export function fovPolicy(input: FovInput): number {
+  void input;
+  throw new Error('fovPolicy: not implemented (v3-T1 stage 1)');
+}

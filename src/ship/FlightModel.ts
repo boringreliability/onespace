@@ -404,6 +404,14 @@ export class FlightModel {
   readonly up = new Vector3(0, 1, 0);
   /** Away from the parent; +Y with no parent. */
   readonly localUp = new Vector3(0, 1, 0);
+  // --- [v3-T1] read-only, for the camera ------------------------------------
+  /**
+   * Proper acceleration (thrust, drag — everything but gravity), km/s², world
+   * axes, averaged over the substeps of the last `update()`. What an
+   * accelerometer on the hull reads. STAGE-1 STUB: always zero.
+   */
+  readonly properAccel = new Vector3();
+  // --- [/v3-T1] ---------------------------------------------------------------
   /** Gravitational acceleration acting on the ship, km/s². */
   readonly gravityAccel = new Vector3();
 

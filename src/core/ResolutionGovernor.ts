@@ -55,6 +55,32 @@ export const GOVERNOR_DEFAULTS: GovernorConfig = {
   spikeRunLimit: 3,
 };
 
+// --- [v3-T1] hysteresis ------------------------------------------------------
+// Every step reallocates the post stack's targets and costs a 56-67 ms frame
+// (8 of 8 steps during an auto-land, docs/v3/PLAN.md §1). Steps are therefore
+// rationed: never closer than 2 s, rises only after 5 s of steady fast frames,
+// and no rise at all while the autopilot or cruise is flying.
+
+export const GOVERNOR_MIN_STEP_INTERVAL_MS = 2000;
+export const GOVERNOR_UP_STABLE_MS = 5000;
+
+export interface GovernorStepQuery {
+  readonly direction: 'up' | 'down';
+  /** Wall time since the last change of scale, ms (Infinity if none). */
+  readonly sinceLastStepMs: number;
+  /** Wall time the frame rate has been continuously under the up threshold, ms. */
+  readonly stableMs: number;
+  /** True while the autopilot or cruise is active: rises wait. */
+  readonly holdUp: boolean;
+}
+
+/** May the governor take the step it wants? STAGE-1 STUB. */
+export function governorShouldStep(q: GovernorStepQuery): boolean {
+  void q;
+  throw new Error('governorShouldStep: not implemented (v3-T1 stage 1)');
+}
+// --- [/v3-T1] ------------------------------------------------------------------
+
 export class ResolutionGovernor {
   readonly config: GovernorConfig;
   scale: number;
@@ -72,7 +98,8 @@ export class ResolutionGovernor {
   }
 
   /** Feed one frame interval in ms. Returns true when `scale` changed. */
-  sample(frameMs: number): boolean {
+  sample(frameMs: number, holdUp = false): boolean {
+    void holdUp; // [v3-T1] stage-1 stub; wired in stage 2
     const c = this.config;
     if (!Number.isFinite(frameMs) || frameMs <= 0) return false;
     if (frameMs > c.spikeMs) {

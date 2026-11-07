@@ -664,6 +664,36 @@ export class CameraRig {
     this.cinematicTime = 0;
   }
 
+  // --- [v3-T1] motion inputs (STAGE-1 STUB: no-ops) -------------------------
+
+  /**
+   * What the hull feels this frame: PROPER acceleration (km/s², world axes,
+   * gravity excluded — FlightModel.properAccel), engine output 0..1 and the
+   * cruise spool 0..1. Lag, cockpit nudge, shake and FOV breathing are driven
+   * from these, never from differencing positions. Call before `update()`.
+   */
+  setMotion(properAccel: Vector3, thrustFrac: number, cruiseSpool: number): void {
+    void properAccel;
+    void thrustFrac;
+    void cruiseSpool;
+  }
+
+  /** Current shake trauma 0..1 (diagnostics and tests). */
+  get trauma(): number {
+    return clamp(this.impulseTrauma + this.thrustTrauma, 0, 1);
+  }
+
+  /**
+   * Blended reseat: carry the camera to its settled pose for the current
+   * attitude, blending the view across `seconds` so nothing cuts. For
+   * discontinuities someone knows about (an attitude snap, an insertion).
+   */
+  reseat(seconds = 0.5): void {
+    void seconds;
+  }
+
+  // --- [/v3-T1] -------------------------------------------------------------
+
   /** Drop all smoothing and snap to the ship next frame — use after a warp. */
   reset(): void {
     this.initialised = false;
