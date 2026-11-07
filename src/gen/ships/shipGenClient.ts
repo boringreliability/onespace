@@ -31,9 +31,12 @@
  * THE FALLBACK IS THE SAME FUNCTION
  *
  * No `Worker` (node, vitest, an old browser), a factory that throws (module
- * workers unsupported), or a worker that errors: the client switches to
- * generating on this thread and stays there. It still never runs more than one
- * hull per task — jobs drain one per `schedule` tick — so the fallback is
+ * workers unsupported), a worker that errors, or one that sits on a job past
+ * a watchdog (killed without an `error`): the client switches to generating
+ * on this thread and stays there, keeping only the hulls someone still waits
+ * for — prefetches and cancelled work are dropped, not built here. It still
+ * never runs more than one hull per task — jobs drain one per `schedule`
+ * tick — so the fallback is
  * D10's one-heavy-build-at-a-time rule rather than the v1 burst. `get()` is
  * the synchronous door for callers that cannot wait at all (the review
  * harness, whose frames are captured on a fixed step; D42).
@@ -81,7 +84,18 @@ export interface ShipGenClientOptions {
   readonly generate?: (p: ShipParams) => GeneratedShip;
   /** Paces the fallback, one job per call. Default: a macrotask. */
   readonly schedule?: (fn: () => void) => void;
+  /**
+   * How long a worker may sit on one job before it is presumed dead. A worker
+   * the browser kills (out of memory, a crashed process) fires no `error`, so
+   * without this its job, and the slot it holds, wait forever.
+   */
+  readonly jobTimeoutMs?: number;
+  /** Arms a watchdog; returns its disarm. Default: `setTimeout`. Only tests replace it. */
+  readonly setTimer?: (fn: () => void, ms: number) => () => void;
 }
+
+/** A hull is 30-75 ms; a cold worker adds its module load. Ten seconds is a death, not a slow job. */
+const JOB_TIMEOUT_MS = 10_000;
 
 /**
  * A canonical key: fixed field order, absent and undefined alike, and the
@@ -118,9 +132,16 @@ interface Job {
 interface Slot {
   readonly port: ShipWorkerPort;
   job: Job | null;
+  /** Disarms the watchdog on `job`; null while idle. */
+  disarm: (() => void) | null;
 }
 
 const noop = (): void => undefined;
+
+function defaultSetTimer(fn: () => void, ms: number): () => void {
+  const t = setTimeout(fn, ms);
+  return () => clearTimeout(t);
+}
 
 function defaultWorkerFactory(): (() => ShipWorkerPort) | null {
   if (typeof Worker === 'undefined') return null;
@@ -143,6 +164,8 @@ export class ShipGenClient {
   private readonly capacity: number;
   private readonly generate: (p: ShipParams) => GeneratedShip;
   private readonly schedule: (fn: () => void) => void;
+  private readonly jobTimeoutMs: number;
+  private readonly setTimer: (fn: () => void, ms: number) => () => void;
 
   private readonly cache = new Map<string, GeneratedShip>();
   private readonly jobs = new Map<string, Job>();
@@ -160,6 +183,8 @@ export class ShipGenClient {
     this.capacity = Math.max(1, Math.floor(opts.capacity ?? 24));
     this.generate = opts.generate ?? generateShip;
     this.schedule = opts.schedule ?? ((fn) => void setTimeout(fn, 0));
+    this.jobTimeoutMs = opts.jobTimeoutMs ?? JOB_TIMEOUT_MS;
+    this.setTimer = opts.setTimer ?? defaultSetTimer;
   }
 
   get mode(): ShipGenMode {
@@ -188,9 +213,12 @@ export class ShipGenClient {
   /**
    * Warm the cache with a ship nobody is waiting for yet. Queued behind every
    * request; cancel it with `cancel(params)` once the guess is wrong.
+   *
+   * A no-op on the synchronous fallback: there a prefetch is a main-thread
+   * build nobody asked for — the stall this client exists to remove.
    */
   prefetch(params: ShipParams): void {
-    if (this.disposed) return;
+    if (this.disposed || this.mode === 'sync') return;
     const key = shipParamsKey(params);
     if (this.cache.has(key)) return;
     const job = this.jobs.get(key);
@@ -307,6 +335,13 @@ export class ShipGenClient {
     job.resolve(bp);
   }
 
+  /** Forget a job nobody will wait for, and tell any listener it was cancelled. */
+  private drop(job: Job): void {
+    job.state = 'done';
+    this.jobs.delete(job.key);
+    job.reject(new ShipGenCancelled());
+  }
+
   private fail(job: Job, error: unknown): void {
     job.state = 'done';
     this.jobs.delete(job.key);
@@ -370,7 +405,7 @@ export class ShipGenClient {
       this.fallBack();
       return null;
     }
-    const slot: Slot = { port, job: null };
+    const slot: Slot = { port, job: null, disarm: null };
     port.onmessage = (ev) => this.onAnswer(slot, ev.data);
     port.onerror = () => this.fallBack();
     this.slots.push(slot);
@@ -381,6 +416,11 @@ export class ShipGenClient {
     job.state = 'running';
     job.id = ++this.nextId;
     slot.job = job;
+    // Also covers a job `get()` has since built in place: the worker is still
+    // wedged on it, and the slot is only free again once someone gives up.
+    slot.disarm = this.setTimer(() => {
+      if (slot.job === job) this.fallBack();
+    }, this.jobTimeoutMs);
     try {
       slot.port.postMessage({ id: job.id, params: job.params });
     } catch {
@@ -393,6 +433,7 @@ export class ShipGenClient {
     // Only the answer to the job this worker is running, under its current id.
     if (!job || job.id !== data.id) return;
     slot.job = null;
+    this.disarm(slot);
     // `get()` may already have built it in place; its answer is then stale.
     if (job.state === 'running') {
       if (data.ok) this.succeed(job, data.blueprint);
@@ -401,7 +442,13 @@ export class ShipGenClient {
     this.pump();
   }
 
+  private disarm(s: Slot): void {
+    s.disarm?.();
+    s.disarm = null;
+  }
+
   private close(s: Slot): void {
+    this.disarm(s);
     s.port.onmessage = null;
     s.port.onerror = null;
     s.port.terminate();
@@ -409,23 +456,32 @@ export class ShipGenClient {
 
   /**
    * Off the workers for good. Whatever they were running goes back to the
-   * head of the queue, in order, and is built on this thread one per task.
+   * head of the queue, in order, and is built on this thread one per task —
+   * but only what somebody still wants. A job every caller cancelled while it
+   * ran, and every queued prefetch, is dropped here: on this thread each is a
+   * 30-75 ms task for a hull nobody is waiting for.
    */
   private fallBack(): void {
     if (this.fallenBack) return;
     this.fallenBack = true;
     const orphans: Job[] = [];
     for (const s of this.slots) {
-      if (s.job && s.job.state === 'running') orphans.push(s.job);
+      const j = s.job;
+      if (j && j.state === 'running') {
+        if (j.wanted > 0 && j.priority === 'high') orphans.push(j);
+        else this.drop(j);
+      }
       s.job = null;
       this.close(s);
     }
     this.slots = [];
+    // Low priority holds prefetches only: a request promotes what it joins.
+    for (const j of this.low.splice(0)) this.drop(j);
     for (let i = orphans.length - 1; i >= 0; i--) {
       const j = orphans[i]!;
       j.state = 'queued';
       j.id = 0;
-      (j.priority === 'high' ? this.high : this.low).unshift(j);
+      this.high.unshift(j);
     }
     this.scheduleDrain();
   }

@@ -58,3 +58,12 @@ describe('seedNeighbours', () => {
     }
   });
 });
+
+describe('mayCut — the ceiling counts from black (review-worker)', () => {
+  const FADE = 160;
+
+  it('Given the blueprint is not ready, When black has lasted just under the ceiling, Then the cut still holds', () => {
+    // The fade itself is not waiting time: the ceiling starts once the veil is black.
+    expect(mayCut(FADE + SWAP_MAX_WAIT_MS - 1, FADE, false)).toBe(false);
+  });
+});

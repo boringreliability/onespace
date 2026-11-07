@@ -63,11 +63,21 @@ class FakeWorker implements ShipWorkerPort {
   }
 }
 
+interface Timer {
+  readonly fn: () => void;
+  readonly ms: number;
+  cleared: boolean;
+}
+
 interface Rig {
   client: ShipGenClient;
   workers: FakeWorker[];
   tasks: Array<() => void>;
+  /** Watchdog timers the client armed, in order. */
+  timers: Timer[];
   runTask(): void;
+  /** Fire every armed, uncleared timer, as if their time had passed. */
+  fireTimers(): void;
 }
 
 function rig(opts: { poolSize?: number; capacity?: number; workers?: boolean; real?: boolean } = {}): Rig {
@@ -75,12 +85,20 @@ function rig(opts: { poolSize?: number; capacity?: number; workers?: boolean; re
   const gen = opts.real ? generateShip : fakeGenerate;
   const workers: FakeWorker[] = [];
   const tasks: Array<() => void> = [];
+  const timers: Timer[] = [];
   const client = new ShipGenClient({
     poolSize: opts.poolSize ?? 1,
     capacity: opts.capacity ?? 8,
     generate: gen,
     schedule: (fn) => {
       tasks.push(fn);
+    },
+    setTimer: (fn, ms) => {
+      const t: Timer = { fn, ms, cleared: false };
+      timers.push(t);
+      return () => {
+        t.cleared = true;
+      };
     },
     createWorker:
       opts.workers === false
@@ -91,7 +109,16 @@ function rig(opts: { poolSize?: number; capacity?: number; workers?: boolean; re
             return w;
           },
   });
-  return { client, workers, tasks, runTask: () => tasks.shift()?.() };
+  return {
+    client,
+    workers,
+    tasks,
+    timers,
+    runTask: () => tasks.shift()?.(),
+    fireTimers: () => {
+      for (const t of timers.splice(0)) if (!t.cleared) t.fn();
+    },
+  };
 }
 
 /** Let resolved promises run their continuations. */
@@ -411,5 +438,247 @@ describe('shipGenClient — dispose', () => {
     }
     workers[0]!.answerNext();
     expect(client.peek({ seed: 1 })).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review (review-worker): the fallback builds only what someone still wants
+// ---------------------------------------------------------------------------
+
+describe('shipGenClient — what the fallback may build on this thread', () => {
+  it('Given queued prefetches, When the worker errors, Then the prefetches are dropped rather than built on the main thread', async () => {
+    const { client, workers, tasks, runTask } = rig();
+    const a = client.request({ seed: 1 });
+    client.prefetch({ seed: 2 });
+    client.prefetch({ seed: 3 });
+    workers[0]!.crash();
+    while (tasks.length > 0) runTask();
+    // Only the hull someone is waiting for; a guess is not worth a 30-75 ms main-thread task.
+    expect(generated).toEqual([1]);
+    expect((await a).id).toBe('bp-1');
+  });
+
+  it('Given a running job whose only caller cancelled, When the worker errors, Then it is not rebuilt on the main thread and its promise rejects as cancelled', async () => {
+    const { client, workers, tasks, runTask } = rig();
+    const left = client.request({ seed: 1 });
+    const settled = Promise.allSettled([left]);
+    client.cancel({ seed: 1 });
+    workers[0]!.crash();
+    while (tasks.length > 0) runTask();
+    expect(generated).toEqual([]);
+    const [r] = await settled;
+    expect(r!.status).toBe('rejected');
+    expect((r as PromiseRejectedResult).reason).toBeInstanceOf(ShipGenCancelled);
+  });
+
+  it('Given a prefetch already running on the worker, When the worker errors, Then it is dropped rather than rebuilt on the main thread', async () => {
+    const { client, workers, tasks, runTask } = rig();
+    client.prefetch({ seed: 2 });
+    expect(workers[0]!.posted.map((r) => r.params.seed)).toEqual([2]);
+    workers[0]!.crash();
+    while (tasks.length > 0) runTask();
+    expect(generated).toEqual([]);
+    // Asked for for real afterwards, it is built then — on demand, not on a guess.
+    const p = client.request({ seed: 2 });
+    runTask();
+    expect((await p).id).toBe('bp-2');
+  });
+
+  it('Given a prefetch that a request then promoted, When the worker errors, Then it is still built for that request', async () => {
+    const { client, workers, tasks, runTask } = rig();
+    void client.request({ seed: 1 });
+    client.prefetch({ seed: 2 });
+    const p = client.request({ seed: 2 });
+    workers[0]!.crash();
+    while (tasks.length > 0) runTask();
+    expect((await p).id).toBe('bp-2');
+  });
+
+  it('Given the synchronous fallback, When a ship is prefetched, Then nothing is queued or built', () => {
+    const { client, tasks } = rig({ workers: false });
+    client.prefetch({ seed: 1 });
+    expect(tasks).toHaveLength(0);
+    expect(generated).toEqual([]);
+  });
+});
+
+describe('shipGenClient — a worker that never answers', () => {
+  it('Given a dispatched job, When the worker stays silent past the watchdog, Then the client falls back and the job completes on this thread', async () => {
+    const { client, workers, timers, runTask, fireTimers } = rig();
+    const p = client.request({ seed: 1 });
+    expect(timers).toHaveLength(1);
+    expect(timers[0]!.ms).toBeGreaterThanOrEqual(2000);
+    fireTimers();
+    expect(workers[0]!.terminated).toBe(true);
+    expect(client.mode).toBe('sync');
+    runTask();
+    expect((await p).id).toBe('bp-1');
+  });
+
+  it('Given a job the worker answered in time, Then its watchdog is disarmed and never trips the fallback', async () => {
+    const { client, workers, timers, fireTimers } = rig();
+    const p = client.request({ seed: 1 });
+    workers[0]!.answerNext();
+    await p;
+    // Disarmed, not merely ignored when it fires: a live timer per answered job would pile up.
+    expect(timers.map((t) => t.cleared)).toEqual([true]);
+    fireTimers();
+    expect(client.mode).toBe('worker');
+    expect(workers[0]!.terminated).toBe(false);
+  });
+
+  it('Given a running job get() already built in place, When its worker then hangs, Then the watchdog still frees the pool for the next request', async () => {
+    const { client, workers, runTask, fireTimers } = rig();
+    void client.request({ seed: 1 });
+    client.get({ seed: 1 });
+    const next = client.request({ seed: 2 });
+    // Seed 2 waits behind the wedged worker until the watchdog gives up on it.
+    expect(workers[0]!.posted.map((r) => r.params.seed)).toEqual([1]);
+    fireTimers();
+    runTask();
+    expect((await next).id).toBe('bp-2');
+  });
+
+  it('Given the client is disposed, Then no watchdog is left armed', () => {
+    const { client, timers } = rig({ poolSize: 2 });
+    void client.request({ seed: 1 });
+    void client.request({ seed: 2 });
+    client.dispose();
+    expect(timers.length).toBe(2);
+    expect(timers.every((t) => t.cleared)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review (review-worker): properties the first suite did not pin
+// ---------------------------------------------------------------------------
+
+describe('shipGenClient — bookkeeping pinned by mutation testing', () => {
+  it('Given every generator field, When any one of them differs, Then the keys differ', () => {
+    const base: ShipParams = {
+      seed: 1,
+      factionId: 'kessler',
+      role: 'tug',
+      sizeClass: 'light',
+      ageYears: 10,
+      damageLevel: 0.2,
+      maintenance: 0.5,
+      generationVersion: 1,
+    };
+    const variants: ShipParams[] = [
+      { ...base, seed: 2 },
+      { ...base, factionId: 'sillane' },
+      { ...base, role: 'miner' },
+      { ...base, sizeClass: 'medium' },
+      { ...base, ageYears: 11 },
+      { ...base, damageLevel: 0.3 },
+      { ...base, maintenance: 0.6 },
+      { ...base, generationVersion: 2 },
+    ];
+    for (const v of variants) expect(shipParamsKey(v)).not.toBe(shipParamsKey(base));
+  });
+
+  it('Given a running job cancelled more times than it was asked for, When a request and a prefetch then share it, Then cancelling the prefetch does not cancel the request', async () => {
+    const { client, workers, tasks, runTask } = rig();
+    client.request({ seed: 1 }).catch(() => undefined);
+    client.cancel({ seed: 1 });
+    client.cancel({ seed: 1 }); // a stray extra cancel must not bank negative interest
+    const wanted = client.request({ seed: 1 });
+    void client.request({ seed: 9 }); // keeps the queue non-empty so the fallback has work in order
+    workers[0]!.crash(); // seed 1 goes back to the queue, now on the fallback
+    client.cancel({ seed: 9 });
+    while (tasks.length > 0) runTask();
+    expect((await wanted).id).toBe('bp-1');
+  });
+
+  it('Given two jobs on two workers and one queued, When the pool errors, Then the fallback builds them in the order they were asked for', async () => {
+    const { client, workers, runTask } = rig({ poolSize: 2 });
+    const ps = [1, 2, 3].map((seed) => client.request({ seed }));
+    workers[0]!.crash();
+    runTask();
+    runTask();
+    runTask();
+    expect(generated).toEqual([1, 2, 3]);
+    await Promise.all(ps);
+  });
+
+  it('Given a queued job, When get() builds it in place, Then it is never posted to a worker afterwards', () => {
+    const { client, workers } = rig();
+    void client.request({ seed: 1 });
+    void client.request({ seed: 2 });
+    client.get({ seed: 2 });
+    workers[0]!.answerNext();
+    expect(workers[0]!.posted.map((r) => r.params.seed)).toEqual([1]);
+  });
+
+  it('Given several ships on the fallback, Then exactly one drain task is pending at a time', () => {
+    const { client, tasks, runTask } = rig({ workers: false });
+    void client.request({ seed: 1 });
+    void client.request({ seed: 2 });
+    void client.request({ seed: 3 });
+    expect(tasks).toHaveLength(1);
+    runTask();
+    expect(tasks).toHaveLength(1);
+  });
+
+  it('Given a worker whose postMessage throws, When a ship is requested, Then the client falls back, spawns no further worker, and still resolves', async () => {
+    generated = [];
+    const tasks: Array<() => void> = [];
+    let made = 0;
+    const client = new ShipGenClient({
+      poolSize: 2,
+      generate: fakeGenerate,
+      schedule: (fn) => {
+        tasks.push(fn);
+      },
+      setTimer: () => () => undefined,
+      createWorker: () => {
+        made++;
+        const w = new FakeWorker(fakeGenerate);
+        w.postMessage = () => {
+          throw new Error('DataCloneError');
+        };
+        return w;
+      },
+    });
+    const a = client.request({ seed: 1 });
+    const b = client.request({ seed: 2 });
+    expect(client.mode).toBe('sync');
+    expect(made).toBe(1);
+    while (tasks.length > 0) tasks.shift()!();
+    expect([(await a).id, (await b).id]).toEqual(['bp-1', 'bp-2']);
+  });
+
+  it('Given a ship already cached, When it is prefetched, Then nothing is posted', async () => {
+    const { client, workers } = rig();
+    const a = client.request({ seed: 1 });
+    workers[0]!.answerNext();
+    await a;
+    client.prefetch({ seed: 1 });
+    expect(workers[0]!.posted).toHaveLength(1);
+  });
+
+  it('Given a cached ship, When the client is disposed, Then the cache is forgotten', () => {
+    const { client } = rig({ workers: false });
+    client.get({ seed: 1 });
+    client.dispose();
+    expect(client.peek({ seed: 1 })).toBeUndefined();
+  });
+
+  it('Given the generator threw for a ship, When it is requested again, Then it is generated again rather than handed the old failure', async () => {
+    const { client, workers } = rig();
+    const first = client.request({ seed: 666 });
+    workers[0]!.answerNext();
+    await expect(first).rejects.toThrow(/cursed hull/);
+    const second = client.request({ seed: 666 });
+    second.catch(() => undefined);
+    expect(second).not.toBe(first);
+    expect(workers[0]!.posted).toHaveLength(2);
+  });
+
+  it('Given a disposed client, When a ship is requested, Then the promise rejects as cancelled instead of hanging', async () => {
+    const { client } = rig();
+    client.dispose();
+    await expect(client.request({ seed: 1 })).rejects.toBeInstanceOf(ShipGenCancelled);
   });
 });
