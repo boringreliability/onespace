@@ -1027,6 +1027,14 @@ export class CloudRenderer {
 
     this.sunDir.copy(view.sunDirection);
     (u.uCameraLocal.value as Vector3).copy(view.cameraLocal);
+    // Same floor as Atmosphere.ts: an eye inside the analytic planet sphere
+    // clips every ray to nothing and the deck vanishes for that frame.
+    {
+      const c = u.uCameraLocal.value as Vector3;
+      const r = c.length();
+      const floor = this.rPlanet + 0.02;
+      if (r > 1e-6 && r < floor) c.multiplyScalar(floor / r);
+    }
     (u.uSunColor.value as Color).copy(view.sunColor);
 
     const sunLum =

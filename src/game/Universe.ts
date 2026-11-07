@@ -41,7 +41,8 @@ import { CloudRenderer } from '@/render/Clouds';
 import { RingRenderer } from '@/render/Rings';
 import { StarRenderer } from '@/render/Star';
 import { AtmosphereRenderer } from '@/render/Atmosphere';
-import { sceneDepthTexture } from '@/render/PostFX';
+import { sceneDepthTexture, setMotionReferenceDisplacement } from '@/render/PostFX';
+import { referenceDisplacement } from '@/render/motionReference';
 import { planStreaming, type StreamCandidate } from '@/game/streaming';
 import { simSlices } from '@/game/timeCompression'; // [v2-p4]
 import { circularOrbitState, insideStar, openingAttitude, progradeAttitude, starRadiusKm } from '@/game/recovery';
@@ -222,8 +223,12 @@ export class Universe implements GameModule {
   private readonly tmpB = new Vector3();
   private readonly tmpDir = new Vector3();
   private readonly camWorld = new Vector3();
+  /** Camera minus hull, render/world axes, km — see update(). */
+  private readonly eyeOffset = new Vector3();
   private readonly sunDir = new Vector3();
   private readonly sunColor = new Color();
+  private readonly bodySun = new Color();
+  private readonly spinInv = new Quaternion();
   private readonly starWorld = new Vector3();
   /** The star does not move in its own system's frame. Never written. */
   private readonly starVelocity = new Vector3();
@@ -519,6 +524,23 @@ export class Universe implements GameModule {
     // FlightModel drops anything past 8 substeps a call; see
     // game/timeCompression.ts. At 1× this is one slice of exactly dt, i.e.
     // the previous code path.
+    // Where the lens is relative to the hull, measured on last frame's poses
+    // (the rig runs after us). Every renderer's `cameraLocal` used to be the
+    // SHIP's position, which is a fine approximation in flight and a fatal one
+    // on the ground: a ship sitting at sea level put the atmosphere's and the
+    // clouds' ray origin exactly on the analytic planet sphere, float32 then
+    // decided frame by frame whether the eye was inside the planet, and when
+    // it was every sky ray was clipped to zero length — the whole sky blinked
+    // black (measured: 1 frame in 12 on the home world). It also aimed the
+    // sea's Fresnel and glint from 70 m beside the real eye.
+    if (!this.options.headless) {
+      ctx.origin.toRender(this.flight.renderWorldPosition, this.tmpA);
+      this.eyeOffset.copy(ctx.camera.position).sub(this.tmpA);
+      // A warp, a recovery or the first frame: the camera is somewhere else
+      // entirely and the offset means nothing. Photo mode stays within this.
+      if (this.eyeOffset.lengthSq() > 50 * 50) this.eyeOffset.set(0, 0, 0);
+    }
+
     simSlices(dt, this.simRate, this.slices);
     this.simulatedSeconds = this.slices.count * this.slices.slice;
     for (let i = 0; i < this.slices.count; i++) {
@@ -535,7 +557,7 @@ export class Universe implements GameModule {
     // [/v2-p4]
 
     if (!this.options.headless) {
-      this.camWorld.copy(this.flight.worldPosition);
+      this.camWorld.copy(this.flight.worldPosition).add(this.eyeOffset);
     } else {
       ctx.origin.toWorld(ctx.camera.position, this.camWorld);
     }
@@ -547,7 +569,33 @@ export class Universe implements GameModule {
     this.updateBodies(dt, ctx);
     this.updateStar(dt, ctx);
     this.updateNearest();
+    this.publishMotionReference();
   }
+
+  /**
+   * Tell the motion blur where the ground under the ship went this frame
+   * (render/motionReference.ts). Without it a landed frame reprojects as a
+   * ~1 km per frame dolly and the hull and the near ground smear.
+   */
+  private publishMotionReference(): void {
+    const b = this.options.headless ? null : this.shipParent;
+    if (b && b === this.refBody) {
+      referenceDisplacement(this.refWorld, this.refSpin, b.world, b.spin, this.flight.position, this.refOut);
+      setMotionReferenceDisplacement(this.refOut);
+    } else {
+      setMotionReferenceDisplacement(null);
+    }
+    this.refBody = b;
+    if (b) {
+      this.refWorld.copy(b.world);
+      this.refSpin.copy(b.spin);
+    }
+  }
+
+  private refBody: Body | null = null;
+  private readonly refWorld = new Vector3();
+  private readonly refSpin = new Quaternion();
+  private readonly refOut = new Vector3();
 
   /**
    * Advance every body's Keplerian position and velocity. Moons compose onto
@@ -805,20 +853,34 @@ export class Universe implements GameModule {
       b.planet.object3d.position.copy(this.tmpA);
       b.planet.object3d.quaternion.copy(b.spin);
 
-      // Local view: camera and sun expressed in the body's own frame.
-      this.tmpB.copy(this.camWorld).sub(b.world);
-      this.sunDir.copy(b.world).multiplyScalar(-1).normalize();
+      // Local view: camera and sun expressed in the body's own frame — which
+      // turns. The mesh carries `spin` (above), so a world-axes camera and sun
+      // handed to it are off by the spin angle. That was invisible at boot
+      // and grew with play: by touchdown on the home world it was 0.054
+      // degrees, i.e. the planet's idea of where the eye stood was 6.8 km
+      // from the eye. Its LOD ring was centred there and every fragment near
+      // the lens measured its pixel footprint from 6.8 km away, so the fine
+      // detail faded out exactly where the landed frame looks (v2-landed).
+      this.spinInv.copy(b.spin).invert();
+      this.tmpB.copy(this.camWorld).sub(b.world).applyQuaternion(this.spinInv);
+      this.sunDir.copy(b.world).multiplyScalar(-1).normalize().applyQuaternion(this.spinInv);
 
-      // Inverse-square falloff so a planet at 30 AU is genuinely dim.
+      // Inverse-square falloff so a planet at 30 AU is genuinely dim. Into a
+      // per-body colour: scaling the shared one in place compounded every
+      // earlier body's irradiance into the next (a moon after its planet got
+      // both).
       const auDist = b.world.length() / AU;
       const irradiance = primary.luminosity / Math.max(auDist * auDist, 1e-6);
-      this.tmpDir.set(this.sunColor.r, this.sunColor.g, this.sunColor.b).multiplyScalar(irradiance);
-      this.sunColor.setRGB(this.tmpDir.x, this.tmpDir.y, this.tmpDir.z);
+      this.bodySun.setRGB(
+        this.sunColor.r * irradiance,
+        this.sunColor.g * irradiance,
+        this.sunColor.b * irradiance,
+      );
 
       b.view.set(
         this.tmpB,
         this.sunDir,
-        this.sunColor,
+        this.bodySun,
         ctx.elapsed,
         (ctx.camera.fov * Math.PI) / 180,
         ctx.height,

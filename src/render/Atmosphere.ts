@@ -1125,6 +1125,17 @@ export class AtmosphereRenderer {
     const u = this.mu;
 
     this.camLocal.copy(view.cameraLocal);
+    // Keep the ray origin a little above the analytic sphere. Every view ray is
+    // clipped against that sphere, so an eye inside it — a valley floor below
+    // the mean radius, or float32 noise on an eye sitting at sea level — gets
+    // every ray cut to zero length and a black sky. Twenty metres moves no
+    // visible air and puts the sphere test well clear of float32 at Earth
+    // radii (|ro|^2 - R^2 ~ 2Rh against an ulp of ~4 km^2).
+    {
+      const r = this.camLocal.length();
+      const floor = this.rPlanet + 0.02;
+      if (r > 1e-6 && r < floor) this.camLocal.multiplyScalar(floor / r);
+    }
     this.sunDir.copy(view.sunDirection);
     this.sunColor.copy(view.sunColor);
     this.shared.uLogFar.value = Math.log2(ctx.camera.far + 1);
