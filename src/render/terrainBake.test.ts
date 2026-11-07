@@ -15,8 +15,10 @@ import {
   atlasLayout,
   bakeNormalEps,
   clipNeedsRecentre,
+  drawnHeight,
   gridTexel,
   pickClipLevel,
+  pickClipRecentre,
   selectBuilds,
   shadowClipExtents,
   SlotPool,
@@ -239,5 +241,101 @@ describe('clipNeedsRecentre', () => {
   it('Given the camera moved more than an eighth of the level, Then it is re-centred', () => {
     const a = 2 / R; // 2 km of arc against a 10 km half-extent
     expect(clipNeedsRecentre(north, [Math.sin(a), Math.cos(a), 0], 10, R)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// review-p3: survivors of the phase-3 mutation run, and the bugs it found.
+// ---------------------------------------------------------------------------
+
+describe('review-p3 — boundaries the first suite left open', () => {
+  it("Given a point exactly on a level's 90 % margin, Then that level is NOT used (strict <)", () => {
+    expect(pickClipLevel(9, [10, 40])).toBe(1);
+  });
+
+  it('Given a drift of exactly an eighth of the level, Then the level is kept (strict >)', () => {
+    // A quarter turn on a unit sphere is acos(0) = pi/2 of arc; a half-extent
+    // of 8x that makes the threshold the same double exactly.
+    const arc = Math.acos(0);
+    expect(clipNeedsRecentre([1, 0, 0], [0, 1, 0], arc * 8, 1)).toBe(false);
+    expect(pickClipRecentre([[1, 0, 0]], [0, 1, 0], [arc * 8], 1)).toBe(-1);
+  });
+
+  it('Given a budget larger than the output buffer, Then it never reports more picks than the buffer holds', () => {
+    const err = Float64Array.from([5, 4, 3, 2, 1]);
+    const out = new Int32Array(2);
+    expect(selectBuilds(err, 5, 10, out)).toBe(2);
+    expect(Array.from(out)).toEqual([0, 1]);
+  });
+
+  it('Given a request with zero screen error, Then it is still a request (only negatives are consumed)', () => {
+    const out = new Int32Array(1);
+    expect(selectBuilds(Float64Array.from([0]), 1, 1, out)).toBe(1);
+    expect(out[0]).toBe(0);
+  });
+
+  it('Given a fresh pool, When slots are allocated, Then they come out from slot 0 (tile 0 at the atlas origin)', () => {
+    const p = new SlotPool(4);
+    expect(p.alloc()).toBe(0);
+    expect(p.alloc()).toBe(1);
+  });
+});
+
+describe('drawnHeight — the surface the GPU actually draws (review-p3 #1)', () => {
+  // Phase 3 merged the sea into the surface pass: the vertex shader holds the
+  // ground at sea level wherever it lies below it (OS_OCEAN). The collision
+  // sampler kept returning the sea FLOOR, so auto-land on an ocean world set
+  // the ship down 14 km under the drawn water, where the camera saw the
+  // underside of the sea and the skirts hanging from it.
+  it('Given an ocean world and ground below sea level, Then the drawn height is sea level', () => {
+    expect(drawnHeight(-13.9, true)).toBe(0);
+  });
+
+  it('Given an ocean world and ground above sea level, Then the drawn height is the ground', () => {
+    expect(drawnHeight(2.5, true)).toBe(2.5);
+  });
+
+  it('Given a world without an ocean, Then a basin is drawn at its own depth', () => {
+    expect(drawnHeight(-3, false)).toBe(-3);
+  });
+});
+
+describe('pickClipRecentre — at most one shadow level re-baked per frame (review-p3 #3)', () => {
+  // A level costs about one patch bake (256^2 terrain evaluations, measured
+  // ~1 ms on an M4 Pro). Re-centring all four in one frame at speed was ~3 ms
+  // outside patchBuildBudget. A stale level stays self-consistent (its centre
+  // uniform moves only when it is re-baked), so deferring one is safe.
+  const R = 6000;
+  const ext = [10, 40, 160, 640];
+  const north: [number, number, number] = [0, 1, 0];
+  const moved = (km: number): [number, number, number] => [Math.sin(km / R), Math.cos(km / R), 0];
+
+  it('Given no level has been baked, Then the coarsest is baked first (it covers every shadow ray)', () => {
+    expect(pickClipRecentre([null, null, null, null], north, ext, R)).toBe(3);
+  });
+
+  it('Given every level is centred under the camera, Then nothing is re-baked', () => {
+    expect(pickClipRecentre([north, north, north, north], north, ext, R)).toBe(-1);
+  });
+
+  it('Given a drift inside every threshold, Then nothing is re-baked', () => {
+    // 0.5 km against the finest level's 1.25 km.
+    expect(pickClipRecentre([north, north, north, north], moved(0.5), ext, R)).toBe(-1);
+  });
+
+  it('Given a drift past the finest level only, Then the finest is re-baked', () => {
+    // 2 km: past 10/8 but well inside 40/8.
+    expect(pickClipRecentre([north, north, north, north], moved(2), ext, R)).toBe(0);
+  });
+
+  it('Given several levels overdue, Then the MOST overdue relative to its own size goes first', () => {
+    // Camera at +2 km. Level 0 drift 2 km (1.6x its 1.25 km threshold);
+    // level 1 baked at -10 km, drift 12 km (2.4x its 5 km threshold).
+    const prev = [north, moved(-10), moved(2), moved(2)];
+    expect(pickClipRecentre(prev, moved(2), ext, R)).toBe(1);
+  });
+
+  it('Given one unbaked level among drifted ones, Then the unbaked one wins', () => {
+    expect(pickClipRecentre([moved(-5), null, north, north], north, ext, R)).toBe(1);
   });
 });

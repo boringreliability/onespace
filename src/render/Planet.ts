@@ -103,8 +103,9 @@ import { MutableViewState } from './ViewState';
 import {
   atlasLayout,
   bakeNormalEps,
-  clipNeedsRecentre,
+  drawnHeight,
   gridTexel,
+  pickClipRecentre,
   selectBuilds,
   shadowClipExtents,
   SlotPool,
@@ -1508,6 +1509,7 @@ export class PlanetRenderer {
   private readonly amplitude: number;
   private readonly seaLevel: number;
   private readonly isGasGiant: boolean;
+  private readonly hasOcean: boolean;
   /** uAtmos as derived from the spec — the value uAtmosOuter returns to. */
   private atmosStrength = 0;
 
@@ -1590,6 +1592,8 @@ export class PlanetRenderer {
     this.amplitude = spec.terrain.amplitude;
     this.seaLevel = spec.terrain.seaLevel;
     this.isGasGiant = spec.bands !== null;
+    // Exactly the OS_OCEAN define: the surface pass draws a sea iff this.
+    this.hasOcean = !!spec.ocean;
 
     this.res = Math.max(5, quality.patchResolution);
     this.gridN = this.res + 2; // one skirt ring on every side
@@ -2098,7 +2102,9 @@ export class PlanetRenderer {
         this.dirScratch[0] = this.v3a.x;
         this.dirScratch[1] = this.v3a.y;
         this.dirScratch[2] = this.v3a.z;
-        const h = sampleTerrain(this.spec.terrain, this.spec.seed, this.dirScratch);
+        // The DRAWN height: an ocean patch is drawn at sea level, and bounds
+        // around the sea floor would horizon-cull it at the limb.
+        const h = drawnHeight(sampleTerrain(this.spec.terrain, this.spec.seed, this.dirScratch), this.hasOcean);
         if (h < minH) minH = h;
         if (h > maxH) maxH = h;
       }
@@ -2204,8 +2210,9 @@ export class PlanetRenderer {
   }
 
   /**
-   * Re-centre any shadow clipmap level the camera has drifted out of. Only
-   * near the ground, where the surface shader actually marches shadows.
+   * Re-centre the shadow clipmap level the camera has drifted furthest out
+   * of — one per frame, see terrainBake.pickClipRecentre. Only near the
+   * ground, where the surface shader actually marches shadows.
    */
   private updateShadowClip(renderer: WebGLRenderer, view: ViewState): void {
     if (this.clipLevels === 0 || !this.clipMat) return;
@@ -2225,10 +2232,9 @@ export class PlanetRenderer {
     const T2 = u.uClipT2!.value as Vector3[];
     const H = u.uClipH!.value as number[];
     const b = this.clipU;
-    for (let l = 0; l < this.clipLevels; l++) {
-      const prev = this.clipCentre[l] ?? null;
-      if (!clipNeedsRecentre(prev, this.camDir, this.clipExtents[l]!, this.radius)) continue;
-
+    // One level per frame at most (see terrainBake.pickClipRecentre).
+    const l = pickClipRecentre(this.clipCentre, this.camDir, this.clipExtents, this.radius);
+    if (l >= 0) {
       // Tangent basis at the new centre, built off whichever axis is least
       // parallel to it so it never degenerates.
       const c = C[l]!.set(this.camDir[0], this.camDir[1], this.camDir[2]);
@@ -2397,6 +2403,7 @@ export class PlanetRenderer {
     this.frustum.setFromProjectionMatrix(this.m4);
 
     const renderer = ctx.renderer;
+    this.watchContext(renderer);
     this.bakesThisFrame = 0;
     for (let i = 0; i < this.roots.length; i++) {
       const r = this.roots[i]!;
@@ -2447,9 +2454,10 @@ export class PlanetRenderer {
   }
 
   /**
-   * Elevation in kilometres, signed about sea level, at a unit direction in
-   * planet-local space. Delegates to the same sampler the vertex shader
-   * mirrors, so the flight model lands on exactly what is drawn.
+   * Elevation of the GROUND in kilometres, signed about sea level, at a unit
+   * direction in planet-local space — the sea floor on an ocean world. The
+   * same function the bake runs on the GPU. For what is drawn (and landed
+   * on) use surfaceRadius().
    */
   sampleHeight(dir: Vector3): number {
     if (this.isGasGiant) return 0;
@@ -2479,10 +2487,48 @@ export class PlanetRenderer {
     return out;
   }
 
-  /** Distance from the planet centre to the surface along `dir`, kilometres. */
+  /**
+   * Distance from the planet centre to the DRAWN surface along `dir`, km. The
+   * flight model collides with this, so a ship sets down on exactly what is
+   * drawn: on an ocean world that is the sea, which the surface pass holds at
+   * sea level over the floor (review-p3: auto-land put ships 14 km under it).
+   */
   surfaceRadius(dir: Vector3): number {
-    return this.radius + this.sampleHeight(dir);
+    return this.radius + drawnHeight(this.sampleHeight(dir), this.hasOcean);
   }
+
+  /**
+   * The WebGL context was lost and restored: every atlas tile and clipmap
+   * level went with it, while each patch still says it is built (three
+   * re-creates the render targets empty, lazily). Drop the whole tree back to
+   * its six roots, which update() re-bakes before anything draws; the deeper
+   * levels stream back in under the normal budget.
+   */
+  contextRestored(): void {
+    if (this.disposed || this.isGasGiant) return;
+    for (let i = 0; i < this.roots.length; i++) {
+      const r = this.roots[i]!;
+      this.collapse(r);
+      this.releaseSlot(r);
+    }
+    const H = this.uniforms.uClipH?.value as number[] | undefined;
+    for (let l = 0; l < this.clipLevels; l++) {
+      this.clipCentre[l] = null;
+      if (H) H[l] = 0;
+    }
+  }
+
+  /** Listen for a context restore on the canvas this planet bakes for. */
+  private watchContext(renderer: WebGLRenderer): void {
+    const canvas = (renderer as { domElement?: HTMLCanvasElement }).domElement ?? null;
+    if (canvas === this.watchedCanvas) return;
+    this.watchedCanvas?.removeEventListener('webglcontextrestored', this.onContextRestored);
+    canvas?.addEventListener('webglcontextrestored', this.onContextRestored);
+    this.watchedCanvas = canvas;
+  }
+
+  private watchedCanvas: HTMLCanvasElement | null = null;
+  private readonly onContextRestored = (): void => this.contextRestored();
 
   /** Diagnostics for the debug overlay. */
   stats(): { resident: number; drawn: number; depth: number } {
@@ -2501,6 +2547,8 @@ export class PlanetRenderer {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.watchedCanvas?.removeEventListener('webglcontextrestored', this.onContextRestored);
+    this.watchedCanvas = null;
 
     for (const g of this.geometries) g.dispose();
     this.geometries.length = 0;

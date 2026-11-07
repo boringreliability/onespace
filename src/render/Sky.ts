@@ -1409,6 +1409,7 @@ export class Sky {
 
   /** One cubemap face per frame until the current galaxy's sky is baked. */
   private bakeSkyFace(renderer: WebGLRenderer): void {
+    this.watchContext(renderer);
     const face = this.schedule.nextFace();
     if (face < 0) return;
     if (this.cubeSystem !== renderer.coordinateSystem) {
@@ -1427,7 +1428,31 @@ export class Sky {
     if (this.schedule.ready) this.backdrop.material = this.bakedMat;
   }
 
+  /**
+   * The WebGL context was lost and restored: three re-creates the cubemap
+   * empty, but the schedule still says it is baked, so the backdrop would
+   * sample black for the rest of the session (review-p3). Draw live and
+   * re-bake the same galaxy.
+   */
+  contextRestored(): void {
+    this.schedule.reset();
+    this.backdrop.material = this.backdropMat;
+  }
+
+  private watchContext(renderer: WebGLRenderer): void {
+    const canvas = (renderer as { domElement?: HTMLCanvasElement }).domElement ?? null;
+    if (canvas === this.watchedCanvas) return;
+    this.watchedCanvas?.removeEventListener('webglcontextrestored', this.onContextRestored);
+    canvas?.addEventListener('webglcontextrestored', this.onContextRestored);
+    this.watchedCanvas = canvas;
+  }
+
+  private watchedCanvas: HTMLCanvasElement | null = null;
+  private readonly onContextRestored = (): void => this.contextRestored();
+
   dispose(): void {
+    this.watchedCanvas?.removeEventListener('webglcontextrestored', this.onContextRestored);
+    this.watchedCanvas = null;
     this.cubeRT.dispose();
     this.bakeMat.dispose();
     this.bakedMat.dispose();
