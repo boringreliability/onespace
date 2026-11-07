@@ -32,6 +32,11 @@ describe('mayCut', () => {
     expect(mayCut(FADE + SWAP_MAX_WAIT_MS, FADE, false)).toBe(true);
   });
 
+  it('Given the player keeps asking for new hulls on black, When the fade began long ago, Then the ceiling runs from the last ask', () => {
+    expect(mayCut(FADE + SWAP_MAX_WAIT_MS * 3, FADE, false, 100)).toBe(false);
+    expect(mayCut(FADE + SWAP_MAX_WAIT_MS * 3, FADE, false, SWAP_MAX_WAIT_MS)).toBe(true);
+  });
+
   it('Given the ceiling, Then it is long enough for a slow hull and short enough not to read as a hang', () => {
     expect(SWAP_MAX_WAIT_MS).toBeGreaterThanOrEqual(400);
     expect(SWAP_MAX_WAIT_MS).toBeLessThanOrEqual(2000);

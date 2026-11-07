@@ -54,7 +54,8 @@ import { config, type QualitySettings, type QualityTier } from '@/core/Config';
 import { MutableViewState, type ViewState } from '@/render/ViewState';
 import { Lru } from './lru';
 
-import { generateShip, type ShipParams } from '@/gen/ships/blueprint';
+import type { ShipParams } from '@/gen/ships/blueprint';
+import { shipGen } from '@/gen/ships/shipGenClient';
 import {
   CONTAINER_LENGTH_KM,
   DECK_HEIGHT_KM,
@@ -1205,7 +1206,11 @@ export class Showroom implements GameModule {
       this.cache.delete(key);
     }
 
-    const blueprint = generateShip(params);
+    // Synchronous on purpose: the review harness captures on a fixed step and
+    // must have the hull this frame (D42). The Yard asks the worker for it
+    // during the fade first, so by the time it calls `configure` this is a
+    // cache hit; a miss builds in place, with the same bytes either way.
+    const blueprint = shipGen.get(params);
     const visual = shipVisualFactory
       ? shipVisualFactory(blueprint, quality)
       : new BlockoutVisual(blueprint, this.material!);

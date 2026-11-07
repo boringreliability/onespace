@@ -18,9 +18,14 @@
  * comes back exactly as it was left.
  *
  * Every cut goes through black: the panel's veil fades up, the change happens
- * behind it, the veil fades away. That is what hides a hull swap — generation
- * and mesh assembly are 30-100 ms of main thread — and it is why nothing on
- * screen ever snaps (ARCHITECTURE §6).
+ * behind it, the veil fades away. That is what hides a hull swap, and it is
+ * why nothing on screen ever snaps (ARCHITECTURE §6).
+ *
+ * The blueprint is asked of a worker the moment the selection changes, so it
+ * is generated DURING the fade rather than after it, and the cut waits on
+ * black until it has arrived (`mayCut`). Only the mesh assembly is left on
+ * the main thread behind the veil. After each cut the hulls one seed either
+ * side are prefetched, so stepping → or ← finds its blueprint already made.
  *
  * ---------------------------------------------------------------------------
  * INPUT IS OURS WHILE WE ARE HERE
@@ -49,6 +54,8 @@ import { bus } from '@/core/EventBus';
 import { modes, type BaseMode, type Mode } from '@/core/Modes';
 import { parseRoute, serializeRoute } from '@/core/Route';
 import { tryFactionById } from '@/gen/ships/families';
+import type { ShipParams } from '@/gen/ships/blueprint';
+import { shipGen } from '@/gen/ships/shipGenClient';
 
 import { FlightSnapshot, restoresFlightTo, snapshotsFlightFrom, type FlightClock } from './FlightSnapshot';
 import { mayEnterYard, yardOwnsInput, type EntryContext } from './entryGuards';
@@ -79,6 +86,7 @@ import {
 } from './showroom/catalog';
 import { shipRegistry, shipSpecs, type ShipRegistryHeader, type SpecLine } from './showroom/specs';
 import { OrbitController, type Vec3Out } from './showroom/orbit';
+import { mayCut, seedNeighbours } from './showroom/swapGate';
 import { YardPanel, type YardAction, type YardBackdrop, type YardView } from '@/ui/YardPanel';
 
 /** Seconds of the veil fading UP before a swap. Short: it is a blink. */
@@ -166,6 +174,17 @@ export class Yard implements GameModule {
   private exitQueued = false;
   /** Frame the scale reference at the next swap instead of the view. */
   private scaleFramePending = false;
+  /** The pending cut is the first one after entering (snaps the lens). */
+  private initialPending = false;
+
+  // -- blueprints in flight -------------------------------------------------
+  /** The ship asked for last, and when. Null when nothing is wanted. */
+  private wanted: ShipParams | null = null;
+  private wantedAt = 0;
+  /** Its blueprint has arrived (or failed — the cut then builds in place). */
+  private wantedReady = false;
+  /** Neighbours warmed after the last cut; cancelled when the guess moves on. */
+  private prefetched: ShipParams[] = [];
 
   /** Light cross-fade: from → to over LIGHT_TWEEN_S. `cur` is what is applied. */
   private readonly lightFrom = mutableLight(LIGHT_PRESETS.raking);
@@ -272,10 +291,13 @@ export class Yard implements GameModule {
     this.panel.setVeil(1, 0);
     this.lightT = 1;
     copyLight(this.lightCur, LIGHT_PRESETS[this.light]);
-    this.swap(ctx, true);
+    // Already black, so the cut is due as soon as the blueprint is: start the
+    // 'out' phase one fade in the past and let `update` make the cut.
+    this.want(toShipParams(this.sel));
+    this.initialPending = true;
+    this.phase = 'out';
+    this.phaseAt = performance.now() - FADE_OUT_S * 1000;
     this.writeUrl(this.sel);
-    this.phase = 'settle';
-    this.settleFrames = SETTLE_FRAMES;
     this.panel.show(true);
     this.panelDirty = true;
     this.iris?.resetExposure();
@@ -290,6 +312,8 @@ export class Yard implements GameModule {
     this.phase = 'idle';
     this.actions.length = 0;
     this.onStage = null;
+    this.initialPending = false;
+    this.unwant();
     // Only flight is restored. A review shot taking the scene from the yard
     // keeps the snapshot for when the shot hands the yard back and Esc leaves.
     if (restoresFlightTo(to)) this.snapshot.restore(ctx.camera, this.clock);
@@ -319,9 +343,11 @@ export class Yard implements GameModule {
     const now = performance.now();
     switch (this.phase) {
       case 'out':
-        // Wall-clock, because the veil's CSS transition is wall-clock.
-        if (now - this.phaseAt >= FADE_OUT_S * 1000) {
-          this.swap(ctx, false);
+        // Wall-clock, because the veil's CSS transition is wall-clock. Held on
+        // black until the worker has the blueprint, within a ceiling.
+        if (mayCut(now - this.phaseAt, FADE_OUT_S * 1000, this.wantedReady, now - this.wantedAt)) {
+          this.swap(ctx, this.initialPending);
+          this.initialPending = false;
           this.phase = 'settle';
           this.settleFrames = SETTLE_FRAMES;
         }
@@ -473,7 +499,54 @@ export class Yard implements GameModule {
     // A ship chosen in the yard is, by definition, of this generation.
     this.stale = false;
     this.writeUrl(next);
+    this.want(toShipParams(next));
     this.requestSwap();
+  }
+
+  /**
+   * Ask the worker for the hull the player just chose, so it is generated
+   * while the veil fades up. Supersedes the previous ask: holding → cancels
+   * every hull it skipped past that has not started yet.
+   */
+  private want(params: ShipParams): void {
+    const previous = this.wanted;
+    this.wanted = params;
+    this.wantedAt = performance.now();
+    this.wantedReady = false;
+    shipGen.request(params).then(
+      () => {
+        if (this.wanted === params) this.wantedReady = true;
+      },
+      () => {
+        // Cancelled because superseded: nothing to do. Failed: let the cut go
+        // ahead, where the synchronous build reports the same error.
+        if (this.wanted === params) this.wantedReady = true;
+      },
+    );
+    if (previous) shipGen.cancel(previous);
+  }
+
+  private unwant(): void {
+    if (this.wanted) shipGen.cancel(this.wanted);
+    this.wanted = null;
+    this.wantedReady = false;
+    for (const p of this.prefetched) shipGen.cancel(p);
+    this.prefetched = [];
+  }
+
+  /**
+   * Warm the hulls one seed either side of what is now on stage. Only with a
+   * worker: on the fallback a prefetch is a main-thread build the player did
+   * not ask for, which is the stall we are avoiding, not a head start.
+   */
+  private prefetchNeighbours(): void {
+    for (const p of this.prefetched) shipGen.cancel(p);
+    this.prefetched = [];
+    if (shipGen.mode !== 'worker') return;
+    for (const p of seedNeighbours(this.sel)) {
+      shipGen.prefetch(p);
+      this.prefetched.push(p);
+    }
   }
 
   /**
@@ -516,6 +589,7 @@ export class Yard implements GameModule {
     this.backdrop.setVisible(this.backdropMode === 'anchorage');
     this.backdrop.place(this.fitDir, this.shipRadius);
     this.panelDirty = true;
+    this.prefetchNeighbours();
   }
 
   /**
