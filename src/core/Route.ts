@@ -109,8 +109,16 @@ export function parseRoute(search: string): Route {
     }
     out.ship = ship;
     const gen = q.get('gen');
-    out.staleGeneration =
-      gen !== null && /^\d{1,6}$/.test(gen) ? Number(gen) < SHIP_GENERATION_VERSION : false;
+    // Any gen that is not exactly this build's is "not this standard": older
+    // links name a ship this generator no longer makes, newer or garbled ones
+    // a ship it never made. Silently re-pinning either shows a different hull
+    // under the same link (review-p2). No gen at all = a hand-typed link.
+    if (gen === null) out.staleGeneration = false;
+    else if (/^\d{1,9}$/.test(gen)) out.staleGeneration = Number(gen) !== SHIP_GENERATION_VERSION;
+    else {
+      out.staleGeneration = true;
+      warnings.push('unreadable ship generation');
+    }
   }
 
   const universe = hex(q.get('seed'));

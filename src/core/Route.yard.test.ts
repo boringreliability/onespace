@@ -50,6 +50,20 @@ describe('parseRoute', () => {
     expect(parseRoute('?mode=yard&ship=1&gen=0').staleGeneration).toBe(true);
   });
 
+  it('Given a gen from a future build or not a number, Then the ship is flagged as not this standard (never silently re-pinned)', () => {
+    // review-p2: gen=999999999 and gen=x were treated as current and the Yard
+    // rewrote the link to the current version — a different ship, unflagged.
+    expect(parseRoute('?mode=yard&ship=1&gen=999999999').staleGeneration).toBe(true);
+    expect(parseRoute(`?mode=yard&ship=1&gen=${SHIP_GENERATION_VERSION + 1}`).staleGeneration).toBe(true);
+    const bad = parseRoute('?mode=yard&ship=1&gen=x');
+    expect(bad.staleGeneration).toBe(true);
+    expect(bad.warnings.length).toBe(1);
+  });
+
+  it('Given no gen at all (a hand-typed link), Then it is taken as current', () => {
+    expect(parseRoute('?mode=yard&ship=1').staleGeneration).toBe(false);
+  });
+
   it('Given ?shot=name, Then the shot name is passed through only if it is a plain identifier', () => {
     expect(parseRoute('?shot=ship-hero-close').shot).toBe('ship-hero-close');
     expect(parseRoute('?shot=%3Cimg%3E').shot).toBeUndefined();

@@ -41,8 +41,11 @@ describe('parseRoute — whitelist edges (R4, R6, R7, R11)', () => {
     expect(r.warnings.length).toBe(1);
   });
 
-  it.each(['-1', '0.5', '0000000', '1e0', ' 0'])('Given gen=%s (not a plain 1-6 digit integer), Then the ship is not flagged stale', (gen) => {
-    expect(parseRoute(`?mode=yard&ship=1&gen=${encodeURIComponent(gen)}`).staleGeneration).toBe(false);
+  // Semantics changed after this review (DECISIONS D58): a gen that is not
+  // exactly this build's — garbled, signed, fractional, exponent — is flagged
+  // as "not this standard" rather than silently treated as current.
+  it.each(['-1', '0.5', '0000000', '1e0', ' 0'])('Given gen=%s (not this build’s generation), Then the ship is flagged stale', (gen) => {
+    expect(parseRoute(`?mode=yard&ship=1&gen=${encodeURIComponent(gen)}`).staleGeneration).toBe(true);
   });
 
   it('Given a shot name starting with a dash, Then it is dropped', () => {
