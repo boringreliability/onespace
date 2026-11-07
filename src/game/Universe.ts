@@ -42,6 +42,7 @@ import { RingRenderer } from '@/render/Rings';
 import { StarRenderer } from '@/render/Star';
 import { AtmosphereRenderer } from '@/render/Atmosphere';
 import { sceneDepthTexture, setMotionReferenceDisplacement } from '@/render/PostFX';
+import { publishSceneDepth } from '@/game/sceneDepth';
 import { referenceDisplacement } from '@/render/motionReference';
 import { planStreaming, type StreamCandidate } from '@/game/streaming';
 import { simSlices } from '@/game/timeCompression'; // [v2-p4]
@@ -516,7 +517,12 @@ export class Universe implements GameModule {
       return;
     }
     this.root.visible = true;
-    if (this.frozen) return;
+    if (this.frozen) {
+      // The world still draws while frozen (an overlay is up), so the shells
+      // must still follow the composer's ping-pong; see game/sceneDepth.ts.
+      publishSceneDepth(this.bodies, sceneDepthTexture());
+      return;
+    }
 
     // [v2-p4] Time compression: `simRate` (1/10/100, set only by
     // game/TimeCompression.ts) scales SIMULATED time, here and nowhere else —
