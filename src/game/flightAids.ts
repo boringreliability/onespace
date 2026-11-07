@@ -81,6 +81,38 @@ export function pickAltitude(i: AltitudeInput): AltitudeReadout | null {
   return null;
 }
 
+export interface AltitudeContext {
+  /** What ALT shows — `pickAltitude`'s choice, unchanged from v2 (F11). */
+  alt: AltitudeReadout | null;
+  /** VEL's frame, named only when it is not the body ALT names. */
+  velFrame: string | null;
+  /** A different body whose surface is nearer than the ALT body's. */
+  proximity: AltitudeReadout | null;
+  /** V/S and impact run along the parent's vertical: meaningful only when ALT is the parent. */
+  verticalApplies: boolean;
+}
+
+/**
+ * Make ALT and VEL say what they measure (v3 F). `frameName` is what VEL is
+ * relative to: the parent, or the system's star in the star frame.
+ */
+export function altitudeContext(i: AltitudeInput, frameName: string): AltitudeContext {
+  const alt = pickAltitude(i);
+  const velFrame = alt !== null && alt.bodyName === frameName ? null : frameName;
+  let proximity: AltitudeReadout | null = null;
+  if (
+    alt !== null &&
+    i.nearestName !== null &&
+    i.nearestAltKm !== null &&
+    i.nearestName !== alt.bodyName &&
+    i.nearestAltKm < alt.altitudeKm
+  ) {
+    proximity = { altitudeKm: i.nearestAltKm, bodyName: i.nearestName };
+  }
+  const verticalApplies = alt !== null && i.parentName !== null && alt.bodyName === i.parentName;
+  return { alt, velFrame, proximity, verticalApplies };
+}
+
 /**
  * The title names where the ship IS — its parent — not whichever renderer was
  * streamed in last (that was the moon, every time the moon was acquired after

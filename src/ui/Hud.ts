@@ -22,6 +22,18 @@ import type { EngineContext, GameModule } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
 import { registerShot } from '@/game/Shots';
 import { AU, type GameScale, type ScanResult } from '@/gen/types';
+import { MAX_CONTACT_BRACKETS, edgePlace, type EdgePlacement } from '@/game/contacts';
+import type { CruiseReadout } from '@/game/cruiseReadout';
+import { gReadout } from '@/ui/gReadout';
+import { createLadderFade, stepLadderFade } from '@/ui/ladderFade';
+import {
+  TAPE_PX_PER_DECADE,
+  TAPE_V0_ALT_KM,
+  TAPE_V0_KMS,
+  tapeTicks,
+  tickLabel,
+  type TapeTick,
+} from '@/ui/speedTape';
 
 // ---------------------------------------------------------------------------
 // Public contracts
@@ -99,6 +111,21 @@ export interface HudInstruments {
   altBody: string | null;
   /** The title line: where the ship is. */
   location: string;
+  /** v3: VEL's frame, named only when it is not the ALT body. */
+  velFrame?: string | null;
+  /** v3: a different body whose surface is nearer than the ALT body's. */
+  proxBody?: string | null;
+  proxAltKm?: number | null;
+}
+
+/**
+ * v3: a vessel within bracket range, already projected through this frame's
+ * camera from a world-space-damped point (game/worldMarker.ts).
+ */
+export interface HudContact {
+  x: number;
+  y: number;
+  behind: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -279,50 +306,92 @@ function svg<K extends keyof SVGElementTagNameMap>(
 // Scrolling tape
 // ---------------------------------------------------------------------------
 
-const TAPE_ROWS = 7;
-const TAPE_PX_PER_STEP = 26;
+/** Tick rows in the pool: ±1.1 decades of 1-2-5 ticks, plus zero, fits in 12. */
+const TAPE_ROWS = 12;
+/** Half the visible tape, px (the tape is 190 px tall). */
+const TAPE_HALF_PX = 88;
 
 /**
- * A vertical tape scale. The minor ticks are a repeating gradient offset by a
- * single background-position, and only the seven numerals are real nodes — they
- * are recycled as they scroll off the ends rather than created and destroyed.
+ * A vertical tape on a log-compressed scale (ui/speedTape.ts). v2 stepped the
+ * rows per half-decade, so at every decade the whole tape re-stepped ×10 and
+ * jumped; here every value has one place on the scale, ticks that would crowd
+ * are faded by their fixed spacing, and ticks fade in and out at the ends.
+ * Rows are a fixed pool, recycled; only text and custom properties change.
  */
 class Tape {
   readonly root: HTMLDivElement;
-  private readonly stripVar: CssVar;
+  private readonly rows: HTMLElement[] = [];
   private readonly rowY: CssVar[] = [];
+  private readonly rowA: CssVar[] = [];
   private readonly rowText: TextSlot[] = [];
+  private readonly rowMajor: boolean[] = [];
+  private readonly ticks: TapeTick[] = [];
+  /** Display scale of the current unit band, and of the one fading out. */
+  private scale = Number.NaN;
+  private prevScale = Number.NaN;
+  /** 0..1 through the cross-fade from the previous band's ticks to these. */
+  private mix = 1;
 
-  constructor(parent: Element) {
+  constructor(
+    parent: Element,
+    private readonly v0: number,
+  ) {
     this.root = el('div', 'os-tape', parent);
-    const strip = el('div', 'os-tape-strip', this.root);
-    this.stripVar = new CssVar(strip, '--tape', 0.4, 1);
-    for (let i = 0; i < TAPE_ROWS; i++) {
+    // Two sets: the current band's ticks and, during a unit change, the old
+    // band's, cross-fading. The 1-2-5 ladder in km/s is not the one in c.
+    for (let i = 0; i < TAPE_ROWS * 2; i++) {
       const row = el('div', 'os-tape-row', this.root);
       el('i', 'os-tape-tick', row);
       const label = el('span', 'os-tape-num', row);
-      this.rowY.push(new CssVar(row, '--ty', 0.4, 1));
+      this.rows.push(row);
+      this.rowY.push(new CssVar(row, '--ty', 0.2, 1));
+      this.rowA.push(new CssVar(row, '--a', 0.02, 2));
       this.rowText.push(new TextSlot(label));
+      this.rowMajor.push(false);
+      this.rowA[i]!.set(0);
+    }
+    for (let i = 0; i < TAPE_ROWS; i++) this.ticks.push({ value: 0, offsetPx: 0, alpha: 0, major: false });
+  }
+
+  /**
+   * `value` in base units (km/s or km); `scale` converts to the readout's
+   * display units. Ticks are laid on the 1-2-5 ladder OF THE DISPLAY UNIT
+   * (0.01 c, not 2 998 km/s); positions do not depend on the unit at all,
+   * since tapeScale(v*s, v0*s) = tapeScale(v, v0). A unit change cross-fades
+   * the two tick sets over the readout's own swap time.
+   */
+  update(value: number, scale: number, dt: number): void {
+    if (scale !== this.scale) {
+      this.prevScale = this.scale;
+      this.scale = scale;
+      this.mix = Number.isNaN(this.prevScale) ? 1 : 0;
+    }
+    this.mix = Math.min(1, this.mix + dt / 0.42);
+    this.drawSet(0, value, this.scale, this.mix);
+    if (this.mix < 1 && !Number.isNaN(this.prevScale)) {
+      this.drawSet(TAPE_ROWS, value, this.prevScale, 1 - this.mix);
+    } else {
+      for (let i = TAPE_ROWS; i < TAPE_ROWS * 2; i++) this.rowA[i]!.set(0);
     }
   }
 
-  /** `value` is already in display units. */
-  update(value: number): void {
-    // One step per half-decade keeps between 2 and 20 steps across the tape at
-    // any magnitude, so the numerals never crowd and never go blank.
-    const mag = Math.max(Math.abs(value), 1e-4);
-    let step = Math.pow(10, Math.floor(Math.log10(mag))) / 2;
-    if (!Number.isFinite(step) || step <= 0) step = 1;
-    const decimals = step >= 1 ? 0 : Math.min(4, Math.ceil(-Math.log10(step)));
-
-    const base = Math.floor(value / step);
-    const mid = (TAPE_ROWS - 1) >> 1;
-    for (let i = 0; i < TAPE_ROWS; i++) {
-      const tickValue = (base + mid - i) * step;
-      this.rowY[i]!.set(((value - tickValue) / step) * TAPE_PX_PER_STEP);
-      this.rowText[i]!.set(fixed(tickValue, decimals));
+  private drawSet(base: number, value: number, scale: number, weight: number): void {
+    const n = tapeTicks(value * scale, this.v0 * scale, TAPE_PX_PER_DECADE, TAPE_HALF_PX, this.ticks);
+    for (let k = 0; k < TAPE_ROWS; k++) {
+      const i = base + k;
+      if (k >= n) {
+        this.rowA[i]!.set(0);
+        continue;
+      }
+      const t = this.ticks[k]!;
+      this.rowY[i]!.set(t.offsetPx);
+      this.rowA[i]!.set(t.alpha * weight);
+      this.rowText[i]!.set(tickLabel(t.value, 1));
+      if (this.rowMajor[i] !== t.major) {
+        this.rowMajor[i] = t.major;
+        this.rows[i]!.classList.toggle('os-major', t.major);
+      }
     }
-    this.stripVar.set((value / step - base) * TAPE_PX_PER_STEP);
   }
 }
 
@@ -431,6 +500,7 @@ export class Hud implements GameModule {
 
   // --- target -------------------------------------------------------------
   private hasTarget = false;
+  private tgtId = '';
   private tgtName = '';
   private tgtKind = '';
   private tgtX = 0;
@@ -445,10 +515,44 @@ export class Hud implements GameModule {
   private tgtClosing = 0;
   private tgtClosingShown = 0;
   private tgtEta: number | null = null;
-  /** Screen-space bracket position, damped so the bracket lags the body. */
-  private brX = 0;
-  private brY = 0;
-  private brInit = false;
+  // v3: the bracket position arrives already damped in WORLD space and
+  // projected this frame (Targeting + game/worldMarker.ts). Damping it again
+  // here, in screen space, is what made it swim against the world.
+  private readonly tgtPlace: EdgePlacement = { x: 0, y: 0, onScreen: true, angleDeg: 0 };
+
+  // --- contacts (v3) -------------------------------------------------------
+  private contactCount = 0;
+  private readonly contacts: HudContact[] = Array.from({ length: MAX_CONTACT_BRACKETS }, () => ({
+    x: 0,
+    y: 0,
+    behind: false,
+  }));
+  private readonly contactPlace: EdgePlacement = { x: 0, y: 0, onScreen: true, angleDeg: 0 };
+  private contactEls: HTMLElement[] = [];
+  private contactX: CssVar[] = [];
+  private contactY: CssVar[] = [];
+  private contactAng: CssVar[] = [];
+  private contactOff: boolean[] = [];
+
+  // --- ladder fade, cruise block, ALT context (v3) ------------------------
+  private readonly ladderFade = createLadderFade();
+  private controlActive = false;
+  private prevPitch = 0;
+  private prevRoll = 0;
+  private vLadder!: CssVar;
+  private cruise: CruiseReadout | null = null;
+  private elThr!: HTMLElement;
+  private tCruise!: TextSlot;
+  private velFrame = '';
+  private tVelFrame!: TextSlot;
+  private proxBody = '';
+  private proxAlt = 0;
+  private hasProx = false;
+  private elProx!: HTMLElement;
+  private tProxBody!: TextSlot;
+  private tProxAlt!: TextSlot;
+  private gTone = '';
+  private frameDt = 0;
 
   // --- instruments --------------------------------------------------------
   private hasVel = false;
@@ -458,10 +562,6 @@ export class Hud implements GameModule {
   private retroX = 0;
   private retroY = 0;
   private retroBehind = true;
-  private proShownX = 0;
-  private proShownY = 0;
-  private retroShownX = 0;
-  private retroShownY = 0;
   private hasVsi = false;
   private vsiTarget = 0;
   private vsi = 0;
@@ -635,6 +735,10 @@ export class Hud implements GameModule {
       this.hasTarget = false;
       return;
     }
+    // A new target's range is a new number, not a slide from the last one's
+    // (3.5 au "closing" on a contact 3 km away for a second).
+    const fresh = !this.hasTarget || info.id !== this.tgtId;
+    this.tgtId = info.id;
     this.hasTarget = true;
     this.tgtName = info.name;
     this.tgtKind = info.kind ?? '';
@@ -642,6 +746,12 @@ export class Hud implements GameModule {
     this.tgtY = info.y;
     this.tgtBehind = info.behind;
     this.tgtDist = Math.max(0, info.distanceKm);
+    if (fresh) {
+      this.tgtDistShown = this.tgtDist;
+      this.tgtClosingShown = info.closingKmS ?? 0;
+      this.rDist.reset();
+      this.rClose.reset();
+    }
     this.tgtHasLead = info.leadX !== undefined && info.leadY !== undefined;
     this.tgtLeadX = info.leadX ?? info.x;
     this.tgtLeadY = info.leadY ?? info.y;
@@ -673,6 +783,10 @@ export class Hud implements GameModule {
       this.altTarget = Math.max(0, i.altitudeKm);
     }
     this.altBody = i.altBody ?? '';
+    this.velFrame = i.velFrame ?? '';
+    this.hasProx = i.proxBody != null && i.proxAltKm != null;
+    this.proxBody = i.proxBody ?? '';
+    this.proxAlt = i.proxAltKm ?? 0;
     // Null before init() has built the DOM.
     this.tHeadLoc?.set(i.location);
   }
@@ -696,7 +810,43 @@ export class Hud implements GameModule {
 
   /** The flight-assist line under the throttle gauge (game/assistReadout.ts). */
   setAssist(text: string): void {
-    this.tAssist?.set(text);
+    // Under cruise the line belongs to the drive's ETA (setCruise).
+    if (this.cruise === null) this.tAssist?.set(text);
+  }
+
+  /**
+   * v3: the cruise drive's readout, or null when the drive is idle. While set,
+   * the throttle block shows the drive (speed vs c, ETA) instead of THR / FA.
+   */
+  setCruise(r: CruiseReadout | null): void {
+    this.cruise = r;
+    if (!this.root) return;
+    this.elThr.classList.toggle('os-cruise', r !== null);
+    if (r) {
+      this.tCruise.set(r.primary);
+      this.tAssist?.set(r.secondary);
+    }
+  }
+
+  /** v3: any rotation input from the pilot this frame (wakes the pitch ladder). */
+  setControlActivity(active: boolean): void {
+    this.controlActive = active;
+  }
+
+  /**
+   * v3: vessels within bracket range, nearest first, excluding the nav target.
+   * Copied; the caller may reuse its objects.
+   */
+  setContacts(list: readonly HudContact[], count: number): void {
+    const n = Math.min(count, MAX_CONTACT_BRACKETS);
+    for (let i = 0; i < n; i++) {
+      const c = list[i]!;
+      const d = this.contacts[i]!;
+      d.x = c.x;
+      d.y = c.y;
+      d.behind = c.behind;
+    }
+    this.contactCount = n;
   }
 
   // --- [v2-p4] time compression readout -----------------------------------
@@ -735,6 +885,7 @@ export class Hud implements GameModule {
   lateUpdate(dt: number, ctx: EngineContext): void {
     if (!this.root) return;
     this.time += dt;
+    this.frameDt = dt;
 
     // Damping runs even while hidden so nothing jumps when the HUD returns.
     this.throttle = damp(this.throttle, this.throttleTarget, 7, dt);
@@ -766,8 +917,10 @@ export class Hud implements GameModule {
     this.drawThrottle();
     this.drawTapes();
     this.drawAttitude();
-    this.drawTarget(ctx.width, ctx.height, dt);
-    this.drawMarkers(ctx.width, ctx.height, dt);
+    this.drawLadderFade(dt);
+    this.drawTarget(ctx.width, ctx.height);
+    this.drawContacts(ctx.width, ctx.height);
+    this.drawMarkers(ctx.width, ctx.height);
     this.drawStick(ctx.width, ctx.height);
     this.drawWarp();
     this.drawFlicker();
@@ -801,7 +954,8 @@ export class Hud implements GameModule {
     this.tSpeedNum.set(fixed(this.rSpeed.step(sval, sq), sband.decimals));
     this.tSpeedUnit.set(sband.label);
     this.elSpeedUnit.classList.toggle('os-swap', this.speedSwap > 0);
-    this.speedTape.update(sval);
+    this.speedTape.update(this.speed, sband.scale, this.frameDt);
+    this.tVelFrame.set(this.velFrame);
 
     this.elAltGauge.classList.toggle('os-void', !this.hasAlt);
     if (this.hasAlt) {
@@ -816,7 +970,7 @@ export class Hud implements GameModule {
       const aq = Math.pow(10, -aband.decimals);
       this.tAltNum.set(fixed(this.rAlt.step(aval, aq), aband.decimals));
       this.tAltUnit.set(aband.label);
-      this.altTape.update(aval);
+      this.altTape.update(this.alt, aband.scale, this.frameDt);
       this.tAltBody.set(this.altBody);
     } else {
       this.tAltNum.set('- - -');
@@ -824,6 +978,14 @@ export class Hud implements GameModule {
       this.tAltBody.set('');
     }
     this.elAltUnit.classList.toggle('os-swap', this.altSwap > 0);
+
+    // A nearer surface than the one ALT names (a moon beside its planet).
+    this.elProx.classList.toggle('os-void', !this.hasProx);
+    if (this.hasProx) {
+      this.tProxBody.set(this.proxBody);
+      const pb = ALT_BANDS[pickBand(ALT_BANDS, this.proxAlt, 1)]!;
+      this.tProxAlt.set(`${fixed(this.proxAlt * pb.scale, pb.decimals)} ${pb.label}`);
+    }
 
     // Vertical speed, in m/s below 1 km/s so it reads in the same units as
     // the landing limits the log grades touchdowns against.
@@ -846,60 +1008,59 @@ export class Hud implements GameModule {
     this.vAttRoll.set(-rollDeg);
     this.vAttRollPtr.set(-clamp(rollDeg, -75, 75));
 
+    // v3: the true number, in a quiet voice (ui/gReadout.ts). Quantised with
+    // hysteresis like every digit group; whole g from 10 up.
     this.elGLoad.classList.toggle('os-void', !this.hasG);
-    if (this.hasG) this.tGLoad.set(`${fixed(this.rG.step(this.gLoad, 0.1), 1)}g`);
+    if (this.hasG) {
+      const q = this.gLoad >= 9.5 ? 1 : 0.1;
+      const g = gReadout(this.rG.step(this.gLoad, q));
+      this.tGLoad.set(g.text);
+      if (g.tone !== this.gTone) {
+        this.elGLoad.dataset.tone = g.tone;
+        this.gTone = g.tone;
+      }
+    }
   }
 
-  private drawTarget(w: number, h: number, dt: number): void {
+  /**
+   * v3: the ladder recedes to a quarter while the attitude is steady and the
+   * pilot is hands-off, so the hull it is drawn over can be seen.
+   */
+  private drawLadderFade(dt: number): void {
+    if (dt > 0) {
+      const k = 180 / Math.PI / dt;
+      stepLadderFade(
+        this.ladderFade,
+        {
+          pitchRateDegS: (this.pitch - this.prevPitch) * k,
+          rollRateDegS: (this.roll - this.prevRoll) * k,
+          stickActive: this.controlActive,
+        },
+        dt,
+      );
+    }
+    this.prevPitch = this.pitch;
+    this.prevRoll = this.roll;
+    this.vLadder.set(this.ladderFade.opacity);
+  }
+
+  private drawTarget(w: number, h: number): void {
     this.elTarget.classList.toggle('os-void', !this.hasTarget);
-    if (!this.hasTarget) {
-      this.brInit = false;
-      return;
-    }
+    if (!this.hasTarget) return;
 
-    const cx = w * 0.5;
-    const cy = h * 0.5;
-    // A target behind the camera projects to a mirrored point; flip it back so
-    // the edge arrow points the short way round rather than the wrong way.
-    let dx = this.tgtX - cx;
-    let dy = this.tgtY - cy;
-    if (this.tgtBehind) {
-      dx = -dx;
-      dy = -dy;
-    }
-
-    const marginX = w * 0.5 - 54;
-    const marginY = h * 0.5 - 54;
-    const off = this.tgtBehind || Math.abs(dx) > marginX || Math.abs(dy) > marginY;
-
-    let px: number;
-    let py: number;
-    if (off) {
-      // Clamp along the ray so the marker slides around the frame edge instead
-      // of stopping in a corner.
-      const s = Math.min(marginX / Math.max(Math.abs(dx), 1e-3), marginY / Math.max(Math.abs(dy), 1e-3));
-      px = cx + dx * s;
-      py = cy + dy * s;
-      this.vTgtArrow.set((Math.atan2(dy, dx) * 180) / Math.PI);
-    } else {
-      px = cx + dx;
-      py = cy + dy;
-    }
+    // Already world-damped and projected this frame; only the edge clamp is
+    // done here. No screen-space damping (v3 A8).
+    const p = edgePlace(this.tgtX, this.tgtY, this.tgtBehind, w, h, 54, this.tgtPlace);
+    const off = !p.onScreen;
+    const px = p.x;
+    const py = p.y;
+    if (off) this.vTgtArrow.set(p.angleDeg);
     this.elTarget.classList.toggle('os-off', off);
     // The name block is wider than the bracket; against the right edge it would
     // hang off the glass, so it swaps to the other side of the reticle.
     this.elTarget.classList.toggle('os-flip', px > w - 230);
-
-    if (!this.brInit) {
-      this.brX = px;
-      this.brY = py;
-      this.brInit = true;
-    }
-    // The bracket has mass: it trails the body slightly and settles onto it.
-    this.brX = damp(this.brX, px, off ? 22 : 14, dt);
-    this.brY = damp(this.brY, py, off ? 22 : 14, dt);
-    this.vTgtX.set(this.brX);
-    this.vTgtY.set(this.brY);
+    this.vTgtX.set(px);
+    this.vTgtY.set(py);
 
     // Bracket opens up as you close: 30px at a million km, 62px alongside.
     const closeness = 1 - clamp(Math.log10(Math.max(this.tgtDistShown, 1)) / 6, 0, 1);
@@ -937,31 +1098,42 @@ export class Hud implements GameModule {
    * camera; the other fades out rather than being clamped to the edge, since
    * an edge-clamped velocity marker reads as a target.
    */
-  private drawMarkers(w: number, h: number, dt: number): void {
+  private drawMarkers(w: number, h: number): void {
     const proOn = this.hasVel && !this.proBehind && onGlass(this.proX, this.proY, w, h);
     const retroOn = this.hasVel && !this.retroBehind && onGlass(this.retroX, this.retroY, w, h);
     this.elPro.classList.toggle('os-void', !proOn);
     this.elRetro.classList.toggle('os-void', !retroOn);
-    // Damped only while on the glass. A marker re-entering from behind moves
-    // to its point while still invisible, then fades in where it belongs.
-    if (proOn) {
-      this.proShownX = damp(this.proShownX, this.proX, 12, dt);
-      this.proShownY = damp(this.proShownY, this.proY, 12, dt);
-    } else {
-      this.proShownX = this.proX;
-      this.proShownY = this.proY;
+    // v3 A8: the positions arrive damped in WORLD space and projected through
+    // this frame's camera (Instruments + game/worldMarker.ts), so they are
+    // glued to the sky. Screen-space damping here made them swim.
+    this.vProX.set(this.proX);
+    this.vProY.set(this.proY);
+    this.vRetroX.set(this.retroX);
+    this.vRetroY.set(this.retroY);
+  }
+
+  /**
+   * v3: faint brackets on vessels within range, or a chevron on the frame edge
+   * pointing the short way to one that is off the glass. No numbers: Tab
+   * selects one for the full range/closing box.
+   */
+  private drawContacts(w: number, h: number): void {
+    for (let i = 0; i < MAX_CONTACT_BRACKETS; i++) {
+      const e = this.contactEls[i]!;
+      const live = i < this.contactCount;
+      e.classList.toggle('os-void', !live);
+      if (!live) continue;
+      const c = this.contacts[i]!;
+      const p = edgePlace(c.x, c.y, c.behind, w, h, 60, this.contactPlace);
+      this.contactX[i]!.set(p.x);
+      this.contactY[i]!.set(p.y);
+      const off = !p.onScreen;
+      if (off) this.contactAng[i]!.set(p.angleDeg);
+      if (off !== this.contactOff[i]) {
+        this.contactOff[i] = off;
+        e.classList.toggle('os-off', off);
+      }
     }
-    if (retroOn) {
-      this.retroShownX = damp(this.retroShownX, this.retroX, 12, dt);
-      this.retroShownY = damp(this.retroShownY, this.retroY, 12, dt);
-    } else {
-      this.retroShownX = this.retroX;
-      this.retroShownY = this.retroY;
-    }
-    this.vProX.set(this.proShownX);
-    this.vProY.set(this.proShownY);
-    this.vRetroX.set(this.retroShownX);
-    this.vRetroY.set(this.retroShownY);
   }
 
   /** The stick dot sits within `STICK_RADIUS_PX` of the screen centre. */
@@ -1165,9 +1337,8 @@ export class Hud implements GameModule {
   // =========================================================================
 
   private layoutTarget(_w: number, _h: number): void {
-    // Kept as a hook: the bracket is positioned from ctx dimensions each frame,
-    // so a resize only needs to invalidate the damped position.
-    this.brInit = false;
+    // Kept as a hook: every marker is placed from ctx dimensions each frame
+    // and nothing on the glass is damped in screen space any more (v3).
   }
 
   private panel(cls: string, parent: Element, delayMs: number): HTMLDivElement {
@@ -1213,7 +1384,8 @@ export class Hud implements GameModule {
 
   private buildThrottle(root: HTMLElement): void {
     const p = this.panel('os-thr', root, 180);
-    el('div', 'os-label', p, 'thr');
+    this.elThr = p;
+    el('div', 'os-label os-thr-label', p, 'thr');
 
     const body = el('div', 'os-thr-body', p);
     const ladder = el('div', 'os-thr-ladder', body);
@@ -1232,19 +1404,30 @@ export class Hud implements GameModule {
     const digits = el('span', 'os-num', num);
     el('span', 'os-unit', num, '%');
     this.tThrottleNum = new TextSlot(digits);
+    // v3: under cruise the number above is meaningless; this replaces it.
+    this.tCruise = new TextSlot(el('div', 'os-thr-cruise', p));
     // v2: what the flight computer is holding. Under FA-ON the gauge above is
     // engine output (0 % while holding speed in vacuum), so this line is the
     // only place the set speed is visible.
     this.tAssist = new TextSlot(el('div', 'os-thr-fa', p));
+    // v3: the G meter lives here now, off the hull and the plume it used to
+    // sit on in the middle of the frame.
+    const g = el('div', 'os-thr-g', p);
+    el('span', 'os-label', g, 'load');
+    this.elGLoad = el('span', 'os-g-num', g);
+    this.elGLoad.dataset.tone = 'idle';
+    this.tGLoad = new TextSlot(this.elGLoad);
   }
 
   private buildRight(root: HTMLElement): void {
     const p = this.panel('os-right', root, 320);
 
     const spd = el('div', 'os-gauge', p);
-    el('div', 'os-label', spd, 'vel');
+    const velLabel = el('div', 'os-label', spd, 'vel ');
+    // v3: VEL names its frame when that is not the body ALT names.
+    this.tVelFrame = new TextSlot(el('span', 'os-alt-body', velLabel));
     const spdRow = el('div', 'os-gauge-row', spd);
-    this.speedTape = new Tape(spdRow);
+    this.speedTape = new Tape(spdRow, TAPE_V0_KMS);
     const spdBox = el('div', 'os-gauge-box', spdRow);
     const spdNum = el('span', 'os-num', spdBox);
     this.elSpeedUnit = el('span', 'os-unit', spdBox);
@@ -1257,7 +1440,7 @@ export class Hud implements GameModule {
     // disagree about that without saying so (GAMEPLAY F11).
     this.tAltBody = new TextSlot(el('span', 'os-alt-body', altLabel));
     const altRow = el('div', 'os-gauge-row', this.elAltGauge);
-    this.altTape = new Tape(altRow);
+    this.altTape = new Tape(altRow, TAPE_V0_ALT_KM);
     const altBox = el('div', 'os-gauge-box', altRow);
     const altNum = el('span', 'os-num', altBox);
     this.elAltUnit = el('span', 'os-unit', altBox);
@@ -1265,6 +1448,10 @@ export class Hud implements GameModule {
     this.tAltUnit = new TextSlot(this.elAltUnit);
 
     const vs = el('div', 'os-vs', this.elAltGauge);
+    // v3: a nearer surface than the ALT body, e.g. a moon beside its planet.
+    this.elProx = el('div', 'os-vs-row os-void', vs);
+    this.tProxBody = new TextSlot(el('span', 'os-label', this.elProx));
+    this.tProxAlt = new TextSlot(el('span', 'os-vs-num', this.elProx));
     this.elVsi = el('div', 'os-vs-row os-void', vs);
     el('span', 'os-label', this.elVsi, 'v/s');
     this.tVsi = new TextSlot(el('span', 'os-vs-num', this.elVsi));
@@ -1307,7 +1494,7 @@ export class Hud implements GameModule {
     });
     svg('circle', '', mask, { cx: C, cy: C, r: ATT_R, fill: 'url(#os-att-fade)' });
 
-    const clipped = svg('g', '', s, { mask: 'url(#os-att-mask)' });
+    const clipped = svg('g', 'os-att-clip', s, { mask: 'url(#os-att-mask)' });
     const ladder = svg('g', 'os-att-ladder', clipped);
     // Rungs every 10° only. Five-degree infill reads as debris at this size — a
     // gunsight etches few lines and makes each one count. ±60° is as far as the
@@ -1354,6 +1541,7 @@ export class Hud implements GameModule {
       }).textContent = label;
     }
     this.vAttPitch = new CssVar(ladder, '--pitch', 0.05, 2);
+    this.vLadder = new CssVar(clipped, '--ladder', 0.01, 2);
     this.vAttRoll = new CssVar(ladder, '--roll', 0.05, 2);
 
     // Fixed aircraft reference — the one thing on the HUD that never moves. It
@@ -1391,9 +1579,6 @@ export class Hud implements GameModule {
       d: `M ${C} ${C - RR} L ${C - 4.8} ${C - RR - 7.5} L ${C + 4.8} ${C - RR - 7.5} Z`,
     });
     this.vAttRollPtr = new CssVar(ptr, '--roll', 0.05, 2);
-
-    this.elGLoad = el('div', 'os-att-g', p);
-    this.tGLoad = new TextSlot(this.elGLoad);
   }
 
   private buildTargetReticle(root: HTMLElement): void {
@@ -1449,6 +1634,26 @@ export class Hud implements GameModule {
     });
     this.vRetroX = new CssVar(this.elRetro, '--vx', 0.25, 1);
     this.vRetroY = new CssVar(this.elRetro, '--vy', 0.25, 1);
+
+    // v3: contact brackets. Not cyan (the nav target's colour) and not amber
+    // (the instruments'): the dim steel of the etch, so a contact is noticed
+    // without competing with either.
+    for (let i = 0; i < MAX_CONTACT_BRACKETS; i++) {
+      const c = el('div', 'os-ct os-void', root);
+      const box = el('div', 'os-ct-box', c);
+      el('i', 'os-ct-c os-tl', box);
+      el('i', 'os-ct-c os-tr', box);
+      el('i', 'os-ct-c os-bl', box);
+      el('i', 'os-ct-c os-br', box);
+      const chev = el('div', 'os-ct-chev', c);
+      const cs = svg('svg', '', chev, { viewBox: '0 0 20 20' });
+      svg('path', '', cs, { d: 'M 5 5 L 14 10 L 5 15' });
+      this.contactEls.push(c);
+      this.contactX.push(new CssVar(c, '--tx', 0.25, 1));
+      this.contactY.push(new CssVar(c, '--ty', 0.25, 1));
+      this.contactAng.push(new CssVar(c, '--ang', 0.4, 1));
+      this.contactOff.push(false);
+    }
 
     this.elStick = el('div', 'os-stick os-void', root);
     this.vStickX = new CssVar(this.elStick, '--vx', 0.25, 1);
@@ -1895,6 +2100,35 @@ const CSS = /* css */ `
   box-shadow: 0 0 10px rgba(255, 180, 84, 0.85), 0 0 2px rgba(0, 0, 0, 0.9);
 }
 .os-hud .os-thr-num { display: flex; align-items: baseline; gap: 3px; }
+/* v3: cruise owns the block while the drive runs. The sublight gauge recedes
+   (it is meaningless under cruise) and the drive's own line takes the number's
+   place; nothing is removed, so leaving cruise is a cross-fade, not a swap. */
+.os-hud .os-thr-cruise {
+  display: none;
+  /* "c", not "C": the unit is the speed of light, not a temperature. */
+  text-transform: none;
+  font-size: 13px;
+  letter-spacing: 0.14em;
+  color: var(--os-amber);
+  text-shadow: var(--os-glow);
+  white-space: nowrap;
+}
+.os-hud .os-thr.os-cruise .os-thr-cruise { display: block; }
+.os-hud .os-thr.os-cruise .os-thr-num { display: none; }
+.os-hud .os-thr .os-thr-body { transition: opacity 0.5s ease; }
+.os-hud .os-thr.os-cruise .os-thr-body { opacity: 0.28; }
+/* v3: the G meter, moved off the hull. Lower-case unit, one size, dim; a high
+   load gets the rationed amber and nothing louder (ui/gReadout.ts). */
+.os-hud .os-thr-g { margin-top: 10px; display: flex; gap: 8px; align-items: baseline; transition: opacity 0.4s ease; }
+.os-hud .os-g-num {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: none;
+  color: var(--os-dim);
+  transition: color 0.6s ease;
+}
+.os-hud .os-g-num[data-tone='idle'] { opacity: 0.6; }
+.os-hud .os-g-num[data-tone='high'] { color: var(--os-amber); text-shadow: var(--os-glow); }
 .os-thr-fa {
   margin-top: 6px;
   font-size: 9px;
@@ -1962,20 +2196,6 @@ const CSS = /* css */ `
   -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 26%, #000 74%, transparent 100%);
   mask-image: linear-gradient(to bottom, transparent 0%, #000 26%, #000 74%, transparent 100%);
 }
-.os-hud .os-tape-strip {
-  position: absolute;
-  inset: -30px 0 -30px auto;
-  right: 0;
-  width: 6px;
-  background-image: repeating-linear-gradient(
-    to bottom,
-    var(--os-etch) 0px,
-    var(--os-etch) 1px,
-    transparent 1px,
-    transparent 5.2px
-  );
-  background-position-y: calc(var(--tape, 0) * 1px);
-}
 .os-hud .os-tape-row {
   position: absolute;
   top: 50%;
@@ -1986,9 +2206,12 @@ const CSS = /* css */ `
   gap: 4px;
   width: 100%;
   transform: translateY(calc(var(--ty, 0) * 1px - 50%));
+  opacity: var(--a, 0);
 }
+.os-hud .os-tape-row.os-major .os-tape-tick { width: 9px; }
+.os-hud .os-tape-row.os-major .os-tape-num { color: var(--os-amber); opacity: 0.85; }
 .os-hud .os-tape-tick {
-  width: 9px;
+  width: 5px;
   height: 1px;
   background: rgba(255, 190, 110, 0.72);
   box-shadow: var(--os-etch-shadow);
@@ -2045,6 +2268,7 @@ const CSS = /* css */ `
 }
 /* viewBox origin is 0,0, so 50% 50% is the reticle centre under every reading of
    the spec. See ATT_C. */
+.os-hud .os-att-clip { opacity: var(--ladder, 1); }
 .os-hud .os-att-ladder {
   transform-box: view-box;
   transform-origin: 50% 50%;
@@ -2066,16 +2290,51 @@ const CSS = /* css */ `
   transform: rotate(calc(var(--roll, 0) * 1deg));
   filter: drop-shadow(0 0 4px rgba(255, 180, 84, 0.6));
 }
-.os-hud .os-att-g {
+/* v3: contact brackets — faint, steel, no numbers. */
+.os-hud .os-ct {
   position: absolute;
-  left: 50%;
-  bottom: 8px;
-  transform: translateX(-50%);
-  font-size: 9px;
-  color: var(--os-dim);
-  letter-spacing: 0.3em;
-  transition: opacity 0.4s ease;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  transform: translate(calc(var(--tx, 0) * 1px), calc(var(--ty, 0) * 1px));
+  transition: opacity 0.5s ease;
+  opacity: 0.72;
 }
+.os-hud .os-ct-box {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 26px;
+  height: 26px;
+  transform: translate(-50%, -50%);
+  transition: opacity 0.25s linear;
+}
+.os-hud .os-ct-c {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  border: 0 solid var(--os-dim);
+  filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.9));
+}
+.os-hud .os-ct-c.os-tl { left: 0; top: 0; border-left-width: 1px; border-top-width: 1px; }
+.os-hud .os-ct-c.os-tr { right: 0; top: 0; border-right-width: 1px; border-top-width: 1px; }
+.os-hud .os-ct-c.os-bl { left: 0; bottom: 0; border-left-width: 1px; border-bottom-width: 1px; }
+.os-hud .os-ct-c.os-br { right: 0; bottom: 0; border-right-width: 1px; border-bottom-width: 1px; }
+.os-hud .os-ct-chev {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 16px;
+  height: 16px;
+  transform: translate(-50%, -50%) rotate(calc(var(--ang, 0) * 1deg));
+  opacity: 0;
+  transition: opacity 0.25s linear;
+}
+.os-hud .os-ct-chev svg { width: 100%; height: 100%; }
+.os-hud .os-ct-chev path { fill: none; stroke: var(--os-dim); stroke-width: 1.2; filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.9)); }
+.os-hud .os-ct.os-off .os-ct-box { opacity: 0; }
+.os-hud .os-ct.os-off .os-ct-chev { opacity: 1; }
 
 /* Target ------------------------------------------------------------------ */
 .os-hud .os-tgt {

@@ -150,7 +150,10 @@ describe('L engages the autopilot', () => {
   it('Given an engaged autopilot, Then it is the computer that writes the command (pilot hands-off), and it flies with thrust', () => {
     const h = harness();
     h.input.press('land');
-    h.tick(600); // v3: the 180° flip to retrograde now swings at 25°/s (~7 s), so 10 s, not 4
+    // [v3-T2] the flip is flown at the D0 pitch maximum (35°/s); [v3-T3] the
+    // attitude setpoint swings at 25°/s, so the 180° flip to retrograde takes
+    // ~7 s before the burn: 10 s, not 4.
+    h.tick(600);
     expect(h.ap.active).toBe(true);
     // 10 s of deorbit burn out of a ~1 km/s orbit must have taken horizontal
     // speed off. (Total speed rises: the suicide burn dives first.)

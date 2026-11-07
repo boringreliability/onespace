@@ -8,15 +8,12 @@
  * copied the stick into the command, and this function leaves a non-zero stick
  * untouched.
  *
- * Tuning. Per axis the hull is, for small errors,
- *
- *     θ̈ = α·u − θ̇/τ        (τ = assistDampTime with assist on, ∞ off)
- *
- * so u = Kp·e − Kd·θ̇ closes to θ̈ + (1/τ + α·Kd)·θ̇ + α·Kp·θ = 0. Critical damping
- * at natural frequency ωn gives Kp = ωn²/α and Kd = (2ωn − 1/τ)/α. α comes from
- * the ship's own config, so a different hull stays critically damped. With the
- * stick saturated the derivative term starts braking earlier than a bang-bang
- * stop needs (e = 2ω/ωn against ω²/2α), which is what bounds the overshoot.
+ * Tuning ([v3-T2], re-derived for the rate-command plant). With attitude hold
+ * on the stick is a rate demand, so the loop is u = K·e/ωmax (`steerRates`, saturated jointly):
+ * a constant-rate slew at the axis maximum far out, critically damped against
+ * the rate loop's τ_down near in. With attitude hold off the hull is
+ * Newtonian, θ̈ = α·u, and u = Kp·e − Kd·θ̇ with Kp = ωn²/α, Kd = 2ωn/α is
+ * critically damped at ωn. α comes from the ship's own config.
  *
  * Limb aim. Aimed at the centre, a ship arrives diving radially and the orbit
  * insertion has to turn its velocity 90°. Given `limbRadiusKm`, the nose is
@@ -29,6 +26,7 @@
 import { Quaternion, Vector3 } from 'three';
 import type { FlightModel } from './FlightModel';
 import { eclipticTangent } from './cruiseOrbit';
+import { steerRates, type AxisCommand } from './rateCommand';
 
 /** Natural frequency of the closed loop, rad/s. ~2 s to settle a large turn. */
 const OMEGA_N = 2;
@@ -47,6 +45,7 @@ const sSide = new Vector3();
 const sAim = new Vector3();
 const sBody = new Vector3();
 const sInv = new Quaternion();
+const sRates: AxisCommand = { pitch: 0, yaw: 0, roll: 0 };
 
 /** Angle between the nose and the direction to `targetWorld`, radians. */
 export function noseErrorRad(flight: FlightModel, targetWorld: Vector3): number {
@@ -128,22 +127,30 @@ export function steerToward(
     ey = 0;
   }
 
+  // [v3-T2] BEGIN steering gains
   const c = flight.config;
+  if (flight.attitudeHold) {
+    // Rate-command plant: ask for a rate proportional to the error (see
+    // `STEER_RATE_GAIN`). Body Y carries the hull's yaw sign; divide it out.
+    steerRates(ex, ey, 0, sRates);
+    cmd.pitch = sRates.pitch;
+    cmd.yaw = sRates.yaw / c.yawAxisSign;
+    return 'steer';
+  }
+  // Newtonian (attitude hold off): u is torque, θ̈ = α·u, so the PD closes to
+  // θ̈ + α·Kd·θ̇ + α·Kp·θ = 0 — critically damped at Kp = ωn²/α, Kd = 2ωn/α.
   const alphaP = (c.rcsTorque.pitch / c.inertia.pitch) * M_TO_KM;
   const alphaY = (c.rcsTorque.yaw / c.inertia.yaw) * M_TO_KM;
-  // Rotation damping is `attitudeHold` since v2 track A split it from the
-  // translational flight assist; the steering gains depend on the former.
-  const decay = flight.attitudeHold ? 1 / c.assistDampTime : 0;
   const w = flight.angularVelocity;
-
   const kpP = (OMEGA_N * OMEGA_N) / alphaP;
-  const kdP = Math.max(0, 2 * OMEGA_N - decay) / alphaP;
+  const kdP = (2 * OMEGA_N) / alphaP;
   const kpY = (OMEGA_N * OMEGA_N) / alphaY;
-  const kdY = Math.max(0, 2 * OMEGA_N - decay) / alphaY;
+  const kdY = (2 * OMEGA_N) / alphaY;
 
   // Torque about body Y is yaw·alpha·yawAxisSign, so divide the sign back out.
   cmd.pitch = clampUnit(kpP * ex - kdP * w.x);
   cmd.yaw = clampUnit((kpY * ey - kdY * w.y) / c.yawAxisSign);
+  // [v3-T2] END steering gains
   return 'steer';
 }
 

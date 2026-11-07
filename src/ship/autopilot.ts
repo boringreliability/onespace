@@ -60,6 +60,7 @@ import { Matrix4, Quaternion, Vector3 } from 'three';
 
 import type { InputAxes } from '@/core/Input';
 import type { FlightModel } from './FlightModel';
+import { steerRates, type AxisCommand } from './rateCommand';
 
 // ---------------------------------------------------------------------------
 // Tuning
@@ -140,6 +141,8 @@ const HOVER_BRAKE_FRACTION = 0.6;
  * flips the camera lost the hull in (PLAN mechanism 5).
  */
 export const ATTITUDE_SLEW_MAX_RAD_S = (25 * Math.PI) / 180;
+/** Fraction of ATTITUDE_SLEW_MAX_RAD_S the setpoint itself turns at (see slewSetpoint). */
+const SETPOINT_SLEW_FRACTION = 0.92;
 /**
  * Most the demanded (non-gravitational) acceleration may change per second,
  * km/s³ (~120 g/s, under the 150 g/s target). RCS has no spool, so without
@@ -608,7 +611,9 @@ export class Autopilot {
     sMat.lookAt(ZERO, aim, sRoofS);
     sQDes.setFromRotationMatrix(sMat);
     const angle = this.setpoint.angleTo(sQDes);
-    const maxStep = ATTITUDE_SLEW_MAX_RAD_S * (h > 0 ? h : 0);
+    // The setpoint runs a little under the limit: T2's rate loop (τ_up 0.22 s)
+    // overshoots a ramp by ~6 %, and it is the HULL that must stay inside.
+    const maxStep = SETPOINT_SLEW_FRACTION * ATTITUDE_SLEW_MAX_RAD_S * (h > 0 ? h : 0);
     if (angle <= maxStep || angle < 1e-9) this.setpoint.copy(sQDes);
     else this.setpoint.slerp(sQDes, maxStep / angle);
   }
@@ -654,8 +659,8 @@ export class Autopilot {
 
   /**
    * Three-axis attitude PD towards nose `aim`, roof as near `roof` as the nose
-   * allows. Same tuning as `cruiseSteer` (critically damped against the
-   * hull's own α and rotation damping), extended to roll.
+   * allows. Same tuning as `cruiseSteer` ([v3-T2]: rate ∝ error against the
+   * rate-command plant; PD against α when attitude hold is off), extended to roll.
    */
   private steer(flight: FlightModel, aim: Vector3, roof: Vector3): void {
     // Matrix4.lookAt puts −Z from eye to target, and −Z is the nose.
@@ -681,21 +686,35 @@ export class Autopilot {
     const ey = sQErr.y * k;
     const ez = sQErr.z * k;
 
+    // [v3-T2] BEGIN steering gains (T2 owns this block)
     const c = flight.config;
-    const decay = flight.attitudeHold ? 1 / c.assistDampTime : 0;
-    const w = flight.angularVelocity;
     const cmd = flight.command;
+    if (flight.attitudeHold) {
+      // Rate-command plant: rate ∝ error, saturated jointly at the axis
+      // maxima (`steerRates`, as cruiseSteer). Hull axis signs divided out.
+      steerRates(ex, ey, ez, sRates);
+      cmd.pitch = sRates.pitch;
+      cmd.yaw = sRates.yaw / c.yawAxisSign;
+      cmd.roll = sRates.roll / c.rollAxisSign;
+      return;
+    }
+    // Newtonian: PD on torque, critically damped at OMEGA_N against α.
+    const w = flight.angularVelocity;
     const aP = (c.rcsTorque.pitch / c.inertia.pitch) * M_TO_KM;
     const aY = (c.rcsTorque.yaw / c.inertia.yaw) * M_TO_KM;
     const aR = (c.rcsTorque.roll / c.inertia.roll) * M_TO_KM;
-    const kd = Math.max(0, 2 * OMEGA_N - decay);
+    const kd = 2 * OMEGA_N;
     const kp = OMEGA_N * OMEGA_N;
     cmd.pitch = clampUnit((kp * ex - kd * w.x) / aP);
     // Torque about body Y/Z carries the hull's axis signs; divide them back out.
     cmd.yaw = clampUnit((kp * ey - kd * w.y) / aY / c.yawAxisSign);
     cmd.roll = clampUnit((kp * ez - kd * w.z) / aR / c.rollAxisSign);
+    // [v3-T2] END steering gains
   }
 }
+
+// [v3-T2] scratch for the steering block.
+const sRates: AxisCommand = { pitch: 0, yaw: 0, roll: 0 };
 
 /** Auto-orbit radius: 1.6 R, or higher if the air reaches that far. */
 export function orbitTargetRadius(world: AutopilotWorld): number {

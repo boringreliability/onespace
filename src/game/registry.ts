@@ -313,6 +313,7 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
 
   progress(0.845, 'priming the cruise drive');
   // After Universe, whose `nearestGapKm` is its speed limit.
+  // [v3-t5] kept in a const so Instruments can read the drive's phase.
   const cruise = new Cruise({ universe });
   await engine.add(cruise);
   // [v2-p4] L: auto-land / auto-orbit. After Pilot (it overwrites the command
@@ -332,7 +333,8 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   // likewise, and its altitude replaces the sphere one Pilot just published.
   const targeting = new Targeting({ universe, traffic, hud });
   await engine.add(targeting);
-  await engine.add(new Instruments({ universe, hud }));
+  // [v3-t5] cruise + targeting: the throttle block's cruise readout and ETA.
+  await engine.add(new Instruments({ universe, hud, cruise, targeting }));
   await engine.add(new Scanner({ universe, traffic, targeting }));
   const codex = new Codex({ log: shipLog });
   await engine.add(codex);
