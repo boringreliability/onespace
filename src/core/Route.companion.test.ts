@@ -81,4 +81,22 @@ describe('seeInFlightSearch: the Yard button’s URL', () => {
     expect(q.has('size')).toBe(false);
     expect(companionShip(parseRoute(`?${q.toString()}`))).toEqual({ seed: 7 });
   });
+
+  // v3 polish (review low): the carry-over was a blacklist — every key that
+  // was not a ship-route key survived, whatever it was. Whitelist instead.
+  it('Given unknown or foreign keys in the current URL (?shot, ?utm_source, ?foo, a script), Then only tier, dpr, seed and dev are carried over', () => {
+    const q = new URLSearchParams(
+      seeInFlightSearch('?tier=low&foo=1&shot=title&utm_source=x&%3Cscript%3E=1&dpr=2&seed=ff&dev', ship),
+    );
+    const keys = [...new Set(q.keys())].sort();
+    expect(keys).toEqual(['dev', 'dpr', 'faction', 'gen', 'mode', 'role', 'seed', 'ship', 'size', 'tier'].sort());
+    expect(q.get('tier')).toBe('low');
+    expect(q.get('dpr')).toBe('2');
+    expect(q.get('seed')).toBe('ff');
+  });
+
+  it('Given an empty URL, Then only the flight route itself', () => {
+    const q = new URLSearchParams(seeInFlightSearch('', { seed: 7 }));
+    expect([...q.keys()].sort()).toEqual(['gen', 'mode', 'ship']);
+  });
 });

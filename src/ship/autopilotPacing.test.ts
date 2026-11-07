@@ -24,7 +24,9 @@ import { Quaternion, Vector3 } from 'three';
 import { bus } from '@/core/EventBus';
 import { autopilotTimeRate, simSlices } from '@/game/timeCompression';
 import { openingAttitude } from '@/game/recovery';
+import type { PlanetSpec } from '@/gen/types';
 import { DEFAULT_SHIP_CONFIG, FlightModel, type ParentBody } from './FlightModel';
+import { groundVelocity, spinAngularVelocity } from './surfaceSpin';
 import {
   ATTITUDE_SLEW_MAX_RAD_S,
   Autopilot,
@@ -32,8 +34,11 @@ import {
   FINAL_MAX_DESCENT_KMS,
   HOVER_LOCK_ALT_KM,
   TOUCHDOWN_KMS,
+  SPIN_MATCH_FULL_KM,
+  SPIN_MATCH_TOP_KM,
   descentSpeedKmS,
   roundedSqrt,
+  spinMatchWeight,
   type AutopilotWorld,
 } from './autopilot';
 
@@ -49,6 +54,9 @@ interface TestWorld extends AutopilotWorld {
   readonly reliefKm: number;
   /** Wall-clock target for the auto-land leg, s (PLAN §2 D). */
   readonly wallTargetS: number;
+  /** v3 polish (D22a): sidereal rotation period, s (0 = the world does not turn), and tilt. */
+  readonly rotationPeriodS?: number;
+  readonly axialTilt?: number;
 }
 
 const REMIT: TestWorld = {
@@ -92,6 +100,20 @@ const MOON: TestWorld = {
 
 const WORLDS = [REMIT, THICK, MOON] as const;
 
+/** Period that gives an equatorial ground speed of `kmS`. */
+const periodFor = (radiusKm: number, kmS: number): number => (2 * Math.PI * radiusKm) / kmS;
+
+/**
+ * v3 polish (D22a): the same worlds, turning. Ground speeds well above the
+ * review's 22 m/s (Remit 31) so a skid cannot hide under the 2 m/s bar, and
+ * the tilts put the opening orbit's landing site off the equator.
+ */
+const SPINNING: readonly TestWorld[] = [
+  { ...REMIT, name: 'Remit 31 turning', rotationPeriodS: periodFor(REMIT.radiusKm, 0.1), axialTilt: 0.4 },
+  { ...THICK, name: 'thick atmosphere turning', rotationPeriodS: periodFor(THICK.radiusKm, 0.1), axialTilt: 0.2 },
+  { ...MOON, name: 'small moon turning', rotationPeriodS: -periodFor(MOON.radiusKm, 0.03), axialTilt: 0.05 },
+];
+
 function terrainRadius(w: TestWorld, dir: Vector3): number {
   const relief =
     w.reliefKm * 0.5 * (1 + Math.sin(dir.x * 7.1 + dir.y * 3.3) * Math.cos(dir.z * 5.7 - dir.y * 2.1));
@@ -114,7 +136,9 @@ interface Leg {
   /** Frames × 1/60 s: what the player waits. */
   wallSeconds: number;
   simSeconds: number;
-  touchdowns: Array<{ vertical: number; speed: number; dir: Vector3 }>;
+  touchdowns: Array<{ vertical: number; speed: number; dir: Vector3; slip: number }>;
+  /** Surface-relative horizontal speed at first contact, measured here from the pre-contact state, km/s. */
+  slipKmS: number;
   crashes: number;
   /** Max |Δ proper accel| / frame, g/s, airborne frames only. */
   maxJerkGs: number;
@@ -135,10 +159,22 @@ function flyLeg(w: TestWorld, auto: boolean): Leg {
   const fm = new FlightModel(DEFAULT_SHIP_CONFIG);
   const frame: ParentBody = { position: new Vector3(), velocity: new Vector3(), mu: w.mu, radius: w.radiusKm };
   fm.setParent(frame);
+  // v3 polish: a turning world, turned as Universe turns it — the terrain is
+  // fixed in the body frame, and a grounded ship is carried with it.
+  const period = w.rotationPeriodS ?? 0;
+  const tilt = w.axialTilt ?? 0;
+  const spinAxis = new Vector3(Math.sin(tilt), Math.cos(tilt), 0).normalize();
+  const omega = spinAngularVelocity(period, tilt, new Vector3());
+  const spinQ = new Quaternion();
+  const spinInv = new Quaternion();
+  const spinPrev = new Quaternion();
+  const spinDelta = new Quaternion();
+  let orbitTime = 0;
+  if (period !== 0) fm.setLandingContext({ id: 'test', name: w.name, rotationPeriod: period, axialTilt: tilt } as unknown as PlanetSpec);
   const d = new Vector3();
   fm.setGroundSampler((p) => {
     const r = p.length();
-    d.copy(p).divideScalar(r);
+    d.copy(p).divideScalar(r).applyQuaternion(spinInv);
     return r - terrainRadius(w, d);
   });
   const pos = new Vector3(-0.8, 0.35, -0.5).normalize().multiplyScalar(w.radiusKm * 1.6);
@@ -150,6 +186,7 @@ function flyLeg(w: TestWorld, auto: boolean): Leg {
     wallSeconds: 0,
     simSeconds: 0,
     touchdowns: [],
+    slipKmS: Number.NaN,
     crashes: 0,
     maxJerkGs: 0,
     maxRateRadS: 0,
@@ -157,9 +194,17 @@ function flyLeg(w: TestWorld, auto: boolean): Leg {
     fastSeconds: 0,
   };
   offs.push(
-    bus.on('ship:touchdown', ({ vertical, speed }) =>
-      leg.touchdowns.push({ vertical, speed, dir: fm.position.clone().normalize() }),
-    ),
+    bus.on('ship:touchdown', ({ vertical, speed, slip }) => {
+      leg.touchdowns.push({ vertical, speed, slip, dir: fm.position.clone().applyQuaternion(spinInv).normalize() });
+      // Independent of FlightModel's own figure: the state before this slice.
+      if (leg.touchdowns.length === 1) {
+        groundVelocity(omega, preP, gV);
+        up.copy(preP).normalize();
+        rel.subVectors(preV, gV);
+        rel.addScaledVector(up, -rel.dot(up));
+        leg.slipKmS = rel.length();
+      }
+    }),
     bus.on('ship:crashed', () => {
       leg.crashes++;
     }),
@@ -174,8 +219,14 @@ function flyLeg(w: TestWorld, auto: boolean): Leg {
     fm.setAtmosphere(Math.exp(-Math.max(0, alt) / w.scaleHeightKm) * w.pressure);
   };
 
+  const preP = new Vector3();
+  const preV = new Vector3();
+  const gV = new Vector3();
+  const up = new Vector3();
+  const rel = new Vector3();
+  const apWorld: AutopilotWorld = { radiusKm: w.radiusKm, mu: w.mu, atmosphereTopKm: w.atmosphereTopKm, spinRadS: omega };
   const ap = new Autopilot();
-  ap.engage('land', fm, w);
+  ap.engage('land', fm, apWorld);
   const slices = { count: 0, slice: 0 };
   const prevV = new Vector3();
   const acc = new Vector3();
@@ -194,9 +245,17 @@ function flyLeg(w: TestWorld, auto: boolean): Leg {
     const tdBefore = leg.touchdowns.length;
     let frameSim = 0;
     for (let i = 0; i < slices.count; i++) {
+      // Universe's slice order: the worlds turn (carrying a grounded ship), then guidance, then the integration.
+      orbitTime += slices.slice;
+      spinPrev.copy(spinQ);
+      spinQ.setFromAxisAngle(spinAxis, period !== 0 ? (orbitTime / period) * Math.PI * 2 : 0);
+      spinInv.copy(spinQ).invert();
+      if (fm.grounded) fm.carryWithSurface(spinDelta.copy(spinPrev).invert().premultiply(spinQ));
       air();
-      leg.result = ap.step(fm, w, slices.slice);
+      leg.result = ap.step(fm, apWorld, slices.slice);
       if (leg.result !== 'flying') break;
+      preP.copy(fm.position);
+      preV.copy(fm.velocity);
       fm.update(slices.slice);
       frameSim += slices.slice;
       const mode = ap.attitudeMode;
@@ -223,6 +282,7 @@ function flyLeg(w: TestWorld, auto: boolean): Leg {
   console.info(
     `[autopilot v3] ${w.name} ${auto ? 'auto-rate' : '1×'}: ${leg.result} · wall ${leg.wallSeconds.toFixed(1)} s · sim ${leg.simSeconds.toFixed(0)} s` +
       ` (10× for ${leg.fastSeconds.toFixed(0)} s) · touchdown ${leg.touchdowns[0] ? (leg.touchdowns[0].vertical * 1000).toFixed(2) + ' m/s' : '-'}` +
+      ` · slip ${(leg.slipKmS * 1000).toFixed(2)} m/s` +
       ` · jerk ${leg.maxJerkGs.toFixed(0)} g/s · rate ${(leg.maxRateRadS / DEG).toFixed(1)}°/s · modes<20km ${leg.modeChangesBelowLock}`,
   );
   return leg;
@@ -365,6 +425,93 @@ describe('auto-land, per sim slice with the D0 time rule', () => {
       expect(ATTITUDE_SLEW_MAX_RAD_S).toBeCloseTo(25 * DEG, 9);
       expect(leg(w, false).maxRateRadS).toBeLessThanOrEqual(ATTITUDE_SLEW_MAX_RAD_S * slack);
       expect(leg(w, true).maxRateRadS).toBeLessThanOrEqual(ATTITUDE_SLEW_MAX_RAD_S * slack);
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// v3 polish (D22a): the ground moves
+// ---------------------------------------------------------------------------
+
+describe('spinMatchWeight — how much of the ground’s velocity the landing field asks for', () => {
+  it('Given terrain altitude at or above SPIN_MATCH_TOP_KM (the 10× deorbit and brake legs), Then 0 — those legs are unchanged', () => {
+    expect(SPIN_MATCH_TOP_KM).toBe(HOVER_LOCK_ALT_KM);
+    for (const h of [SPIN_MATCH_TOP_KM, 25, 400, 1e6]) expect(spinMatchWeight(h)).toBe(0);
+  });
+
+  it('Given terrain altitude at or below SPIN_MATCH_FULL_KM, Then 1 — the whole final segment flies with the ground', () => {
+    expect(SPIN_MATCH_FULL_KM).toBeGreaterThan(FINAL_ALTITUDE_KM);
+    for (const h of [SPIN_MATCH_FULL_KM, 1, FINAL_ALTITUDE_KM, 0, -0.2]) expect(spinMatchWeight(h)).toBe(1);
+  });
+
+  it('Given falling altitude, Then the weight rises monotonically and continuously (no step in the demand)', () => {
+    let prev = -1;
+    for (let h = SPIN_MATCH_TOP_KM + 1; h >= 0; h -= 0.01) {
+      const wgt = spinMatchWeight(h);
+      expect(wgt).toBeGreaterThanOrEqual(prev);
+      if (prev >= 0) expect(wgt - prev).toBeLessThan(0.01);
+      prev = wgt;
+    }
+  });
+
+  it('Given NaN altitude, Then a number in [0, 1], never NaN', () => {
+    const wgt = spinMatchWeight(Number.NaN);
+    expect(Number.isFinite(wgt)).toBe(true);
+    expect(wgt).toBeGreaterThanOrEqual(0);
+    expect(wgt).toBeLessThanOrEqual(1);
+  });
+});
+
+describe('the landing field above the blend is the same on a turning world', () => {
+  it('Given the same hull state 30 km up, When the autopilot steps against a still and a turning world, Then the command is identical', () => {
+    const mk = (): FlightModel => {
+      const fm = new FlightModel(DEFAULT_SHIP_CONFIG);
+      fm.setParent({ position: new Vector3(), velocity: new Vector3(), mu: REMIT.mu, radius: REMIT.radiusKm });
+      const pos = new Vector3(0.3, 0.8, -0.5).normalize().multiplyScalar(REMIT.radiusKm + 30);
+      fm.teleport(pos, new Vector3(0.2, -0.4, 0.1), new Quaternion());
+      return fm;
+    };
+    const still = mk();
+    const turning = mk();
+    const a = new Autopilot();
+    const b = new Autopilot();
+    const base: AutopilotWorld = { radiusKm: REMIT.radiusKm, mu: REMIT.mu, atmosphereTopKm: 0 };
+    const spun: AutopilotWorld = { ...base, spinRadS: spinAngularVelocity(periodFor(REMIT.radiusKm, 0.1), 0.4, new Vector3()) };
+    a.engage('land', still, base);
+    b.engage('land', turning, spun);
+    for (let i = 0; i < 30; i++) {
+      a.step(still, base, FRAME);
+      b.step(turning, spun, FRAME);
+      expect(turning.command).toEqual(still.command);
+      still.update(FRAME);
+      turning.update(FRAME);
+    }
+  });
+});
+
+describe('auto-land on a turning world (D22a: the review measured a ~22 m/s sideways skid on Remit 31)', () => {
+  for (const w of SPINNING) {
+    const groundMs = Math.abs((2 * Math.PI * w.radiusKm) / w.rotationPeriodS!) * 1000;
+    it(`Given the opening orbit over ${w.name} (ground ${groundMs.toFixed(0)} m/s at the equator), When L flies hands-off with auto-10×, Then it touches down CLEAN with < 2 m/s relative to the ground, no crash, inside ${w.wallTargetS} s`, () => {
+      const l = leg(w, true);
+      expect(l.crashes).toBe(0);
+      expect(l.result).toBe('landed');
+      expect(l.touchdowns[0]!.vertical).toBeLessThan(0.002);
+      expect(l.slipKmS).toBeLessThan(0.002);
+      // FlightModel's own figure agrees (it is what Pilot grades on).
+      expect(l.touchdowns[0]!.slip).toBeLessThan(0.002);
+      expect(l.wallSeconds).toBeLessThanOrEqual(w.wallTargetS);
+    });
+
+    it(`Given the leg over ${w.name}, Then it is still smooth: ≤ 1 mode change below ${HOVER_LOCK_ALT_KM} km, jerk ≤ 150 g/s at 1×, hull rate inside the slew limit`, () => {
+      const fast = leg(w, true);
+      const slow = leg(w, false);
+      expect(slow.result).toBe('landed');
+      expect(slow.slipKmS).toBeLessThan(0.002);
+      expect(fast.modeChangesBelowLock).toBeLessThanOrEqual(1);
+      expect(slow.modeChangesBelowLock).toBeLessThanOrEqual(1);
+      expect(slow.maxJerkGs).toBeLessThanOrEqual(150);
+      expect(fast.maxRateRadS).toBeLessThanOrEqual(ATTITUDE_SLEW_MAX_RAD_S * 1.05);
     });
   }
 });

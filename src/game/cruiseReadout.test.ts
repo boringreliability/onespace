@@ -99,6 +99,31 @@ describe('cruiseReadout', () => {
       expect(r.primary + r.secondary).not.toMatch(/THR|100 %/);
     }
   });
+
+  // v3 polish (D22b): Remit 31 → Vassa read ETA 0:40 and took 79 s; the
+  // line ran through Remit, the drive skirted it, and the readout froze at
+  // ~0:41 for ~25 s. While the drive skirts there is no honest ETA to give.
+  it('Given the drive skirting Remit 31 on the way to Vassa, Then "SKIRTING · REMIT 31" instead of an ETA', () => {
+    const r = cruiseReadout({ ...base, phase: 'cruise', speedKmS: 0.1 * C, etaS: 40, destination: 'Vassa', skirting: 'Remit 31' });
+    expect(r).toEqual({ primary: 'CRUISE · 0.10 c', secondary: 'SKIRTING · REMIT 31' });
+    expect(r!.secondary).not.toMatch(/ETA|\d:\d\d/);
+  });
+
+  it('Given the drive spooling while the line is blocked, Then SKIRTING too (it steers while charging)', () => {
+    const r = cruiseReadout({ ...base, phase: 'spooling', progress: 0.5, etaS: 40, destination: 'Vassa', skirting: 'Remit 31' });
+    expect(r?.secondary).toBe('SKIRTING · REMIT 31');
+  });
+
+  it('Given the line clear again (skirting null or absent), Then the countdown is back', () => {
+    const r = cruiseReadout({ ...base, phase: 'cruise', speedKmS: 0.1 * C, etaS: 38, destination: 'Vassa', skirting: null });
+    expect(r?.secondary).toBe('ETA 0:38 · VASSA');
+    expect(cruiseReadout({ ...base, phase: 'cruise', speedKmS: 0.1 * C, etaS: 38, destination: 'Vassa' })?.secondary).toBe('ETA 0:38 · VASSA');
+  });
+
+  it('Given the drive dropping, Then never SKIRTING (the drop is not steered past anything)', () => {
+    const r = cruiseReadout({ ...base, phase: 'dropping', etaS: 1, destination: 'Vassa', skirting: 'Remit 31' });
+    expect(r?.secondary).toBe('ETA 0:01 · VASSA');
+  });
 });
 
 describe('cruiseArrivalEta', () => {

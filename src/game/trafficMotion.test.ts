@@ -13,9 +13,14 @@
 
 import { describe, expect, it } from 'vitest';
 import { Quaternion, Vector3 } from 'three';
+import { BASE_HFOV_DEG } from '@/ship/fovPolicy';
 import {
+  CONTACT_CLEARANCE_FACTOR,
+  CONTACT_CLEARANCE_PAD_KM,
   CONTACT_ELEVATION_RAD,
   CONTACT_RANGE_KM,
+  HULL_ANGLE_DEG,
+  hullContactRangeKm,
   TRAFFIC_THROTTLE_MAX,
   TRAFFIC_THROTTLE_MIN,
   contactRangeKm,
@@ -82,6 +87,77 @@ describe('contactRangeKm: 1.5-2.5 km', () => {
     expect(contactRangeKm(-3)).toBe(1.5);
     expect(contactRangeKm(7)).toBe(2.5);
     expect(contactRangeKm(Number.NaN)).toBeGreaterThanOrEqual(1.5);
+  });
+});
+
+// v3 polish (D22c): SEE IN FLIGHT put a 30 m companion 1.6 km off — a few
+// pixels, and the "your 30 m ship as yardstick" idea failed. The range now
+// follows the hull: it is placed where it subtends 6-10° of the 88° frame.
+describe('hullContactRangeKm: contact 0 placed by the size of its hull', () => {
+  const subtends = (lengthKm: number, rangeKm: number): number => (2 * Math.atan(lengthKm / (2 * rangeKm)) * 180) / Math.PI;
+  const clearance = (boundKm: number): number => CONTACT_CLEARANCE_FACTOR * (boundKm + CONTACT_CLEARANCE_PAD_KM);
+
+  it('Given the target band, Then it is 6-10° of hull, out of the 88° horizontal frame', () => {
+    expect(HULL_ANGLE_DEG).toEqual([6, 10]);
+    expect(BASE_HFOV_DEG).toBe(88);
+    expect(CONTACT_CLEARANCE_FACTOR).toBe(3);
+    expect(CONTACT_CLEARANCE_PAD_KM).toBeCloseTo(0.03, 12);
+  });
+
+  for (const [label, len] of [['30 m (the player’s own size)', 0.03], ['120 m', 0.12], ['300 m', 0.3]] as const) {
+    it(`Given a ${label} hull, Then it subtends 6-10° — the draw picks where in the band — and the range is inside 2.5 km`, () => {
+      for (const u of [0, 0.25, 0.5, 0.75, 1]) {
+        const r = hullContactRangeKm(u, len, 0.55 * len);
+        const deg = subtends(len, r);
+        expect(deg).toBeGreaterThanOrEqual(6 - 1e-9);
+        expect(deg).toBeLessThanOrEqual(10 + 1e-9);
+        expect(r).toBeLessThanOrEqual(CONTACT_RANGE_KM[1]);
+      }
+      expect(subtends(len, hullContactRangeKm(0.5, len, 0.55 * len))).toBeCloseTo(8, 6);
+    });
+  }
+
+  it('Given a 30 m hull, Then it sits ~210 m off, not 1.6 km (the review’s few pixels)', () => {
+    const r = hullContactRangeKm(0.5, 0.03, 0.017);
+    expect(r).toBeGreaterThan(0.15);
+    expect(r).toBeLessThan(0.3);
+  });
+
+  it('Given a hull long enough that 6-10° is beyond 2.5 km, Then the range is capped at 2.5 km (it only looks bigger)', () => {
+    const r = hullContactRangeKm(0, 0.4, 0.22);
+    expect(r).toBe(2.5);
+    expect(subtends(0.4, r)).toBeGreaterThan(6);
+  });
+
+  it('Given any hull 5 m-3 km and any draw, Then the range is never inside 3 × (bounding radius + 30 m) — clearance beats both the angle and the cap', () => {
+    for (let len = 0.005; len <= 3; len *= 1.17) {
+      for (const k of [0.5, 0.6, 0.9]) {
+        for (const u of [0, 0.5, 1]) {
+          const bound = k * len;
+          expect(hullContactRangeKm(u, len, bound)).toBeGreaterThanOrEqual(clearance(bound) - 1e-12);
+        }
+      }
+    }
+    // A 2 km capital: 3 × (1.1 + 0.03) = 3.39 km, past the 2.5 km cap.
+    expect(hullContactRangeKm(0.5, 2, 1.1)).toBeCloseTo(3.39, 9);
+  });
+
+  it('Given a draw outside [0, 1] or NaN, Then it is clamped into the band', () => {
+    expect(hullContactRangeKm(-4, 0.1, 0.06)).toBe(hullContactRangeKm(0, 0.1, 0.06));
+    expect(hullContactRangeKm(9, 0.1, 0.06)).toBe(hullContactRangeKm(1, 0.1, 0.06));
+    expect(Number.isFinite(hullContactRangeKm(Number.NaN, 0.1, 0.06))).toBe(true);
+  });
+
+  it('Given no usable length (NaN, 0, negative), Then the old 1.5-2.5 km band — never NaN', () => {
+    for (const bad of [Number.NaN, 0, -1]) {
+      const r = hullContactRangeKm(0.5, bad, bad);
+      expect(r).toBe(contactRangeKm(0.5));
+    }
+  });
+
+  it('Given the offset rescaled to the hull range, Then it is still exactly at the elevation angle above the nose (still in frame)', () => {
+    const o = openingContactOffset(NOSE, ROOF, hullContactRangeKm(0.5, 0.03, 0.017), new Vector3());
+    expect(Math.acos(o.clone().normalize().dot(NOSE))).toBeCloseTo(CONTACT_ELEVATION_RAD, 9);
   });
 });
 

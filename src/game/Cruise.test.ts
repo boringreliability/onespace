@@ -16,7 +16,7 @@ import type { ActionName } from '@/core/Input';
 import { DEFAULT_SHIP_CONFIG, FlightModel, type ParentBody } from '@/ship/FlightModel';
 import { CRUISE_DEFAULTS } from '@/ship/CruiseDrive';
 import { noseErrorRad } from '@/ship/cruiseSteer';
-import { Cruise, type CruiseWorld } from './Cruise';
+import { Cruise, lineBlockedBy, type CruiseWorld } from './Cruise';
 
 const R = 7_240;
 const MU = 9.8e-3 * R * R;
@@ -360,7 +360,7 @@ describe('review-p1: a target behind the world being orbited', () => {
    * behind it on the −X axis. The ship opens on +X, so the straight line to
    * the target runs through the home world — the playtest's Vassa/Remit 31.
    */
-  function behind(): { cruise: Cruise; flight: FlightModel; logs: string[]; run: (s: number) => string[] } {
+  function behind(): { cruise: Cruise; flight: FlightModel; logs: string[]; run: (s: number, onFrame?: () => void) => string[] } {
     const frame: ParentBody = { position: new Vector3(), velocity: new Vector3(), mu: MU, radius: R };
     const flight = new FlightModel(DEFAULT_SHIP_CONFIG);
     flight.setParent(frame);
@@ -382,7 +382,7 @@ describe('review-p1: a target behind the world being orbited', () => {
     bus.emit('target:changed', { id: 'body:Vassa', name: 'Vassa' });
     press.add('cruise');
     const reasons: string[] = [];
-    const run = (seconds: number): string[] => {
+    const run = (seconds: number, onFrame?: () => void): string[] => {
       for (let t = 0; t < seconds; t += H) {
         flight.update(H);
         const p = flight.worldPosition;
@@ -400,6 +400,7 @@ describe('review-p1: a target behind the world being orbited', () => {
         cruise.update(H, ctx);
         press.clear();
         if (before === 'cruise' && cruise.drive.phase === 'dropping') reasons.push(cruise.drive.dropReason ?? '?');
+        onFrame?.();
         if (reasons.length) break;
       }
       return reasons;
@@ -421,6 +422,43 @@ describe('review-p1: a target behind the world being orbited', () => {
     expect(reasons).toEqual(['arrival']);
     expect(r.flight.worldPosition.distanceTo(new Vector3(-2e7, 0, 0))).toBeLessThan(5_000 * 4);
     expect(r.logs.some((t) => t.includes('MASS'))).toBe(false);
+  });
+
+  // v3 polish (D22b): the readout said ETA 0:40 for a 79 s trip while the
+  // drive skirted Remit 31. Cruise now says when it is skirting, and which world.
+  it('Given the target behind the home world, When the drive carries the ship, Then `skirting` names the home world while it is in the way and clears (null) once the line is clear, before arrival', () => {
+    const r = behind();
+    expect(r.cruise.skirting).toBeNull(); // idle: nothing to skirt
+    const seen: Array<string | null> = [];
+    r.run(120, () => {
+      if (r.cruise.drive.phase === 'spooling' || r.cruise.drive.phase === 'cruise') seen.push(r.cruise.skirting);
+    });
+    expect(seen[0]).toBe('Remit 31');
+    const firstClear = seen.indexOf(null);
+    expect(firstClear).toBeGreaterThan(0);
+    // Once clear it stays clear — and the drive still had a stretch of cruise to count down.
+    expect(seen.slice(firstClear).every((x) => x === null)).toBe(true);
+    expect(seen.length - firstClear).toBeGreaterThan(30);
+    expect(r.cruise.drive.phase === 'dropping' || r.cruise.drive.phase === 'idle').toBe(true);
+    expect(r.cruise.skirting).toBeNull();
+  });
+});
+
+describe('lineBlockedBy — the occluder test, pure (v3 polish)', () => {
+  const ship = new Vector3(10_000, 0, 0);
+  const target = new Vector3(-2e7, 0, 0);
+  it('Given a world on the line nearer than the target, Then blocked', () => {
+    expect(lineBlockedBy(ship, target, new Vector3(0, 0, 0), 7_500)).toBe(true);
+  });
+  it('Given the same world passed by more than its safe radius, Then clear', () => {
+    expect(lineBlockedBy(ship, target, new Vector3(0, 8_000, 0), 7_500)).toBe(false);
+  });
+  it('Given a world behind the ship or beyond the target, Then clear', () => {
+    expect(lineBlockedBy(ship, target, new Vector3(20_000, 0, 0), 7_500)).toBe(false);
+    expect(lineBlockedBy(ship, target, new Vector3(-3e7, 0, 0), 7_500)).toBe(false);
+  });
+  it('Given the ship on the target, Then clear (no line to block)', () => {
+    expect(lineBlockedBy(target, target, new Vector3(0, 0, 0), 7_500)).toBe(false);
   });
 });
 
