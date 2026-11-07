@@ -88,6 +88,15 @@ const CRUISE_RESPONSE = 1.6;
 const CRUISE_BRAKE = 0.7;
 /** Altitude (km) above ground at which "grounded" releases. 5 m of hysteresis. */
 const GROUND_RELEASE = 0.005;
+// [v3-t3] boost ramp
+/**
+ * Seconds for the boost multiplier to travel 1 ↔ boostMultiplier, both ways,
+ * for the pilot's Shift and the autopilot alike. It was a step: 0.4 km/s²
+ * (41 g) in one substep, ~1 040 g/s of jerk (PLAN A2). Linear over 0.5 s it
+ * is ≤ 82 g/s at full throttle.
+ */
+export const BOOST_RAMP_S = 0.5;
+// [/v3-t3]
 
 /**
  * Sphere-of-influence hysteresis. A ship skimming a boundary would otherwise
@@ -543,6 +552,21 @@ export class FlightModel {
   get boosting(): boolean {
     return this._boosting;
   }
+  // [v3-t3] boost ramp
+  /** The multiplier in force on main thrust and top speed: 1 … boostMultiplier, ramped. */
+  get boostFactor(): number {
+    return this._boostFactor;
+  }
+  private _boostFactor = 1;
+  /** Ramp the boost factor one substep towards the command (BOOST_RAMP_S, linear). */
+  private rampBoost(h: number): void {
+    const top = this.config.boostMultiplier;
+    const target = this._boosting ? top : 1;
+    const step = (Math.abs(top - 1) * h) / BOOST_RAMP_S;
+    const f = this._boostFactor;
+    this._boostFactor = f < target ? Math.min(target, f + step) : Math.max(target, f - step);
+  }
+  // [/v3-t3]
 
   /**
    * Flight assist (FA). On, the lever is a set speed and the computer flies
@@ -866,7 +890,8 @@ export class FlightModel {
 
     // Thrust fades as the ceiling approaches. Never clamp the velocity: the
     // whole point is that you feel the engine give up, not the world stop you.
-    const boostMul = this._boosting ? c.boostMultiplier : 1;
+    this.rampBoost(h); // [v3-t3] boost ramp: the factor, not a step
+    const boostMul = this._boostFactor;
     const vmax = c.topSpeed * boostMul;
     const limiter = clamp01(1 - Math.pow(Math.min(speed / vmax, 1), c.speedFalloffExponent));
 
@@ -985,6 +1010,7 @@ export class FlightModel {
     const cap = this.cruiseCap ?? 0;
 
     this._boosting = false;
+    this._boostFactor = 1; // [v3-t3] boost ramp: the drive carries, nothing to ramp
     this._throttle = damp(this._throttle, clamp01(this.command.throttle), c.throttleSpoolTime, h);
 
     // Throttle chooses a fraction of the ceiling, so the pilot can coast in
