@@ -24,6 +24,8 @@ import { ResolutionGovernor } from './ResolutionGovernor';
 import { modes, type Mode } from './Modes';
 import { moduleDt, tickModules } from './tick';
 import { parseDevParams } from './Route';
+import { ENGINE_MAX_DT } from './substeps';
+import { governorHoldUp } from './flightActivity';
 
 export interface EngineContext {
   readonly renderer: WebGLRenderer;
@@ -217,7 +219,9 @@ export class Engine {
     this.lastStepAt = t0;
 
     // Clamp dt: a background tab or a long GC pause must not teleport the ship.
-    const realDt = Math.min(this.clock.getDelta(), 1 / 15);
+    // [v3-T1] The clamp is shared with FlightModel's substep budget
+    // (core/substeps.ts) so no clamped frame ever loses ship time.
+    const realDt = Math.min(this.clock.getDelta(), ENGINE_MAX_DT);
     const dt = this.fixedDt ?? realDt;
     this.elapsed += dt;
     this.frame++;
@@ -322,7 +326,9 @@ export class Engine {
    * visible than dropping frames, so this is the first lever we pull.
    */
   private adaptResolution(wallMs: number): void {
-    if (!this.governor.sample(wallMs)) return;
+    // [v3-T1] No rise while the autopilot or cruise is flying: each step
+    // reallocates the post stack and costs a 56-67 ms frame.
+    if (!this.governor.sample(wallMs, governorHoldUp())) return;
     this.resolutionScale = this.governor.scale;
     config.dynamicResolution = this.resolutionScale;
     this.applySize();

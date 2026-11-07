@@ -65,6 +65,7 @@ import { Quaternion, Vector3 } from 'three';
 import { bus } from '@/core/EventBus';
 import type { InputAxes } from '@/core/Input';
 import type { PlanetSpec } from '@/gen/types';
+import { FIXED_H, MAX_SUBSTEPS, substepBudget } from '@/core/substeps';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -74,13 +75,9 @@ import type { PlanetSpec } from '@/gen/types';
 const M_TO_KM = 1e-3;
 /** Standard gravity in km/s², for the g-meter. */
 const G0 = 9.80665e-3;
-/** Physics substep. 120 Hz survives a 25 g burn without visible integration error. */
-const FIXED_H = 1 / 120;
-/**
- * Ceiling on substeps per frame. 8 × 1/120 s = 1/15 s, which is exactly the dt
- * clamp in `Engine.step()`, so a stalled frame never spirals.
- */
-const MAX_SUBSTEPS = 8;
+// [v3-T1] FIXED_H and MAX_SUBSTEPS live in core/substeps.ts, next to the
+// engine's dt clamp they must agree with (9 × 1/120 s ≥ 1/15 s + one carried
+// substep, so no frame the engine produces ever loses ship time).
 
 /** Seconds for the cruise speed to answer the throttle. */
 const CRUISE_RESPONSE = 1.6;
@@ -408,9 +405,12 @@ export class FlightModel {
   /**
    * Proper acceleration (thrust, drag — everything but gravity), km/s², world
    * axes, averaged over the substeps of the last `update()`. What an
-   * accelerometer on the hull reads. STAGE-1 STUB: always zero.
+   * accelerometer on the hull reads. A call that takes no substep keeps the
+   * previous value. The camera reads this instead of differencing positions.
    */
   readonly properAccel = new Vector3();
+  private readonly properSum = new Vector3();
+  private readonly budget = { steps: 0, carry: 0, dropped: 0 };
   // --- [/v3-T1] ---------------------------------------------------------------
   /** Gravitational acceleration acting on the ship, km/s². */
   readonly gravityAccel = new Vector3();
@@ -798,18 +798,16 @@ export class FlightModel {
   // -------------------------------------------------------------------------
 
   update(dt: number): void {
-    this.accumulator += dt;
-    // Discard anything beyond the substep ceiling rather than trying to catch
-    // up: a 2 s hitch must not become a 2 s burn.
-    const maxCarry = MAX_SUBSTEPS * FIXED_H;
-    if (this.accumulator > maxCarry) this.accumulator = maxCarry;
-
-    let steps = 0;
-    while (this.accumulator >= FIXED_H && steps < MAX_SUBSTEPS) {
-      this.step(FIXED_H);
-      this.accumulator -= FIXED_H;
-      steps++;
-    }
+    // --- [v3-T1] substep budget -------------------------------------------
+    // Anything beyond the ceiling is discarded rather than caught up (a 2 s
+    // hitch must not become a 2 s burn), but the ceiling now covers the
+    // engine's clamp PLUS the carry, so no real frame loses time.
+    const b = substepBudget(this.accumulator, dt, FIXED_H, MAX_SUBSTEPS, this.budget);
+    this.properSum.set(0, 0, 0);
+    for (let i = 0; i < b.steps; i++) this.step(FIXED_H);
+    this.accumulator = b.carry;
+    if (b.steps > 0) this.properAccel.copy(this.properSum).multiplyScalar(1 / b.steps);
+    // --- [/v3-T1] -----------------------------------------------------------
 
     this.extrapolateForRender(this.accumulator);
     this.refreshDerived();
@@ -910,6 +908,7 @@ export class FlightModel {
     // g-force is what an accelerometer reads: proper acceleration only, so free
     // fall is 0 g and sitting on a planet is 1 g.
     this._gForce = damp(this._gForce, this.sAcc.length() / G0, 0.15, h);
+    this.properSum.add(this.sAcc); // [v3-T1] the camera's accelerometer
 
     this.sAcc.add(this.sGrav);
     // Semi-implicit Euler: velocity first, then position with the NEW velocity.

@@ -1,8 +1,7 @@
 /**
  * [v3-T1] Pure pieces of the chase camera. No allocation: every function
- * writes into an `out` the caller owns.
- *
- * STAGE-1 STUB: signatures only. Implemented in stage 2.
+ * writes into an `out` the caller owns (module scratch is used internally and
+ * never escapes a call).
  */
 
 import { Vector3 } from 'three';
@@ -32,21 +31,44 @@ export function limitAnchorVelocity(
   aMax: number,
   out: AnchorVelocity,
 ): AnchorVelocity {
-  void prevVel;
-  void rawVel;
-  void dt;
-  void aMax;
-  void out;
-  throw new Error('limitAnchorVelocity: not implemented (v3-T1 stage 1)');
+  const px = prevVel.x;
+  const py = prevVel.y;
+  const pz = prevVel.z;
+  const rx = rawVel.x;
+  const ry = rawVel.y;
+  const rz = rawVel.z;
+  if (!(dt > 0)) {
+    out.vel.set(px, py, pz);
+    out.teleport.set(0, 0, 0);
+    out.jumped = false;
+    return out;
+  }
+  const dx = rx - px;
+  const dy = ry - py;
+  const dz = rz - pz;
+  const dv = Math.sqrt(dx * dx + dy * dy + dz * dz);
+  const maxDv = Math.max(0, aMax) * dt;
+  if (dv <= maxDv) {
+    out.vel.set(rx, ry, rz);
+    out.teleport.set(0, 0, 0);
+    out.jumped = false;
+    return out;
+  }
+  const k = maxDv / dv;
+  out.vel.set(px + dx * k, py + dy * k, pz + dz * k);
+  out.teleport.set((rx - out.vel.x) * dt, (ry - out.vel.y) * dt, (rz - out.vel.z) * dt);
+  out.jumped = true;
+  return out;
 }
 
 /** First-order low-pass, frame-rate independent. Mutates and returns `state`. */
 export function lowPassVec(state: Vector3, input: Vector3, dt: number, tau: number): Vector3 {
-  void state;
-  void input;
-  void dt;
-  void tau;
-  throw new Error('lowPassVec: not implemented (v3-T1 stage 1)');
+  if (!(dt > 0)) return state;
+  const k = tau > 0 ? 1 - Math.exp(-dt / tau) : 1;
+  state.x += (input.x - state.x) * k;
+  state.y += (input.y - state.y) * k;
+  state.z += (input.z - state.z) * k;
+  return state;
 }
 
 /**
@@ -61,12 +83,20 @@ export function chaseLagOffset(
   lMax: number,
   out: Vector3,
 ): Vector3 {
-  void aFiltered;
-  void omega;
-  void lMax;
-  void out;
-  throw new Error('chaseLagOffset: not implemented (v3-T1 stage 1)');
+  const a = aFiltered.length();
+  if (!(a > 1e-12) || !(lMax > 0)) return out.set(0, 0, 0);
+  const mag = omega > 0 ? lMax * Math.tanh(a / (omega * omega * lMax)) : lMax;
+  return out.copy(aFiltered).multiplyScalar(-mag / a);
 }
+
+const sF = new Vector3();
+const sR = new Vector3();
+const sU = new Vector3();
+const sS = new Vector3();
+const sAxis = new Vector3();
+const sTry = new Vector3();
+const sA = new Vector3();
+const sB = new Vector3();
 
 /**
  * The subject's distance from frame centre as a fraction of the half-frame:
@@ -80,12 +110,20 @@ export function subjectFrameRadius(
   halfFovY: number,
   aspect: number,
 ): number {
-  void aimDir;
-  void toSubject;
-  void up;
-  void halfFovY;
-  void aspect;
-  throw new Error('subjectFrameRadius: not implemented (v3-T1 stage 1)');
+  const f = sF.copy(aimDir).normalize();
+  const r = sR.crossVectors(f, up);
+  if (r.lengthSq() < 1e-12) {
+    r.set(1, 0, 0).cross(f);
+    if (r.lengthSq() < 1e-12) r.set(0, 0, 1).cross(f);
+  }
+  r.normalize();
+  const u = sU.crossVectors(r, f);
+  const s = sS.copy(toSubject).normalize();
+  const z = s.dot(f);
+  if (z <= 1e-9) return Infinity;
+  const tanY = Math.tan(halfFovY);
+  const tanX = tanY * aspect;
+  return Math.hypot(s.dot(r) / z / tanX, s.dot(u) / z / tanY);
 }
 
 /**
@@ -102,14 +140,32 @@ export function constrainAimToFrame(
   aspect: number,
   margin = 0.6,
 ): Vector3 {
-  void out;
-  void aimDir;
-  void toSubject;
-  void up;
-  void halfFovY;
-  void aspect;
-  void margin;
-  throw new Error('constrainAimToFrame: not implemented (v3-T1 stage 1)');
+  const aim = sA.copy(aimDir).normalize();
+  const subj = sB.copy(toSubject).normalize();
+  const rho = subjectFrameRadius(aim, subj, up, halfFovY, aspect);
+  const soft = (2 / 3) * margin;
+  if (!(rho > soft)) return out.copy(aim);
+  const band = margin - soft;
+  const want = Number.isFinite(rho) ? soft + band * Math.tanh((rho - soft) / band) : margin;
+
+  // Great circle from the aim to the subject; bisect the turn that lands the
+  // subject's radius on `want`. Radius falls as the aim closes on the subject.
+  const theta = Math.acos(Math.max(-1, Math.min(1, aim.dot(subj))));
+  const axis = sAxis.crossVectors(aim, subj);
+  if (axis.lengthSq() < 1e-14) {
+    axis.crossVectors(up, aim);
+    if (axis.lengthSq() < 1e-14) axis.set(1, 0, 0).cross(aim);
+  }
+  axis.normalize();
+  let lo = 0;
+  let hi = theta;
+  for (let i = 0; i < 40; i++) {
+    const mid = 0.5 * (lo + hi);
+    sTry.copy(aim).applyAxisAngle(axis, mid);
+    if (subjectFrameRadius(sTry, subj, up, halfFovY, aspect) > want) lo = mid;
+    else hi = mid;
+  }
+  return out.copy(aim).applyAxisAngle(axis, hi).normalize();
 }
 
 /**
@@ -119,11 +175,25 @@ export function constrainAimToFrame(
  * through it.
  */
 export function sphericalLerp(out: Vector3, a: Vector3, b: Vector3, t: number): Vector3 {
-  void out;
-  void a;
-  void b;
-  void t;
-  throw new Error('sphericalLerp: not implemented (v3-T1 stage 1)');
+  const ra = a.length();
+  const rb = b.length();
+  if (ra < 1e-12 || rb < 1e-12) return out.lerpVectors(a, b, t);
+  const ua = sA.copy(a).divideScalar(ra);
+  const ub = sB.copy(b).divideScalar(rb);
+  const r = ra + (rb - ra) * t;
+  const c = Math.max(-1, Math.min(1, ua.dot(ub)));
+  const th = Math.acos(c);
+  if (th < 1e-7) return out.copy(ua).multiplyScalar(r);
+  if (Math.PI - th < 1e-6) {
+    const axis = sAxis.set(0, 1, 0).cross(ua);
+    if (axis.lengthSq() < 1e-8) axis.set(1, 0, 0).cross(ua);
+    axis.normalize();
+    return out.copy(ua).applyAxisAngle(axis, th * t).multiplyScalar(r);
+  }
+  const s = Math.sin(th);
+  const wa = Math.sin((1 - t) * th) / s;
+  const wb = Math.sin(t * th) / s;
+  return out.set(ua.x * wa + ub.x * wb, ua.y * wa + ub.y * wb, ua.z * wa + ub.z * wb).multiplyScalar(r);
 }
 
 /**
@@ -131,8 +201,6 @@ export function sphericalLerp(out: Vector3, a: Vector3, b: Vector3, t: number): 
  * exceeding `maxRateRad` per second, and lasts at least `minSeconds`.
  */
 export function blendSeconds(angleRad: number, minSeconds: number, maxRateRad: number): number {
-  void angleRad;
-  void minSeconds;
-  void maxRateRad;
-  throw new Error('blendSeconds: not implemented (v3-T1 stage 1)');
+  if (!Number.isFinite(angleRad) || !(angleRad > 0) || !(maxRateRad > 0)) return minSeconds;
+  return Math.max(minSeconds, (SMOOTHERSTEP_PEAK_SLOPE * angleRad) / maxRateRad);
 }

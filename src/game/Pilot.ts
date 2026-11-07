@@ -15,6 +15,7 @@ import { config } from '@/core/Config';
 
 import { Ship } from '@/ship/Ship';
 import { CameraRig, type CameraMode, type LandedFrameSource } from '@/ship/CameraRig';
+import { cruiseSpoolNow, flightActivity } from '@/core/flightActivity';
 import type { Universe } from '@/game/Universe';
 import { shotOwnsScene } from '@/game/Shots';
 import type { Hud } from '@/ui/Hud';
@@ -348,6 +349,15 @@ export class Pilot implements GameModule {
     // `flight.velocity` is parent-relative, which is what the rig wants: it
     // eases its aim towards the velocity vector, and a world one would point
     // along the planet's orbit around its sun no matter what the pilot did.
+    // [v3-T1] What the hull feels — proper acceleration, engine output, cruise
+    // spool — so the rig never differentiates positions. Under cruise the ship
+    // is carried, not pushed: no thrust rumble. The cruise flags are a
+    // fallback from FlightModel alone (core/flightActivity.ts).
+    const fa = flightActivity;
+    fa.cruiseFallback = flight.cruising;
+    const spoolK = dt > 0 ? 1 - Math.exp(-dt / 0.6) : 0;
+    fa.cruiseSpoolFallback += ((flight.cruising ? 1 : 0) - fa.cruiseSpoolFallback) * spoolK;
+    this.rig.setMotion(flight.properAccel, flight.cruising ? 0 : flight.throttle, cruiseSpoolNow());
     this.rig.update(dt, this.renderPos, flight.renderOrientation, flight.velocity, ctx);
 
     // The ship leaves the ground the moment the model says it has, rather than

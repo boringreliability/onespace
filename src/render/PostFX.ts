@@ -74,6 +74,7 @@ import type { EngineContext, RenderPipeline } from '@/core/Engine';
 import { Rng } from '@/math/rng';
 import { activeShot, registerShot } from '@/game/Shots';
 import { registerShaderChunks } from '@/shaders/chunks';
+import { motionJumped } from './motionJump';
 
 // ---------------------------------------------------------------------------
 // Shared GLSL
@@ -1489,7 +1490,7 @@ export class PostFX implements RenderPipeline {
 
     this.finalPass.material.uniforms.uTime.value = this.elapsed;
 
-    if (this.scenePass) this.updateSceneSpaceUniforms(ctx);
+    if (this.scenePass) this.updateSceneSpaceUniforms(ctx, dt);
 
     // Keep the shot rig out of everyone else's frames — see registerPostFXShots.
     // It is also rebuilt here if a pipeline swap (a quality-tier change) tore it
@@ -1518,7 +1519,7 @@ export class PostFX implements RenderPipeline {
       this.composer.readBuffer !== sceneTarget ? sceneTarget.depthTexture : null;
   }
 
-  private updateSceneSpaceUniforms(ctx: EngineContext): void {
+  private updateSceneSpaceUniforms(ctx: EngineContext, dt: number): void {
     const pass = this.scenePass;
     if (!pass) return;
     const u = pass.material.uniforms;
@@ -1545,9 +1546,12 @@ export class PostFX implements RenderPipeline {
     const rebased = ctx.origin.version !== this.prevOriginVersion;
     // Measured against the ground under the ship, not render space: a landed
     // camera sweeps ~1 km per frame through render space without moving at all.
-    const jumped =
-      this.refScratch.copy(this.camWorldPos).sub(this.prevCamWorldPos).sub(motionReference).lengthSq() >
-      25 * 25;
+    // [v3-T1] A speed, not 25 km per frame: the same flight was motion at
+    // 30 fps and a cut at 144 (render/motionJump.ts).
+    const jumped = motionJumped(
+      this.refScratch.copy(this.camWorldPos).sub(this.prevCamWorldPos).sub(motionReference).length(),
+      dt,
+    );
     motion.x = this.hasPrevFrame && !rebased && !jumped ? MOTION_SHUTTER : 0;
 
     // A point at X now was at X - d a frame ago, so reproject through

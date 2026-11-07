@@ -90,11 +90,11 @@ describe('ResolutionGovernor with hysteresis', () => {
     expect(firstRise).toBeGreaterThanOrEqual(5000);
   });
 
-  it('Given fast frames broken by one slow window, When it wants to rise, Then the 5 s of stability start again after the slow window', () => {
+  it('Given fast frames broken by a 1.5 s stretch between the thresholds, When it wants to rise, Then the 5 s of stability start again after it', () => {
     const g = new ResolutionGovernor();
     for (let i = 0; i < 20; i++) g.sample(60); // drop
     for (let i = 0; i < 400; i++) g.sample(10); // 4 s fast
-    for (let i = 0; i < 25; i++) g.sample(19); // ~0.5 s between thresholds: not "fast"
+    for (let i = 0; i < 79; i++) g.sample(19); // 1.5 s between thresholds: not "fast"
     const held = g.scale;
     let t = 0;
     let firstRise = -1;

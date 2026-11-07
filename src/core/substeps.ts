@@ -8,14 +8,16 @@
  * 8.3 ms of ship time while the world and the camera went the full frame. The
  * chase camera read that as a 4 km/s velocity spike (docs/v3/PLAN.md §1).
  *
- * STAGE-1 STUB: signatures only. Implemented in stage 2.
+ * The invariant is `ENGINE_MAX_DT + FIXED_H ≤ MAX_SUBSTEPS · FIXED_H`: the
+ * longest frame the engine hands out, plus the most the accumulator can carry
+ * into it, always fits. Hence 9 substeps, not 8.
  */
 
-/** Physics substep, s. */
+/** Physics substep, s. 120 Hz survives a 25 g burn without visible error. */
 export const FIXED_H = 1 / 120;
 /** Ceiling on substeps per `FlightModel.update()` call. */
-export const MAX_SUBSTEPS = 8;
-/** The engine's dt clamp, s. */
+export const MAX_SUBSTEPS = 9;
+/** The engine's dt clamp, s: a background tab or GC pause is not a 2 s burn. */
 export const ENGINE_MAX_DT = 1 / 15;
 
 export interface SubstepBudget {
@@ -29,7 +31,9 @@ export interface SubstepBudget {
 
 /**
  * How to spend `acc + dt` in substeps of `h`, at most `maxSteps`.
- * Conserves time: `steps·h + carry + dropped === acc + dt`.
+ * Conserves time: `steps·h + carry + dropped === acc + dt`. Time is dropped
+ * only past the ceiling, and then in whole substeps so the carry keeps its
+ * phase.
  */
 export function substepBudget(
   acc: number,
@@ -38,10 +42,25 @@ export function substepBudget(
   maxSteps: number,
   out: SubstepBudget = { steps: 0, carry: 0, dropped: 0 },
 ): SubstepBudget {
-  void acc;
-  void dt;
-  void h;
-  void maxSteps;
-  void out;
-  throw new Error('substepBudget: not implemented (v3-T1 stage 1)');
+  const a = Number.isFinite(acc) && acc > 0 ? acc : 0;
+  out.dropped = 0;
+  if (!(dt > 0) || !(h > 0)) {
+    out.steps = 0;
+    out.carry = a;
+    return out;
+  }
+  let rem = a + dt;
+  let steps = 0;
+  while (rem >= h && steps < maxSteps) {
+    rem -= h;
+    steps++;
+  }
+  if (rem >= h) {
+    const keep = rem % h;
+    out.dropped = rem - keep;
+    rem = keep;
+  }
+  out.steps = steps;
+  out.carry = rem;
+  return out;
 }

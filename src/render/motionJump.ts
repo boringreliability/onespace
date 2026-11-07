@@ -4,8 +4,6 @@
  * PostFX disabled motion blur when the camera moved more than 25 km in one
  * frame — a distance, so the same flight was "motion" at 30 fps and a "cut" at
  * 144 fps. This is the same threshold expressed as a speed.
- *
- * STAGE-1 STUB: signature only. Implemented in stage 2.
  */
 
 /** 25 km per 1/60 s, the v2 threshold at the frame rate it was tuned at. */
@@ -19,8 +17,6 @@ export function motionJumped(
   dt: number,
   maxSpeedKmS: number = MOTION_JUMP_SPEED_KMS,
 ): boolean {
-  void displacementKm;
-  void dt;
-  void maxSpeedKmS;
-  throw new Error('motionJumped: not implemented (v3-T1 stage 1)');
+  const t = Number.isFinite(dt) && dt > MOTION_JUMP_MIN_DT ? dt : MOTION_JUMP_MIN_DT;
+  return displacementKm > maxSpeedKmS * t;
 }

@@ -8,8 +8,6 @@
  *   degrees on top of the base. NEVER from orbital speed: there is no speed
  *   input here on purpose.
  * - Cockpit: never wider than 100° horizontal.
- *
- * STAGE-1 STUB: signatures only. Implemented in stage 2.
  */
 
 export type FovMode = 'chase' | 'cockpit';
@@ -45,6 +43,16 @@ export function vfovFromHfov(hfovDeg: number, aspect: number): number {
 
 /** Vertical fov in degrees, what `PerspectiveCamera.fov` wants. */
 export function fovPolicy(input: FovInput): number {
-  void input;
-  throw new Error('fovPolicy: not implemented (v3-T1 stage 1)');
+  const aspect = input.aspect > 0 && Number.isFinite(input.aspect) ? input.aspect : REFERENCE_ASPECT;
+  // The 16:9 vertical; Hor+ keeps it, until the horizontal reaches the cap.
+  const vRef = vfovFromHfov(BASE_HFOV_DEG, REFERENCE_ASPECT);
+  const hBase = Math.min(HOR_PLUS_MAX_HFOV_DEG, hfovFromVfov(vRef, aspect));
+  const breath = THRUST_BREATH_DEG * unit(input.thrustFrac) + CRUISE_BREATH_DEG * unit(input.cruiseSpool);
+  let h = hBase + breath;
+  if (input.mode === 'cockpit') h = Math.min(COCKPIT_MAX_HFOV_DEG, h);
+  return vfovFromHfov(h, aspect);
+}
+
+function unit(x: number): number {
+  return x > 0 ? (x < 1 ? x : 1) : 0; // NaN → 0
 }
