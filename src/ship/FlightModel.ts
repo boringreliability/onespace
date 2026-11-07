@@ -459,6 +459,26 @@ export class FlightModel {
   private _assistTarget = 0;
   private lastEmittedThrottle = -1;
 
+  // --- v3 T4: formation reference (OPTIONAL hook; T2 owns assist internals) --
+  /**
+   * Parent-relative velocity the FA hold is referenced to, or null. Set by the
+   * formation assist (ship/formation.ts) to the companion's velocity: the
+   * lever's set speed is then relative to it, and the detent means "sit
+   * beside it" (hold) instead of coast. A non-finite vector counts as null.
+   */
+  private _assistRef: Vector3 | null = null;
+  get assistReferenceVelocity(): Vector3 | null {
+    return this._assistRef;
+  }
+  set assistReferenceVelocity(v: Vector3 | null) {
+    if (v && Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.z)) {
+      this._assistRef = (this._assistRef ?? new Vector3()).copy(v);
+    } else {
+      this._assistRef = null;
+    }
+  }
+  // --- end v3 T4 ---------------------------------------------------------------
+
   /**
    * Speed ceiling imposed by the cruise drive, km/s, or null when sublight.
    *
@@ -835,7 +855,7 @@ export class FlightModel {
       }
       if (this.command.brake) this._assistState = 'stop';
       else if (this.soiLatchLever !== null) this._assistState = 'coast';
-      else if (this.command.throttle > 0) this._assistState = 'hold';
+      else if (this.command.throttle > 0 || this._assistRef !== null) this._assistState = 'hold'; // v3 T4: ref ⇒ detent holds
       else this._assistState = 'coast'; // the detent, and NaN
       active = this._assistState !== 'coast';
     }
@@ -942,6 +962,7 @@ export class FlightModel {
 
     // a_des = (nose·vset − v)/τ − g, in sTmp.
     const d = this.sTmp.copy(this.forward).multiplyScalar(vset).sub(v);
+    if (this._assistRef && this._assistState === 'hold') d.add(this._assistRef); // v3 T4: formation reference
     d.multiplyScalar(1 / ASSIST_TAU);
     if (!this._grounded) d.sub(this.sGrav);
 

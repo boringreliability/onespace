@@ -51,7 +51,12 @@ import { Audio } from '@/audio/Audio';
 import { Photo } from '@/game/Photo';
 import { DevOverlay } from '@/ui/DevOverlay';
 import { Title } from '@/ui/Title';
-import { parseRoute } from '@/core/Route';
+import { companionShip, parseRoute } from '@/core/Route';
+// -- v3 T4: dust, drive field, audio feed, formation, SEE IN FLIGHT -----------
+import { Dust } from '@/render/Dust';
+import { FlightSense } from '@/game/FlightSense';
+import { selectionFromRoute, toShipParams } from '@/game/showroom/catalog';
+// -----------------------------------------------------------------------------
 import { RecoveryCut } from '@/game/RecoveryCut';
 import { Pause } from '@/ui/Pause';
 import { Hints } from '@/ui/Hints';
@@ -310,10 +315,20 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   // The procedural fleet, in the universe rather than the showroom.
   const traffic = new Traffic(universe);
   await engine.add(traffic);
+  // -- v3 T4: `?mode=flight&ship=…` (generation-pinned) flies that hull beside
+  // you; the Yard's SEE IN FLIGHT button does the same in-session.
+  {
+    const companion = companionShip(route);
+    if (companion) traffic.setCompanion(toShipParams(selectionFromRoute(companion)));
+  }
+  // Orbital dust, after Traffic and Pilot so it sees this frame's camera.
+  await engine.add(new Dust({ universe, warping: () => warp.phase !== 'idle' }));
+  // ---------------------------------------------------------------------------
 
   progress(0.845, 'priming the cruise drive');
   // After Universe, whose `nearestGapKm` is its speed limit.
-  await engine.add(new Cruise({ universe }));
+  const cruise = new Cruise({ universe }); // v3 T4: named, FlightSense reads it
+  await engine.add(cruise);
   // [v2-p4] L: auto-land / auto-orbit. After Pilot (it overwrites the command
   // Pilot copied from the stick) and after Cruise (which also reads L).
   // Time compression after both: it judges this frame's command and autopilot.
@@ -330,6 +345,9 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   // likewise, and its altitude replaces the sphere one Pilot just published.
   const targeting = new Targeting({ universe, traffic, hud });
   await engine.add(targeting);
+  // -- v3 T4: drive field → sky, silent events → audio, K formation ----------
+  await engine.add(new FlightSense({ universe, cruise, traffic, targeting, audio, sky }));
+  // ---------------------------------------------------------------------------
   await engine.add(new Instruments({ universe, hud }));
   await engine.add(new Scanner({ universe, traffic, targeting }));
   const codex = new Codex({ log: shipLog });
@@ -386,6 +404,8 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
     // review-p2: Y mid-jump froze the tunnel; Y mid-recovery hung its black
     // veil (z 40) over the whole Yard.
     busy: () => warp.phase !== 'idle' || recovery.active,
+    // v3 T4: SEE IN FLIGHT.
+    onSeeInFlight: (params) => traffic.setCompanion(params),
   });
   await engine.add(yard);
   // ---------------------------------------------------------------------------
