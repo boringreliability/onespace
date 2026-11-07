@@ -20,6 +20,7 @@ import {
   CONTACT_ELEVATION_RAD,
   CONTACT_RANGE_KM,
   HULL_ANGLE_DEG,
+  apparentExtentKm,
   hullContactRangeKm,
   TRAFFIC_THROTTLE_MAX,
   TRAFFIC_THROTTLE_MIN,
@@ -158,6 +159,46 @@ describe('hullContactRangeKm: contact 0 placed by the size of its hull', () => {
   it('Given the offset rescaled to the hull range, Then it is still exactly at the elevation angle above the nose (still in frame)', () => {
     const o = openingContactOffset(NOSE, ROOF, hullContactRangeKm(0.5, 0.03, 0.017), new Vector3());
     expect(Math.acos(o.clone().normalize().dot(NOSE))).toBeCloseTo(CONTACT_ELEVATION_RAD, 9);
+  });
+});
+
+// v3 polish (D22c, found on the GPU): contact 0 flies prograde and sits ahead
+// along the track, so the player sees it nearly END-ON — a 62 m hull placed to
+// subtend 6.5° by its length showed as ~10 px of stern. The range is set from
+// the extent actually presented to the eye.
+describe('apparentExtentKm: what of the hull faces the eye', () => {
+  const L = 0.062;
+  const B = 0.02;
+  const H = 0.012;
+  const axis = new Vector3(0, 0, -1);
+
+  it('Given a broadside view (line of sight ⟂ hull axis), Then the full length', () => {
+    expect(apparentExtentKm(L, B, H, axis, new Vector3(1, 0, 0))).toBeCloseTo(L, 12);
+  });
+
+  it('Given an end-on view, Then the larger of beam and height, not the length', () => {
+    expect(apparentExtentKm(L, B, H, axis, new Vector3(0, 0, 1))).toBeCloseTo(B, 12);
+    expect(apparentExtentKm(L, 0.01, 0.03, axis, new Vector3(0, 0, -1))).toBeCloseTo(0.03, 12);
+  });
+
+  it('Given 15° off the axis (the opening composition), Then L·sin 15° or the section, whichever is larger', () => {
+    const los = new Vector3(0, Math.sin((15 * Math.PI) / 180), -Math.cos((15 * Math.PI) / 180));
+    const e = apparentExtentKm(L, B, H, axis, los);
+    expect(e).toBeCloseTo(Math.max(L * Math.sin((15 * Math.PI) / 180), B), 9);
+  });
+
+  it('Given unnormalised or degenerate directions, Then still finite and never above the length or below the section', () => {
+    const e = apparentExtentKm(L, B, H, new Vector3(0, 0, -5), new Vector3(3, 0, 3));
+    expect(e).toBeGreaterThanOrEqual(B);
+    expect(e).toBeLessThanOrEqual(L + 1e-12);
+    expect(Number.isFinite(apparentExtentKm(L, B, H, new Vector3(), new Vector3()))).toBe(true);
+  });
+
+  it('Given the end-on 62 m hull through hullContactRangeKm, Then it is placed nearer than by its length — down to the clearance floor', () => {
+    const byLength = hullContactRangeKm(0.5, L, 0.0375);
+    const byFace = hullContactRangeKm(0.5, apparentExtentKm(L, B, H, axis, new Vector3(0, 0, 1)), 0.0375);
+    expect(byFace).toBeLessThan(byLength);
+    expect(byFace).toBeCloseTo(3 * (0.0375 + 0.03), 9);
   });
 });
 
