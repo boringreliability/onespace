@@ -70,9 +70,13 @@ import { steerRates, type AxisCommand } from './rateCommand';
 export const LAND_RANGE_RADII = 8;
 /** Auto-orbit target, radii from the centre — the opening and recovery standoff. */
 export const ORBIT_TARGET_RADII = 1.6;
-/** Terrain altitude below which the final descent segment applies, km. */
-export const FINAL_ALTITUDE_KM = 2;
-/** Descent ceiling inside the final segment, km/s (PLAN P4: "under 30 m/s the last 2 km"). */
+/**
+ * Terrain altitude below which the final descent segment applies, km. v3
+ * (PLAN §2 D): 2 → 0.6 km, measured −42-47 s per landing with touchdown still
+ * ~0.1 m/s.
+ */
+export const FINAL_ALTITUDE_KM = 0.6;
+/** Descent ceiling inside the final segment, km/s (PLAN P4: 30 m/s at the end). */
 export const FINAL_MAX_DESCENT_KMS = 0.03;
 /**
  * Speed the field asks for at the ground, km/s. Pilot grades < 2 m/s CLEAN;
@@ -118,6 +122,34 @@ const ORBIT_RADIUS_TOL = 0.03;
 
 const M_TO_KM = 1e-3;
 
+// --- v3 T3 (PLAN §2 D): smoother phase changes ---------------------------------
+/**
+ * Below this terrain altitude on a landing, HOVER — once entered while the
+ * remaining descent is within RCS authority — is locked: no more 90° swings
+ * between nose-down thrust and belly-down hover near the ground (A2: 4-6).
+ */
+export const HOVER_LOCK_ALT_KM = 20;
+/**
+ * Fraction of the RCS's net vertical authority (RCS less surface gravity) the
+ * envelope plans with once HOVER is locked. Higher than BRAKE_FRACTION: no
+ * flip is left to budget for.
+ */
+const HOVER_BRAKE_FRACTION = 0.6;
+/**
+ * Fastest the attitude SETPOINT may turn, rad/s (25°/s). The steering then
+ * tracks a setpoint that swings rather than one that jumps 90-180° — the
+ * flips the camera lost the hull in (PLAN mechanism 5).
+ */
+export const ATTITUDE_SLEW_MAX_RAD_S = (25 * Math.PI) / 180;
+/** Fraction of ATTITUDE_SLEW_MAX_RAD_S the setpoint itself turns at (see slewSetpoint). */
+const SETPOINT_SLEW_FRACTION = 0.92;
+/**
+ * Most the demanded (non-gravitational) acceleration may change per second,
+ * km/s³ (~120 g/s, under the 150 g/s target). RCS has no spool, so without
+ * this the allocation stepped the hull's acceleration from frame to frame.
+ */
+const JERK_MAX_KMS3 = 1.18;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -154,6 +186,22 @@ export interface Apsides {
 // ---------------------------------------------------------------------------
 
 /**
+ * The √ braking field with a rounded tip: v = sign(e)·(√(2a|e| + (aτ)²) − aτ).
+ *
+ * Far from the target it is the plain stopping curve √(2a|e|) less a constant
+ * aτ; at the target its slope is 1/τ instead of infinite, so a loop with time
+ * constant τ closes on it without the chatter the plain √ makes there (D61:
+ * ±0.012 km/s² radially at the orbit target). Never asks for more than
+ * braking at `a` allows. Non-finite or non-positive inputs return 0.
+ */
+export function roundedSqrt(e: number, a: number, tau: number): number {
+  if (!Number.isFinite(e) || !(a > 0) || e === 0) return 0;
+  const t = tau > 0 ? tau : 0;
+  const at = a * t;
+  return Math.sign(e) * (Math.sqrt(2 * a * Math.abs(e) + at * at) - at);
+}
+
+/**
  * Downward speed the landing field asks for at terrain altitude `altKm`,
  * km/s, planning to brake at `brakeKmS2`. Monotone in altitude, continuous at
  * the final-segment boundary, and ≤ FINAL_MAX_DESCENT_KMS inside it.
@@ -161,7 +209,9 @@ export interface Apsides {
 export function descentSpeedKmS(altKm: number, brakeKmS2: number): number {
   const h = altKm > 0 ? altKm : 0; // NaN fails `> 0` too
   if (h <= FINAL_ALTITUDE_KM) {
-    return Math.min(FINAL_MAX_DESCENT_KMS, TOUCHDOWN_KMS + Math.sqrt(2 * FINAL_DECEL * h));
+    // v3: rounded at the ground, so the last metres close at 1/τ, not on a
+    // √ whose gain is infinite at touchdown.
+    return Math.min(FINAL_MAX_DESCENT_KMS, TOUCHDOWN_KMS + roundedSqrt(h, FINAL_DECEL, TAU));
   }
   const a = brakeKmS2 > 0 ? brakeKmS2 : 0;
   return Math.sqrt(FINAL_MAX_DESCENT_KMS * FINAL_MAX_DESCENT_KMS + 2 * a * (h - FINAL_ALTITUDE_KM));
@@ -263,6 +313,7 @@ const sAim = new Vector3();
 const sRoof = new Vector3();
 const sRes = new Vector3();
 const sTan = new Vector3();
+const sRoofS = new Vector3();
 const sMat = new Matrix4();
 const sQDes = new Quaternion();
 const sQErr = new Quaternion();
@@ -285,6 +336,12 @@ export class Autopilot {
   /** THRUST vs HOVER attitude, with hysteresis. */
   private thrustMode = false;
   private boosting = false;
+  /** v3: HOVER locked for the rest of a landing (see HOVER_LOCK_ALT_KM). */
+  private hoverLocked = false;
+  /** v3: the slewed attitude setpoint the steering tracks. */
+  private readonly setpoint = new Quaternion();
+  /** v3: last demanded acceleration after the jerk limit, km/s². */
+  private readonly lastAcc = new Vector3();
 
   get active(): boolean {
     return this._goal !== null;
@@ -294,6 +351,10 @@ export class Autopilot {
   }
   get phase(): AutopilotPhase {
     return this._phase;
+  }
+  /** Which attitude the computer flies in: nose on the demand, or level on RCS. */
+  get attitudeMode(): 'thrust' | 'hover' {
+    return this.thrustMode ? 'thrust' : 'hover';
   }
 
   /**
@@ -305,6 +366,10 @@ export class Autopilot {
     this._goal = goal;
     this.thrustMode = false;
     this.boosting = false;
+    this.hoverLocked = false;
+    this.setpoint.copy(flight.orientation);
+    // The hull is coasting at engage: the jerk limit ramps up from nothing.
+    this.lastAcc.set(0, 0, 0);
     flight.flightAssist = false;
 
     if (goal === 'orbit') {
@@ -345,7 +410,7 @@ export class Autopilot {
    * Returns 'landed' / 'orbit' when the leg is complete (the caller then
    * disengages), else 'flying'.
    */
-  step(flight: FlightModel, world: AutopilotWorld): AutopilotResult {
+  step(flight: FlightModel, world: AutopilotWorld, h = 1 / 60): AutopilotResult {
     const goal = this._goal;
     if (goal === null) return 'flying';
     const cfg = flight.config;
@@ -372,6 +437,7 @@ export class Autopilot {
     const gSurface = world.mu / (world.radiusKm * world.radiusKm);
     // Braking the envelope plans with: boosted drive less surface gravity.
     const brake = BRAKE_FRACTION * Math.max(0, mainAccel * cfg.boostMultiplier - gSurface);
+    this.hoverBrake = HOVER_BRAKE_FRACTION * Math.max(0, rcsAccel - gSurface);
 
     // --- completion ---------------------------------------------------------
     if (goal === 'land' && flight.grounded) {
@@ -430,27 +496,63 @@ export class Autopilot {
     // --- demanded acceleration -------------------------------------------------
     // a = (field − v)/τ − g_eff, with g_eff = −g·r̂ + (v_h²/r)·r̂.
     sAcc.subVectors(sField, v).multiplyScalar(1 / TAU).add(sFf);
-    sAcc.addScaledVector(sUp, g - vh2 / r);
+    // v3: on the orbit leg the field's own prograde part turns with the ship,
+    // and the feed-forward already carries that turn (−v_c·v_h/r·r̂). Taking
+    // the full relief on top counted the centripetal term twice — an inward
+    // demand of ~1 g_local in a circular orbit, hidden until v3 by the √
+    // field's chatter (D61) and exposed once the field was rounded.
+    const relief = goal === 'orbit' ? 1 - this.lastBlend : 1;
+    sAcc.addScaledVector(sUp, g - relief * (vh2 / r));
+    // v3: jerk limit. The hull's acceleration follows the demand at a bounded
+    // rate, whatever the field does from one step to the next.
+    sRes.subVectors(sAcc, this.lastAcc);
+    const jStep = JERK_MAX_KMS3 * h;
+    if (sRes.lengthSq() > jStep * jStep) sRes.setLength(jStep);
+    this.lastAcc.add(sRes);
+    sAcc.copy(this.lastAcc);
     const aMag = sAcc.length();
 
     // --- attitude mode ----------------------------------------------------------
-    if (this.thrustMode ? aMag < HOVER_IN * rcsAccel : aMag > THRUST_IN * rcsAccel) {
-      this.thrustMode = !this.thrustMode;
+    const lowLanding = goal === 'land' && alt < HOVER_LOCK_ALT_KM;
+    // v3: near the ground HOVER is only taken when RCS alone can still fly the
+    // rest of the descent, and once taken it is kept.
+    const rcsCanStop = -vr <= descentSpeedKmS(alt, this.hoverBrake) * 1.02 + 0.002;
+    if (lowLanding && !this.thrustMode && rcsCanStop) this.hoverLocked = true;
+    if (this.hoverLocked) {
+      this.thrustMode = false;
+    } else if (this.thrustMode ? aMag < HOVER_IN * rcsAccel : aMag > THRUST_IN * rcsAccel) {
+      if (!(lowLanding && this.thrustMode && !rcsCanStop)) {
+        this.thrustMode = !this.thrustMode;
+        if (lowLanding && !this.thrustMode) this.hoverLocked = true;
+      }
     }
     if (this.boosting ? aMag < BOOST_OFF * mainAccel : aMag > BOOST_ON * mainAccel) {
       this.boosting = !this.boosting;
     }
     if (!this.thrustMode) this.boosting = false;
     const boostMul = this.boosting ? cfg.boostMultiplier : 1;
+    // v3: the multiplier actually in force (FlightModel ramps it over 0.5 s).
+    const boostNow = flight.boostFactor;
     // FlightModel's thrust limiter, mirrored so the allocation is honest near
     // the speed ceiling.
-    const vmax = cfg.topSpeed * boostMul;
+    const vmax = cfg.topSpeed * boostNow;
     const limiter = clamp01(1 - Math.pow(Math.min(flight.speed / vmax, 1), cfg.speedFalloffExponent));
     const rcsEff = rcsAccel * limiter;
 
     if (this.thrustMode) {
       sAim.copy(sAcc).multiplyScalar(1 / aMag);
-      sRoof.copy(flight.up); // keep the roll the hull already has
+      if (lowLanding) {
+        // v3: near the ground the nose never points down. A dive demand there
+        // is flown by gravity and the reverse RCS; turning nose-down for it
+        // left a 180° swing (7 s at the slew limit) between the ship and its
+        // braking burn.
+        const down = sAim.dot(sUp);
+        if (down < 0) sAim.addScaledVector(sUp, -down);
+        if (sAim.lengthSq() < 0.04) sAim.copy(sUp);
+        sAim.normalize();
+      }
+      // Keep the roll the setpoint already has (the hull's, before v3).
+      sRoof.set(0, 1, 0).applyQuaternion(this.setpoint);
     } else if (goal === 'orbit') {
       sAim.crossVectors(this.normal, sUp).normalize(); // prograde, roof out
       sRoof.copy(sUp);
@@ -463,6 +565,10 @@ export class Autopilot {
       sAim.normalize();
       sRoof.copy(sUp);
     }
+    // v3: the steering tracks a setpoint slewed at ≤ ATTITUDE_SLEW_MAX_RAD_S.
+    this.slewSetpoint(sAim, sRoof, h);
+    sAim.set(0, 0, -1).applyQuaternion(this.setpoint);
+    sRoof.set(0, 1, 0).applyQuaternion(this.setpoint);
     this.steer(flight, sAim, sRoof);
 
     // --- allocation ---------------------------------------------------------------
@@ -474,12 +580,12 @@ export class Autopilot {
       const want = along > 0 && along > MAIN_CONE_COS * aMag ? along : 0;
       cmd.throttle = cap > 0 ? clamp01(want / cap) : 0;
       // What the drive will actually push this frame is its SPOOLED output,
-      // not the lever; RCS makes up the difference, which is what hides the
-      // 0.7 s spool from the loop.
-      mainOut = flight.throttle * cap;
+      // at the boost factor in force, not the lever; RCS makes up the
+      // difference, which is what hides the spool and the boost ramp.
+      mainOut = flight.throttle * mainAccel * boostNow * limiter;
     } else {
       cmd.throttle = 0;
-      mainOut = flight.throttle * mainAccel * limiter;
+      mainOut = flight.throttle * mainAccel * boostNow * limiter;
     }
     sRes.copy(sAcc).addScaledVector(flight.forward, -mainOut);
     cmd.strafeX = rcsEff > 0 ? clampUnit(sRes.dot(flight.right) / rcsEff) : 0;
@@ -490,6 +596,27 @@ export class Autopilot {
 
   /** Last orbit-leg horizontal blend (0..1), for the phase story. */
   private lastBlend = 0;
+  /** v3: braking the envelope plans with once HOVER is locked, km/s². */
+  private hoverBrake = 0;
+
+  /**
+   * v3: turn the setpoint towards nose `aim` / roof `roof` by at most
+   * ATTITUDE_SLEW_MAX_RAD_S·h. Same roof rule as `steer`.
+   */
+  private slewSetpoint(aim: Vector3, roof: Vector3, h: number): void {
+    sRoofS.copy(roof).addScaledVector(aim, -aim.dot(roof));
+    if (sRoofS.lengthSq() < 1e-10) sRoofS.copy(WORLD_UP).addScaledVector(aim, -aim.y);
+    if (sRoofS.lengthSq() < 1e-10) sRoofS.copy(WORLD_X).addScaledVector(aim, -aim.x);
+    sRoofS.normalize();
+    sMat.lookAt(ZERO, aim, sRoofS);
+    sQDes.setFromRotationMatrix(sMat);
+    const angle = this.setpoint.angleTo(sQDes);
+    // The setpoint runs a little under the limit: T2's rate loop (τ_up 0.22 s)
+    // overshoots a ramp by ~6 %, and it is the HULL that must stay inside.
+    const maxStep = SETPOINT_SLEW_FRACTION * ATTITUDE_SLEW_MAX_RAD_S * (h > 0 ? h : 0);
+    if (angle <= maxStep || angle < 1e-9) this.setpoint.copy(sQDes);
+    else this.setpoint.slerp(sQDes, maxStep / angle);
+  }
 
   /**
    * The velocity field at parent-relative `pos`, whose terrain altitude is
@@ -500,11 +627,14 @@ export class Autopilot {
     const r = pos.length();
     sUpF.copy(pos).multiplyScalar(1 / r);
     if (this._goal === 'land') {
-      return out.copy(sUpF).multiplyScalar(-descentSpeedKmS(altKm, brake));
+      // v3: once HOVER is locked the envelope is the one RCS alone can fly.
+      const b = this.hoverLocked ? Math.min(brake, this.hoverBrake) : brake;
+      return out.copy(sUpF).multiplyScalar(-descentSpeedKmS(altKm, b));
     }
     const rTarget = orbitTargetRadius(world);
     const dr = rTarget - r;
-    const vRad = Math.sign(dr) * Math.sqrt(2 * brake * Math.abs(dr));
+    // v3: rounded √ — slope 1/τ at the target radius instead of infinite.
+    const vRad = roundedSqrt(dr, brake, TAU);
     // Horizontal speed blends in between the air's middle and well clear of
     // it: a gravity turn by schedule rather than by aerodynamics.
     const hA = Math.max(0.5 * world.atmosphereTopKm, 2);

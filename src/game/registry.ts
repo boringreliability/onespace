@@ -319,8 +319,9 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   // [v2-p4] L: auto-land / auto-orbit. After Pilot (it overwrites the command
   // Pilot copied from the stick) and after Cruise (which also reads L).
   // Time compression after both: it judges this frame's command and autopilot.
-  const autopilot = new AutoPilot({ universe, warp });
+  const autopilot = new AutoPilot({ universe, warp, cruise }); // [v3-t3] cruise: the L queue
   await engine.add(autopilot);
+  universe.beforeSlice = (h) => autopilot.sliceStep(h); // [v3-t3] flies per sim slice
   await engine.add(new TimeControl({ universe, warp, autopilot, hud }));
   // [/v2-p4]
 

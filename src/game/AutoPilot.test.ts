@@ -58,6 +58,8 @@ interface Harness {
   world: { -readonly [K in keyof AutoPilotWorld]: AutoPilotWorld[K] };
   warp: { phase: string };
   preset: { id: FlightPresetId };
+  /** v3 T3: what AutoPilot reads of the cruise module (busy = drive or settle running). */
+  cruise: { busy: boolean };
   logs: string[];
   tick(n?: number): void;
 }
@@ -93,7 +95,8 @@ function harness(opts: { grounded?: boolean } = {}): Harness {
   const warp = { phase: 'idle' };
   const preset = { id: 'survey' as FlightPresetId };
   const input = new StubInput();
-  const ap = new AutoPilot({ universe: world, warp, preset: () => FLIGHT_PRESETS[preset.id] });
+  const cruise = { busy: false };
+  const ap = new AutoPilot({ universe: world, warp, cruise, preset: () => FLIGHT_PRESETS[preset.id] });
   const logs: string[] = [];
   offs.push(bus.on('log', ({ text }) => logs.push(text)));
   const ctx = { input, elapsed: 0 } as unknown as EngineContext;
@@ -106,13 +109,18 @@ function harness(opts: { grounded?: boolean } = {}): Harness {
     world,
     warp,
     preset,
+    cruise,
     logs,
     tick(n = 1) {
       for (let i = 0; i < n; i++) {
-        // Pilot copies the stick into the command first, as in the game.
+        // v3 T3: the engine's frame order. Universe integrates first, and its
+        // slice loop steps the autopilot before each slice (`sliceStep`);
+        // then Pilot copies the stick into the command; then AutoPilot.update
+        // judges the pilot's hands, engages, and hands back.
+        ap.sliceStep(1 / 60);
+        fm.update(1 / 60);
         fm.applyInput(input.axes, input.held('boost'), input.held('brake'));
         ap.update(1 / 60, ctx);
-        fm.update(1 / 60);
         input.endFrame();
       }
     },
@@ -142,12 +150,12 @@ describe('L engages the autopilot', () => {
   it('Given an engaged autopilot, Then it is the computer that writes the command (pilot hands-off), and it flies with thrust', () => {
     const h = harness();
     h.input.press('land');
-    // [v3-T2] 4 s → 4.5 s: the flip to retrograde is flown at the D0 pitch
-    // maximum (35°/s, was ~40°/s), so the burn starts ~0.5 s later. At 4.5 s
-    // the margin is ~49 m/s (v2 at 4 s: ~20 m/s).
-    h.tick(270);
+    // [v3-T2] the flip is flown at the D0 pitch maximum (35°/s); [v3-T3] the
+    // attitude setpoint swings at 25°/s, so the 180° flip to retrograde takes
+    // ~7 s before the burn: 10 s, not 4.
+    h.tick(600);
     expect(h.ap.active).toBe(true);
-    // 4.5 s of deorbit burn out of a ~1 km/s orbit must have taken horizontal
+    // 10 s of deorbit burn out of a ~1 km/s orbit must have taken horizontal
     // speed off. (Total speed rises: the suicide burn dives first.)
     const up = h.fm.position.clone().normalize();
     const horizontal = h.fm.velocity.clone().addScaledVector(up, -h.fm.velocity.dot(up)).length();
@@ -260,13 +268,6 @@ describe('refusals', () => {
     expect(h.logs.some((l) => l.includes('AUTOPILOT') && l.includes('NEWTONIAN'))).toBe(true);
   });
 
-  it('Given the cruise drive carrying the ship, When L is pressed, Then it refuses with CRUISE', () => {
-    h.fm.setCruise(50);
-    h.input.press('land');
-    h.tick();
-    expect(h.ap.active).toBe(false);
-    expect(h.logs.some((l) => l.includes('AUTOPILOT') && l.includes('CRUISE'))).toBe(true);
-  });
 
   it('Given a jump in progress, When L is pressed, Then it refuses with JUMP', () => {
     h.warp.phase = 'charging';
@@ -351,5 +352,155 @@ describe('review-p4: the leg ends when something else takes the ship', () => {
     h.tick();
     expect(h.ap.active).toBe(false);
     expect(h.fm.flightAssist).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v3 T3: L during cruise is queued (PLAN §2 D)
+// ---------------------------------------------------------------------------
+
+describe('v3: L during cruise is queued, not refused', () => {
+  /** Cruise carrying the ship: FlightModel under a ceiling, the module busy. */
+  function cruising(): Harness {
+    const h = harness();
+    h.fm.setCruise(50);
+    h.cruise.busy = true;
+    return h;
+  }
+  /** The drive lets go (Cruise.ts: drop → insertion → settle → idle). */
+  function cruiseEnds(h: Harness): void {
+    h.fm.setCruise(null);
+    h.cruise.busy = false;
+  }
+
+  it('Given the cruise drive carrying the ship, When L is pressed, Then the landing is QUEUED (logged) and nothing engages yet', () => {
+    const h = cruising();
+    h.input.press('land');
+    h.tick();
+    expect(h.ap.active).toBe(false);
+    expect(h.ap.queued).toBe(true);
+    expect(h.logs.some((l) => l.includes('AUTOPILOT') && l.includes('QUEUED'))).toBe(true);
+    expect(h.logs.some((l) => l.includes('DENIED'))).toBe(false);
+  });
+
+  it('Given a queued landing, While cruise is still busy (dropping or settling) though no longer cruising, Then it waits', () => {
+    const h = cruising();
+    h.input.press('land');
+    h.tick();
+    h.fm.setCruise(null); // handed over, but the settle is still turning the ship
+    h.tick(5);
+    expect(h.ap.active).toBe(false);
+    expect(h.ap.queued).toBe(true);
+  });
+
+  it('Given a queued landing, When cruise goes idle with a parent in range, Then the autopilot engages a LANDING by itself', () => {
+    const h = cruising();
+    h.input.press('land');
+    h.tick();
+    cruiseEnds(h);
+    h.tick();
+    expect(h.ap.queued).toBe(false);
+    expect(h.ap.active).toBe(true);
+    expect(h.ap.goal).toBe('land');
+    expect(h.logs.some((l) => l.startsWith('AUTOPILOT ENGAGED') && l.includes('LANDING'))).toBe(true);
+  });
+
+  it('Given a queued landing, When cruise goes idle with NO parent world, Then it is dropped with NO WORLD IN RANGE — the queue is not a loop', () => {
+    const h = cruising();
+    h.input.press('land');
+    h.tick();
+    h.world.shipParent = null;
+    cruiseEnds(h);
+    h.tick();
+    expect(h.ap.active).toBe(false);
+    expect(h.ap.queued).toBe(false);
+    expect(h.logs.some((l) => l.includes('NO WORLD IN RANGE'))).toBe(true);
+  });
+
+  it('Given a queued landing, When L is pressed again, Then the queue is cancelled and nothing engages when cruise ends', () => {
+    const h = cruising();
+    h.input.press('land');
+    h.tick();
+    h.input.press('land');
+    h.tick();
+    expect(h.ap.queued).toBe(false);
+    cruiseEnds(h);
+    h.tick(3);
+    expect(h.ap.active).toBe(false);
+  });
+
+  it('Given a queued landing, When a jump starts, Then the queue is cancelled', () => {
+    const h = cruising();
+    h.input.press('land');
+    h.tick();
+    bus.emit('warp:engaged', {} as never);
+    h.tick();
+    expect(h.ap.queued).toBe(false);
+    cruiseEnds(h);
+    h.tick(3);
+    expect(h.ap.active).toBe(false);
+  });
+
+  it('Given a queued landing under a preset without an autopilot, When L is pressed, Then it is refused outright (PRESET), not queued', () => {
+    const h = cruising();
+    h.preset.id = 'pilot';
+    h.input.press('land');
+    h.tick();
+    expect(h.ap.queued).toBe(false);
+    expect(h.logs.some((l) => l.includes('NOT FITTED'))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v3 T3: the autopilot flies per sim slice (PLAN §2 D)
+// ---------------------------------------------------------------------------
+
+describe('v3: the autopilot is stepped per sim slice', () => {
+  it('Given an engaged autopilot, When Universe runs ten slices in one frame (10×), Then the computer writes a fresh command before each one — not one command for the whole frame', () => {
+    const h = harness();
+    h.input.press('land');
+    h.tick(30);
+    expect(h.ap.active).toBe(true);
+    const seen: number[] = [];
+    for (let i = 0; i < 10; i++) {
+      h.fm.command.pitch = 99; // poison: sliceStep must overwrite it
+      h.ap.sliceStep(1 / 60);
+      seen.push(h.fm.command.pitch);
+      h.fm.update(1 / 60);
+    }
+    expect(seen.every((p) => p !== 99 && Math.abs(p) <= 1)).toBe(true);
+  });
+
+  it('Given no autopilot engaged, When a slice is stepped, Then the command is left alone (the pilot’s)', () => {
+    const h = harness();
+    h.fm.command.pitch = 0.3;
+    h.ap.sliceStep(1 / 60);
+    expect(h.fm.command.pitch).toBe(0.3);
+  });
+
+  it('Given AutoPilot.update with the autopilot engaged and hands off, Then update itself does not fly (Universe’s slices do) — a frame is one guidance step per slice, never an extra one', () => {
+    const h = harness();
+    h.input.press('land');
+    h.tick(30);
+    const ctx = { input: h.input, elapsed: 0 } as unknown as EngineContext;
+    h.fm.command.pitch = 0.123;
+    h.ap.update(1 / 60, ctx);
+    expect(h.fm.command.pitch).toBe(0.123);
+  });
+
+  it('Given the leg completing inside a slice (touchdown), Then the autopilot disengages there and logs LANDED once', () => {
+    const h = harness();
+    h.input.press('land');
+    h.tick(60 * 600);
+    expect(h.ap.active).toBe(false);
+    expect(h.logs.filter((l) => l === 'AUTOPILOT OFF — LANDED').length).toBe(1);
+  });
+
+  it('Given an engaged leg, Then its phase is readable by TimeControl (phase getter)', () => {
+    const h = harness();
+    expect(h.ap.phase).toBe('idle');
+    h.input.press('land');
+    h.tick();
+    expect(h.ap.phase).not.toBe('idle');
   });
 });

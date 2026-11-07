@@ -125,3 +125,47 @@ export function pilotTouching(axes: InputAxes, brake: boolean, boost: boolean): 
   if (axes.strafeX !== 0 || axes.strafeY !== 0 || axes.strafeZ !== 0) return true;
   return Math.abs(axes.pitch) > DEADZONE || Math.abs(axes.yaw) > DEADZONE || Math.abs(axes.roll) > DEADZONE;
 }
+
+// ---------------------------------------------------------------------------
+// [v3-t3] The autopilot's own rate (PLAN §2 D, D0 point 3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Terrain altitude above which the autopilot runs the sim at 10×, km. Below
+ * it the end of a landing (and the start of a climb) is watched at 1×.
+ */
+export const AUTOPILOT_FAST_ALT_KM = 20;
+
+/**
+ * Relative air density at and above which the autopilot keeps 1×.
+ *
+ * Deliberately high (stage-1 decision, option a): the autopilot is stepped
+ * per sim slice, so it flies the same leg at 10× as at 1× (tested), and its
+ * 20 g drag cap keeps it out of the thick of the air anyway. A threshold of 1
+ * put the 4-bar test world at ~200 s of wall-clock. What remains is a guard
+ * against air denser than anything the generator makes.
+ */
+export const THICK_AIR_RHO = 10;
+
+export interface AutopilotRateInputs {
+  /** Terrain altitude, km. */
+  readonly altKm: number;
+  /** Relative air density at the ship. */
+  readonly rho: number;
+  /** The leg's phase ('idle' when nothing is flying). */
+  readonly phase: string;
+  /** Any hand on the controls. */
+  readonly hands: boolean;
+}
+
+/**
+ * The rate the autopilot runs the sim at: 10× while it flies hands-off above
+ * AUTOPILOT_FAST_ALT_KM and outside thick air, else 1×. NaN fails to 1×.
+ */
+export function autopilotTimeRate(s: AutopilotRateInputs): TimeRate {
+  if (s.hands || s.phase === 'idle' || s.phase === 'final') return 1;
+  if (!(s.altKm > AUTOPILOT_FAST_ALT_KM)) return 1;
+  if (!(s.rho < THICK_AIR_RHO)) return 1;
+  return 10;
+}
+// [/v3-t3]
