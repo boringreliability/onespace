@@ -13,8 +13,8 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { Vector3 } from 'three';
-import { arrivalAim, framesSubject } from './arrivalFraming';
+import { Quaternion, Vector3 } from 'three';
+import { arrivalAim, framesSubject, openSpaceArrivalAttitude } from './arrivalFraming';
 
 const NOSE = new Vector3(0, 0, -1);
 const ROOF = new Vector3(0, 1, 0);
@@ -46,6 +46,35 @@ describe('framesSubject: is the subject (or its limb) inside the view?', () => {
   it('Given horizontal and vertical half-angles differ, Then each is applied on its own axis', () => {
     expect(framesSubject(NOSE, ROOF, dir(40, 0), 0, H, V)).toBe(true);
     expect(framesSubject(NOSE, ROOF, dir(0, 40), 0, H, V)).toBe(false);
+  });
+});
+
+describe('openSpaceArrivalAttitude: a system with no world to orbit (measured: Skruzvir Margin)', () => {
+  // Measured in the browser: a jump into a system with no planets placed the
+  // ship at 6 AU with the identity attitude — nose straight at the star, so
+  // the chase camera hid the star exactly behind the hull. 20 s of nothing.
+  const toStar = new Vector3(0.2, -0.1, -1).normalize();
+
+  it('Given the star direction, Then the star is in the frame but not behind the hull (off the nose by 12-30°)', () => {
+    const q = openSpaceArrivalAttitude(toStar, new Quaternion());
+    const nose = NOSE.clone().applyQuaternion(q);
+    const roof = ROOF.clone().applyQuaternion(q);
+    const off = Math.acos(nose.dot(toStar)) / DEG;
+    expect(off).toBeGreaterThanOrEqual(12);
+    expect(off).toBeLessThanOrEqual(30);
+    expect(framesSubject(nose, roof, toStar, 0, H, V)).toBe(true);
+  });
+
+  it('Given the star, Then it sits above the nose (the hull is drawn low in the chase frame)', () => {
+    const q = openSpaceArrivalAttitude(toStar, new Quaternion());
+    const roof = ROOF.clone().applyQuaternion(q);
+    expect(toStar.dot(roof)).toBeGreaterThan(0.15);
+  });
+
+  it('Given any star direction, Then the attitude is a unit quaternion', () => {
+    for (const d of [new Vector3(0, 1, 0), new Vector3(0, -1, 0), new Vector3(1, 0, 0)]) {
+      expect(Math.abs(openSpaceArrivalAttitude(d, new Quaternion()).length() - 1)).toBeLessThan(1e-9);
+    }
   });
 });
 

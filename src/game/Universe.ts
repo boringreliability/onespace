@@ -46,6 +46,7 @@ import { publishSceneDepth } from '@/game/sceneDepth';
 import { referenceDisplacement } from '@/render/motionReference';
 import { planStreaming, type StreamCandidate } from '@/game/streaming';
 import { simSlices } from '@/game/timeCompression'; // [v2-p4]
+import { openSpaceArrivalAttitude } from '@/ship/arrivalFraming'; // [v3-T4]
 import { circularOrbitState, insideStar, openingAttitude, progradeAttitude, starRadiusKm } from '@/game/recovery';
 
 import {
@@ -404,7 +405,15 @@ export class Universe implements GameModule {
     const target = this.pickHeroBody();
     if (!target) {
       this.setShipParent(null);
-      this.flight.teleport(new Vector3(0, 0, 6 * AU));
+      // [v3-T4] arrival framing (PLAN E6): a system with no world used to put
+      // the nose dead on the star, which the chase camera then hid exactly
+      // behind the hull — 20 s of empty sky, measured. Hold the star in frame
+      // above the hull instead; there is no orbit, so no prograde to keep.
+      this.tmpA.set(0, 0, 6 * AU);
+      this.tmpB.copy(this.tmpA).multiplyScalar(-1).normalize();
+      openSpaceArrivalAttitude(this.tmpB, this.arrivalQuat);
+      this.flight.teleport(this.tmpA, this.tmpB.set(0, 0, 0), this.arrivalQuat);
+      // [/v3-T4]
       return;
     }
     // The world we arrive at becomes the parent, so everything below is stated

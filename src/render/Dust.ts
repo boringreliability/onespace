@@ -46,7 +46,7 @@ import {
 
 const ACTIVE: readonly Mode[] = ['title', 'flight', 'map'];
 /** Overall brightness, linear HDR. Dim: dust is texture, not a light show. */
-const DUST_INTENSITY = 0.55;
+const DUST_INTENSITY = 0.45;
 /** Seconds for the field to fade in or out (cruise, warp, shadow). */
 const FADE_S = 0.6;
 
