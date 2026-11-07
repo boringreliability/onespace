@@ -225,3 +225,27 @@ describe('100× is the same physics, just more of it', () => {
     expect(fm.position.distanceTo(start)).toBeLessThan(0.01);
   });
 });
+
+describe('review-p4: the edges of legality and slicing', () => {
+  it('Given a NaN engine output (a degenerate readout), Then compression is refused as "thrust", never allowed', () => {
+    expect(compressionBlock({ ...STABLE, engineOutput: Number.NaN })).toBe('thrust');
+  });
+  it('Given an apoapsis exactly ON the SOI boundary, Then the orbit is not stable (it would leave the SOI)', () => {
+    expect(compressionBlock({ ...STABLE, apoapsisKm: STABLE.soiRadiusKm })).toBe('unstable');
+  });
+  it('Given a periapsis exactly AT the safe radius, Then the orbit is not stable (it grazes the air/terrain margin)', () => {
+    expect(compressionBlock({ ...STABLE, periapsisKm: STABLE.safeRadiusKm })).toBe('unstable');
+  });
+  it('Given no parent world, Then it is refused even when the ship reads grounded', () => {
+    expect(compressionBlock({ ...STABLE, hasWorld: false, grounded: true })).toBe('no-world');
+  });
+  it('Given 100× at the engine dt clamp (1/15 s), Then one frame simulates exactly the budget — 100× at 30 fps, 3.33 s — never 6.7 s', () => {
+    const s = simSlices(1 / 15, 100, { count: 0, slice: 0 });
+    expect(s.count * s.slice).toBeCloseTo(100 / 30, 9);
+  });
+  it('Given dt = 0 at 100× (photo mode), Then Universe still runs ONE empty slice, so orbits and readouts refresh', () => {
+    const s = simSlices(0, 100, { count: 0, slice: 0 });
+    expect(s.count).toBe(1);
+    expect(s.slice).toBe(0);
+  });
+});

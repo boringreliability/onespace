@@ -319,7 +319,10 @@ export class Traffic implements GameModule {
       return;
     }
     this.root.visible = true;
-    this.time += dt;
+    // Simulated time, not wall time (review-p4): at 100× a co-orbiting hull
+    // ran at 1× and fell behind the player it is meant to share an orbit with.
+    // `dt` stays for the visuals below.
+    this.time += this.universe.simulatedSeconds;
 
     if (this.pendingPopulate && this.universe.nearest) {
       this.pendingPopulate = false;

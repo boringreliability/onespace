@@ -55,3 +55,40 @@ describe('carryWithSurface', () => {
     expect(fm.position.length()).toBeCloseTo(r0, 9);
   });
 });
+
+describe('review-p4: everything that is drawn or read turns with the ship', () => {
+  /** Landed with a yawed, pitched hull, so body-frame and world-frame turns differ. */
+  function landedTilted(): FlightModel {
+    const fm = landed();
+    const q = new Quaternion().setFromAxisAngle(new Vector3(1, 0.3, 0).normalize(), 0.7);
+    fm.teleport(fm.position.clone(), new Vector3(), q);
+    for (let i = 0; i < 120 && !fm.grounded; i++) fm.update(1 / 60);
+    return fm;
+  }
+
+  it('Given a tilted grounded hull, When the world turns, Then its attitude turns in the PARENT frame (delta · q), not its own body frame', () => {
+    const fm = landedTilted();
+    expect(fm.grounded).toBe(true);
+    const q0 = fm.orientation.clone();
+    fm.carryWithSurface(quarterTurnY);
+    expect(fm.orientation.angleTo(q0.clone().premultiply(quarterTurnY))).toBeLessThan(1e-9);
+  });
+
+  it('Given a grounded hull, When the world turns, Then the RENDER position and attitude turn too — no one-frame snap of the drawn hull', () => {
+    const fm = landedTilted();
+    const rp0 = fm.renderPosition.clone();
+    const rq0 = fm.renderOrientation.clone();
+    fm.carryWithSurface(quarterTurnY);
+    expect(fm.renderPosition.distanceTo(rp0.applyQuaternion(quarterTurnY))).toBeLessThan(1e-9);
+    expect(fm.renderOrientation.angleTo(rq0.premultiply(quarterTurnY))).toBeLessThan(1e-9);
+  });
+
+  it('Given a grounded hull, When the world turns, Then the body axes and world positions read by the camera, HUD and autopilot are already the turned ones', () => {
+    const fm = landedTilted();
+    const f0 = fm.forward.clone();
+    fm.carryWithSurface(quarterTurnY);
+    expect(fm.forward.distanceTo(f0.applyQuaternion(quarterTurnY))).toBeLessThan(1e-9);
+    expect(fm.worldPosition.distanceTo(fm.position)).toBeLessThan(1e-9); // parent at the origin
+    expect(fm.renderWorldPosition.distanceTo(fm.renderPosition)).toBeLessThan(1e-9);
+  });
+});

@@ -297,3 +297,56 @@ describe('refusals', () => {
     expect(h.ap.active).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// review-p4: hand-backs the first cut missed
+// ---------------------------------------------------------------------------
+
+describe('review-p4: the leg ends when something else takes the ship', () => {
+  it('Given an engaged landing, When the recovery cut puts the ship back in orbit (RETURN TO ORBIT keeps the same parent), Then the autopilot disengages instead of diving straight back in', () => {
+    const h = harness();
+    h.input.press('land');
+    h.tick(60);
+    expect(h.ap.active).toBe(true);
+    bus.emit('ship:recovered', { cause: 'requested' });
+    expect(h.ap.active).toBe(false);
+    expect(h.logs).toContain('AUTOPILOT DISENGAGED');
+    h.tick(60);
+    expect(h.ap.active).toBe(false);
+  });
+
+  it('Given an engaged landing (FA was ON at engage), When Z turns FA back on mid-leg, Then the autopilot disengages that frame and FA stays ON — the computer never flies raw thrust through the assist', () => {
+    const h = harness();
+    h.input.press('land');
+    h.tick(60);
+    expect(h.fm.flightAssist).toBe(false);
+    h.fm.flightAssist = true; // Pilot handles Z before AutoPilot runs
+    h.tick();
+    expect(h.ap.active).toBe(false);
+    expect(h.fm.flightAssist).toBe(true);
+    expect(h.logs).toContain('AUTOPILOT DISENGAGED');
+  });
+
+  it('Given an engaged landing from an FA-OFF pilot, When Z turns FA on mid-leg, Then the pilot gets the FA they just asked for, not the one saved at engage', () => {
+    const h = harness();
+    h.fm.flightAssist = false;
+    h.input.press('land');
+    h.tick(60);
+    h.fm.flightAssist = true;
+    h.tick();
+    expect(h.ap.active).toBe(false);
+    expect(h.fm.flightAssist).toBe(true);
+  });
+
+  it('Given an engaged landing with FA saved ON, When the pause sheet switches to NEWTONIAN, Then the autopilot disengages and FA follows the preset (OFF), not the saved ON', () => {
+    const h = harness();
+    expect(h.fm.flightAssist).toBe(true);
+    h.input.press('land');
+    h.tick(60);
+    h.preset.id = 'newtonian';
+    h.fm.flightAssist = false; // what Pause applies with the preset
+    h.tick();
+    expect(h.ap.active).toBe(false);
+    expect(h.fm.flightAssist).toBe(false);
+  });
+});
