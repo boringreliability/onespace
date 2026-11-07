@@ -276,8 +276,13 @@ export class CameraRig {
    * motion, km/s². A full-rate pitch onset is ~0.13; an attitude snap is ~100.
    */
   chaseAnchorAccelMax = 1.5;
-  /** [v3-T1] Hull turn rate beyond which a change of attitude is a snap, rad/s. */
-  attitudeSnapRate = 4;
+  /**
+   * [v3-T1] Hull turn rate beyond which a change of attitude is a snap, rad/s.
+   * Above any flown rate: the autopilot at auto-10× turns the hull ~4 rad/s
+   * of REAL time (measured), and treating that as snaps re-seated every
+   * frame. A one-frame 30 deg snap at 60 fps is 31 rad/s.
+   */
+  attitudeSnapRate = 8;
   /** [v3-T1] Blend length of an automatic reseat, s. */
   reseatSeconds = 0.5;
   /** [v3-T1] Keep the hull inside this fraction of the half-frame (soft from 2/3 of it). */
@@ -827,6 +832,12 @@ export class CameraRig {
       this.poseOut.quaternion.copy(this.tmpQ);
     }
 
+    // [v3-T1] Whatever a blend does, the hull stays in the picture: a reseat
+    // slerps world orientations while the position swings on a sphere, and
+    // across a large arc the two disagree (measured: 78 deg off the hull
+    // after an auto-10x flip). The chase pose itself is already framed.
+    if (this.mode_ === 'chase' && (this.reseatT < 1 || this.blendT < 1)) this.frameOutput(shipPosition);
+
     // [v3-T1] Liftoff turn clamp: the blend is sized to stay under the limit;
     // this is the guarantee, for when the poses themselves are moving.
     if (this.turnClamp && this.lastOutSet && step > 1e-6) {
@@ -847,6 +858,20 @@ export class CameraRig {
 
     this.applyShake(step);
     this.commit();
+  }
+
+  /** [v3-T1] Turn the output just enough to keep the hull inside chaseFrameMargin. */
+  private frameOutput(ship: Vector3): void {
+    const q = this.poseOut.quaternion;
+    const fwd = this.tmpA.set(0, 0, -1).applyQuaternion(q);
+    const up = this.tmpB.set(0, 1, 0).applyQuaternion(q);
+    const toShip = this.tmpC.copy(ship).sub(this.poseOut.position);
+    if (toShip.lengthSq() < 1e-14) return;
+    const aspect = this.camera.aspect > 0 ? this.camera.aspect : 16 / 9;
+    const halfY = (this.poseOut.fov * Math.PI) / 360;
+    constrainAimToFrame(this.tmpD, fwd, toShip, up, halfY, aspect, this.chaseFrameMargin);
+    if (this.tmpD.angleTo(fwd) < 1e-6) return;
+    this.lookRotation(q, this.poseOut.position, this.tmpD, up);
   }
 
   /** [v3-T1] Mode blend about the hull: radius linear, direction on the sphere. */
@@ -1007,8 +1032,11 @@ export class CameraRig {
       }
 
       const raw = this.tmpA.copy(anchor).sub(this.anchorRelPrev).divideScalar(dt);
+      // The excess is carried (the lens is solved in the anchor's frame), not
+      // fed to the spring; it only re-seats the view when the attitude itself
+      // snapped (above), since under time compression fast but real turns
+      // exceed aMax too.
       const lim = limitAnchorVelocity(this.anchorRelVel, raw, dt, this.chaseAnchorAccelMax, this.anchorLimit);
-      if (lim.jumped) snapped = true;
       this.anchorRelVel.copy(lim.vel);
 
       // Spring in the anchor's frame: position carried with the anchor, the

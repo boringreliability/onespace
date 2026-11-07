@@ -226,6 +226,53 @@ describe('chase: attitude snaps and explicit reseat (robust to what cruise inser
     expect(px(ndc(s), rest)).toBeLessThan(10);
   });
 
+  it('Given auto-10× time compression (the autopilot flips the hull at ~4 rad/s of real time, measured), When it turns, Then the hull stays inside NDC ±0.8 every frame', () => {
+    // Browser, merged v3: during an auto-10× descent the old snap test fired
+    // every frame, each reseat blended from a stale world orientation, and
+    // the hull left the frame by 76°.
+    const s = sim();
+    s.vel.set(0, 0, -30);
+    run(s, 2);
+    const axis = new Vector3(1, 0.3, 0).normalize();
+    const dq = new Quaternion();
+    let t = 0;
+    for (let i = 0; i < 300; i++) {
+      // ~4 rad/s (straddling any snap threshold) for 0.3 s, then the flip
+      // ends abruptly and decays — the measured profile — with ragged frames.
+      const dt = i % 3 ? 1 / 120 : 1 / 45;
+      t += dt;
+      const rate = t < 0.3 ? 3.6 + 0.8 * ((i * 7) % 5) / 4 : 0.48 * Math.exp(-(t - 0.3) / 0.3);
+      dq.setFromAxisAngle(axis, rate * dt);
+      s.q.multiply(dq);
+      frame(s, dt);
+      const n = ndc(s);
+      expect(n.z).toBeLessThan(1);
+      expect(Math.abs(n.x)).toBeLessThanOrEqual(0.8);
+      expect(Math.abs(n.y)).toBeLessThanOrEqual(0.8);
+    }
+  });
+
+  it('Given reseats requested every frame during a fast turn, When the turn ends, Then the blend never carries the hull out of frame (the output is framed, not just the chase pose)', () => {
+    const s = sim();
+    s.vel.set(0, 0, -30);
+    run(s, 2);
+    const axis = new Vector3(1, 0.2, 0.4).normalize();
+    const dq = new Quaternion();
+    for (let i = 0; i < 180; i++) {
+      const dt = 1 / 90;
+      if (i < 60) {
+        // 4 rad/s for 0.67 s: a 150° flip, as the autopilot flies at 10×.
+        dq.setFromAxisAngle(axis, 4 * dt);
+        s.q.multiply(dq);
+        s.rig.reseat(0.5);
+      }
+      frame(s, dt);
+      const n = ndc(s);
+      expect(n.z).toBeLessThan(1);
+      expect(Math.max(Math.abs(n.x), Math.abs(n.y))).toBeLessThanOrEqual(0.85);
+    }
+  });
+
   it('Given steady flight, When reseat() is called, Then that frame is not a cut (< 0.5 m, < 1°)', () => {
     const s = sim();
     s.vel.set(0, 0, -5);
