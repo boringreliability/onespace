@@ -167,6 +167,18 @@ describe('[v3-T2] rateCommand (pure)', () => {
     expect(w).toBe(-MAX_RATE.yaw);
   });
 
+  it('Given a disturbance that pushes ω back over zero every substep (weathercock in thick air), When the demand is positive, Then ω still rises — it is not pinned at 0', () => {
+    // Found in stage 2: a brake that stopped exactly at zero on a reversal
+    // pinned ω at 0 under the autopilot in thick air (no flip for 3.6 s).
+    const t = rateTuning('pitch');
+    let w = 0;
+    for (let i = 0; i < 120; i++) {
+      w -= 1.0 * H; // 1 rad/s² of restoring torque, well inside α
+      w = rateCommand(w, MAX_RATE.pitch, H, t);
+    }
+    expect(w).toBeGreaterThan(0.5 * MAX_RATE.pitch);
+  });
+
   it('Given ω already equal to the demand, Then it is returned unchanged (bit-identical hold)', () => {
     const t = rateTuning('roll');
     expect(rateCommand(0.3, 0.3, H, t)).toBe(0.3);

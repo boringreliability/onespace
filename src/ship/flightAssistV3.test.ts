@@ -62,7 +62,7 @@ describe('[v3-T2] actuatorStep (pure)', () => {
 
   it('Given a full reversal (+a_max → −a_max), Then the slew bound still holds', () => {
     let a = MAIN;
-    for (let i = 0; i < 120; i++) {
+    for (let i = 0; i < 360; i++) {
       const n = actuatorStep(a, -MAIN, H, MAIN);
       expect(Math.abs(n - a)).toBeLessThanOrEqual((MAIN * H) / ASSIST_ACTUATOR_TAU + 1e-15);
       a = n;

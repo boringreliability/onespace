@@ -7,8 +7,8 @@
  * swipe at 144 Hz turned it 2.4× less because the spike was shorter.
  *
  * Here the mouse moves a *dot*. Its offset from centre, clamped to a circle,
- * IS the stick, and it stays where it was put until the hand moves it back or
- * the slow recentring walks it home. The axis is therefore a held value like a
+ * IS the stick, and it stays where it was put until the hand moves it back
+ * ([v3-T2]: no constant recentring; optional idle auto-centre, off by default). The axis is therefore a held value like a
  * key — full deflection reads exactly 1, the same as an arrow key, which is
  * what gives mouse/keyboard parity for free — and the delta sum is
  * independent of how many frames it arrived in.
@@ -22,11 +22,14 @@ export interface StickTuning {
   /** Fraction of the radius that reads as zero, so a resting hand is not a slow turn. */
   readonly deadzone: number;
   /**
-   * Seconds for the drift back to centre to walk a FULL deflection home. The
-   * walk is radial at a constant rate, so half deflection takes half as long.
-   * 0 disables recentring.
+   * [v3-T2] Optional auto-centre: after `autoCentreIdleSeconds` with no mouse
+   * motion the offset decays exponentially with `autoCentreTau`. OFF by
+   * default — a held turn is a turn however long it lasts (a 180° turn at
+   * 35°/s is ~5 s of a still hand), and the HUD dot shows where centre is.
    */
-  readonly recentreSeconds: number;
+  readonly autoCentre: boolean;
+  readonly autoCentreIdleSeconds: number;
+  readonly autoCentreTau: number;
 }
 
 export const STICK_DEFAULTS: StickTuning = {
@@ -34,17 +37,24 @@ export const STICK_DEFAULTS: StickTuning = {
   // small enough that full deflection is one motion, large enough that half
   // deflection is easy to hold.
   radiusPx: 300,
-  // 4% of 300 px is 12 px — larger than sensor jitter and a resting hand,
-  // small enough that a gentle correction still registers.
-  deadzone: 0.04,
-  // Slow on purpose: a 1 s manoeuvre loses 12% of full deflection, so a held
-  // turn stays a turn and mouse stays on par with the arrow keys, but a stick
-  // left off-centre and forgotten is home within 8 s instead of spinning the
-  // ship forever. Constant-rate rather than exponential: an exponential
-  // strong enough to get home in ~8 s already eats ~25% of the first second,
-  // which is exactly the part of a turn the pilot is holding on purpose.
-  recentreSeconds: 8,
+  // [v3-T2] 2.5 % of 300 px is 7.5 px: above sensor jitter, and with the
+  // cubic curve below a deflection just past it is a crawl, not a jump.
+  deadzone: 0.025,
+  // [v3-T2] v2 walked the stick home linearly over 8 s, which ate small
+  // deflections (0.25 was gone after 2 s, PLAN S1). The stick now holds.
+  autoCentre: false,
+  autoCentreIdleSeconds: 1.0,
+  autoCentreTau: 0.25,
 };
+
+/**
+ * [v3-T2] Response curve on the deadzone-rescaled magnitude: 0.35x + 0.65x³.
+ * Fine near centre (half the slope of linear) for precision aiming, still
+ * exactly 1 at full deflection so mouse and keys keep parity. Odd.
+ */
+export function stickCurve(x: number): number {
+  return 0.35 * x + 0.65 * x * x * x;
+}
 
 export interface StickVector {
   readonly x: number;
@@ -57,6 +67,8 @@ export class VirtualStick {
   /** Accumulated offset in pixels, always inside the radius. */
   private px = 0;
   private py = 0;
+  /** Seconds since the last non-zero pointer delta (auto-centre only). */
+  private idle = 0;
 
   private readonly _deflection = { x: 0, y: 0 };
   private readonly _axis = { x: 0, y: 0 };
@@ -74,7 +86,7 @@ export class VirtualStick {
     return this._deflection;
   }
 
-  /** The control output: deflection with the deadzone removed and rescaled. */
+  /** The control output: deadzone removed, rescaled, then shaped by `stickCurve`. */
   get axis(): StickVector {
     return this._axis;
   }
@@ -82,6 +94,9 @@ export class VirtualStick {
   /** Feed a pointer delta in pixels (already scaled by sensitivity). */
   addDelta(dx: number, dy: number): void {
     if (!Number.isFinite(dx) || !Number.isFinite(dy)) return;
+    // Input feeds a zero delta every frame; only real motion is "the hand moved".
+    if (dx === 0 && dy === 0) return;
+    this.idle = 0;
     this.px += dx;
     this.py += dy;
     // Clamp the ACCUMULATOR, not just the output: otherwise a 5000 px shove
@@ -98,17 +113,18 @@ export class VirtualStick {
   }
 
   /**
-   * Once per frame. Recentring shortens the offset by a fixed number of
-   * pixels per second, which is linear in time and therefore identical
-   * however the second is sliced into frames.
+   * Once per frame. Without auto-centre the stick simply holds. With it, the
+   * idle threshold is crossed mid-frame exactly (only the part of `dt` past
+   * it decays), so the result is the same however a second is sliced.
    */
   update(dt: number): void {
-    const t = this.tuning.recentreSeconds;
-    if (t > 0 && dt > 0) {
-      const len = Math.hypot(this.px, this.py);
-      if (len > 0) {
-        const next = Math.max(0, len - (this.tuning.radiusPx / t) * dt);
-        const k = next / len;
+    const t = this.tuning;
+    if (t.autoCentre && dt > 0 && Number.isFinite(dt)) {
+      const before = this.idle;
+      this.idle += dt;
+      const decaying = this.idle - Math.max(before, t.autoCentreIdleSeconds);
+      if (decaying > 0 && t.autoCentreTau > 0) {
+        const k = Math.exp(-decaying / t.autoCentreTau);
         this.px *= k;
         this.py *= k;
       }
@@ -120,6 +136,7 @@ export class VirtualStick {
   reset(): void {
     this.px = 0;
     this.py = 0;
+    this.idle = 0;
     this.refresh();
   }
 
@@ -131,7 +148,8 @@ export class VirtualStick {
     this._deflection.y = dy;
 
     // Radial deadzone, rescaled so the axis leaves zero continuously at the
-    // edge and still reaches exactly 1 at full deflection.
+    // edge and still reaches exactly 1 at full deflection; the curve then
+    // acts on the radius, so the direction is kept.
     const mag = Math.hypot(dx, dy);
     const dz = this.tuning.deadzone;
     if (mag <= dz || mag === 0) {
@@ -139,9 +157,9 @@ export class VirtualStick {
       this._axis.y = 0;
       return;
     }
-    const scaled = Math.min(1, (mag - dz) / (1 - dz));
-    this._axis.x = (dx / mag) * scaled;
-    this._axis.y = (dy / mag) * scaled;
+    const shaped = stickCurve(Math.min(1, (mag - dz) / (1 - dz)));
+    this._axis.x = (dx / mag) * shaped;
+    this._axis.y = (dy / mag) * shaped;
   }
 }
 
