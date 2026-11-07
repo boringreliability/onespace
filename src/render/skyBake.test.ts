@@ -81,4 +81,10 @@ describe('SkyBakeSchedule', () => {
     expect(s.ready).toBe(false);
     expect(s.nextFace()).toBe(0);
   });
+
+  it('Given no key was ever set, When faces are reported done, Then the bake is still not ready', () => {
+    const s = new SkyBakeSchedule();
+    for (let f = 0; f < 6; f++) s.faceDone(f);
+    expect(s.ready).toBe(false);
+  });
 });

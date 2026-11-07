@@ -96,10 +96,57 @@ export function pickClipLevel(dist: number, extents: readonly number[]): number 
  * level's half-extent, which keeps the camera well inside the margin above.
  */
 export function clipNeedsRecentre(prev: V3 | null, next: V3, halfExtent: number, radius: number): boolean {
-  if (!prev) return true;
+  return clipOverdue(prev, next, halfExtent, radius) > 1;
+}
+
+/** Drift as a multiple of the re-centre threshold; Infinity when never baked. */
+function clipOverdue(prev: V3 | null, next: V3, halfExtent: number, radius: number): number {
+  if (!prev) return Infinity;
   const d = prev[0] * next[0] + prev[1] * next[1] + prev[2] * next[2];
   const arc = Math.acos(Math.min(1, Math.max(-1, d))) * radius;
-  return arc > halfExtent / 8;
+  const limit = halfExtent / 8;
+  return limit > 0 ? arc / limit : arc > 0 ? Infinity : 0;
+}
+
+/**
+ * The one clipmap level to re-bake this frame, or -1. A level costs about one
+ * patch bake (256^2 terrain evaluations), and all four at once — a teleport,
+ * or cruise speed low over the ground — was ~3 ms of GPU outside
+ * patchBuildBudget. Deferring a level is safe: its centre uniform only moves
+ * when it is re-baked, so a stale level is still self-consistent and the
+ * shader simply finds the camera nearer its edge (or falls back a level).
+ *
+ * The most overdue level relative to its own threshold goes first; a level
+ * never baked is infinitely overdue, and among those the COARSEST wins, since
+ * it alone covers every shadow ray.
+ */
+export function pickClipRecentre(
+  prev: ReadonlyArray<V3 | null>,
+  next: V3,
+  extents: readonly number[],
+  radius: number,
+): number {
+  let best = -1;
+  let bestOver = 1;
+  for (let l = extents.length - 1; l >= 0; l--) {
+    const over = clipOverdue(prev[l] ?? null, next, extents[l]!, radius);
+    if (over > bestOver) {
+      best = l;
+      bestOver = over;
+    }
+  }
+  return best;
+}
+
+/**
+ * Height of the surface the GPU DRAWS, km about sea level. On an ocean world
+ * the surface pass holds the ground at sea level wherever it lies below it
+ * (Planet's vertex shader: hs = max(h, 0)), so that is where a ship must touch
+ * down and what a patch's bounds must enclose. The GLSL twin is in
+ * surfaceVertexShader.
+ */
+export function drawnHeight(h: number, ocean: boolean): number {
+  return ocean ? Math.max(h, 0) : h;
 }
 
 /**
