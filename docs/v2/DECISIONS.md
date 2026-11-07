@@ -73,6 +73,13 @@ mutation testing."* Hver beslutning har en kort begrundelse og en konsekvens.
 | D55 | 04:15 | Universe kalder nu `compileAsync` på Planet, Clouds og Atmosphere ved acquire (de private scener fra review #4) | Fjerner de sidste synkrone links ved approach i rigtigt gameplay | — |
 | D56 ⚠ | 04:20 | **Udskudt:** skibsgenerering i Web Worker og faste render targets | Alle scener er nu under 16,7 ms. Tilbageværende hak er én skibs-build (40-75 ms) pr. kontakt og sjældne governor-reallokeringer | Kandidater til v2.1 |
 
+| D57 ⚠ | 04:40 | Reviewet af fase 2 er merget (9 fund, 7 rettet). Foto over Yard lækker ikke længere input, og pause åbner aldrig under overlays. Foto bevarer roll fra indgangskameraet, så der ikke er noget snap. Entry-guards forhindrer Y under hop/recovery. **Golden-testen er strammet:** sweep over ~150 skrog (de 5 faste skibe fangede ikke en ændret alpha-clamp), og re-record under samme version afvises. Mutation-score 73 → 98 % | — | Golden-testen tager ~5 s |
+| D58 | 04:45 | Ethvert `gen` i et link, der ikke er præcis dette builds version (ældre, nyere eller ulæseligt), markeres som "older yard standard" | Review-p2: fremtidige eller ulæselige `gen` blev i stilhed pinnet om til `gen=1`, så linket viste et andet skib | Én mutant-test fra reviewet er opdateret til den nye regel |
+| D59 ⚠ | 04:55 | Reviewet af fase 3 er merget. **Regression rettet:** skibet landede 14 km under det tegnede hav, fordi kollisionen brugte havbunden, mens havet nu tegnes i surface-passet (`drawnHeight`). Desuden: genbag efter tabt WebGL-kontekst (planet og himmel var sorte resten af sessionen), og højst ét clipmap-niveau pr. frame | Fanget ved en rigtig landing på GPU | — |
+| D60 | 05:00 | To ekstra spor er startet: skibsgenerering i Web Worker (D56 genåbnet, fordi der er tid) og billedet fra overfladen (åbent punkt) | Der er tid tilbage i de 8 timer, og begge er blandt de vigtigste tilbageværende hak/look-problemer | — |
+
+**Kendte, ikke rettede (fra fase 3-review):** HalfFloat-fallback kan ikke rendere uden `EXT_color_buffer_float` (påvirker kun meget gamle GPU'er), og Clouds/Atmosphere genbager sandsynligvis ikke efter tabt kontekst.
+
 **Slutmåling, fase 0-3 (prod, M4 Pro, samme probe som auditten, `?mode=flight`):**
 
 | Scene | v1 | v2 |
