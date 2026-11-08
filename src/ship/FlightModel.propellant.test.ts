@@ -272,3 +272,123 @@ describe('[v4-fuel] FlightModel draws on the tank', () => {
     expect(fm.propellant!.massKg).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Fix round 1 (ruling R7): the FA computer works in DELIVERED acceleration.
+// Its caps are scaled by massScale, so its gravity feed-forward and lead are
+// what the hull really gets; FA stop/hold must hold with a tank attached.
+// ---------------------------------------------------------------------------
+
+const X_AXIS = new Vector3(1, 0, 0);
+
+describe('[v4-fuel] FA stop/hold holds with a tank (R7)', () => {
+  it('Given a full tank, When FA stop is held nose-up under gravity (mu 4e5, r 6000) for 20 s, Then |v| settles below 1e-9 km/s', () => {
+    // g = 4e5 / 6000² ≈ 0.0111 km/s², far inside the scaled main cap
+    // (0.2 · 2e5/2.2e5 ≈ 0.182 km/s²). Nose-up: rotate −Z onto +Y.
+    const make = (withTank: boolean): FlightModel => {
+      const fm = new FlightModel(C);
+      fm.setParent({ position: new Vector3(), velocity: new Vector3(), mu: 4e5, radius: 1000 });
+      fm.teleport(
+        new Vector3(0, 6000, 0),
+        new Vector3(),
+        new Quaternion().setFromAxisAngle(X_AXIS, Math.PI / 2),
+      );
+      if (withTank) fm.attachPropellant(tank(PROBE_TANK_CAPACITY_KG), VE);
+      fm.flightAssist = true;
+      fm.command.brake = true;
+      return fm;
+    };
+    const control = make(false);
+    const fm = make(true);
+    expect(fm.forward.y).toBeCloseTo(1, 12);
+    run(control, 20);
+    run(fm, 20);
+    expect(control.assistState).toBe('stop');
+    expect(control.velocity.length()).toBeLessThan(1e-9); // the v3 control
+    expect(fm.assistState).toBe('stop');
+    expect(fm.velocity.length()).toBeLessThan(1e-9);
+    expect(fm.thrustStarved).toBe(false);
+  });
+
+  it('Given a full tank and FA hold on the up-axis at the edge of RCS authority, Then altitude is held as well as massScale allows (no steady sink beyond what the reduced cap physically forces)', () => {
+    // Up-axis = RCS only: raw cap 2e7/2e5·1e-3 = 0.1 km/s²; a full tank scales
+    // it to 0.1·2e5/2.2e5 ≈ 0.0909 km/s². g = 0.085 km/s² is below the scaled
+    // cap (and the margin grows as the tank drains), so the physically right
+    // answer is "holds": no steady sink at all.
+    // r = √(mu/g) = √(4e5/0.085) ≈ 2169 km. Identity orientation: up = +Y =
+    // radial out, nose −Z horizontal. Hold at rest: throttle 0 with a zero
+    // formation reference (a ref makes the detent hold, v_set 0, target 0).
+    //
+    // The hold is a VELOCITY loop: the actuator's spin-up (τa 0.15 s, slew
+    // bound) costs a one-off altitude offset that is never flown back. The
+    // no-tank v3 control loses ≈ 6.7 m this way (measured at 6c1c4b9) and
+    // then holds. So "held" means: velocity → 0, NO drift over the second
+    // 10 s, and a one-off offset of the same order as the control's.
+    const G = 0.085;
+    const R = Math.sqrt(4e5 / G);
+    const make = (withTank: boolean): { fm: FlightModel; p: Propellant | null } => {
+      const fm = new FlightModel(C);
+      fm.setParent({ position: new Vector3(), velocity: new Vector3(), mu: 4e5, radius: 1000 });
+      fm.teleport(new Vector3(0, R, 0), new Vector3(), new Quaternion());
+      const p = withTank ? tank(PROBE_TANK_CAPACITY_KG) : null;
+      if (p) fm.attachPropellant(p, VE);
+      fm.flightAssist = true;
+      fm.assistReferenceVelocity = new Vector3();
+      return { fm, p };
+    };
+    const control = make(false).fm;
+    const { fm, p } = make(true);
+    expect((C.rcsThrust / C.mass) * 1e-3 * massScale(DRY, p!.massKg, 0)).toBeGreaterThan(G);
+
+    run(control, 20);
+    const controlDrop = R - control.position.y;
+    expect(Math.abs(control.velocity.y)).toBeLessThan(1e-9);
+    expect(controlDrop).toBeGreaterThan(0);
+    expect(controlDrop).toBeLessThan(0.01);
+
+    run(fm, 10);
+    const yMid = fm.position.y;
+    run(fm, 10);
+    expect(fm.assistState).toBe('hold');
+    expect(fm.thrustStarved).toBe(false);
+    expect(p!.massKg).toBeLessThan(PROBE_TANK_CAPACITY_KG); // it really paid for the hover
+    expect(Math.abs(fm.velocity.y)).toBeLessThan(1e-6); // no steady sink
+    expect(Math.abs(fm.position.y - yMid)).toBeLessThan(1e-5); // < 1 cm over the last 10 s
+    expect(R - fm.position.y).toBeLessThan(3 * controlDrop); // one-off offset, same order as v3
+  });
+});
+
+describe('[v4-fuel] edge cases (fix round 1)', () => {
+  it('Given extraMassKg = NaN, When main burns, Then propellant is still consumed (never free thrust)', () => {
+    const burn = (extra: number): { used: number; dv: number } => {
+      const fm = deepSpace();
+      const p = tank(1_000);
+      fm.attachPropellant(p, VE);
+      fm.extraMassKg = extra;
+      fm.command.throttle = 1;
+      const kg0 = p.massKg;
+      run(fm, 1);
+      return { used: kg0 - p.massKg, dv: fm.velocity.length() };
+    };
+    const nan = burn(Number.NaN);
+    const zero = burn(0);
+    expect(Number.isFinite(nan.dv)).toBe(true);
+    expect(nan.dv).toBeGreaterThan(0);
+    expect(nan.used).toBeGreaterThan(0);
+    // Same clean semantics as massScale: NaN counts as 0 kg everywhere.
+    expect(Math.abs(nan.used - zero.used)).toBeLessThanOrEqual(1e-12 * zero.used);
+    expect(Math.abs(nan.dv - zero.dv)).toBeLessThanOrEqual(1e-12 * zero.dv);
+  });
+
+  it('Given thrustStarved was true, When cruise engages (setCruise with a cap), Then thrustStarved reads false', () => {
+    const fm = deepSpace();
+    fm.attachPropellant(tank(0), VE);
+    fm.command.throttle = 1;
+    run(fm, 0.5);
+    expect(fm.thrustStarved).toBe(true);
+    fm.setCruise(10);
+    fm.update(H);
+    expect(fm.cruising).toBe(true);
+    expect(fm.thrustStarved).toBe(false);
+  });
+});
