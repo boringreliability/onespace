@@ -1,6 +1,7 @@
 /**
- * Hands this frame's scene depth to every atmosphere (and, through its shared
- * uniforms, the cloud deck) in the system.
+ * Hands this frame's scene depth to every atmosphere and every cloud deck in
+ * the system. Both march inside their shell with the depth test off once the
+ * camera is inside it, so both need it to stop at the hull and the terrain.
  *
  * `PostFX.sceneDepthTexture()` is the idle half of a ping-pong pair: which of
  * the two depth textures it names flips as the composer swaps buffers. A shell
@@ -18,8 +19,11 @@ export interface DepthReader {
 }
 
 export function publishSceneDepth(
-  bodies: Iterable<{ atmosphere: DepthReader | null }>,
+  bodies: Iterable<{ atmosphere: DepthReader | null; clouds?: DepthReader | null }>,
   depth: Texture | null,
 ): void {
-  for (const b of bodies) b.atmosphere?.setDepthTexture(depth);
+  for (const b of bodies) {
+    b.atmosphere?.setDepthTexture(depth);
+    b.clouds?.setDepthTexture(depth);
+  }
 }

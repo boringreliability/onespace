@@ -915,6 +915,8 @@ export class Universe implements GameModule {
       );
 
       b.planet.update(dt, ctx, b.view);
+      // Before update(): the deck renders its march there, not in the scene pass.
+      b.clouds?.setDepthTexture(sceneDepth);
       b.clouds?.update(dt, ctx, b.view);
       b.rings?.update(dt, ctx, b.view);
       if (b.atmosphere) {

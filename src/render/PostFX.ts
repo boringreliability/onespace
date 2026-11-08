@@ -67,6 +67,7 @@ import {
 } from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { FullScreenQuad, Pass } from 'three/addons/postprocessing/Pass.js';
+import { drawPostQuad } from './postQuad';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 
 import type { QualitySettings } from '@/core/Config';
@@ -329,8 +330,8 @@ class SceneSpacePass extends Pass {
     // loop — which is exactly why this pass may only ever run once.
     u.tDepth.value = readBuffer.depthTexture;
     this.quad.material = this.material;
-    renderer.setRenderTarget(this.renderToScreen ? null : writeBuffer);
-    this.quad.render(renderer);
+    // Never through a depth clear: see render/postQuad.ts.
+    drawPostQuad(renderer, this.renderToScreen ? null : writeBuffer, () => this.quad.render(renderer));
   }
 
   dispose(): void {
@@ -1099,8 +1100,8 @@ class GradePass extends Pass {
   render(renderer: WebGLRenderer, writeBuffer: WebGLRenderTarget, readBuffer: WebGLRenderTarget): void {
     this.material.uniforms.tDiffuse.value = readBuffer.texture;
     this.quad.material = this.material;
-    renderer.setRenderTarget(this.renderToScreen ? null : writeBuffer);
-    this.quad.render(renderer);
+    // Never through a depth clear: see render/postQuad.ts.
+    drawPostQuad(renderer, this.renderToScreen ? null : writeBuffer, () => this.quad.render(renderer));
   }
 
   dispose(): void {
@@ -1226,8 +1227,8 @@ class FinalPass extends Pass {
   render(renderer: WebGLRenderer, writeBuffer: WebGLRenderTarget, readBuffer: WebGLRenderTarget): void {
     this.material.uniforms.tDiffuse.value = readBuffer.texture;
     this.quad.material = this.material;
-    renderer.setRenderTarget(this.renderToScreen ? null : writeBuffer);
-    this.quad.render(renderer);
+    // Never through a depth clear: see render/postQuad.ts.
+    drawPostQuad(renderer, this.renderToScreen ? null : writeBuffer, () => this.quad.render(renderer));
   }
 
   dispose(): void {
