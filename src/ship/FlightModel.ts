@@ -76,6 +76,8 @@ import {
   actuatorStep,
   stopDecel,
 } from './assistShape';
+// [v4-fuel] the probe's tank and its consumption formulas.
+import { Propellant, massScale, propellantForImpulse } from './propellant';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -525,6 +527,36 @@ export class FlightModel {
 
   private accumulator = 0;
 
+  // --- [v4-fuel] propellant ---------------------------------------------------
+  /**
+   * The tank thrust draws on, or null. Null is v3: no mass response, no
+   * consumption, the step bit-for-bit unchanged (R3). Set via
+   * `attachPropellant`; the tank itself is only changed through consume().
+   */
+  private _propellant: Propellant | null = null;
+  /** Effective exhaust velocity of the attached tank, km/s. */
+  private exhaustKmS = 0;
+  /** Mass carried on top of dry + propellant (cargo), kg. Only felt with a tank. */
+  extraMassKg = 0;
+  private _thrustStarved = false;
+
+  get propellant(): Propellant | null {
+    return this._propellant;
+  }
+
+  /** True when, in the last substep, thrust was wanted but the tank could not supply it. */
+  get thrustStarved(): boolean {
+    return this._thrustStarved;
+  }
+
+  /** Attach a tank (or detach with `null`) and its exhaust velocity, km/s. */
+  attachPropellant(p: Propellant | null, exhaustKmS: number): void {
+    this._propellant = p;
+    this.exhaustKmS = Number.isFinite(exhaustKmS) && exhaustKmS > 0 ? exhaustKmS : 0;
+    this._thrustStarved = false;
+  }
+  // --- end [v4-fuel] -----------------------------------------------------------
+
   // --- scratch. Every vector the update path touches lives here. ----------
   private readonly sAcc = new Vector3();
   private readonly sGrav = new Vector3();
@@ -970,6 +1002,14 @@ export class FlightModel {
       }
     }
 
+    // --- [v4-fuel] the tank -----------------------------------------------------
+    // Here `sAcc` holds thrust only (main, RCS, brake or the FA computer), so
+    // the propellant need is measured before drag is added. No tank: skipped,
+    // and the step is v3 untouched. Rotation never comes through here.
+    this._thrustStarved = false;
+    if (this._propellant !== null) this.drawPropellant(h);
+    // --- end [v4-fuel] ---
+
     // --- atmosphere ---------------------------------------------------------
     // [v3-atmo] The air turns with its world: the relative wind is v − ω×r,
     // not the centre-frame v (which put a hull flying with the ground in a
@@ -1133,6 +1173,39 @@ export class FlightModel {
     this._throttle = mainCap > 0 ? Math.max(0, act.x) / mainCap : 0;
   }
   // [v3-T2] END assist
+
+  // --- [v4-fuel] ---------------------------------------------------------------
+  /**
+   * Scale the thrust in `sAcc` by the tank's mass response, then pay for it.
+   *
+   * need = propellantForImpulse(|thrust|, dry + prop + extra, h, ve). If the
+   * tank gives less, the thrust is scaled by got/need in this same substep —
+   * so an empty tank gives exactly zero thrust — and `thrustStarved` is set.
+   * Gravity is not in `sAcc` yet, so it always acts.
+   */
+  private drawPropellant(h: number): void {
+    const p = this._propellant!;
+    const dry = this.config.mass;
+    const prop = p.massKg;
+    this.sAcc.multiplyScalar(massScale(dry, prop, this.extraMassKg));
+    const a = this.sAcc.length();
+    if (!(a > 0)) return; // no thrust wanted: nothing to pay
+    if (this.exhaustKmS <= 0) {
+      // No usable exhaust velocity: the engine cannot work.
+      this.sAcc.set(0, 0, 0);
+      this._thrustStarved = true;
+      return;
+    }
+    const total = dry + prop + Math.max(0, this.extraMassKg);
+    const need = propellantForImpulse(a, total, h, this.exhaustKmS);
+    const got = p.consume(need);
+    if (got < need) {
+      if (got > 0) this.sAcc.multiplyScalar(got / need);
+      else this.sAcc.set(0, 0, 0);
+      this._thrustStarved = true;
+    }
+  }
+  // --- end [v4-fuel] -----------------------------------------------------------
 
   /**
    * One substep under the cruise drive.
