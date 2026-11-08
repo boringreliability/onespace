@@ -36,7 +36,7 @@ viser budgettet, og en tom tank har en nødudgang, der koster noget.
 - **Tal for v4, i `propellant.ts`:**
   - `PROBE_TANK_CAPACITY_KG = 20_000`
   - `PROBE_DRY_MASS_KG = DEFAULT_SHIP_CONFIG.mass` (200 t)
-  - `EXHAUST_VELOCITY_KMS`, startværdi 1000, tunes i Task 3
+  - `EXHAUST_VELOCITY_KMS`, startværdi 1000, tunes i Task 3 (ejerbeslutning D2: ≈ 11 500 — autopiloten er en hurtig, dyr bekvemmelighed)
   - `START_FILL = 0.6` (bruges først i delplan 2/3, men konstanten bor her)
 - **GS-TDD:** hver task stopper ved ⏸ til ejeren har sagt "godkendt" til testene.
 - **Log:** beslutninger skrives i `docs/v4/DECISIONS.md`.
@@ -134,6 +134,8 @@ viser budgettet, og en tom tank har en nødudgang, der koster noget.
   `src/ship/autopilotPacing.test.ts` here. The pacing test imports from here, unchanged.
 - Test: `src/ship/propellantTuning.test.ts`
 - Modify: `src/ship/propellant.ts`, but only the number `EXHAUST_VELOCITY_KMS`.
+- Modify: the auto-land guidance (`src/ship/autopilot.ts` / `src/game/AutoPilot.ts`) so its capability model reads the hull's
+  current `massScale` (owner decision D2: with a full tank the landing touched down at 2.2 m/s, above the CLEAN bar).
 
 **Interfaces:**
 - Consumes: Task 1-2.
@@ -142,10 +144,8 @@ viser budgettet, og en tom tank har en nødudgang, der koster noget.
 - [ ] **Step 1: Write the failing tests** (the tuning targets):
   - `Given a full tank on the opening orbit at Remit, When auto-land runs to touchdown, Then it uses 4–10 % of capacity`
   - `Given a full tank in orbit, When main is held for 10 s, Then it uses ≤ 2 %`
-  - `Given the measured landing use L, Then 3·2L + 2·jumpPropellantFraction(neighbourLy) ≤ 1`
-    - `neighbourLy` = the distance to the nearest neighbour of the start system, from the generator.
-    - `jumpPropellantFraction` comes from Task 4 and is imported here, so this test lands red until
-      Task 4 is done. This is deliberate.
+  - `Given a full tank, When auto-land runs to touchdown, Then it is CLEAN (vertical < 2 m/s, the pacing test's bar)`
+  - (The jump-budget assertion moved to Task 4, ruling R2.)
 - [ ] **Step 2:** Run → FAIL. Then adjust *only* `EXHAUST_VELOCITY_KMS` until (a) and (b) hold.
   Record the value and the measured percentages in DECISIONS (D1).
 - [ ] **Step 3: ⏸** Wait for owner approval of the tests.
@@ -169,7 +169,7 @@ viser budgettet, og en tom tank har en nødudgang, der koster noget.
 - Produces:
   - `type PropellantAction = { kind: 'cruise-spool' } | { kind: 'cruise-leg'; distanceKm: number } | { kind: 'jump'; distanceLy: number } | { kind: 'cannibalize'; part: 'tank' | 'cargo' } | { kind: 'beacon' }`
     (the last two are used in Task 6)
-  - `function jumpPropellantFraction(distanceLy: number): number /* 0.10 + 0.01·ly, clamped to [0.10, 0.6] */`
+  - `function jumpPropellantFraction(distanceLy: number): number /* 0.04 + 0.004·ly, clamped to [0.04, 0.3] — retuned by D2 */`
   - `function cruiseSpoolKg(capacityKg: number): number /* 0.5 % of capacity */`
   - `function cruiseLegKg(distanceKm: number, capacityKg: number): number /* 1 % of capacity per AU, linear */`
   - `function canAfford(p: Propellant, kg: number): boolean`
@@ -178,11 +178,12 @@ viser budgettet, og en tom tank har en nødudgang, der koster noget.
     `ok: false` when it runs dry.
 
 - [ ] **Step 1: Write the failing tests.**
-  - `jumpPropellantFraction(5) === 0.15` and `(0) === 0.10`. The value is clamped to `0.6` for 80 ly.
-  - `Given 9 % left, When a 15 % jump is applied, Then ok is false, reason is insufficient, and the tank is unchanged`
+  - `jumpPropellantFraction(5) === 0.06` and `(0) === 0.04`. The value is clamped to `0.3` for 80 ly.
+  - `Given the measured auto-land use L (from Task 3's landingSim), Then 3·2L + 2·jumpPropellantFraction(neighbourLy) ≤ 1` (moved here by R2; `neighbourLy` = nearest neighbour of the start system, from the generator)
+  - `Given 5 % left, When a 6 % jump is applied, Then ok is false, reason is insufficient, and the tank is unchanged`
   - `Given an empty tank, When cruise is requested, Then it does not spool and logs "CRUISE · NO PROPELLANT"`
   - `Given cruise in progress and a tank that runs dry, Then the drive drops out through its normal 'dropping' phase (no teleport) and logs it`
-  - `Given the chart open on a system 5 ly away with 9 % left, Then the jump row shows PROPELLANT 15 % in the warning tone and the jump command is refused`
+  - `Given the chart open on a system 5 ly away with 5 % left, Then the jump row shows PROPELLANT 6 % in the warning tone and the jump command is refused`
 - [ ] **Step 2:** Run → FAIL.
 - [ ] **Step 3: ⏸** Wait for owner approval.
 - [ ] **Step 4:** Implement the pure functions. Then make three calls:
