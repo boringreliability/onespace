@@ -20,6 +20,7 @@ import {
   canonicalTargetId,
   closingSpeed,
   etaSeconds,
+  targetEtaSeconds,
   nextTargetId,
   orderByNoseAngle,
   resolveTarget,
@@ -243,6 +244,20 @@ describe('etaSeconds', () => {
 
   it('Given a closing speed below the threshold (station-keeping drift), Then there is no ETA', () => {
     expect(etaSeconds(100, ETA_MIN_CLOSING_KMS * 0.5)).toBeNull();
+  });
+
+  // review-v3b (T5 × T3 seam): under cruise the target box showed a straight-
+  // line ETA at the current speed ("eta 13:04:14") beside the drive's own
+  // readout ("ETA 0:52") — two contradictory times on one screen, and the
+  // straight-line one is wrong by 900× because the drive's speed is not
+  // constant. The drive's readout owns the ETA while it runs.
+  it('Given the cruise drive carrying the ship, Then the target box has no ETA of its own (the cruise readout owns it)', () => {
+    expect(targetEtaSeconds(57_000_000, 1215, true)).toBeNull();
+  });
+
+  it('Given sublight flight, Then the target box ETA is the straight-line one, unchanged', () => {
+    expect(targetEtaSeconds(100, 2, false)).toBe(etaSeconds(100, 2));
+    expect(targetEtaSeconds(100, -2, false)).toBeNull();
   });
 
   it('Given zero range while closing, Then the ETA is zero', () => {

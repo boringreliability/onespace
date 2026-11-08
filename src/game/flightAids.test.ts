@@ -15,6 +15,7 @@ import {
   ALT_RANGE_RADII,
   LEVEL_VS_KMS,
   MARKER_MIN_SPEED_KMS,
+  TTI_MAX_S,
   locationLabel,
   pickAltitude,
   projectToScreen,
@@ -58,6 +59,24 @@ describe('verticalReadout', () => {
 
   it('Given a descent with the terrain already at or above the hull, Then impact is now (0 s), never negative', () => {
     expect(verticalReadout(-0.05, -0.2, false).ttiS).toBe(0);
+  });
+
+  // v3 polish (review low): a stable orbit breathes a few m/s of V/S, and
+  // IMPACT read ">99h" — a countdown to an impact the orbit never delivers.
+  it(`Given a stable orbit (4 474 km up, 3 m/s of eccentric sink), Then no IMPACT — the countdown is over TTI_MAX_S (${TTI_MAX_S} s)`, () => {
+    expect(TTI_MAX_S).toBe(3600);
+    const r = verticalReadout(-0.003, 4474, false);
+    expect(r.vsiKmS).toBeCloseTo(-0.003, 9); // V/S still reads
+    expect(r.ttiS).toBeNull();
+  });
+
+  it('Given a real deorbit (1.2 km/s down from 4 000 km), Then the countdown shows (3 333 s, under the hour)', () => {
+    expect(verticalReadout(-1.2, 4000, false).ttiS).toBeCloseTo(4000 / 1.2, 6);
+  });
+
+  it('Given an impact exactly TTI_MAX_S away, Then it is shown; a hair beyond, hidden', () => {
+    expect(verticalReadout(-0.1, 0.1 * TTI_MAX_S, false).ttiS).toBeCloseTo(TTI_MAX_S, 6);
+    expect(verticalReadout(-0.1, 0.1 * TTI_MAX_S + 0.01, false).ttiS).toBeNull();
   });
 });
 

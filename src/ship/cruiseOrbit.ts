@@ -89,10 +89,21 @@ const sOut = new Vector3();
  * Leave cruise in a circular orbit. Returns false, changing nothing, when
  * there is no gravity source to orbit — deep space keeps the legacy sublight
  * exit along the nose.
+ *
+ * v3: `along` names the tangent direction to use — the one the drop has
+ * already turned the ship onto (`game/Cruise.ts`) — so the handover is the
+ * small remainder of that turn, not the ecliptic blend's own few degrees.
+ * Projected perpendicular to r; ignored if that leaves nothing.
  */
-export function insertIntoOrbit(flight: FlightModel): boolean {
+export function insertIntoOrbit(flight: FlightModel, along?: Vector3): boolean {
   circularExitVelocity(flight, sOut);
   if (sOut.lengthSq() === 0) return false;
+  if (along) {
+    sR.copy(flight.position).normalize();
+    sT.copy(along).addScaledVector(sR, -along.dot(sR));
+    const vc = sOut.length();
+    if (sT.lengthSq() > 1e-18) sOut.copy(sT).setLength(vc);
+  }
   // A change of motion, not of frame: the velocity is parent-relative.
   flight.exitCruiseWithVelocity(sOut);
   return true;

@@ -57,6 +57,7 @@ import {
   Quaternion,
   ShaderMaterial,
   SphereGeometry,
+  Vector2,
   Vector3,
   type IUniform,
 } from 'three';
@@ -497,11 +498,23 @@ varying vec3 vDir;
 uniform samplerCube uSkyCube;
 uniform float uBrightness;
 uniform vec3  uVoidColor;
+uniform vec3  uDriveApex;   // v3 T4
+uniform float uDriveSheen;  // v3 T4
+uniform vec2  uViewport;    // v3 T4
 
 void main() {
   vec4 s = textureCube(uSkyCube, normalize(vDir));
   vec3 base = uVoidColor * (0.7 + 0.6 * s.a);
   vec3 col = base + s.rgb * uBrightness;
+
+  // v3 T4 (PLAN E2): cruise drive-field sheen — the warp's edge vocabulary at
+  // ~5 %. Steel blue, strongest at the frame edges and towards the apex.
+  if (uDriveSheen > 0.0) {
+    vec2 ndc = gl_FragCoord.xy / uViewport * 2.0 - 1.0;
+    float edge = smoothstep(0.45, 1.25, length(ndc));
+    float fore = 0.35 + 0.65 * max(dot(normalize(vDir), uDriveApex), 0.0);
+    col += vec3(0.30, 0.42, 0.58) * (uDriveSheen * edge * fore);
+  }
   gl_FragColor = vec4(max(col, 0.0), 1.0);
   #include <colorspace_fragment>
   // Dither after the output transform, exactly as the live path does: the
@@ -521,13 +534,29 @@ uniform float uPixelScale;
 uniform float uBrightness;
 uniform float uTwinkle;
 uniform float uTime;
+uniform vec3  uDriveApex;   // v3 T4: direction of travel, sky-local
+uniform float uDriveBeta;   // v3 T4: aberration β (render/driveField.ts)
 
 varying vec3 vColor;
 varying float vSize;
 varying float vSpike;
 
 void main() {
-  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  vec3 pos = position;
+  // v3 T4 (PLAN E2): relativistic aberration under the cruise drive — the
+  // field bunches towards the apex. Mirrors aberrateCos() in driveField.ts.
+  if (uDriveBeta > 0.0) {
+    float r = length(pos);
+    vec3 d = pos / r;
+    float c = dot(d, uDriveApex);
+    vec3 perp = d - uDriveApex * c;
+    float pl = length(perp);
+    if (pl > 1e-5) {
+      float c2 = clamp((c + uDriveBeta) / (1.0 + uDriveBeta * c), -1.0, 1.0);
+      pos = (uDriveApex * c2 + perp / pl * sqrt(max(1.0 - c2 * c2, 0.0))) * r;
+    }
+  }
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
 
   float flux = aFlux;
   vec3 col = aColor;
@@ -835,6 +864,15 @@ export class Sky {
   private readonly uBrightness: IUniform<number> = { value: 1 };
   private readonly uTwinkle: IUniform<number> = { value: 0 };
   private readonly uPixelScale: IUniform<number> = { value: 1 };
+  // v3 T4: cruise drive field (aberration + sheen). Apex is sky-LOCAL.
+  private readonly uDriveApex: IUniform<Vector3> = { value: new Vector3(0, 0, -1) };
+  private readonly uDriveBeta: IUniform<number> = { value: 0 };
+  private readonly uDriveSheen: IUniform<number> = { value: 0 };
+  private readonly uViewport: IUniform<Vector2> = { value: new Vector2(1920, 1080) };
+  private readonly driveApexWorld = new Vector3(0, 0, -1);
+  private driveBetaTarget = 0;
+  private driveSheenTarget = 0;
+  private readonly tmpQ = new Quaternion();
 
   private brightnessTarget = 1;
   private twinkleTarget = 0;
@@ -942,6 +980,9 @@ export class Sky {
         uSkyCube: { value: this.cubeRT.texture },
         uBrightness: this.uBrightness,
         uVoidColor: this.backdropMat.uniforms.uVoidColor!,
+        uDriveApex: this.uDriveApex,
+        uDriveSheen: this.uDriveSheen,
+        uViewport: this.uViewport,
       },
       vertexShader: BACKDROP_VERT,
       fragmentShader: BACKDROP_BAKED_FRAG,
@@ -974,6 +1015,8 @@ export class Sky {
         uPixelScale: this.uPixelScale,
         uTwinkle: this.uTwinkle,
         uTime: this.uTime,
+        uDriveApex: this.uDriveApex,
+        uDriveBeta: this.uDriveBeta,
       },
       vertexShader: STAR_VERT,
       fragmentShader: STAR_FRAG,
@@ -1373,6 +1416,17 @@ export class Sky {
     this.twinkleTarget = clamp01(v);
   }
 
+  /**
+   * v3 T4 (PLAN E2): the cruise drive field. `beta` is the aberration β and
+   * `sheen` the edge sheen (both from render/driveField.ts); `apexWorld` the
+   * direction of travel in world axes. Damped internally — safe to snap.
+   */
+  setDriveField(beta: number, sheen: number, apexWorld: Vector3): void {
+    this.driveBetaTarget = Number.isFinite(beta) ? Math.max(0, Math.min(0.9, beta)) : 0;
+    this.driveSheenTarget = Number.isFinite(sheen) ? Math.max(0, sheen) : 0;
+    if (apexWorld.lengthSq() > 1e-12) this.driveApexWorld.copy(apexWorld).normalize();
+  }
+
   /** Immediately match the targets, skipping the damping. Use on teleports. */
   snap(): void {
     this.uBrightness.value = this.brightnessTarget;
@@ -1405,6 +1459,17 @@ export class Sky {
     const kT = 1 - Math.exp(-2.2 * dt);
     this.uBrightness.value += (this.brightnessTarget - this.uBrightness.value) * kB;
     this.uTwinkle.value += (this.twinkleTarget - this.uTwinkle.value) * kT;
+
+    // v3 T4: drive field. Apex carried into the sky group's local axes.
+    const kD = 1 - Math.exp(-3.0 * dt);
+    this.uDriveBeta.value += (this.driveBetaTarget - this.uDriveBeta.value) * kD;
+    this.uDriveSheen.value += (this.driveSheenTarget - this.uDriveSheen.value) * kD;
+    if (this.uDriveBeta.value < 1e-5) this.uDriveBeta.value = 0;
+    if (this.uDriveSheen.value < 1e-5) this.uDriveSheen.value = 0;
+    this.tmpQ.copy(this.group.quaternion).invert();
+    this.uDriveApex.value.copy(this.driveApexWorld).applyQuaternion(this.tmpQ);
+    const pr = ctx.renderer.getPixelRatio();
+    this.uViewport.value.set(Math.max(1, ctx.width * pr), Math.max(1, ctx.height * pr));
   }
 
   /** One cubemap face per frame until the current galaxy's sky is baked. */

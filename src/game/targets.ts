@@ -147,6 +147,15 @@ export function etaSeconds(rangeKm: number, closingKmS: number): number | null {
   return Math.max(0, rangeKm) / closingKmS;
 }
 
+/**
+ * The target box's ETA (review-v3b): the straight-line one in sublight
+ * flight; none under cruise, whose speed is not constant — the drive's own
+ * readout (game/cruiseReadout.ts) owns the arrival time then.
+ */
+export function targetEtaSeconds(rangeKm: number, closingKmS: number, cruising: boolean): number | null {
+  return cruising ? null : etaSeconds(rangeKm, closingKmS);
+}
+
 /** Range to a body's surface (radius > 0) or a vessel's centre (radius 0). */
 export function targetRangeKm(centreKm: number, radiusKm: number): number {
   return Math.max(0, centreKm - radiusKm);

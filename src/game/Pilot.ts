@@ -15,12 +15,15 @@ import { config } from '@/core/Config';
 
 import { Ship } from '@/ship/Ship';
 import { CameraRig, type CameraMode, type LandedFrameSource } from '@/ship/CameraRig';
+import { cruiseSpoolNow, flightActivity } from '@/core/flightActivity';
 import type { Universe } from '@/game/Universe';
 import { shotOwnsScene } from '@/game/Shots';
 import type { Hud } from '@/ui/Hud';
 import type { Audio } from '@/audio/Audio';
 import { resolveJumpKey, type JumpSelection } from '@/game/jumpKey';
 import { activeFlightPreset } from '@/game/flightPreset'; // [v2-p4]
+import { touchdownGrade } from '@/game/touchdownGrade'; // v3 polish (D22a)
+import { keyLightAt, starDirectionLocal } from '@/render/keyLight';
 
 /** What `J` needs from the galaxy chart. `StarMap` satisfies it. */
 export interface JumpChart {
@@ -42,6 +45,9 @@ export interface PilotOptions {
   readonly audio?: Audio | null;
   readonly shipSeed?: number;
 }
+
+/** The hull's key-light colour at unit irradiance (Ship.sunColor's authored default). */
+const HULL_SUN_BASE = new Color(1.0, 0.94, 0.86);
 
 export class Pilot implements GameModule {
   readonly name = 'pilot';
@@ -106,7 +112,7 @@ export class Pilot implements GameModule {
 
     bus.on('camera:shake', ({ intensity, duration }) => this.rig.shake(intensity, duration));
 
-    bus.on('ship:touchdown', ({ speed, vertical }) => this.onTouchdown(speed, vertical));
+    bus.on('ship:touchdown', ({ vertical, slip }) => this.onTouchdown(vertical, slip));
     // A crash is not a landing: the recovery module fades to black and puts
     // the ship back in orbit (GAMEPLAY F6). Entering the landed state here
     // would swing the camera to orbit and then log AIRBORNE on the respawn.
@@ -123,15 +129,11 @@ export class Pilot implements GameModule {
    * Grade the arrival and say so. A pilot knows the difference between setting
    * a hull down and arriving at it, and the log is where the game admits it.
    */
-  private onTouchdown(speed: number, vertical: number): void {
+  private onTouchdown(vertical: number, slip: number): void {
     this.enterLanded();
-    const mps = Math.abs(vertical) * 1000;
-    const grade =
-      mps < 2 ? 'TOUCHDOWN — CLEAN' : mps < 8 ? 'TOUCHDOWN' : 'TOUCHDOWN — HARD';
-    bus.emit('log', {
-      text: `${grade} · ${mps.toFixed(1)} M/S`,
-      tone: mps < 8 ? 'good' : 'warn',
-    });
+    // v3 polish (D22a): graded on the worse of the sink rate and the slip
+    // against the (turning) ground; the only touchdown line in the log.
+    bus.emit('log', touchdownGrade(vertical, slip));
   }
 
   private enterLanded(): void {
@@ -329,6 +331,16 @@ export class Pilot implements GameModule {
     this.shipState.boost = flight.boosting ? 1 : 0;
     this.shipState.heating = flight.heating;
 
+    // v3-light: the hull takes the key light the worlds take
+    // (render/keyLight.ts), from where the star actually is. Neither was ever
+    // filled in: the hull sat at a flat daylight 1.0 at any distance with an
+    // authored sun off the bow at every attitude. The iris metered that hull,
+    // and in the outskirts the world beside it rendered black.
+    starDirectionLocal(flight.renderWorldPosition, flight.renderOrientation, this.ship.sunDirection);
+    this.ship.sunColor
+      .copy(HULL_SUN_BASE)
+      .multiplyScalar(keyLightAt(this.universe.system?.stars[0]?.luminosity ?? 1, flight.renderWorldPosition.length()));
+
     this.ship.object3d.position.copy(this.renderPos);
     this.ship.object3d.quaternion.copy(flight.renderOrientation);
     this.ship.update(dt, ctx, this.shipState);
@@ -348,6 +360,15 @@ export class Pilot implements GameModule {
     // `flight.velocity` is parent-relative, which is what the rig wants: it
     // eases its aim towards the velocity vector, and a world one would point
     // along the planet's orbit around its sun no matter what the pilot did.
+    // [v3-T1] What the hull feels — proper acceleration, engine output, cruise
+    // spool — so the rig never differentiates positions. Under cruise the ship
+    // is carried, not pushed: no thrust rumble. The cruise flags are a
+    // fallback from FlightModel alone (core/flightActivity.ts).
+    const fa = flightActivity;
+    fa.cruiseFallback = flight.cruising;
+    const spoolK = dt > 0 ? 1 - Math.exp(-dt / 0.6) : 0;
+    fa.cruiseSpoolFallback += ((flight.cruising ? 1 : 0) - fa.cruiseSpoolFallback) * spoolK;
+    this.rig.setMotion(flight.properAccel, flight.cruising ? 0 : flight.throttle, cruiseSpoolNow());
     this.rig.update(dt, this.renderPos, flight.renderOrientation, flight.velocity, ctx);
 
     // The ship leaves the ground the moment the model says it has, rather than

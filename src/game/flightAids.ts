@@ -14,6 +14,12 @@ export const LEVEL_VS_KMS = 1e-4;
  * wanders with every substep of ground contact. 0.5 m/s.
  */
 export const MARKER_MIN_SPEED_KMS = 5e-4;
+/**
+ * v3 polish (review low): an impact further off than this is not shown, s.
+ * A stable orbit breathes a few m/s of V/S, and IMPACT read ">99h" for an
+ * impact the orbit never delivers; a real deorbit is well under the hour.
+ */
+export const TTI_MAX_S = 3600;
 /** The altimeter's reach, in the body's own radii — same as Universe's. */
 export const ALT_RANGE_RADII = 40;
 
@@ -42,7 +48,8 @@ export function verticalReadout(
     return out;
   }
   out.vsiKmS = vsKmS;
-  out.ttiS = altKm !== null && vsKmS < -LEVEL_VS_KMS ? Math.max(0, altKm) / -vsKmS : null;
+  const tti = altKm !== null && vsKmS < -LEVEL_VS_KMS ? Math.max(0, altKm) / -vsKmS : null;
+  out.ttiS = tti !== null && tti <= TTI_MAX_S ? tti : null;
   return out;
 }
 
@@ -79,6 +86,48 @@ export function pickAltitude(i: AltitudeInput): AltitudeReadout | null {
     return { altitudeKm: i.nearestAltKm, bodyName: i.nearestName };
   }
   return null;
+}
+
+export interface AltitudeContext {
+  /** What ALT shows — `pickAltitude`'s choice, unchanged from v2 (F11). */
+  alt: AltitudeReadout | null;
+  /** VEL's frame, named only when it is not the body ALT names. */
+  velFrame: string | null;
+  /** A different body whose surface is nearer than the ALT body's. */
+  proximity: AltitudeReadout | null;
+  /** V/S and impact run along the parent's vertical: meaningful only when ALT is the parent. */
+  verticalApplies: boolean;
+}
+
+/**
+ * Make ALT and VEL say what they measure (v3 F). `frameName` is what VEL is
+ * relative to: the parent, or the system's star in the star frame.
+ */
+export function altitudeContext(i: AltitudeInput, frameName: string): AltitudeContext {
+  const alt = pickAltitude(i);
+  const velFrame = alt !== null && alt.bodyName === frameName ? null : frameName;
+  let proximity: AltitudeReadout | null = null;
+  if (
+    alt !== null &&
+    i.nearestName !== null &&
+    i.nearestAltKm !== null &&
+    i.nearestName !== alt.bodyName &&
+    i.nearestAltKm < alt.altitudeKm
+  ) {
+    proximity = { altitudeKm: i.nearestAltKm, bodyName: i.nearestName };
+  }
+  const verticalApplies = alt !== null && i.parentName !== null && alt.bodyName === i.parentName;
+  return { alt, velFrame, proximity, verticalApplies };
+}
+
+/**
+ * V/S and time-to-impact are shown only with a parent to measure against and
+ * while the cruise drive is idle (review-v3b): under cruise "vertical" speed
+ * is the drive's 10^3-10^5 km/s along whatever the nose points at, and the
+ * impact countdown runs towards a world the drive drops out in front of.
+ */
+export function verticalShown(hasParent: boolean, cruisePhase: 'idle' | 'spooling' | 'cruise' | 'dropping'): boolean {
+  return hasParent && cruisePhase === 'idle';
 }
 
 /**

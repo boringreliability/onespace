@@ -148,3 +148,39 @@ export function serializeRoute(r: Route): string {
   const s = q.toString();
   return s ? `?${s}` : '';
 }
+
+// ---------------------------------------------------------------------------
+// v3 T4 — SEE IN FLIGHT: a flight route that carries a ship names a companion.
+// ---------------------------------------------------------------------------
+
+/**
+ * The ship to spawn beside the player, or null. Only an explicit
+ * `?mode=flight` link spawns, and only a hull of THIS generation: an older
+ * generator's ship is not this ship, and spawning a different one under the
+ * same link is the review-p2 bug.
+ */
+export function companionShip(r: Route): RouteShip | null {
+  if (r.mode !== 'flight' || !r.ship || r.staleGeneration !== false) return null;
+  return r.ship;
+}
+
+/**
+ * v3 polish (review low): the developer overrides SEE IN FLIGHT carries over
+ * from the current URL. A whitelist — it used to keep every key that was not
+ * a ship-route key, whatever it was.
+ */
+const CARRIED_KEYS: readonly string[] = ['tier', 'dpr', 'seed', 'dev'];
+
+/** A generation-pinned flight route for `ship`, keeping only `search`'s developer overrides. */
+export function seeInFlightSearch(search: string, ship: RouteShip): string {
+  const from = new URLSearchParams(search);
+  const q = new URLSearchParams();
+  for (const k of CARRIED_KEYS) {
+    const v = from.get(k);
+    if (v !== null) q.set(k, v);
+  }
+  for (const [k, v] of new URLSearchParams(serializeRoute({ mode: 'flight', ship, warnings: [] }))) q.set(k, v);
+  const out = q.toString().replace(/(^|&)dev=(?=&|$)/, '$1dev');
+  return out ? `?${out}` : '';
+}
+// --- end v3 T4 ---------------------------------------------------------------

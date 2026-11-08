@@ -12,6 +12,12 @@
  *
  * Registered after Pilot, AutoPilot and Cruise, so the command and the
  * autopilot state it judges are this frame's.
+ *
+ * v3 (T3, D0 point 3): while the autopilot flies, IT sets the rate —
+ * `autopilotTimeRate`: 10× hands-off above 20 km AGL outside thick air, 1×
+ * below. `,` and `.` are refused meanwhile, any touch drops to 1× on the
+ * frame (the autopilot disengages on the same touch), and when the leg ends
+ * the rate it chose goes with it.
  */
 
 import type { EngineContext, GameModule } from '@/core/Engine';
@@ -19,7 +25,8 @@ import { bus } from '@/core/EventBus';
 import { shotOwnsScene } from '@/game/Shots';
 import type { Universe } from '@/game/Universe';
 import type { Hud } from '@/ui/Hud';
-import { orbitApsides, type Apsides } from '@/ship/autopilot';
+import { orbitApsides, pilotIntervened, type Apsides } from '@/ship/autopilot';
+import type { InputAxes } from '@/core/Input';
 import {
   compressionBlock,
   pilotTouching,
@@ -27,12 +34,13 @@ import {
   type CompressionBlock,
   type CompressionInputs,
   type TimeRate,
+  autopilotTimeRate,
 } from '@/game/timeCompression';
 
 export interface TimeControlOptions {
   readonly universe: Universe;
   readonly warp: { readonly phase: string };
-  readonly autopilot: { readonly active: boolean };
+  readonly autopilot: { readonly active: boolean; readonly phase?: string };
   readonly hud?: Hud | null;
 }
 
@@ -58,6 +66,8 @@ export class TimeControl implements GameModule {
   readonly name = 'time-compression';
 
   private rate: TimeRate = 1;
+  /** v3: the current rate was chosen by the autopilot, not the pilot. */
+  private autoRate = false;
   private readonly opts: TimeControlOptions;
   private readonly apsides: Apsides = { periapsis: 0, apoapsis: 0, eccentricity: 0 };
   private readonly inputs: { -readonly [K in keyof CompressionInputs]: CompressionInputs[K] } = {
@@ -74,6 +84,8 @@ export class TimeControl implements GameModule {
     soiRadiusKm: 0,
   };
   private readonly offs: Array<() => void> = [];
+  /** review-v3b: last frame's axes, so a resting stick is told from a moving one. */
+  private readonly prevAxes: InputAxes = { pitch: 0, yaw: 0, roll: 0, throttle: 0, strafeX: 0, strafeY: 0, strafeZ: 0 };
 
   constructor(opts: TimeControlOptions) {
     this.opts = opts;
@@ -112,6 +124,44 @@ export class TimeControl implements GameModule {
       input.pressed('land') ||
       input.pressed('cruise') ||
       input.pressed('warp');
+
+    // review-v3b: the autopilot's own notion of a hand (pilotIntervened): the
+    // v3 mouse stick HOLDS a deflection (D4), so a stick resting off centre
+    // is not a touch; only one that grows is. pilotTouching read the resting
+    // deflection as hands-on and the autopilot was never compressed.
+    const moved =
+      pilotIntervened(input.axes, this.prevAxes, {
+        throttleKeys: input.isDown('KeyW') || input.isDown('KeyS'),
+        brake: input.held('brake'),
+        boost: input.held('boost'),
+        zeroThrottle: input.pressed('zeroThrottle'),
+      }) ||
+      input.pressed('land') ||
+      input.pressed('cruise') ||
+      input.pressed('warp');
+    Object.assign(this.prevAxes, input.axes);
+
+    // [v3-t3] the autopilot's rate
+    const ap = this.opts.autopilot;
+    if (ap.active) {
+      const want = autopilotTimeRate({
+        altKm: u.flight.altitude,
+        rho: u.flight.atmosphericDensity,
+        phase: ap.phase ?? 'descent',
+        hands: moved,
+      });
+      if (want !== this.rate) {
+        this.set(want, want === 1 && moved ? 'CONTROLS' : null, want > 1 ? 'AUTOPILOT' : null);
+      }
+      this.autoRate = true;
+      if (input.pressed('timeFaster') || input.pressed('timeSlower')) this.refuse(BLOCK_TEXT.autopilot);
+      return;
+    }
+    if (this.autoRate) {
+      this.autoRate = false;
+      if (this.rate > 1) this.set(1, touching ? 'CONTROLS' : null);
+    }
+    // [/v3-t3]
 
     if (this.rate > 1 && (touching || block !== null)) {
       this.set(1, touching ? 'CONTROLS' : BLOCK_TEXT[block!]);
@@ -154,13 +204,13 @@ export class TimeControl implements GameModule {
   }
 
   /** Apply a rate; `dropped` names why it fell back to 1×, if it did. */
-  private set(rate: TimeRate, dropped: string | null): void {
+  private set(rate: TimeRate, dropped: string | null, by: string | null = null): void {
     if (rate === this.rate) return;
     this.rate = rate;
     this.opts.universe.simRate = rate;
     this.opts.hud?.setTimeRate(rate);
     bus.emit('log', {
-      text: dropped ? `TIME ×1 — ${dropped}` : `TIME ×${rate}`,
+      text: dropped ? `TIME ×1 — ${dropped}` : by ? `TIME ×${rate} — ${by}` : `TIME ×${rate}`,
       tone: dropped ? 'warn' : 'normal',
     });
   }
