@@ -27,7 +27,7 @@ describe('propellant constants', () => {
   it('Given the global constraints, Then the probe constants have the specified values', () => {
     expect(PROBE_TANK_CAPACITY_KG).toBe(20_000);
     expect(PROBE_DRY_MASS_KG).toBe(DEFAULT_SHIP_CONFIG.mass);
-    expect(EXHAUST_VELOCITY_KMS).toBe(1000);
+    expect(EXHAUST_VELOCITY_KMS).toBe(11_500);
     expect(START_FILL).toBe(0.6);
   });
 });

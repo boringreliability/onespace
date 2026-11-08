@@ -9,8 +9,8 @@
 export const PROBE_TANK_CAPACITY_KG = 20_000;
 /** Dry mass of the probe, kg. Equals DEFAULT_SHIP_CONFIG.mass (pinned by test). */
 export const PROBE_DRY_MASS_KG = 2.0e5;
-/** Starting effective exhaust velocity, km/s. */
-export const EXHAUST_VELOCITY_KMS = 1000;
+/** Effective exhaust velocity, km/s. Tuned in D1/D2: auto-land from the opening orbit ~7 % of a full tank. */
+export const EXHAUST_VELOCITY_KMS = 11_500;
 /** Fraction of the tank filled at the start. */
 export const START_FILL = 0.6;
 

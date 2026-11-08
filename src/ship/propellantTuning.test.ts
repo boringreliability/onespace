@@ -51,22 +51,15 @@ describe('fuel tuning targets (D1)', () => {
     expect(used).toBeLessThanOrEqual(0.1);
   });
 
-  // D2: the owner's ve. Phase B sets EXHAUST_VELOCITY_KMS to it; until then the
-  // CLEAN bar is also flown here, because a full tank that stays heavy all the
-  // way down (high ve) is the hard case: at ve 1000 the leg burns 80 % and
-  // lands light, which would hide the miss.
-  const D2_VE_KMS = 11_500;
-
+  // D2: with the tuned ve the tank stays heavy all the way down (~7 % burned),
+  // the hard case for the landing envelope.
   it('Given a full tank, When auto-land runs to touchdown, Then it is CLEAN (vertical < 2 m/s, the pacing test\'s bar)', () => {
-    for (const ve of new Set([EXHAUST_VELOCITY_KMS, D2_VE_KMS])) {
-      const l = flyLeg(REMIT, true, (fm) => fm.attachPropellant(new Propellant(CAP, 1.0), ve));
-      releaseLegListeners();
-      const v = l.touchdowns[0]?.vertical ?? Number.NaN;
-      console.info(`[fuel tuning] ve ${ve} km/s · full-tank auto-land: ${l.result} · touchdown ${(v * 1000).toFixed(2)} m/s`);
-      expect(l.result, `ve ${ve}`).toBe('landed');
-      expect(l.crashes, `ve ${ve}`).toBe(0);
-      expect(v, `ve ${ve}: touchdown vertical km/s`).toBeLessThan(0.002);
-    }
+    const l = flyLeg(REMIT, true, fullTank);
+    const v = l.touchdowns[0]?.vertical ?? Number.NaN;
+    console.info(`[fuel tuning] ve ${EXHAUST_VELOCITY_KMS} km/s · full-tank auto-land: ${l.result} · touchdown ${(v * 1000).toFixed(2)} m/s`);
+    expect(l.result).toBe('landed');
+    expect(l.crashes).toBe(0);
+    expect(v).toBeLessThan(0.002);
   });
 
   it('Given a full tank in orbit, When main is held for 10 s, Then it uses ≤ 2 %', () => {

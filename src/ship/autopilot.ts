@@ -465,8 +465,12 @@ export class Autopilot {
     const vh2 = sHoriz.lengthSq();
 
     // --- authority ----------------------------------------------------------
-    const mainAccel = (cfg.mainThrust / cfg.mass) * M_TO_KM;
-    const rcsAccel = (cfg.rcsThrust / cfg.mass) * M_TO_KM;
+    // [v4-fuel] D2: the hull's DELIVERED authority — a full tank answers
+    // slower, and the envelope, hover lock and allocation must know it.
+    // Exactly 1 without a tank (v3 bit for bit).
+    const fuel = flight.massScaleNow;
+    const mainAccel = (cfg.mainThrust / cfg.mass) * M_TO_KM * fuel;
+    const rcsAccel = (cfg.rcsThrust / cfg.mass) * M_TO_KM * fuel;
     const g = world.mu / (r * r);
     const gSurface = world.mu / (world.radiusKm * world.radiusKm);
     // Braking the envelope plans with: boosted drive less surface gravity.

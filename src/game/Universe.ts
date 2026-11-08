@@ -59,6 +59,7 @@ import {
   soiRadius,
   type ParentBody,
 } from '@/ship/FlightModel';
+import { EXHAUST_VELOCITY_KMS, PROBE_TANK_CAPACITY_KG, Propellant } from '@/ship/propellant'; // [v4-fuel]
 
 /**
  * Orbits run at 1:1 with the ship.
@@ -247,6 +248,8 @@ export class Universe implements GameModule {
 
   constructor(private readonly options: UniverseOptions = {}) {
     this.seed = options.seed ?? DEFAULT_UNIVERSE_SEED;
+    // [v4-fuel] The probe carries its tank. Full until sub-plan 2 (START_FILL, belts).
+    this.flight.attachPropellant(new Propellant(PROBE_TANK_CAPACITY_KG, 1.0), EXHAUST_VELOCITY_KMS);
   }
 
   // -------------------------------------------------------------------------

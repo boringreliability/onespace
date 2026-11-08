@@ -544,6 +544,14 @@ export class FlightModel {
     return this._propellant;
   }
 
+  /**
+   * The tank's mass response now: massScale(dry, prop, extra), exactly 1
+   * without a tank. Guidance multiplies its acceleration caps by it (D2).
+   */
+  get massScaleNow(): number {
+    return this._propellant !== null ? massScale(this.config.mass, this._propellant.massKg, this.extraMassKg) : 1;
+  }
+
   /** True when, in the last substep, thrust was wanted but the tank could not supply it. */
   get thrustStarved(): boolean {
     return this._thrustStarved;
