@@ -68,7 +68,7 @@ import type { InputAxes } from '@/core/Input';
 import type { PlanetSpec } from '@/gen/types';
 import { FIXED_H, MAX_SUBSTEPS, substepBudget } from '@/core/substeps';
 // [v3-T2] rotation and assist shaping live in their own pure modules.
-import { MAX_RATE, rateCommand, rateTuning, type RateTuning } from './rateCommand';
+import { MAX_RATE, rateCommandAgainst, rateTuning, type RateTuning } from './rateCommand';
 import { groundVelocity, spinAngularVelocity } from './surfaceSpin'; // v3 polish (D22a)
 import {
   ASSIST_ACTUATOR_TAU,
@@ -971,10 +971,14 @@ export class FlightModel {
     }
 
     // --- atmosphere ---------------------------------------------------------
-    if (this.density > 0 && speed > 1e-9) {
-      this.sVdir.copy(this.velocity).multiplyScalar(1 / speed);
-      const dragMag = c.dragCoefficient * this.density * speed * speed;
-      this.sAcc.addScaledVector(this.sVdir, -dragMag);
+    // [v3-atmo] The air turns with its world: the relative wind is v − ω×r,
+    // not the centre-frame v (which put a hull flying with the ground in a
+    // crosswind of ω×r — 0.39 km/s on Grey Angle). Drag, weathercock and
+    // heating all take it.
+    const airspeed = this.relativeWind(this.sAirRel);
+    if (this.density > 0 && airspeed > 1e-9) {
+      const dragMag = c.dragCoefficient * this.density * airspeed;
+      this.sAcc.addScaledVector(this.sAirRel, -dragMag);
     }
 
     // --- accelerometer, then integrate --------------------------------------
@@ -989,10 +993,32 @@ export class FlightModel {
     this.velocity.addScaledVector(this.sAcc, h);
     this.position.addScaledVector(this.velocity, h);
 
-    this.stepRotation(h, speed);
-    this.stepHeating(h, speed);
+    this.stepRotation(h, airspeed);
+    this.stepHeating(h, airspeed);
     if (this.groundSampler) this.stepGround(h);
   }
+
+  /**
+   * [v3-atmo] The air's velocity relative to the hull's, into `out`; returns
+   * its length (the airspeed). The air co-rotates with the parent world
+   * (ω×r, `surfaceSpin`). A grounded hull's velocity is already
+   * surface-relative (D24), so there it is the velocity itself. No air, no
+   * wind: the centre-frame velocity is returned unchanged.
+   */
+  private relativeWind(out: Vector3): number {
+    out.copy(this.velocity);
+    const spec = this.landingPlanet;
+    if (this.density > 0 && !this._grounded && spec) {
+      spinAngularVelocity(spec.rotationPeriod, spec.axialTilt, this.sAirOmega);
+      if (this.sAirOmega.lengthSq() > 0) out.sub(groundVelocity(this.sAirOmega, this.position, this.sAirGround));
+    }
+    return out.length();
+  }
+
+  /** [v3-atmo] scratch: relative wind, the spin vector and the air's velocity. */
+  private readonly sAirRel = new Vector3();
+  private readonly sAirOmega = new Vector3();
+  private readonly sAirGround = new Vector3();
 
   /**
    * The FA computer, 'hold' or 'stop'. Writes thrust into `sAcc`; gravity is
@@ -1157,7 +1183,7 @@ export class FlightModel {
   // -------------------------------------------------------------------------
 
   // [v3-T2] BEGIN rotation (T2 owns this function)
-  private stepRotation(h: number, speed: number): void {
+  private stepRotation(h: number, airspeed: number): void {
     const c = this.config;
     const w = this.angularVelocity;
     const hold = this._attitudeHold;
@@ -1174,18 +1200,19 @@ export class FlightModel {
       );
     }
 
-    if (this.density > 0 && speed > 1e-9) {
+    if (this.density > 0 && airspeed > 1e-9) {
       // Weathercock: a body with fins wants its nose down the relative wind.
       // Working in body space makes the axis almost free — the nose is a
       // constant (0,0,-1), so (0,0,-1) × v̂ collapses to (v̂.y, -v̂.x, 0).
+      // [v3-atmo] v̂ is the relative wind (`relativeWind`, set by step()).
       this.sInvQ.copy(this.orientation).invert();
-      this.sVdir.copy(this.velocity).multiplyScalar(1 / speed).applyQuaternion(this.sInvQ);
-      const q = c.aeroAlign * this.density * speed * speed;
+      this.sVdir.copy(this.sAirRel).multiplyScalar(1 / airspeed).applyQuaternion(this.sInvQ);
+      const q = c.aeroAlign * this.density * airspeed * airspeed;
       this.sTorque.x += this.sVdir.y * q;
       this.sTorque.y += -this.sVdir.x * q;
 
       // Aerodynamic damping is physical, so it survives assist being off.
-      const aeroDamp = c.aeroAngularDamp * this.density * speed;
+      const aeroDamp = c.aeroAngularDamp * this.density * airspeed;
       this.sTorque.addScaledVector(w, -aeroDamp);
     }
 
@@ -1199,17 +1226,23 @@ export class FlightModel {
     this.sTorque.y -= ((ix - iz) * w.z * w.x) / iy;
     this.sTorque.z -= ((iy - ix) * w.x * w.y) / iz;
 
-    w.addScaledVector(this.sTorque, h);
-
     if (hold) {
-      // Rate command: the disturbances above are integrated first and then
-      // flown out like any other rate error. Landing gear locked on the ground
-      // stiffens the loop (τ × 0.25), as the v2 damping did.
+      // Rate command. [v3-atmo] The moments above (weathercock, aero damping,
+      // gyroscopic) are ones the computer itself computes, so it cancels
+      // them with the RCS instead of letting them into ω and flying them back
+      // out: a proportional loop holds a constant moment M only with a
+      // standing error τ·M, which in air was the hull turning on its own with
+      // the stick released (`rateCommandAgainst`). Only what the RCS cannot
+      // hold turns the hull. Landing gear locked on the ground stiffens the
+      // loop (τ × 0.25), as the v2 damping did.
       const k = this._grounded ? 0.25 : 1;
       const cmd = this.command;
-      w.x = rateCommand(w.x, clampAbs(cmd.pitch, 1) * MAX_RATE.pitch, h, this.ratePitch, k);
-      w.y = rateCommand(w.y, clampAbs(cmd.yaw, 1) * MAX_RATE.yaw * c.yawAxisSign, h, this.rateYaw, k);
-      w.z = rateCommand(w.z, clampAbs(cmd.roll, 1) * MAX_RATE.roll * c.rollAxisSign, h, this.rateRoll, k);
+      const t = this.sTorque;
+      w.x = rateCommandAgainst(w.x, clampAbs(cmd.pitch, 1) * MAX_RATE.pitch, t.x, h, this.ratePitch, k);
+      w.y = rateCommandAgainst(w.y, clampAbs(cmd.yaw, 1) * MAX_RATE.yaw * c.yawAxisSign, t.y, h, this.rateYaw, k);
+      w.z = rateCommandAgainst(w.z, clampAbs(cmd.roll, 1) * MAX_RATE.roll * c.rollAxisSign, t.z, h, this.rateRoll, k);
+    } else {
+      w.addScaledVector(this.sTorque, h);
     }
 
     // Exponential map: exact for a constant ω over the substep, and it keeps

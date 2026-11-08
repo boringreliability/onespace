@@ -86,6 +86,37 @@ export function rateCommand(w: number, wcmd: number, h: number, t: RateTuning, t
   return next;
 }
 
+/**
+ * [v3-atmo] One step of the rate loop on a hull that also feels a KNOWN
+ * angular acceleration `moment` (rad/s², body axis: weathercock, aero damping,
+ * gyroscopic). The computer flies `rateCommand`'s path as if the moment were
+ * not there and the RCS supplies the difference — up to α_brake, the most the
+ * loop ever asks of it. Only the part of the moment beyond that moves ω off
+ * the path, so in air the hull holds a released attitude, a demanded rate is
+ * reached, and a moment the RCS cannot hold weathervanes the hull honestly.
+ *
+ * The old order (integrate the moment, then fly it back out) left a standing
+ * error τ·M — the hull turned by itself with the stick released — and, for
+ * α_max < M < α_brake, chattered ω across zero every substep. With
+ * `moment` 0 this is `rateCommand`, bit for bit.
+ */
+export function rateCommandAgainst(
+  w: number,
+  wcmd: number,
+  moment: number,
+  h: number,
+  t: RateTuning,
+  tauScale = 1,
+): number {
+  const next = rateCommand(w, wcmd, h, t, tauScale);
+  if (!(h > 0) || !Number.isFinite(moment) || moment === 0) return next;
+  // RCS the path needs: (Δω/h) − moment.
+  const need = (next - w) / h - moment;
+  const cap = t.alphaDown;
+  if (need <= cap && need >= -cap) return next;
+  return w + ((need > 0 ? cap : -cap) + moment) * h;
+}
+
 // ---------------------------------------------------------------------------
 // Steering against this plant (cruiseSteer, autopilot)
 // ---------------------------------------------------------------------------

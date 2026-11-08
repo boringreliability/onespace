@@ -109,7 +109,7 @@ describe('[v3-atmo] rate command against the aerodynamic moment', () => {
     expect(-fm.angularVelocity.x).toBeGreaterThan(0.5 * MAX_RATE.pitch);
   });
 
-  it('Given a moment far beyond the RCS (4 km/s, ρ 1, 60°), When hands-off, Then physics wins honestly: the nose weathervanes into the wind monotonically and settles (< 1°/s) without ω reversing', () => {
+  it('Given a moment far beyond the RCS (4 km/s, ρ 1, 60°), When hands-off, Then physics wins honestly: the nose weathervanes into the wind monotonically, without ω reversing, until the moment is one the RCS can hold — and there it holds (< 1°/s)', () => {
     const fm = inAir(1, 4, 60);
     expect(aeroMoment(1, 4, 60)).toBeGreaterThan(12);
     let prevAoa = relativeWindAngle(fm);
@@ -127,7 +127,8 @@ describe('[v3-atmo] rate command against the aerodynamic moment', () => {
     }
     expect(increases).toBe(0);
     expect(reversals).toBe(0);
-    expect(relativeWindAngle(fm)).toBeLessThan(5);
+    expect(relativeWindAngle(fm)).toBeLessThan(45);
+    expect(aeroMoment(1, fm.speed, relativeWindAngle(fm))).toBeLessThan(6.25 * 1.05);
     expect(fm.angularVelocity.length() / DEG).toBeLessThan(1);
   });
 
@@ -175,10 +176,8 @@ describe('[v3-atmo] the air turns with its world', () => {
     fm.flightAssist = false;
     fm.teleport(pos, ground.clone(), new Quaternion());
     fm.update(H);
-    // ω×r turns as the hull moves round, so compare against the ground at the
-    // new position: what is left is drag, and there is none.
-    const after = groundVelocity(spinAngularVelocity(PERIOD, TILT, new Vector3()), fm.position, new Vector3());
-    expect(fm.velocity.distanceTo(after)).toBeLessThan(1e-6);
+    // No gravity here (mu 0), so with no drag the velocity is untouched.
+    expect(fm.velocity.distanceTo(ground)).toBeLessThan(1e-12);
   });
 
   it('Given a turning world, When the hull moves with the ground, Then there is no weathercock (raw hull, hold off) and no heating', () => {

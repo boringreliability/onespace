@@ -352,6 +352,9 @@ const WORLD_X = new Vector3(1, 0, 0);
 const sApsides: Apsides = { periapsis: 0, apoapsis: 0, eccentricity: 0 };
 const sGround = new Vector3();
 const sRel = new Vector3();
+/** [v3-atmo] the air's horizontal velocity (ω×r) and the relative wind. */
+const sAirH = new Vector3();
+const sAirRel = new Vector3();
 
 // ---------------------------------------------------------------------------
 // The computer
@@ -543,12 +546,20 @@ export class Autopilot {
     const spinW = goal === 'land' && hasSpin(world) ? spinMatchWeight(alt) : 0;
     const relief = goal === 'orbit' ? 1 - this.lastBlend : 1 - spinW;
     sAcc.addScaledVector(sUp, g - relief * (vh2 / r));
-    // v3 polish: matching a turning ground in air means flying sideways
-    // through still air (FlightModel's drag is centre-frame). Carry the
-    // horizontal drag the hull feels, or the loop trails it by τ·drag.
-    if (spinW > 0 && rho > 0) {
-      const k = spinW * cfg.dragCoefficient * rho * flight.speed;
-      sAcc.addScaledVector(sHoriz, k);
+    // [v3-atmo] The air turns with the world (FlightModel's drag acts on
+    // v − ω×r). The field was shaped for air that stands still in its own
+    // frame below the blend and moves with the ground under it, so carry the
+    // difference: the push of the moving air, less the drag of the share of
+    // the ground's motion the field asks for. Matching the ground in full
+    // (spinW 1) leaves nothing to carry; the 10× legs above the blend
+    // (spinW 0) fly as they did before the air turned. Before, the air stood
+    // still and this was the drag of flying sideways through it.
+    if (rho > 0 && hasSpin(world)) {
+      sAirH.crossVectors(world.spinRadS!, p);
+      sAirRel.subVectors(v, sAirH);
+      sAirH.addScaledVector(sUp, -sAirH.dot(sUp));
+      const k = cfg.dragCoefficient * rho * sAirRel.length();
+      sAcc.addScaledVector(sHoriz, k * spinW).addScaledVector(sAirH, -k);
     }
     // v3: jerk limit. The hull's acceleration follows the demand at a bounded
     // rate, whatever the field does from one step to the next.
