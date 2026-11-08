@@ -920,6 +920,10 @@ export class FlightModel {
     const c = this.config;
     this.refreshBodyAxes();
 
+    // [v4-fuel] Per substep, and before the cruise return: under cruise no
+    // thrust is drawn from the tank, so nothing can be starved.
+    this._thrustStarved = false;
+
     if (this.cruiseCap !== null) {
       this.stepCruise(h);
       return;
@@ -978,7 +982,13 @@ export class FlightModel {
     const limiter = clamp01(1 - Math.pow(Math.min(speed / vmax, 1), c.speedFalloffExponent));
 
     if (active) {
-      this.stepAssist(vmax, boostMul, limiter, h);
+      // [v4-fuel] R7: the computer flies in DELIVERED acceleration — its caps
+      // carry the tank's mass response (1 without a tank: v3 exactly).
+      const fuel =
+        this._propellant !== null
+          ? massScale(c.mass, this._propellant.massKg, this.extraMassKg)
+          : 1;
+      this.stepAssist(vmax, boostMul, limiter, h, fuel);
     } else {
       if (this._fa) this._assistTarget = 0;
       // [v3-T2] The detent cuts the drive at once: no actuator tail (D39).
@@ -1006,8 +1016,9 @@ export class FlightModel {
     // Here `sAcc` holds thrust only (main, RCS, brake or the FA computer), so
     // the propellant need is measured before drag is added. No tank: skipped,
     // and the step is v3 untouched. Rotation never comes through here.
-    this._thrustStarved = false;
-    if (this._propellant !== null) this.drawPropellant(h);
+    // Under the assist the output is already delivered acceleration (R7), so
+    // massScale is applied here only to FA-OFF thrust.
+    if (this._propellant !== null) this.drawPropellant(h, !active);
     // --- end [v4-fuel] ---
 
     // --- atmosphere ---------------------------------------------------------
@@ -1080,7 +1091,7 @@ export class FlightModel {
    * The computer throttles the drive directly, and the readout says so.
    */
   // [v3-T2] BEGIN assist (T2 owns stepAssist; T4's formation seam is marked)
-  private stepAssist(vmax: number, boostMul: number, limiter: number, h: number): void {
+  private stepAssist(vmax: number, boostMul: number, limiter: number, h: number, fuel: number): void {
     const cmd = this.command;
     const v = this.velocity;
     const act = this.assistAct;
@@ -1111,14 +1122,17 @@ export class FlightModel {
     const er = e.dot(this.right);
     const eu = e.dot(this.up);
 
-    const mainCap = this.mainAccel * boostMul;
-    const rcs = this.rcsAccel;
+    // [v4-fuel] R7: caps in delivered acceleration (`fuel` = massScale, or
+    // exactly 1 without a tank, and x·1 === x, so v3 is bit-for-bit).
+    const mainCap = this.mainAccel * boostMul * fuel;
+    const rcs = this.rcsAccel * fuel;
+    const brake = this.brakeAccel * fuel;
     let f: number;
     let r: number;
     let u: number;
     if (this._assistState === 'stop') {
       // Rounded-√ stop per axis: full authority, then a jerk-limited taper.
-      f = ef >= 0 ? stopDecel(ef, mainCap * limiter) : -stopDecel(-ef, this.brakeAccel);
+      f = ef >= 0 ? stopDecel(ef, mainCap * limiter) : -stopDecel(-ef, brake);
       r = Math.sign(er) * stopDecel(Math.abs(er), rcs);
       u = Math.sign(eu) * stopDecel(Math.abs(eu), rcs);
     } else {
@@ -1136,7 +1150,7 @@ export class FlightModel {
     }
 
     let main = f > 0 ? Math.min(f, mainCap * limiter) : 0;
-    const retro = f < 0 ? Math.min(-f, this.brakeAccel) : 0;
+    const retro = f < 0 ? Math.min(-f, brake) : 0;
     // Overspeed: no main drive while the settled speed is past 1.02·v_set
     // (audit: +20 % after a 55° turn — main built speed along the new nose
     // before RCS had killed the old velocity).
@@ -1160,7 +1174,7 @@ export class FlightModel {
     // pilot's own strafe is direct, as in FA-OFF — the lag models the
     // computer, not the hand — and leaves the actuator where the hand put it,
     // so the hand-back is continuous.
-    act.x = actuatorStep(act.x, main - retro, h, Math.max(mainCap, this.brakeAccel));
+    act.x = actuatorStep(act.x, main - retro, h, Math.max(mainCap, brake));
     act.y = cmd.strafeX !== 0 ? rx : actuatorStep(act.y, rx, h, rcs);
     act.z = cmd.strafeY !== 0 ? uy : actuatorStep(act.z, uy, h, rcs);
 
@@ -1176,18 +1190,25 @@ export class FlightModel {
 
   // --- [v4-fuel] ---------------------------------------------------------------
   /**
-   * Scale the thrust in `sAcc` by the tank's mass response, then pay for it.
+   * Pay for the thrust in `sAcc`. FA-OFF (`scaleByMass`) thrust is raw
+   * authority and is first scaled by the tank's mass response; the assist's
+   * output is already delivered acceleration (R7) and is not scaled again.
    *
    * need = propellantForImpulse(|thrust|, dry + prop + extra, h, ve). If the
    * tank gives less, the thrust is scaled by got/need in this same substep —
    * so an empty tank gives exactly zero thrust — and `thrustStarved` is set.
    * Gravity is not in `sAcc` yet, so it always acts.
    */
-  private drawPropellant(h: number): void {
+  private drawPropellant(h: number, scaleByMass: boolean): void {
     const p = this._propellant!;
     const dry = this.config.mass;
     const prop = p.massKg;
-    this.sAcc.multiplyScalar(massScale(dry, prop, this.extraMassKg));
+    // One total mass, with massScale's clean semantics: a non-finite or
+    // negative extra counts as 0 kg (NaN must never make thrust free).
+    const x = this.extraMassKg;
+    const extra = Number.isFinite(x) && x > 0 ? x : 0;
+    const total = dry + prop + extra;
+    if (scaleByMass) this.sAcc.multiplyScalar(massScale(dry, prop, extra));
     const a = this.sAcc.length();
     if (!(a > 0)) return; // no thrust wanted: nothing to pay
     if (this.exhaustKmS <= 0) {
@@ -1196,7 +1217,6 @@ export class FlightModel {
       this._thrustStarved = true;
       return;
     }
-    const total = dry + prop + Math.max(0, this.extraMassKg);
     const need = propellantForImpulse(a, total, h, this.exhaustKmS);
     const got = p.consume(need);
     if (got < need) {
