@@ -36,6 +36,7 @@ import { generateSystem } from '@/gen/system';
 import { orbitalPosition, orbitalVelocity } from '@/gen/orbit';
 
 import { MutableViewState } from '@/render/ViewState';
+import { keyLightAt } from '@/render/keyLight';
 import { PlanetRenderer } from '@/render/Planet';
 import { CloudRenderer } from '@/render/Clouds';
 import { RingRenderer } from '@/render/Rings';
@@ -891,12 +892,13 @@ export class Universe implements GameModule {
       this.tmpB.copy(this.camWorld).sub(b.world).applyQuaternion(this.spinInv);
       this.sunDir.copy(b.world).multiplyScalar(-1).normalize().applyQuaternion(this.spinInv);
 
-      // Inverse-square falloff so a planet at 30 AU is genuinely dim. Into a
-      // per-body colour: scaling the shared one in place compounded every
-      // earlier body's irradiance into the next (a moon after its planet got
-      // both).
-      const auDist = b.world.length() / AU;
-      const irradiance = primary.luminosity / Math.max(auDist * auDist, 1e-6);
+      // Inverse-square falloff, compressed below a knee (render/keyLight.ts)
+      // so an outer world is dim but lit — raw, Fyss VIII at 3.55 AU got
+      // 1/1300 of the opening world's light and drew as a black disc. The
+      // player's hull and traffic take the same key light. Into a per-body
+      // colour: scaling the shared one in place compounded every earlier
+      // body's irradiance into the next (a moon after its planet got both).
+      const irradiance = keyLightAt(primary.luminosity, b.world.length());
       this.bodySun.setRGB(
         this.sunColor.r * irradiance,
         this.sunColor.g * irradiance,

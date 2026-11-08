@@ -23,6 +23,7 @@ import type { Audio } from '@/audio/Audio';
 import { resolveJumpKey, type JumpSelection } from '@/game/jumpKey';
 import { activeFlightPreset } from '@/game/flightPreset'; // [v2-p4]
 import { touchdownGrade } from '@/game/touchdownGrade'; // v3 polish (D22a)
+import { keyLightAt, starDirectionLocal } from '@/render/keyLight';
 
 /** What `J` needs from the galaxy chart. `StarMap` satisfies it. */
 export interface JumpChart {
@@ -44,6 +45,9 @@ export interface PilotOptions {
   readonly audio?: Audio | null;
   readonly shipSeed?: number;
 }
+
+/** The hull's key-light colour at unit irradiance (Ship.sunColor's authored default). */
+const HULL_SUN_BASE = new Color(1.0, 0.94, 0.86);
 
 export class Pilot implements GameModule {
   readonly name = 'pilot';
@@ -326,6 +330,16 @@ export class Pilot implements GameModule {
     this.shipState.throttle = flight.throttle;
     this.shipState.boost = flight.boosting ? 1 : 0;
     this.shipState.heating = flight.heating;
+
+    // v3-light: the hull takes the key light the worlds take
+    // (render/keyLight.ts), from where the star actually is. Neither was ever
+    // filled in: the hull sat at a flat daylight 1.0 at any distance with an
+    // authored sun off the bow at every attitude. The iris metered that hull,
+    // and in the outskirts the world beside it rendered black.
+    starDirectionLocal(flight.renderWorldPosition, flight.renderOrientation, this.ship.sunDirection);
+    this.ship.sunColor
+      .copy(HULL_SUN_BASE)
+      .multiplyScalar(keyLightAt(this.universe.system?.stars[0]?.luminosity ?? 1, flight.renderWorldPosition.length()));
 
     this.ship.object3d.position.copy(this.renderPos);
     this.ship.object3d.quaternion.copy(flight.renderOrientation);

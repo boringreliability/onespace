@@ -32,6 +32,7 @@ import { shipScan } from '@/gen/ships/physics';
 import { FACTIONS } from '@/gen/ships/families';
 
 import { MutableViewState } from '@/render/ViewState';
+import { keyLightAt } from '@/render/keyLight';
 import { createShipVisual } from '@/render/ships/ShipMesh';
 import type { ShipVisual } from '@/game/Showroom';
 import { shotOwnsScene } from '@/game/Shots';
@@ -591,12 +592,9 @@ export class Traffic implements GameModule {
     packMotionExclusions(this.motionExclusions(), ctx.camera.position, motionExclusionBuffer);
   }
 
-  /** v3 T4: inverse-square irradiance from the primary, as the worlds are lit. */
+  /** v3 T4: the primary's key light, exactly as the worlds get it (render/keyLight.ts). */
   private irradiance(world: Vector3): number {
-    const star = this.universe.system?.stars[0];
-    const lum = star && Number.isFinite(star.luminosity) && star.luminosity > 0 ? star.luminosity : 1;
-    const au = world.length() / AU;
-    return lum / Math.max(au * au, 1e-6);
+    return keyLightAt(this.universe.system?.stars[0]?.luminosity ?? 1, world.length());
   }
 
   /** Planetshine falls off with distance from the lit body below. */
