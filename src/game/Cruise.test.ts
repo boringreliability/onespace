@@ -16,6 +16,8 @@ import type { ActionName } from '@/core/Input';
 import { DEFAULT_SHIP_CONFIG, FlightModel, type ParentBody } from '@/ship/FlightModel';
 import { CRUISE_DEFAULTS } from '@/ship/CruiseDrive';
 import { noseErrorRad } from '@/ship/cruiseSteer';
+import { EXHAUST_VELOCITY_KMS, PROBE_TANK_CAPACITY_KG, Propellant } from '@/ship/propellant';
+import { AU } from '@/gen/types';
 import { Cruise, lineBlockedBy, type CruiseWorld } from './Cruise';
 
 const R = 7_240;
@@ -497,6 +499,121 @@ describe('v2 merge: leaving the home world, and the arrival frame', () => {
     const v = r.flight.velocity.clone().normalize();
     expect(nose.dot(down)).toBeCloseTo(Math.sin(Math.PI / 6), 2);
     expect(nose.dot(v)).toBeCloseTo(Math.cos(Math.PI / 6), 2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v4 sub-plan 1 (propellant), Task 4: cruise is paid for out of the tank
+// ---------------------------------------------------------------------------
+
+describe('v4-fuel: cruise is paid for out of the tank', () => {
+  const CAP = PROBE_TANK_CAPACITY_KG;
+  /** 0.5 % of capacity (travelCost.cruiseSpoolKg). */
+  const SPOOL_KG = 0.005 * CAP;
+
+  /**
+   * The opening orbit with `kg` in a probe tank. FA-OFF at the coast detent,
+   * so the main drive draws nothing of its own and every kg that leaves the
+   * tank is the cruise bill. (The detent still carries the ship under cruise.)
+   */
+  function fuelled(kg: number): Rig {
+    const r = opening();
+    const p = new Propellant(CAP, 0);
+    p.add(kg);
+    r.flight.attachPropellant(p, EXHAUST_VELOCITY_KMS);
+    r.flight.flightAssist = false;
+    r.axes.throttle = 0;
+    return r;
+  }
+
+  const seen: Array<{ text: string; tone?: string }> = [];
+  let offSeen: (() => void) | null = null;
+  beforeEach(() => {
+    seen.length = 0;
+    offSeen = bus.on('log', (e) => seen.push(e));
+  });
+  afterEach(() => {
+    offSeen?.();
+    offSeen = null;
+  });
+
+  it('Given an empty tank, When cruise is requested, Then it does not spool and logs "CRUISE · NO PROPELLANT"', () => {
+    const r = fuelled(0);
+    const phases = new Set<string>();
+    r.press.add('cruise');
+    for (let i = 0; i < Math.round((CRUISE_DEFAULTS.spoolTime + 0.5) / H); i++) {
+      r.step(H);
+      phases.add(r.cruise.drive.phase);
+    }
+    expect([...phases]).toEqual(['idle']);
+    expect(r.flight.cruising).toBe(false);
+    expect(r.logs).toContain('CRUISE · NO PROPELLANT');
+  });
+
+  it('Given a full tank, When cruise is requested, Then the spool is paid up front: 0.5 % of capacity leaves the tank on the request frame', () => {
+    const r = fuelled(CAP);
+    r.press.add('cruise');
+    r.step(H);
+    expect(r.cruise.drive.phase).toBe('spooling');
+    expect(r.flight.propellant!.massKg).toBeCloseTo(CAP - SPOOL_KG, 6);
+  });
+
+  it('Given cruise in progress, Then it is paid frame by frame for the distance travelled: 1 % of capacity per AU', () => {
+    const r = fuelled(CAP);
+    r.press.add('cruise');
+    r.step(CRUISE_DEFAULTS.spoolTime + 0.5);
+    expect(r.cruise.drive.phase).toBe('cruise');
+    const kg0 = r.flight.propellant!.massKg;
+    const last = r.flight.worldPosition.clone();
+    let km = 0;
+    for (let i = 0; i < 4 * 60; i++) {
+      r.step(H);
+      expect(r.cruise.drive.phase).toBe('cruise');
+      km += r.flight.worldPosition.distanceTo(last);
+      last.copy(r.flight.worldPosition);
+    }
+    const paid = kg0 - r.flight.propellant!.massKg;
+    const expected = (0.01 * CAP * km) / AU;
+    expect(km).toBeGreaterThan(1_000);
+    expect(paid).toBeGreaterThan(0);
+    expect(Math.abs(paid - expected) / expected).toBeLessThan(0.1);
+  });
+
+  it("Given cruise in progress and a tank that runs dry, Then the drive drops out through its normal 'dropping' phase (no teleport) and logs it", () => {
+    // The spool price plus ~1 500 km of cruise at 1 % / AU of 20 000 kg.
+    const r = fuelled(SPOOL_KG + 0.002);
+    r.press.add('cruise');
+    const seq: string[] = [];
+    let maxStepKm = 0;
+    let maxSpeedKmS = 0;
+    const last = r.flight.worldPosition.clone();
+    for (let i = 0; i < 20 * 60; i++) {
+      r.step(H);
+      const ph = r.cruise.drive.phase;
+      if (seq[seq.length - 1] !== ph) seq.push(ph);
+      maxStepKm = Math.max(maxStepKm, r.flight.worldPosition.distanceTo(last));
+      maxSpeedKmS = Math.max(maxSpeedKmS, r.flight.velocity.length());
+      last.copy(r.flight.worldPosition);
+      if (seq.length >= 4 && ph === 'idle') break;
+    }
+    expect(seq).toEqual(['spooling', 'cruise', 'dropping', 'idle']);
+    expect(r.flight.propellant!.empty).toBe(true);
+    // No teleport: no frame moves the ship further than the fastest speed seen carries it.
+    expect(maxStepKm).toBeLessThanOrEqual(maxSpeedKmS * H * 1.5 + 1e-6);
+    const dry = seen.find((e) => e.text.startsWith('CRUISE') && e.text.includes('PROPELLANT'));
+    expect(dry).toBeDefined();
+    expect(dry!.tone).toBe('warn');
+    // A drop is an answer: the drive does not spool up again on an empty tank.
+    r.step(3);
+    expect(r.cruise.drive.phase).toBe('idle');
+  });
+
+  it('Given no tank attached (a bare hull), Then cruise is not charged and engages as before', () => {
+    const r = opening();
+    expect(r.flight.propellant).toBeFalsy();
+    r.press.add('cruise');
+    r.step(CRUISE_DEFAULTS.spoolTime + 0.3);
+    expect(r.cruise.drive.phase).toBe('cruise');
   });
 });
 
