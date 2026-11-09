@@ -21,6 +21,8 @@ import { DEFAULT_SHIP_CONFIG, FlightModel } from '@/ship/FlightModel';
 import { AutoPilot, type AutoPilotWorld } from './AutoPilot';
 import { FLIGHT_PRESETS, type FlightPresetId } from './flightPreset';
 import { pilotIntervened } from '@/ship/autopilot';
+import { EXHAUST_VELOCITY_KMS, PROBE_TANK_CAPACITY_KG, Propellant } from '@/ship/propellant';
+import { autoLandVerdict, landingEstimateKg } from '@/ui/propellantReadout';
 
 const R = 1_000;
 const MU = 1_500;
@@ -520,5 +522,86 @@ describe('v3: the autopilot is stepped per sim slice', () => {
     h.input.press('land');
     h.tick();
     expect(h.ap.phase).not.toBe('idle');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v4 sub-plan 1 (propellant), Task 5 — the autopilot checks the tank before a
+// landing, and lets go when the tank runs dry.
+// ---------------------------------------------------------------------------
+
+describe('v4: the autopilot checks propellant before landing', () => {
+  /** Attach a tank holding `ratio` × the landing estimate for this hull. */
+  function tankAt(h: Harness, ratio: number): number {
+    h.fm.attachPropellant(new Propellant(PROBE_TANK_CAPACITY_KG, 1), EXHAUST_VELOCITY_KMS);
+    const need = landingEstimateKg(h.fm);
+    h.fm.propellant!.massKg = Math.min(PROBE_TANK_CAPACITY_KG, ratio * need);
+    return need;
+  }
+
+  function toneLogs(): Array<{ text: string; tone?: string }> {
+    const out: Array<{ text: string; tone?: string }> = [];
+    offs.push(bus.on('log', (e) => out.push(e)));
+    return out;
+  }
+
+  it('Given propellant below half the landing estimate, When L is pressed, Then autopilot does not engage and logs "AUTOPILOT · PROPELLANT LOW"', () => {
+    const h = harness();
+    tankAt(h, 0.4);
+    expect(autoLandVerdict(h.fm.propellant!.massKg, landingEstimateKg(h.fm))).toBe('refuse');
+    h.input.press('land');
+    h.tick();
+    expect(h.ap.active).toBe(false);
+    expect(h.logs).toContain('AUTOPILOT · PROPELLANT LOW');
+    expect(h.logs.some((l) => l.startsWith('AUTOPILOT ENGAGED'))).toBe(false);
+  });
+
+  it('Given marginal propellant, When L is pressed, Then it engages with a caution log', () => {
+    const h = harness();
+    const logs = toneLogs();
+    tankAt(h, 0.75);
+    expect(autoLandVerdict(h.fm.propellant!.massKg, landingEstimateKg(h.fm))).toBe('marginal');
+    h.input.press('land');
+    h.tick();
+    expect(h.ap.active).toBe(true);
+    expect(h.ap.goal).toBe('land');
+    expect(logs.some((l) => l.tone === 'warn' && l.text.includes('PROPELLANT'))).toBe(true);
+  });
+
+  it('Given propellant at or above the landing estimate, When L is pressed, Then it engages with no propellant warning', () => {
+    const h = harness();
+    tankAt(h, 1.5);
+    expect(autoLandVerdict(h.fm.propellant!.massKg, landingEstimateKg(h.fm))).toBe('go');
+    h.input.press('land');
+    h.tick();
+    expect(h.ap.active).toBe(true);
+    expect(h.logs.some((l) => l.includes('PROPELLANT'))).toBe(false);
+  });
+
+  it('Given autopilot engaged, When the tank runs dry (thrustStarved), Then autopilot disengages with "AUTOPILOT OFF · PROPELLANT" and never re-engages by itself', () => {
+    const h = harness();
+    tankAt(h, 1e6); // clamped to a full tank: the check is a GO
+    h.input.press('land');
+    // Past the flip (~7 s) and into the burn, where thrust is wanted.
+    h.tick(600);
+    expect(h.ap.active).toBe(true);
+
+    h.fm.propellant!.massKg = 0;
+    let starvedSeen = false;
+    for (let i = 0; i < 120 && h.ap.active; i++) {
+      h.tick();
+      starvedSeen ||= h.fm.thrustStarved;
+    }
+    expect(starvedSeen).toBe(true);
+    expect(h.ap.active).toBe(false);
+    expect(h.logs).toContain('AUTOPILOT OFF · PROPELLANT');
+
+    // Never by itself: not on the next frames, not even once the tank is refilled.
+    h.tick(120);
+    expect(h.ap.active).toBe(false);
+    h.fm.propellant!.massKg = PROBE_TANK_CAPACITY_KG;
+    h.tick(120);
+    expect(h.ap.active).toBe(false);
+    expect(h.logs.filter((l) => l.startsWith('AUTOPILOT ENGAGED'))).toHaveLength(1);
   });
 });
