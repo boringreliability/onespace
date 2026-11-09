@@ -21,6 +21,7 @@ import {
   applyCannibalize,
   cannibalizeLossFrac,
   cannibalizeYield,
+  emergencyMayAct,
 } from './emergency';
 
 const BASE = PROBE_TANK_CAPACITY_KG;
@@ -186,5 +187,58 @@ describe('applyAction routes the emergency kinds through the same rules', () => 
     const r = applyAction(p, { kind: 'cannibalize', part: 'tank' });
     expect(r.ok).toBe(false);
     expect(p.massKg).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1 (R16): one predicate; the tank is only cannibalized when empty.
+// ---------------------------------------------------------------------------
+
+describe('emergencyMayAct — the one gate for keys and line', () => {
+  const ok = { paused: false, frozen: false, recoveryActive: false, warpPhase: 'idle', tank: emptyTank() };
+
+  it('Given an empty tank and nothing in the way, Then it is true', () => {
+    expect(emergencyMayAct(ok)).toBe(true);
+  });
+
+  it('Given paused, frozen, a recovery, or any warp phase but idle, Then it is false', () => {
+    expect(emergencyMayAct({ ...ok, paused: true })).toBe(false);
+    expect(emergencyMayAct({ ...ok, frozen: true })).toBe(false);
+    expect(emergencyMayAct({ ...ok, recoveryActive: true })).toBe(false);
+    for (const phase of ['charging', 'tunnel', 'arriving', 'anything-not-idle']) {
+      expect(emergencyMayAct({ ...ok, warpPhase: phase }), phase).toBe(false);
+    }
+  });
+
+  it('Given propellant above 0, Then it is false', () => {
+    const p = emptyTank();
+    p.add(0.001);
+    expect(emergencyMayAct({ ...ok, tank: p })).toBe(false);
+  });
+
+  it('Given a hull without a tank, Then it is false', () => {
+    expect(emergencyMayAct({ ...ok, tank: null })).toBe(false);
+  });
+});
+
+describe('cannibalize only an empty tank', () => {
+  it('Given propellant above 0, When applyCannibalize is called directly, Then it is refused and the tank is unchanged', () => {
+    const p = emptyTank();
+    p.add(50);
+    const r = applyCannibalize(p, 0);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('not-empty');
+    expect(p.massKg).toBe(50);
+    expect(p.capacityLossFrac).toBe(0);
+  });
+
+  it("Given propellant above 0, When applyAction cannibalize 'tank' is called, Then it is refused with 'not-empty' and the tank is unchanged", () => {
+    const p = emptyTank();
+    p.add(50);
+    const r = applyAction(p, { kind: 'cannibalize', part: 'tank' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('not-empty');
+    expect(p.massKg).toBe(50);
+    expect(p.capacityLossFrac).toBe(0);
   });
 });

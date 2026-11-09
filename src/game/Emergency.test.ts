@@ -21,7 +21,9 @@ import { bus } from '@/core/EventBus';
 import type { EngineContext } from '@/core/Engine';
 import { EMERGENCY_KEYS, actionForKey, type ActionName } from '@/core/Input';
 import { PROBE_TANK_CAPACITY_KG, Propellant } from '@/ship/propellant';
-import { Emergency, type EmergencyWorld } from './Emergency';
+import { emergencyMayAct } from '@/ship/emergency';
+import { advisoryText, type HintState } from '@/ui/hintRules';
+import { EMERGENCY_PROMPT, Emergency, type EmergencyWorld } from './Emergency';
 
 const BASE = PROBE_TANK_CAPACITY_KG;
 /** 'KeyH' → 'H', 'Digit1' → '1': what the HUD prints for a key code. */
@@ -51,6 +53,10 @@ class StubInput {
 interface Harness {
   em: Emergency;
   tank: Propellant;
+  /** R16: the states the exit must stand down in. Mutable mid-test. */
+  world: { -readonly [K in keyof EmergencyWorld]: EmergencyWorld[K] };
+  recovery: { active: boolean };
+  warp: { phase: string };
   input: StubInput;
   recoveries: number;
   logs: string[];
@@ -65,7 +71,7 @@ afterEach(() => {
   for (const off of offs.splice(0)) off();
 });
 
-function harness(opts: { fill?: number; lossFrac?: number } = {}): Harness {
+function harness(opts: { fill?: number; lossFrac?: number; noTank?: boolean } = {}): Harness {
   const tank = new Propellant(BASE, opts.fill ?? 0);
   tank.capacityLossFrac = opts.lossFrac ?? 0;
   const input = new StubInput();
@@ -77,14 +83,20 @@ function harness(opts: { fill?: number; lossFrac?: number } = {}): Harness {
     used: [] as Array<'cannibalize' | 'beacon'>,
     recovered: 0,
   } as Harness;
-  const world: EmergencyWorld = {
-    flight: { propellant: tank },
+  const world: Harness['world'] = {
+    flight: { propellant: opts.noTank ? null : tank },
     paused: false,
+    frozen: false,
     recoverToOrbit: () => {
       h.recoveries++;
     },
   };
-  h.em = new Emergency({ universe: world });
+  const recovery = { active: false };
+  const warp = { phase: 'idle' };
+  h.world = world;
+  h.recovery = recovery;
+  h.warp = warp;
+  h.em = new Emergency({ universe: world, recovery, warp });
   offs.push(bus.on('log', ({ text }) => h.logs.push(text)));
   offs.push(bus.on('emergency:used', ({ kind }) => h.used.push(kind)));
   offs.push(bus.on('ship:recovered', () => h.recovered++));
@@ -261,5 +273,155 @@ describe('beacon', () => {
     h.tick(120);
     expect(h.recoveries).toBe(1);
     expect(h.used).toEqual(['beacon']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1 (R16): the exit only acts when its prompt is shown — one shared
+// predicate, `emergencyMayAct`, gates the keys AND the NAV ADVISORY line.
+// ---------------------------------------------------------------------------
+
+/** What `emergencyMayAct` is asked, read off the harness (the module reads the same). */
+function gateOf(h: Harness) {
+  return {
+    paused: h.world.paused,
+    frozen: h.world.frozen,
+    recoveryActive: h.recovery.active,
+    warpPhase: h.warp.phase,
+    tank: h.world.flight.propellant,
+  };
+}
+
+/** A flight state in which a lesson could show (pointer captured, nothing open). */
+const FLYING: HintState = {
+  inFlight: true,
+  pointerLocked: true,
+  overlayOpen: false,
+  paused: false,
+  busy: false,
+  hasTarget: false,
+  cruising: false,
+};
+
+function expectNothingHappened(h: Harness): void {
+  expect(h.tank.massKg).toBe(0);
+  expect(h.tank.capacityLossFrac).toBe(0);
+  expect(h.recoveries).toBe(0);
+  expect(h.recovered).toBe(0);
+  expect(h.used).toEqual([]);
+  expect(h.logs).not.toContain('RECOVERED · BEACON');
+  expect(h.em.timesUsed).toBe(0);
+}
+
+describe('the exit only acts when its prompt is shown (R16)', () => {
+  it('Given a recovery fade in progress (frozen), When H then 2 is pressed, Then nothing happens and no ship:recovered is emitted', () => {
+    const h = harness({ fill: 0 });
+    h.world.frozen = true;
+    h.recovery.active = true;
+    h.press(EMERGENCY_KEYS.open);
+    h.press(EMERGENCY_KEYS.beacon);
+    expect(h.em.open).toBe(false);
+    expectNothingHappened(h);
+  });
+
+  it('Given only universe.frozen (no recovery flag), When H then 2 is pressed, Then nothing happens', () => {
+    const h = harness({ fill: 0 });
+    h.world.frozen = true;
+    h.press(EMERGENCY_KEYS.open);
+    h.press(EMERGENCY_KEYS.beacon);
+    expectNothingHappened(h);
+  });
+
+  it('Given only a recovery active (not frozen), When H then 1 is pressed, Then nothing happens', () => {
+    const h = harness({ fill: 0 });
+    h.recovery.active = true;
+    h.press(EMERGENCY_KEYS.open);
+    h.press(EMERGENCY_KEYS.cannibalize);
+    expectNothingHappened(h);
+  });
+
+  it('Given a warp in progress with an empty tank, When H then 2 is pressed, Then nothing happens', () => {
+    const h = harness({ fill: 0 });
+    h.warp.phase = 'tunnel';
+    h.press(EMERGENCY_KEYS.open);
+    h.press(EMERGENCY_KEYS.beacon);
+    h.press(EMERGENCY_KEYS.cannibalize);
+    expectNothingHappened(h);
+  });
+
+  it('Given the choice was opened and THEN a warp/fade starts, When 2 is pressed, Then nothing happens', () => {
+    const h = harness({ fill: 0 });
+    h.press(EMERGENCY_KEYS.open);
+    h.warp.phase = 'charging';
+    h.press(EMERGENCY_KEYS.beacon);
+    expectNothingHappened(h);
+    h.warp.phase = 'idle';
+    h.world.frozen = true;
+    h.press(EMERGENCY_KEYS.beacon);
+    expectNothingHappened(h);
+  });
+
+  it('Given the game paused, Then H/1/2 do nothing', () => {
+    const h = harness({ fill: 0 });
+    h.world.paused = true;
+    h.press(EMERGENCY_KEYS.open);
+    h.press(EMERGENCY_KEYS.cannibalize);
+    h.press(EMERGENCY_KEYS.beacon);
+    expect(h.em.open).toBe(false);
+    expectNothingHappened(h);
+  });
+
+  it('Given a hull without a tank, Then H/1/2 do nothing', () => {
+    const h = harness({ noTank: true });
+    h.tick(10);
+    expect(h.em.prompt).toBeNull();
+    expect(h.em.line).toBeNull();
+    expect(h.em.offers).toEqual([]);
+    h.press(EMERGENCY_KEYS.open);
+    h.press(EMERGENCY_KEYS.cannibalize);
+    h.press(EMERGENCY_KEYS.beacon);
+    expect(h.em.open).toBe(false);
+    expect(h.recoveries).toBe(0);
+    expect(h.recovered).toBe(0);
+    expect(h.used).toEqual([]);
+  });
+
+  it('Given the predicate false, Then the hint line is not shown; given true, Then it is (same predicate)', () => {
+    const h = harness({ fill: 0 });
+    const blockers: Array<[string, () => void, () => void]> = [
+      ['paused', () => (h.world.paused = true), () => (h.world.paused = false)],
+      ['frozen', () => (h.world.frozen = true), () => (h.world.frozen = false)],
+      ['recovery', () => (h.recovery.active = true), () => (h.recovery.active = false)],
+      ['warp', () => (h.warp.phase = 'tunnel'), () => (h.warp.phase = 'idle')],
+    ];
+    // True: the prompt is the line, and NAV ADVISORY shows it.
+    expect(emergencyMayAct(gateOf(h))).toBe(true);
+    expect(h.em.prompt).toBe(EMERGENCY_PROMPT);
+    expect(h.em.line).toBe(EMERGENCY_PROMPT);
+    expect(advisoryText(FLYING, {}, h.em.line)).toBe(EMERGENCY_PROMPT);
+    for (const [why, set, clear] of blockers) {
+      set();
+      expect(emergencyMayAct(gateOf(h)), why).toBe(false);
+      expect(h.em.prompt, why).toBeNull();
+      expect(h.em.line, why).toBeNull();
+      expect(advisoryText(FLYING, {}, h.em.line), why).not.toBe(EMERGENCY_PROMPT);
+      clear();
+    }
+    // A full tank: predicate false, no line.
+    h.tank.add(1);
+    expect(emergencyMayAct(gateOf(h))).toBe(false);
+    expect(h.em.line).toBeNull();
+    expect(advisoryText(FLYING, {}, h.em.line)).not.toBe(EMERGENCY_PROMPT);
+  });
+
+  it('Given the emergency line, Then it outranks every lesson on NAV ADVISORY, but an open chart or codex still hides the line', () => {
+    // Outranks lessons (fresh counts: the "fly" lesson would otherwise show).
+    expect(advisoryText(FLYING, {}, EMERGENCY_PROMPT)).toBe(EMERGENCY_PROMPT);
+    // An open chart or codex hides the whole line.
+    expect(advisoryText({ ...FLYING, overlayOpen: true }, {}, EMERGENCY_PROMPT)).toBeNull();
+    // Out of flight, nothing.
+    expect(advisoryText({ ...FLYING, inFlight: false }, {}, EMERGENCY_PROMPT)).toBeNull();
+    // No emergency line: the ordinary lesson text.
+    expect(advisoryText(FLYING, {}, null)).toBe('W/S — THROTTLE · MOUSE — STEER');
   });
 });
