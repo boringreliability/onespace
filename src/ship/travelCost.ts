@@ -67,11 +67,11 @@ function payAll(p: Propellant, kg: number): ActionResult {
 export function applyAction(p: Propellant, a: PropellantAction): ActionResult {
   switch (a.kind) {
     case 'cruise-spool':
-      return payAll(p, cruiseSpoolKg(p.capacityKg));
+      return payAll(p, cruiseSpoolKg(p.baseCapacityKg)); // R17: prices are fractions of BASE capacity
     case 'jump':
-      return payAll(p, jumpPropellantFraction(a.distanceLy) * p.capacityKg);
+      return payAll(p, jumpPropellantFraction(a.distanceLy) * p.baseCapacityKg);
     case 'cruise-leg': {
-      const bill = cruiseLegKg(a.distanceKm, p.capacityKg);
+      const bill = cruiseLegKg(a.distanceKm, p.baseCapacityKg);
       if (bill <= 0) return { ok: true, kg: 0 };
       const taken = p.consume(bill);
       return taken < bill ? { ok: false, kg: taken, reason: 'nothing-left' } : { ok: true, kg: taken };
@@ -94,6 +94,6 @@ export interface JumpPropellantRow {
 /** The chart's PROPELLANT row for a jump of `distanceLy`. */
 export function jumpPropellantRow(p: Propellant, distanceLy: number): JumpPropellantRow {
   const frac = jumpPropellantFraction(distanceLy);
-  const affordable = canAfford(p, frac * p.capacityKg);
+  const affordable = canAfford(p, frac * p.baseCapacityKg);
   return { text: `PROPELLANT ${Math.round(frac * 100)} %`, tone: affordable ? 'normal' : 'warn', affordable };
 }

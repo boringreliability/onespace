@@ -241,9 +241,7 @@ export class Pilot implements GameModule {
       warpIdle: (this.drive?.phase ?? 'idle') === 'idle',
     });
     if (r.kind === 'jump') {
-      bus.emit('nav:jump-requested', { systemId: r.systemId, name: r.name, distanceLy: r.distanceLy });
-      bus.emit('log', { text: `JUMP AUTHORISED — ${r.name}`, tone: 'good' });
-    } else if (r.kind === 'hint') {
+      bus.emit('nav:jump-requested', { systemId: r.systemId, name: r.name, distanceLy: r.distanceLy });    } else if (r.kind === 'hint') {
       bus.emit('log', { text: r.text, tone: 'normal' });
     }
   }

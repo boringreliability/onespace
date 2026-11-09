@@ -366,7 +366,7 @@ export class Cruise implements GameModule {
         }
       }
       // Refuse to spool what cannot be paid for.
-      if (this.wanted && this.drive.phase === 'idle' && !canAfford(tank, cruiseSpoolKg(tank.capacityKg))) {
+      if (this.wanted && this.drive.phase === 'idle' && !canAfford(tank, cruiseSpoolKg(tank.baseCapacityKg))) {
         this.wanted = false;
         if (ctx.elapsed - this.refusedAt > 3) {
           this.refusedAt = ctx.elapsed;
