@@ -13,14 +13,26 @@
  * the memo five fields, so "600 in range" can only be staged. three.js
  * objects (InstancedMesh, matrices, ShaderMaterial) need no WebGL in node.
  *
+ * R15 (fix round 1): the instances are CAMERA-RELATIVE. Each instance
+ * translation is asteroidWorld − cameraWorld, taken in float64 on the CPU
+ * (|t| ≤ ASTEROID_DRAW_KM), and `root.position` is the camera's render
+ * position, so the GPU never composes a ~10 000 km translation in float32.
+ * Where an instance is DRAWN in render space is therefore root · instance —
+ * the same world point as origin.toRender(asteroidWorld), which the older
+ * tests below still assert through `drawn()`.
+ *
  * Contract asserted here:
  *   new Asteroids({ belt, universe }) — universe: { system, flight.worldPosition }
  *   .meshes: readonly InstancedMesh[] (one per variant; .count = active instances)
- *   init(ctx), update(dt, ctx)
+ *   .root: the Group holding the meshes (pure translation = camera render position)
+ *   init(ctx), update(dt, ctx), optional lateUpdate(dt, ctx) (a frame runs both)
+ *   per-instance surface attribute 'aSurface' on each variant geometry
  */
 
 import { describe, expect, it } from 'vitest';
-import { InstancedMesh, Matrix4, Quaternion, ShaderMaterial, Vector3 } from 'three';
+import { InstancedBufferAttribute, InstancedMesh, Matrix4, Quaternion, ShaderMaterial, Vector3 } from 'three';
+
+import type { GameModule } from '@/core/Engine';
 
 import type { AsteroidSpec, Resource } from '@/gen/belt';
 import { AU } from '@/gen/types';
@@ -83,14 +95,22 @@ function dir(i: number, n: number): Vector3 {
   return new Vector3(Math.cos(phi) * r, y, Math.sin(phi) * r);
 }
 
+/** Camera offset from the ship, km (a chase camera ~40 m behind and above). */
+const CAM_FROM_SHIP = new Vector3(0.02, 0.012, -0.035);
+
 function rig() {
   const belt = new StubBelt();
   const universe = { system: startSystem(), orbitSeconds: 0, flight: { worldPosition: SHIP.clone() } };
   const ctx = nodeCtx();
   ctx.origin.setTo(SHIP.clone().add(new Vector3(37, -12, 5)));
+  // The camera sits just off the ship, as the chase rig puts it.
+  ctx.origin.toRender(SHIP, ctx.camera.position).add(CAM_FROM_SHIP);
   const asteroids = new Asteroids({ belt, universe } as unknown as ConstructorParameters<typeof Asteroids>[0]);
   asteroids.init(ctx);
-  const frame = (): void => asteroids.update(1 / 60, ctx);
+  const frame = (): void => {
+    asteroids.update(1 / 60, ctx);
+    (asteroids as GameModule).lateUpdate?.(1 / 60, ctx);
+  };
   return { belt, universe, ctx, asteroids, frame };
 }
 
@@ -100,9 +120,13 @@ interface Drawn {
   scale: number;
 }
 
-/** Every active instance across every variant mesh. */
+/**
+ * Every active instance across every variant mesh, at the RENDER position it
+ * is drawn at: the mesh's world matrix (root, R15) times the instance matrix.
+ */
 function drawn(asteroids: Asteroids): Drawn[] {
   const out: Drawn[] = [];
+  asteroids.root.updateMatrixWorld(true);
   const m = new Matrix4();
   const p = new Vector3();
   const q = new Quaternion();
@@ -112,6 +136,7 @@ function drawn(asteroids: Asteroids): Drawn[] {
     const mesh = meshes[v]!;
     for (let i = 0; i < mesh.count; i++) {
       mesh.getMatrixAt(i, m);
+      m.premultiply(mesh.matrixWorld);
       m.decompose(p, q, s);
       out.push({ variant: v, position: p.clone(), scale: s.x });
       // Uniform scale: radius, not a squashed blob.
@@ -234,5 +259,125 @@ describe('Asteroids — instanced, in render space', () => {
       expect(mat.fragmentShader).not.toContain('colorspace_fragment');
       expect(mat.fragmentShader).not.toContain('dithering_fragment');
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R15 — camera-relative instances (fix round 1)
+// ---------------------------------------------------------------------------
+
+/** Ship 9 000 km from render zero: just under the 10 000 km rebase threshold. */
+function farRig() {
+  const r = rig();
+  r.ctx.origin.setTo(SHIP.clone().sub(new Vector3(9_000, -2_000, 500)));
+  r.ctx.origin.toRender(SHIP, r.ctx.camera.position).add(CAM_FROM_SHIP);
+  for (let i = 0; i < 30; i++) {
+    r.belt.add(`ast:test:0:${i}`, SHIP.clone().add(dir(i, 30).multiplyScalar(5 + i * 13)), 0.05 + 0.018 * i, 1000 + i * 7);
+  }
+  return r;
+}
+
+/** Half a float32 step at |x| (the instance matrix is a Float32Array), plus the ruling's 1e-6 km. */
+function f32Tol(x: number): number {
+  return 1e-6 + Math.abs(x) * 2 ** -24;
+}
+
+describe('Asteroids — camera-relative instances (R15)', () => {
+  it('Given the camera 9 000 km from render zero, Then every instance translation is the asteroid\'s world position minus the camera\'s world position (to 1e-6 km) and |translation| ≤ ASTEROID_DRAW_KM', () => {
+    const { belt, ctx, asteroids, frame } = farRig();
+    expect(ctx.camera.position.length()).toBeGreaterThan(9_000);
+    frame();
+
+    const camWorld = ctx.origin.offset.clone().add(ctx.camera.position); // float64
+    expect(drawn(asteroids).length).toBe(30);
+
+    const m = new Matrix4();
+    const t = new Vector3();
+    let checked = 0;
+    for (const mesh of asteroids.meshes) {
+      for (let i = 0; i < mesh.count; i++) {
+        mesh.getMatrixAt(i, m);
+        t.setFromMatrixPosition(m);
+        expect(t.length(), `${mesh.name}[${i}]`).toBeLessThanOrEqual(ASTEROID_DRAW_KM);
+        // Which rock is it? The one drawn at root + t in render space.
+        const at = t.clone().add(asteroids.root.position);
+        const id = idAt(belt, ctx, at);
+        expect(id, `${mesh.name}[${i}] at ${at.toArray()}`).not.toBeNull();
+        const w = belt.world.get(id!)!;
+        const ex = w.x - camWorld.x;
+        const ey = w.y - camWorld.y;
+        const ez = w.z - camWorld.z;
+        expect(Math.abs(t.x - ex), id!).toBeLessThanOrEqual(f32Tol(ex));
+        expect(Math.abs(t.y - ey), id!).toBeLessThanOrEqual(f32Tol(ey));
+        expect(Math.abs(t.z - ez), id!).toBeLessThanOrEqual(f32Tol(ez));
+        checked++;
+      }
+    }
+    expect(checked).toBe(30);
+  });
+
+  it('Given the root, Then its position is the camera\'s render position', () => {
+    const { ctx, asteroids, frame } = farRig();
+    frame();
+    const cam = ctx.camera.getWorldPosition(new Vector3());
+    expect(asteroids.root.position.distanceTo(cam)).toBeLessThanOrEqual(1e-9);
+    // A pure translation: no rotation or scale for the normals to undo.
+    expect(asteroids.root.quaternion.angleTo(new Quaternion())).toBeLessThanOrEqual(1e-12);
+    expect(asteroids.root.scale.equals(new Vector3(1, 1, 1))).toBe(true);
+
+    // It follows the camera the next frame.
+    ctx.camera.position.add(new Vector3(1.5, -0.25, 3));
+    frame();
+    expect(asteroids.root.position.distanceTo(ctx.camera.getWorldPosition(new Vector3()))).toBeLessThanOrEqual(1e-9);
+  });
+
+  it('Given the vertex shader, Then it uses modelViewMatrix with instanceMatrix and not viewMatrix * modelMatrix', () => {
+    const { asteroids } = rig();
+    for (const mesh of asteroids.meshes) {
+      const vs = (mesh.material as ShaderMaterial).vertexShader;
+      expect(vs).toMatch(/modelViewMatrix\s*\*\s*instanceMatrix/);
+      expect(vs).not.toMatch(/viewMatrix\s*\*\s*modelMatrix/);
+      // Nor a world position built from modelMatrix and then multiplied by viewMatrix.
+      expect(vs).not.toMatch(/projectionMatrix\s*\*\s*viewMatrix/);
+      expect(vs).toContain('#include <logdepthbuf_vertex>');
+    }
+  });
+
+  it('Given 30 instances, Then the matrix update range covers 30 instances only', () => {
+    const { asteroids, frame } = farRig();
+    // Two frames: the ranges must be reset, not accumulated (in node nothing uploads them).
+    frame();
+    frame();
+    let covered = 0;
+    for (const mesh of asteroids.meshes) {
+      let sum = 0;
+      for (const r of mesh.instanceMatrix.updateRanges) {
+        expect(r.start).toBeGreaterThanOrEqual(0);
+        expect(r.start + r.count, mesh.name).toBeLessThanOrEqual(mesh.count * 16);
+        sum += r.count;
+      }
+      expect(sum, mesh.name).toBe(mesh.count * 16);
+      covered += sum;
+    }
+    expect(covered).toBe(30 * 16);
+  });
+
+  it('Given an unchanged slot assignment across two frames, Then the surface attribute is not re-uploaded (version unchanged)', () => {
+    const { belt, asteroids, frame } = farRig();
+    const surface = (v: number): InstancedBufferAttribute =>
+      asteroids.meshes[v]!.geometry.getAttribute('aSurface') as InstancedBufferAttribute;
+
+    frame();
+    const before = asteroids.meshes.map((_, v) => surface(v).version);
+    frame();
+    const after = asteroids.meshes.map((_, v) => surface(v).version);
+    expect(after).toEqual(before);
+
+    // Control: a new rock, nearer than all the others, changes its variant's slots.
+    const seed = 4242;
+    belt.add('ast:test:9:0', SHIP.clone().add(new Vector3(1, 0, 0)), 0.3, seed);
+    frame();
+    const v = seed % ASTEROID_VARIANTS;
+    expect(surface(v).version).toBeGreaterThan(after[v]!);
   });
 });
