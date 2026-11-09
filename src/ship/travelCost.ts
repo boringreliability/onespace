@@ -22,8 +22,11 @@ export interface ActionResult {
   ok: boolean;
   /** kg actually taken from the tank. */
   kg: number;
-  /** `capacity`: the tank cannot carry a cannibalization's loss; `cargo-reserved`: sub-plan 2. */
-  reason?: 'insufficient' | 'nothing-left' | 'capacity' | 'cargo-reserved';
+  /**
+   * `capacity`: the tank cannot carry a cannibalization's loss; `not-empty`: only a
+   * dry tank is cannibalized; `cargo-reserved`: sub-plan 2.
+   */
+  reason?: 'insufficient' | 'nothing-left' | 'capacity' | 'not-empty' | 'cargo-reserved';
 }
 
 const JUMP_BASE = 0.04;

@@ -22,6 +22,30 @@ const LOSS_GROWTH = 1.5;
 /** The beacon leaves the tank at this fraction of CURRENT capacity. */
 export const BEACON_FILL_FRAC = 0.05;
 
+/** What the one gate reads (R16): the keys and the NAV ADVISORY line both ask it. */
+export interface EmergencyGate {
+  readonly paused: boolean;
+  readonly frozen: boolean;
+  readonly recoveryActive: boolean;
+  readonly warpPhase: string;
+  readonly tank: Propellant | null;
+}
+
+/**
+ * The exit may be offered and taken: a tank exists and is empty, and nothing
+ * else owns the ship — not paused, not frozen, no recovery cut, warp idle.
+ */
+export function emergencyMayAct(g: EmergencyGate): boolean {
+  return (
+    !g.paused &&
+    !g.frozen &&
+    !g.recoveryActive &&
+    g.warpPhase === 'idle' &&
+    g.tank !== null &&
+    g.tank.empty
+  );
+}
+
 /** Uses so far; anything but a finite non-negative number counts as 0. */
 function uses(timesUsed: number): number {
   return Number.isFinite(timesUsed) && timesUsed > 0 ? Math.floor(timesUsed) : 0;
@@ -48,9 +72,12 @@ export function cannibalizeYield(
 
 /**
  * Cannibalize the tank: the loss first, then the gain into the smaller tank
- * (`add` clamps, so a badly shrunk tank keeps less than 3 %). Refused → untouched.
+ * (`add` clamps, so a badly shrunk tank keeps less than 3 %). Refused (tank not
+ * empty, or the loss cannot be carried) → untouched.
  */
 export function applyCannibalize(p: Propellant, timesUsed: number): ActionResult {
+  // Only a dry tank is stripped (R16 minor 3): with propellant aboard it is not an emergency.
+  if (!p.empty) return { ok: false, kg: 0, reason: 'not-empty' };
   const y = cannibalizeYield(p, timesUsed);
   if (!y) return { ok: false, kg: 0, reason: 'capacity' };
   p.capacityLossFrac = p.capacityLossFrac + y.lossFrac;

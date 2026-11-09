@@ -76,6 +76,18 @@ export function selectHint(state: HintState, counts: HintCounts): HintId | null 
   return null;
 }
 
+/**
+ * [v4-fuel] The text on the NAV ADVISORY line. `emergencyLine` is the
+ * emergency exit's line — already null unless `emergencyMayAct` holds (R16) —
+ * and outranks every lesson; an open chart or codex, or leaving flight, still
+ * hides the whole line. Otherwise the ordinary hint.
+ */
+export function advisoryText(state: HintState, counts: HintCounts, emergencyLine: string | null): string | null {
+  if (emergencyLine !== null && state.inFlight && !state.overlayOpen) return emergencyLine;
+  const id = selectHint(state, counts);
+  return id ? HINT_TEXT[id] : null;
+}
+
 /** The subset of Storage these functions use, so tests can hand in a fake. */
 export interface KeyValueStore {
   getItem(key: string): string | null;

@@ -7,13 +7,18 @@
  * pure (`ship/emergency.ts`); this module owns the keys, the line and the
  * bookkeeping. A hull without a tank is inert.
  *
+ * R16: prompt, line and keys all ask one gate, `emergencyMayAct` — never while
+ * paused or frozen, during a recovery cut, or mid-warp — and the gate is asked
+ * again at the moment 1 / 2 is pressed. Hints shows `line`, so what is on
+ * screen and what the keys do cannot drift apart.
+ *
  * `timesUsed` lives here (get/set) — sub-plan 3 saves and restores it.
  */
 
 import type { EngineContext, GameModule } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
 import { EMERGENCY_KEYS } from '@/core/Input';
-import { applyBeacon, applyCannibalize, cannibalizeYield } from '@/ship/emergency';
+import { applyBeacon, applyCannibalize, cannibalizeYield, emergencyMayAct } from '@/ship/emergency';
 import type { Propellant } from '@/ship/propellant';
 
 export type EmergencyChoice = 'cannibalize' | 'beacon';
@@ -26,11 +31,15 @@ export interface EmergencyWorld {
     readonly command?: { throttle: number };
   };
   readonly paused: boolean;
+  /** Pause sheet, recovery cut or an overlay holds the world (ui/Pause.ts). */
+  readonly frozen: boolean;
   recoverToOrbit(): void;
 }
 
 export interface EmergencyOptions {
   readonly universe: EmergencyWorld;
+  readonly recovery: { readonly active: boolean };
+  readonly warp: { readonly phase: string };
 }
 
 /** 'KeyH' → 'H', 'Digit1' → '1'. */
@@ -61,10 +70,16 @@ export class Emergency implements GameModule {
     return this.opts.universe.flight.propellant;
   }
 
-  /** The tank exists and is dry: the only time the exit is offered. */
+  /** R16: the one gate — a dry tank, and nothing else owns the ship. */
   private get stranded(): boolean {
-    const t = this.tank;
-    return t !== null && t.empty;
+    const { universe, recovery, warp } = this.opts;
+    return emergencyMayAct({
+      paused: universe.paused,
+      frozen: universe.frozen,
+      recoveryActive: recovery.active,
+      warpPhase: warp.phase,
+      tank: this.tank,
+    });
   }
 
   /** "EMERGENCY · H" while the tank is empty, else null. */
@@ -77,10 +92,10 @@ export class Emergency implements GameModule {
     return this.choosing && this.stranded;
   }
 
-  /** What may be picked; [] unless the tank is empty. Cannibalize only when the tank can pay. */
+  /** What may be picked; [] unless the gate holds. Cannibalize only when the tank can pay. */
   get offers(): EmergencyChoice[] {
     const t = this.tank;
-    if (!t || !t.empty) return [];
+    if (!t || !this.stranded) return [];
     return cannibalizeYield(t, this.uses) ? ['cannibalize', 'beacon'] : ['beacon'];
   }
 
@@ -106,8 +121,10 @@ export class Emergency implements GameModule {
   update(_dt: number, ctx: EngineContext): void {
     const input = ctx.input;
     const tank = this.tank;
-    if (!tank || !tank.empty || this.opts.universe.paused) {
-      if (!tank || !tank.empty) this.choosing = false;
+    // Closed whenever the gate fails: a choice opened before a jump or a cut
+    // does not survive it.
+    if (!tank || !this.stranded) {
+      this.choosing = false;
       return;
     }
 
@@ -117,6 +134,9 @@ export class Emergency implements GameModule {
     }
     if (!this.choosing) return;
 
+    // Re-check at the moment of the pick (R16): nothing between the gate above
+    // and here may have changed it, but the pick is what must never slip.
+    if (!this.stranded) return;
     if (input.pressed('emergencyCannibalize')) {
       if (!applyCannibalize(tank, this.uses).ok) return; // refused: the beacon still answers
       this.uses++;

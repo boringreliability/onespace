@@ -379,7 +379,7 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   const pause = new Pause({ universe, recovery, warp, input: engine.input });
   await engine.add(pause);
   // [v4-fuel] the emergency exit on an empty tank; its line rides NAV ADVISORY.
-  const emergency = new Emergency({ universe });
+  const emergency = new Emergency({ universe, recovery, warp });
   await engine.add(emergency);
   await engine.add(new Hints({ universe, pause, recovery, warp, emergency }));
   // --- end track D -------------------------------------------------------------

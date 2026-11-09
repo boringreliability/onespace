@@ -18,11 +18,10 @@ import type { Universe } from '@/game/Universe';
 import type { RecoveryCut } from '@/game/RecoveryCut';
 import type { Pause } from '@/ui/Pause';
 import {
-  HINT_TEXT,
+  advisoryText,
   loadHintCounts,
   recordUse,
   saveHintCounts,
-  selectHint,
   type HintCounts,
   type KeyValueStore,
   type RetirableHintId,
@@ -132,9 +131,12 @@ export class Hints implements GameModule {
     this.wasPaused = pause.isOpen;
 
     const codexOpen = document.querySelector('.os-codex.is-live') !== null;
-    const want = shotOwnsScene()
+    // [v4-fuel] R16: the emergency line is `Emergency.line`, null unless
+    // `emergencyMayAct` holds — the same gate its keys use — so the line and
+    // the keys cannot disagree. `advisoryText` ranks it above every lesson.
+    const wantText = shotOwnsScene()
       ? null
-      : selectHint(
+      : advisoryText(
           {
             inFlight: modes.current === 'flight',
             pointerLocked: input.pointerLocked,
@@ -145,20 +147,8 @@ export class Hints implements GameModule {
             cruising: universe.flight.cruising,
           },
           this.counts,
+          this.opts.emergency?.line ?? null,
         );
-
-    // [v4-fuel] The emergency line takes the slot whenever a hint could show.
-    const urgent =
-      !shotOwnsScene() &&
-      modes.current === 'flight' &&
-      !this.chartOpen &&
-      !codexOpen &&
-      !pause.isOpen &&
-      !recovery.active &&
-      warp.phase === 'idle'
-        ? (this.opts.emergency?.line ?? null)
-        : null;
-    const wantText: string | null = urgent ?? (want ? HINT_TEXT[want] : null);
 
     // Fade out, swap while invisible, fade in. A changed hint never cuts.
     const goal = wantText !== null && wantText === this.shown ? 1 : 0;
