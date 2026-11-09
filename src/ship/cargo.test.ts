@@ -93,10 +93,11 @@ describe('mine', () => {
     expect(c.kg('ice')).toBe(0);
   });
 
-  it.each([NaN, -5, -Infinity])('Given kg = %s, When mining, Then refused and unchanged', (kg) => {
+  it.each([NaN, -5, -Infinity])("Given kg = %s, When mining, Then refused 'invalid' and unchanged", (kg) => {
     const c = hold({ ice: 100 });
     const r = mine(c, 'metal', kg);
     expect(r.ok).toBe(false);
+    expect(r.reason).toBe('invalid');
     expect(c.totalKg).toBe(100);
     expect(c.kg('metal')).toBe(0);
   });
@@ -140,10 +141,11 @@ describe('refine', () => {
     expect(c.kg('ice')).toBe(1_000);
   });
 
-  it('Given no tank, Then refused and the ice is kept', () => {
+  it("Given no tank, When refine, Then refused 'no-tank' and the ice is kept", () => {
     const c = hold({ ice: 1_000 });
     const r = applyCargoAction(c, null, { kind: 'refine' });
     expect(r.ok).toBe(false);
+    expect(r.reason).toBe('no-tank');
     expect(c.kg('ice')).toBe(1_000);
   });
 });
@@ -214,6 +216,7 @@ describe('cannibalize-cargo', () => {
     const t = new Propellant(20_000, 0.1);
     const r = applyCargoAction(c, t, { kind: 'cannibalize-cargo' });
     expect(r.ok).toBe(false);
+    expect(r.reason).toBe('insufficient');
     expect(c.totalKg).toBe(999);
     expect(t.massKg).toBeCloseTo(2_000, 6);
   });
@@ -242,10 +245,11 @@ describe('cannibalize-cargo is an emergency action', () => {
     expect(t.massKg).toBeCloseTo(2_000, 6);
   });
 
-  it('Given no tank, When cannibalize-cargo, Then refused and the cargo is kept', () => {
+  it("Given no tank, When cannibalize-cargo, Then refused 'no-tank' and the cargo is kept", () => {
     const c = hold({ metal: 3_000 });
     const r = applyCargoAction(c, null, { kind: 'cannibalize-cargo' });
     expect(r.ok).toBe(false);
+    expect(r.reason).toBe('no-tank');
     expect(c.totalKg).toBe(3_000);
   });
 
@@ -295,14 +299,120 @@ describe('cargo:action event', () => {
   });
 });
 
-describe('invariant — totalKg + freeKg = capacityKg', () => {
-  it('Given a seeded random sequence of actions, Then it holds after every step', () => {
+describe('honest refusals (R8)', () => {
+  it("Given no tank, When repair, Then refused 'no-tank' and nothing is spent", () => {
+    const c = hold({ metal: 600, silicate: 400 });
+    const r = applyCargoAction(c, null, { kind: 'repair' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('no-tank');
+    expect(c.totalKg).toBe(1_000);
+  });
+
+  it("Given NaN kg, When mine, Then refused 'invalid'", () => {
+    expect(mine(new Cargo(8_000), 'ice', NaN).reason).toBe('invalid');
+  });
+
+  it("Given 1e-13 kg free, When mine, Then 'hold-full'", () => {
+    const c = hold({ metal: 1 - 1e-13 }, 1);
+    expect(c.freeKg).toBeGreaterThan(0);
+    const r = mine(c, 'ice', 5);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('hold-full');
+    expect(c.kg('ice')).toBe(0);
+  });
+
+  it("Given 1e-13 kg of ice, When refine, Then 'nothing-to-refine'", () => {
+    const c = hold({ ice: 1e-13 });
+    const r = applyCargoAction(c, new Propellant(20_000, 0), { kind: 'refine' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('nothing-to-refine');
+  });
+
+  it("Given loss 1e-17, When repair, Then 'nothing-to-repair' and nothing spent", () => {
+    const c = hold({ metal: 600, silicate: 400 });
+    const t = new Propellant(20_000, 0.5);
+    t.capacityLossFrac = 1e-17;
+    const r = applyCargoAction(c, t, { kind: 'repair' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('nothing-to-repair');
+    expect(c.kg('metal')).toBe(600);
+    expect(c.kg('silicate')).toBe(400);
+  });
+
+  it("Given an empty tank of zero capacity, When cannibalize-cargo, Then refused 'tank-full' and nothing is burned", () => {
+    const c = hold({ metal: 3_000 });
+    const t = new Propellant(20_000, 0);
+    t.capacityLossFrac = 1;
+    const r = applyCargoAction(c, t, { kind: 'cannibalize-cargo' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('tank-full');
+    expect(c.totalKg).toBe(3_000);
+  });
+});
+
+describe('snapshot and restore', () => {
+  it('Given a snapshot, When restored into a fresh hold, Then identical', () => {
+    const c = hold({ ice: 100, metal: 200, silicate: 300, rare: 4 });
+    const snap = c.snapshot();
+    expect(snap).toEqual({ ice: 100, metal: 200, silicate: 300, rare: 4 });
+    const d = new Cargo(8_000);
+    d.restore(snap);
+    expect(d.snapshot()).toEqual(snap);
+    expect(d.totalKg).toBe(c.totalKg);
+  });
+
+  it('Given NaN and negative amounts in the record, Then they become 0, with no event', () => {
+    const c = new Cargo(8_000);
+    c.restore({ ice: NaN, metal: -5, silicate: 10, rare: Infinity });
+    expect(c.kg('ice')).toBe(0);
+    expect(c.kg('metal')).toBe(0);
+    expect(c.kg('silicate')).toBe(10);
+    expect(c.kg('rare')).toBe(0);
+    expect(Number.isFinite(c.totalKg + c.freeKg)).toBe(true);
+    expect(seen).toHaveLength(0);
+  });
+
+  it('Given more than capacity in the record, Then it is clamped in the order ice, rare, metal, silicate', () => {
+    const c = new Cargo(1_000);
+    c.restore({ ice: 600, rare: 300, metal: 500, silicate: 500 });
+    expect(c.kg('ice')).toBe(600);
+    expect(c.kg('rare')).toBe(300);
+    expect(c.kg('metal')).toBe(100);
+    expect(c.kg('silicate')).toBe(0);
+    expect(c.totalKg).toBe(1_000);
+    expect(seen).toHaveLength(0);
+  });
+
+  it('Given a partial record, Then missing resources become 0', () => {
+    const c = hold({ ice: 50, metal: 50 });
+    c.restore({ rare: 7 });
+    expect(c.snapshot()).toEqual({ ice: 0, metal: 0, silicate: 0, rare: 7 });
+  });
+
+  it('Given a taken snapshot, When the hold changes later, Then the snapshot is unchanged', () => {
+    const c = hold({ ice: 50 });
+    const snap = c.snapshot();
+    mine(c, 'ice', 10);
+    expect(snap.ice).toBe(50);
+  });
+
+  it('Given the hold, Then its raw mutators are not public', () => {
+    const c = new Cargo(8_000) as unknown as Record<string, unknown>;
+    expect(c['_add']).toBeUndefined();
+    expect(c['_take']).toBeUndefined();
+  });
+});
+
+describe('conservation — a seeded random sequence of actions', () => {
+  it('Given 800 random actions, Then every step conserves mass and the hold stays valid', () => {
     const rng = new Rng(20260809);
     const res: Resource[] = ['ice', 'metal', 'silicate', 'rare'];
     const c = new Cargo(CARGO_CAPACITY_KG);
     const t = new Propellant(20_000, 0.3);
     t.capacityLossFrac = 0.2;
-    for (let i = 0; i < 500; i++) {
+    let cannibalized = 0;
+    for (let i = 0; i < 800; i++) {
+      if (rng.chance(0.12)) t.consume(t.massKg); // keep the emergency branch reachable
       const p = rng.next();
       let a: CargoAction;
       if (p < 0.5) {
@@ -311,10 +421,20 @@ describe('invariant — totalKg + freeKg = capacityKg', () => {
       else if (p < 0.8) a = { kind: 'repair' };
       else if (p < 0.9) a = { kind: 'cannibalize-cargo' };
       else a = { kind: 'jettison-all' };
-      applyCargoAction(c, t, a);
+      const totalBefore = c.totalKg;
+      const iceBefore = c.kg('ice');
+      const tankBefore = t.massKg;
+      const r = applyCargoAction(c, t, a);
+      expect(c.totalKg - totalBefore).toBeCloseTo(r.kgIn - r.kgOut, 6);
       expect(c.totalKg + c.freeKg).toBeCloseTo(c.capacityKg, 6);
       expect(c.freeKg).toBeGreaterThanOrEqual(0);
-      expect(c.totalKg).toBeGreaterThanOrEqual(0);
+      for (const k of res) expect(c.kg(k)).toBeGreaterThanOrEqual(0);
+      if (a.kind === 'refine' && r.ok) {
+        expect(r.fuelKg).toBeCloseTo(REFINE_ICE_TO_FUEL * (iceBefore - c.kg('ice')), 6);
+        expect(t.massKg - tankBefore).toBeCloseTo(r.fuelKg, 6);
+      }
+      if (a.kind === 'cannibalize-cargo' && r.ok) cannibalized++;
     }
+    expect(cannibalized).toBeGreaterThan(0);
   });
 });
