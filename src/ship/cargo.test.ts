@@ -220,14 +220,46 @@ describe('cannibalize-cargo', () => {
 
   it('Given 1 000 kg or more, Then the hold empties and the tank rises by 3 % of base, with no capacity loss', () => {
     const c = hold({ metal: 1_500, ice: 500 });
-    const t = new Propellant(20_000, 0.1);
+    const t = new Propellant(20_000, 0);
     const r = applyCargoAction(c, t, { kind: 'cannibalize-cargo' });
     expect(r.ok).toBe(true);
     expect(r.kgOut).toBe(2_000);
     expect(r.fuelKg).toBeCloseTo(600, 6);
     expect(c.totalKg).toBe(0);
-    expect(t.massKg).toBeCloseTo(2_600, 6);
+    expect(t.massKg).toBeCloseTo(600, 6);
     expect(t.capacityLossFrac).toBe(0);
+  });
+});
+
+describe('cannibalize-cargo is an emergency action', () => {
+  it("Given propellant above 0 and 3 t cargo, When cannibalize-cargo, Then refused 'not-empty' and nothing changes", () => {
+    const c = hold({ metal: 3_000 });
+    const t = new Propellant(20_000, 0.1);
+    const r = applyCargoAction(c, t, { kind: 'cannibalize-cargo' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('not-empty');
+    expect(c.totalKg).toBe(3_000);
+    expect(t.massKg).toBeCloseTo(2_000, 6);
+  });
+
+  it('Given no tank, When cannibalize-cargo, Then refused and the cargo is kept', () => {
+    const c = hold({ metal: 3_000 });
+    const r = applyCargoAction(c, null, { kind: 'cannibalize-cargo' });
+    expect(r.ok).toBe(false);
+    expect(c.totalKg).toBe(3_000);
+  });
+
+  it('Given a heavily cannibalized tank (capacityKg < 3 % of base), When cannibalize-cargo, Then fuelKg = what fit and the whole cargo is still burned (emergency burns it either way)', () => {
+    const c = hold({ metal: 3_000 });
+    const t = new Propellant(20_000, 0);
+    t.capacityLossFrac = 0.99; // 200 kg left, under the 600 kg a full gift would be
+    expect(t.capacityKg).toBeLessThan(0.03 * t.baseCapacityKg);
+    const r = applyCargoAction(c, t, { kind: 'cannibalize-cargo' });
+    expect(r.ok).toBe(true);
+    expect(r.fuelKg).toBeCloseTo(200, 6);
+    expect(r.kgOut).toBe(3_000);
+    expect(c.totalKg).toBe(0);
+    expect(t.massKg).toBeCloseTo(200, 6);
   });
 });
 
