@@ -41,6 +41,8 @@ import {
   type NamedBody,
   type TargetCandidate,
 } from '@/game/targets';
+import { beltTargetName, type Belt } from '@/game/Belt';
+import { FIELD_RADIUS_KM } from '@/gen/belt';
 import { BodyDotsRenderer, registerBodyDotsShots } from '@/render/BodyDots';
 import { MutableViewState } from '@/render/ViewState';
 import type { Hud, HudContact, HudTarget } from '@/ui/Hud';
@@ -55,7 +57,15 @@ export interface TargetingOptions {
   readonly universe: Universe;
   readonly traffic?: Traffic | null;
   readonly hud?: Hud | null;
+  /** [v4-mining] Field and asteroid targets resolve through it. Absent: v3 behaviour. */
+  readonly belt?: Pick<
+    Belt,
+    'nearestField' | 'fieldWorld' | 'fieldVelocity' | 'asteroidWorld' | 'asteroidVelocity' | 'asteroidsNear' | 'asteroidSpec'
+  > | null;
 }
+
+/** [v4-mining] Asteroids within this range of the ship join the Tab cycle (≥ a field's radius). */
+export const TAB_ASTEROID_RANGE_KM = 100;
 
 type MutableHudTarget = { -readonly [K in keyof HudTarget]: HudTarget[K] };
 type MutableContact = { -readonly [K in keyof ContactIn]: ContactIn[K] };
@@ -71,11 +81,14 @@ export class Targeting implements GameModule {
   private readonly universe: Universe;
   private readonly traffic: Traffic | null;
   private readonly hud: Hud | null;
+  private readonly belt: NonNullable<TargetingOptions['belt']> | null;
   private readonly selection = new TargetSelection();
   private offs: Array<() => void> = [];
 
   /** Resolved each frame: the targeted body, or null for a vessel / nothing. */
   private body: UniverseBody | null = null;
+  /** [v4-mining] Radius the range is measured to for a field or asteroid target, km. */
+  private beltRadius = 0;
   private targetName = '';
   private targetKind = '';
   /** The targeted body's name, cached at selection so resolving never slices. */
@@ -123,6 +136,7 @@ export class Targeting implements GameModule {
     this.universe = opts.universe;
     this.traffic = opts.traffic ?? null;
     this.hud = opts.hud ?? null;
+    this.belt = opts.belt ?? null;
     for (let i = 0; i < MAX_CONTACT_BRACKETS; i++) {
       this.contactPick.push(0);
       this.hudContacts.push({ x: 0, y: 0, behind: false });
@@ -221,6 +235,21 @@ export class Targeting implements GameModule {
         if (c) cands.push({ id: c.id, name: c.name, rel: new Vector3().subVectors(c.world, this.shipWorld) });
       }
     }
+    const belt = this.belt;
+    if (belt) {
+      // [v4-mining] Asteroids near the ship, and the nearest field from outside it.
+      const ids: string[] = [];
+      belt.asteroidsNear(this.shipWorld, TAB_ASTEROID_RANGE_KM, ids);
+      for (const id of ids) {
+        const w = new Vector3();
+        if (belt.asteroidWorld(id, w)) cands.push({ id, name: beltTargetName(id) ?? id, rel: w.sub(this.shipWorld) });
+      }
+      const f = belt.nearestField();
+      const w = new Vector3();
+      if (f && belt.fieldWorld(f.id, w) && w.distanceTo(this.shipWorld) > f.radiusKm) {
+        cands.push({ id: f.id, name: beltTargetName(f.id) ?? f.id, rel: w.sub(this.shipWorld) });
+      }
+    }
     const ordered = orderByNoseAngle(cands, nose).map((c) => c.id);
     const next = nextTargetId(ordered, this.selection.id);
     if (next === null) {
@@ -240,7 +269,23 @@ export class Targeting implements GameModule {
   private resolve(dt: number): boolean {
     const id = this.selection.id;
     this.body = null;
+    this.beltRadius = 0;
     if (id === null) return false;
+
+    // [v4-mining] Asteroids and fields, through the Belt (allocation-free).
+    const belt = this.belt;
+    if (belt && id.startsWith('ast:')) {
+      const a = belt.asteroidSpec(id);
+      if (!a || !belt.asteroidWorld(id, this.tgtWorld) || !belt.asteroidVelocity(id, this.tgtVel)) return false;
+      this.beltRadius = a.radiusKm;
+      return true;
+    }
+    if (belt && id.startsWith('field:')) {
+      if (!belt.fieldWorld(id, this.tgtWorld) || !belt.fieldVelocity(id, this.tgtVel)) return false;
+      // To the edge, so the cruise drive drops out ahead of the field.
+      this.beltRadius = FIELD_RADIUS_KM;
+      return true;
+    }
 
     const name = this.bodyName;
     if (name !== null) {
@@ -273,7 +318,7 @@ export class Targeting implements GameModule {
     this.rel.subVectors(this.tgtWorld, this.shipWorld);
     this.relVel.subVectors(this.tgtVel, this.shipVel);
     const closing = closingSpeed(this.rel, this.relVel);
-    const range = targetRangeKm(this.rel.length(), this.body ? this.body.spec.radius : 0);
+    const range = targetRangeKm(this.rel.length(), this.body ? this.body.spec.radius : this.beltRadius);
 
     // Damped in world space from the ship, held at the exact range, then
     // projected through this frame's camera: glued to the target under any
@@ -394,6 +439,11 @@ export class Targeting implements GameModule {
       const b = this.universe.allBodies().find((x) => x.spec.name === name);
       this.targetName = name;
       this.targetKind = b ? (b.spec.isMoon ? `moon · ${b.spec.type}` : b.spec.type) : '';
+      return;
+    }
+    if (id.startsWith('ast:') || id.startsWith('field:')) {
+      this.targetName = beltTargetName(id) ?? id;
+      this.targetKind = id.startsWith('ast:') ? 'asteroid' : 'field';
       return;
     }
     const t = this.traffic;

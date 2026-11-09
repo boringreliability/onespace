@@ -20,6 +20,7 @@ import type { EngineContext, GameModule } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
 import type { Mode } from '@/core/Modes';
 import type { Audio } from '@/audio/Audio';
+import type { Belt } from '@/game/Belt';
 import type { Cruise } from '@/game/Cruise';
 import type { Targeting } from '@/game/Targeting';
 import type { Traffic } from '@/game/Traffic';
@@ -37,6 +38,8 @@ export interface FlightSenseOptions {
   readonly targeting: Targeting;
   readonly audio: Audio;
   readonly sky: Sky;
+  /** [v4-mining] Asteroid targets hold formation through it. Absent: vessels only (v3). */
+  readonly belt?: Pick<Belt, 'asteroidWorld' | 'asteroidVelocity'> | null;
 }
 
 export class FlightSense implements GameModule {
@@ -110,9 +113,22 @@ export class FlightSense implements GameModule {
     const haveVel = id !== null && traffic.vesselVelocity(id, this.refVel);
     let distanceKm = Number.NaN;
     if (haveVel && traffic.vesselWorld(id!, this.tgtWorld)) distanceKm = this.tgtWorld.distanceTo(flight.worldPosition);
+    // [v4-mining] An asteroid: its world velocity, made parent-relative (the
+    // flight model's frame) by taking off the parent body's world velocity.
+    let haveRock = false;
+    const belt = this.o.belt;
+    if (!haveVel && id !== null && belt && id.startsWith('ast:')) {
+      haveRock = belt.asteroidVelocity(id, this.refVel) && belt.asteroidWorld(id, this.tgtWorld);
+      if (haveRock) {
+        const parent = universe.shipParent;
+        if (parent) this.refVel.sub(parent.worldVelocity);
+        distanceKm = this.tgtWorld.distanceTo(flight.worldPosition);
+      }
+    }
     const allowed = mayHoldFormation({
       fa: flight.flightAssist,
       targetIsVessel: haveVel,
+      targetIsAsteroid: haveRock,
       distanceKm,
       cruise: flight.cruising,
     });
@@ -125,7 +141,7 @@ export class FlightSense implements GameModule {
         bus.emit('log', { text: 'FORMATION — HOLDING ON TARGET', tone: 'good' });
       } else {
         bus.emit('log', {
-          text: !flight.flightAssist ? 'FORMATION NEEDS FA' : 'FORMATION — TARGET A VESSEL WITHIN 50 KM',
+          text: !flight.flightAssist ? 'FORMATION NEEDS FA' : 'FORMATION — TARGET A VESSEL OR ASTEROID WITHIN 50 KM',
           tone: 'warn',
         });
       }

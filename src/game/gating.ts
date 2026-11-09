@@ -58,6 +58,8 @@ export const MODULE_MODES: Readonly<Record<string, readonly Mode[]>> = {
   'time-compression': PILOTING,
   // v4 sub-plan 1: the emergency exit (keys only in flight; never mid-chart).
   emergency: ['flight'],
+  // v4 sub-plan 2: the belt's queries follow the flight (Targeting reads them).
+  belt: FLIGHT,
 };
 
 /**

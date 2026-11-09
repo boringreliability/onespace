@@ -99,7 +99,8 @@ export class ShipLog implements GameModule {
         // the log. Absent means a world, which is what the field defaults to.
         this.record({
           key: `scan:${scan.targetId}`,
-          kind: scan.kind === 'vessel' ? 'contact' : 'world',
+          // [v4-mining] An asteroid assay is a note: neither a world nor a contact.
+          kind: scan.kind === 'vessel' ? 'contact' : scan.kind === 'asteroid' ? 'note' : 'world',
           system: this.currentSystem,
           title: scan.name,
           body: scan.lines,

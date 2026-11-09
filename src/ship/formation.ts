@@ -5,7 +5,7 @@
 
 import type { Vector3 } from 'three';
 
-/** Toggle while a vessel is targeted. Free in every other binding. */
+/** Toggle while a vessel (or, v4, an asteroid) is targeted. Free in every other binding. */
 export const FORMATION_KEY = 'KeyK';
 /** Beyond this a contact is not "in formation", it is somewhere else. */
 export const FORMATION_RANGE_KM = 50;
@@ -20,8 +20,10 @@ export function formationHoldVelocity(forward: Vector3, vset: number, reference:
 export function mayHoldFormation(s: {
   readonly fa: boolean;
   readonly targetIsVessel: boolean;
+  /** [v4-mining] An asteroid holds formation like a vessel: same gates. */
+  readonly targetIsAsteroid?: boolean;
   readonly distanceKm: number;
   readonly cruise: boolean;
 }): boolean {
-  return s.fa && s.targetIsVessel && !s.cruise && Number.isFinite(s.distanceKm) && s.distanceKm <= FORMATION_RANGE_KM;
+  return s.fa && (s.targetIsVessel || s.targetIsAsteroid === true) && !s.cruise && Number.isFinite(s.distanceKm) && s.distanceKm <= FORMATION_RANGE_KM;
 }

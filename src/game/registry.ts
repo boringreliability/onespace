@@ -55,6 +55,8 @@ import { companionShip, parseRoute } from '@/core/Route';
 // -- v3 T4: dust, drive field, audio feed, formation, SEE IN FLIGHT -----------
 import { Dust } from '@/render/Dust';
 import { FlightSense } from '@/game/FlightSense';
+import { Belt } from '@/game/Belt'; // [v4-mining]
+import { WorldState } from '@/game/worldState'; // [v4-mining]
 import { selectionFromRoute, toShipParams } from '@/game/showroom/catalog';
 // -----------------------------------------------------------------------------
 import { RecoveryCut } from '@/game/RecoveryCut';
@@ -347,14 +349,19 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   // Targeting before Scanner: the array scans the nav target. After Pilot, so
   // the camera it projects through has already moved this frame; Instruments
   // likewise, and its altitude replaces the sphere one Pilot just published.
-  const targeting = new Targeting({ universe, traffic, hud });
+  // [v4-mining] The belt as game state: depletion (P2, in memory) and the
+  // field/asteroid queries. Before Targeting, which resolves its targets.
+  const worldState = new WorldState({ orbitSeconds: () => universe.orbitSeconds, wallMs: () => Date.now() });
+  const belt = new Belt({ universe, worldState });
+  await engine.add(belt);
+  const targeting = new Targeting({ universe, traffic, hud, belt });
   await engine.add(targeting);
   // -- v3 T4: drive field → sky, silent events → audio, K formation ----------
-  await engine.add(new FlightSense({ universe, cruise, traffic, targeting, audio, sky }));
+  await engine.add(new FlightSense({ universe, cruise, traffic, targeting, audio, sky, belt }));
   // ---------------------------------------------------------------------------
   // [v3-t5] cruise + targeting: the throttle block's cruise readout and ETA.
   await engine.add(new Instruments({ universe, hud, cruise, targeting }));
-  await engine.add(new Scanner({ universe, traffic, targeting }));
+  await engine.add(new Scanner({ universe, traffic, targeting, belt }));
   const codex = new Codex({ log: shipLog });
   await engine.add(codex);
   registerCodexShots(codex, universe, shipLog);

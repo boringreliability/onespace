@@ -14,6 +14,7 @@
  * agree and a scan never contradicts what the atmosphere shader renders.
  */
 
+import type { AsteroidSpec, Resource } from './belt';
 import type { PlanetSpec, ScanResult } from './types';
 
 /** The HUD allocates this many fixed rows. Every scan must fill all of them. */
@@ -182,4 +183,28 @@ export function planetScan(p: PlanetSpec): ScanResult {
     row('note', p.blurb.toLowerCase()),
   ];
   return { targetId: p.id, name: p.name, lines, kind: 'world' };
+}
+
+const RESOURCES: readonly Resource[] = ['ice', 'metal', 'silicate', 'rare'];
+
+/**
+ * [v4-mining] An asteroid's assay: per resource, the generated kilograms and
+ * what is left after mining. Pure — `remainingKg` is passed in, so the same
+ * rock reads differently once it has been worked, and the caller must not
+ * cache the result.
+ */
+export function asteroidScan(
+  id: string,
+  name: string,
+  a: AsteroidSpec,
+  remainingKg: Readonly<Record<Resource, number>>,
+): ScanResult {
+  let left = 0;
+  const lines: string[] = [row('class', 'asteroid'), row('radius', `${grouped(a.radiusKm * 1000)} m`)];
+  for (const r of RESOURCES) {
+    left += remainingKg[r];
+    lines.push(row(r, `${grouped(a.composition[r])} kg · ${grouped(remainingKg[r])} left`));
+  }
+  lines.push(row('extractable', `${grouped(left)} kg left`));
+  return { targetId: id, name, lines, kind: 'asteroid' };
 }

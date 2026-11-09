@@ -59,7 +59,8 @@ import {
   soiRadius,
   type ParentBody,
 } from '@/ship/FlightModel';
-import { EXHAUST_VELOCITY_KMS, PROBE_TANK_CAPACITY_KG, Propellant } from '@/ship/propellant'; // [v4-fuel]
+import { EXHAUST_VELOCITY_KMS, PROBE_TANK_CAPACITY_KG, Propellant, START_FILL } from '@/ship/propellant'; // [v4-fuel]
+import { CARGO_CAPACITY_KG, Cargo } from '@/ship/cargo'; // [v4-mining]
 
 /**
  * Orbits run at 1:1 with the ship.
@@ -165,6 +166,9 @@ export class Universe implements GameModule {
 
   readonly flight = new FlightModel(DEFAULT_SHIP_CONFIG);
 
+  /** [v4-mining] The probe's hold. Its mass is handed to the flight model every update. */
+  readonly cargo = new Cargo(CARGO_CAPACITY_KG);
+
   /** Simulated orbital time in seconds. Advances at ORBIT_TIME_SCALE. */
   private orbitTime = 0;
 
@@ -248,8 +252,9 @@ export class Universe implements GameModule {
 
   constructor(private readonly options: UniverseOptions = {}) {
     this.seed = options.seed ?? DEFAULT_UNIVERSE_SEED;
-    // [v4-fuel] The probe carries its tank. Full until sub-plan 2 (START_FILL, belts).
-    this.flight.attachPropellant(new Propellant(PROBE_TANK_CAPACITY_KG, 1.0), EXHAUST_VELOCITY_KMS);
+    // [v4-fuel] The probe carries its tank, opening at START_FILL [v4-mining]:
+    // the belt is where the rest comes from.
+    this.flight.attachPropellant(new Propellant(PROBE_TANK_CAPACITY_KG, START_FILL), EXHAUST_VELOCITY_KMS);
   }
 
   // -------------------------------------------------------------------------
@@ -525,6 +530,10 @@ export class Universe implements GameModule {
 
   update(dt: number, ctx: EngineContext): void {
     this.simulatedSeconds = 0;
+    // [v4-mining] The hold's mass, every update — frozen, paused and shot
+    // frames included: a jettison from a menu must be felt on the first
+    // frame back, and the sync costs nothing.
+    this.flight.extraMassKg = this.cargo.totalKg;
     // A review shot has placed its own fixtures and camera; touching the scene
     // now would undo all of it before the frame is captured.
     if (shotOwnsScene()) {

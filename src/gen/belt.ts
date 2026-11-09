@@ -40,7 +40,7 @@ export interface BeltSpec {
 export interface AsteroidSpec {
   readonly id: string;
   /** Offset from the field centre, km. */
-  readonly offsetKm: [number, number, number];
+  readonly offsetKm: readonly [number, number, number];
   readonly radiusKm: number;
   readonly seed: number;
   /** Extractable kilograms of each resource. */
@@ -185,6 +185,9 @@ function drawComposition(rng: Rng, radiusKm: number, icy: boolean): Record<Resou
 }
 
 export function fieldSpec(belt: BeltSpec, systemSeed: number, k: number): FieldSpec {
+  if (!Number.isInteger(k) || k < 0 || k >= belt.fieldCount) {
+    throw new RangeError(`fieldSpec: k=${k} outside [0, ${belt.fieldCount})`);
+  }
   const rng = fieldRng(systemSeed, k);
   const orbit = drawOrbit(belt, rng, k, beltPhase(systemSeed));
   const count = rng.int(ASTEROIDS_PER_FIELD[0], ASTEROIDS_PER_FIELD[1]);
@@ -218,38 +221,48 @@ export function fieldSpec(belt: BeltSpec, systemSeed: number, k: number): FieldS
   };
 }
 
+/** One cached entry: the last system asked for (a session sits in one system at a time). */
+let orbitsCache: { key: string; orbits: readonly OrbitSpec[] } | null = null;
+
+/**
+ * Every field centre's orbit, index k = field k. Computed once per system
+ * (keyed by systemId and seed, so an equal belt rebuilt from a fresh
+ * generation hits the same array) — drawing 512 orbits costs ~50 µs, too much
+ * for a per-frame search.
+ */
+export function fieldOrbits(belt: BeltSpec, systemSeed: number): readonly OrbitSpec[] {
+  const key = `${belt.systemId}|${systemSeed}`;
+  if (orbitsCache && orbitsCache.key === key) return orbitsCache.orbits;
+  const phase = beltPhase(systemSeed);
+  const orbits: OrbitSpec[] = [];
+  for (let k = 0; k < belt.fieldCount; k++) orbits.push(drawOrbit(belt, fieldRng(systemSeed, k), k, phase));
+  orbitsCache = { key, orbits };
+  return orbits;
+}
+
+const SHORTLIST = 5;
+const shortK = new Int32Array(SHORTLIST);
+const shortD = new Float64Array(SHORTLIST);
+const scratchP = { x: 0, y: 0, z: 0 };
+
 /**
  * Index of the field whose centre is nearest `worldPos` (star-centred km) at
- * `orbitSeconds`.
+ * `orbitSeconds`, given the system's `fieldOrbits`.
  *
  * Each field's longitude is advanced by its OWN mean motion (fields at the
  * inner edge lap those at the outer edge, so after a while index order no
  * longer matches longitude order), giving a cheap planar distance estimate
  * for every field. Only the best few are then placed exactly with Kepler.
- * Drawing an orbit costs a hash and a handful of rng draws — no asteroids.
- * `_starMu` is accepted for the interface; the periods already carry
- * `belt.starMu`, and using them keeps the estimate consistent with Kepler.
+ * Allocation-free.
  */
-export function nearestFieldIndex(
-  belt: BeltSpec,
-  systemSeed: number,
-  worldPos: Vec3Like,
-  orbitSeconds: number,
-  _starMu: number,
-): number {
-  const phase = beltPhase(systemSeed);
+export function nearestFieldIndex(orbits: readonly OrbitSpec[], worldPos: Vec3Like, orbitSeconds: number): number {
   const rs = Math.hypot(worldPos.x, worldPos.z);
   const lambdaShip = Math.atan2(worldPos.z, worldPos.x);
 
-  const SHORTLIST = 5;
-  const bestK: number[] = [];
-  const bestD: number[] = [];
-  const orbits: OrbitSpec[] = [];
-  for (let k = 0; k < belt.fieldCount; k++) {
-    const orbit = drawOrbit(belt, fieldRng(systemSeed, k), k, phase);
-    orbits.push(orbit);
+  let count = 0;
+  for (let k = 0; k < orbits.length; k++) {
+    const orbit = orbits[k]!;
     const a = orbit.semiMajorAxis;
-    // The field's own period (from belt.starMu), so estimate and Kepler agree.
     const n = TAU / orbit.period;
     const lambda =
       orbit.longitudeOfAscendingNode +
@@ -257,25 +270,24 @@ export function nearestFieldIndex(
       orbit.meanAnomalyAtEpoch +
       n * orbitSeconds;
     const d2 = rs * rs + a * a - 2 * rs * a * Math.cos(lambda - lambdaShip);
-    // Insertion into a tiny sorted shortlist.
-    let i = bestD.length;
-    while (i > 0 && bestD[i - 1]! > d2) i--;
-    if (i < SHORTLIST) {
-      bestD.splice(i, 0, d2);
-      bestK.splice(i, 0, k);
-      if (bestD.length > SHORTLIST) {
-        bestD.pop();
-        bestK.pop();
-      }
+    // Insertion into a tiny sorted shortlist (fixed arrays, no splice).
+    if (count === SHORTLIST && d2 >= shortD[SHORTLIST - 1]!) continue;
+    let i = count < SHORTLIST ? count++ : SHORTLIST - 1;
+    while (i > 0 && shortD[i - 1]! > d2) {
+      shortD[i] = shortD[i - 1]!;
+      shortK[i] = shortK[i - 1]!;
+      i--;
     }
+    shortD[i] = d2;
+    shortK[i] = k;
   }
 
-  let best = bestK[0] ?? 0;
+  let best = count > 0 ? shortK[0]! : 0;
   let bestDist = Number.POSITIVE_INFINITY;
-  const p = { x: 0, y: 0, z: 0 };
-  for (const k of bestK) {
-    orbitalPosition(orbits[k]!, orbitSeconds, p);
-    const d = Math.hypot(p.x - worldPos.x, p.y - worldPos.y, p.z - worldPos.z);
+  for (let j = 0; j < count; j++) {
+    const k = shortK[j]!;
+    orbitalPosition(orbits[k]!, orbitSeconds, scratchP);
+    const d = Math.hypot(scratchP.x - worldPos.x, scratchP.y - worldPos.y, scratchP.z - worldPos.z);
     if (d < bestDist) {
       bestDist = d;
       best = k;
