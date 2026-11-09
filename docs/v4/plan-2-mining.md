@@ -379,7 +379,9 @@ asteroide og tank op".
 ### Task 7: Kortene viser bæltet, og man kan sætte kurs
 
 **Files:**
-- Modify: `src/ui/SystemMap.ts`, `src/ui/StarMap.ts`, `src/game/MapMode.ts`
+- Modify: `src/ui/SystemMap.ts`, `src/ui/StarMap.ts`, `src/game/MapMode.ts`, `src/game/Cruise.ts`
+  (`target()` must resolve `field:` targets with `FIELD_RADIUS_KM` as their radius; today it resolves
+  bodies only, per the Task 3 review)
 - Test: `src/ui/beltChart.test.ts` (pure helpers)
 
 **Interfaces:**
