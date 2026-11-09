@@ -261,3 +261,58 @@ describe('the one-tank budget (R2)', () => {
     expect(budget).toBeLessThanOrEqual(1);
   });
 });
+
+describe('travelCost — mutation hardening', () => {
+  it('Given a NaN distance, Then a jump costs the 4 % floor', () => {
+    expect(jumpPropellantFraction(NaN)).toBe(0.04);
+  });
+
+  it('Given a NaN or negative cruise distance, Then cruiseLegKg is exactly 0', () => {
+    expect(cruiseLegKg(NaN, CAP)).toBe(0);
+    expect(cruiseLegKg(-AU, CAP)).toBe(0);
+  });
+
+  it('Given a jump of 3.8 ly (5.52 %), Then the chart row rounds to 6 %, not floors to 5 %', () => {
+    expect(jumpPropellantRow(tank(1), 3.8).text).toBe('PROPELLANT 6 %');
+  });
+
+  // R17: every travel price is a fixed fraction of BASE capacity, whatever capacity has been lost.
+  describe('R17 — prices are fractions of the BASE capacity', () => {
+    function shrunk(massKg: number): Propellant {
+      const p = new Propellant(CAP, 1);
+      p.capacityLossFrac = 0.5;
+      p.consume(p.massKg - massKg);
+      return p;
+    }
+
+    it('Given 50 % capacity lost, When the cruise drive is spooled, Then it costs 0.5 % of BASE capacity (100 kg)', () => {
+      const p = shrunk(10_000);
+      expect(applyAction(p, { kind: 'cruise-spool' }).kg).toBeCloseTo(0.005 * CAP, 6);
+    });
+
+    it('Given 50 % capacity lost, When a 5 ly jump is paid, Then it costs 6 % of BASE capacity (1 200 kg)', () => {
+      const p = shrunk(10_000);
+      expect(applyAction(p, { kind: 'jump', distanceLy: 5 }).kg).toBeCloseTo(0.06 * CAP, 6);
+    });
+
+    it('Given 50 % capacity lost, When one AU of cruise is paid, Then it costs 1 % of BASE capacity (200 kg)', () => {
+      const p = shrunk(10_000);
+      expect(applyAction(p, { kind: 'cruise-leg', distanceKm: AU }).kg).toBeCloseTo(0.01 * CAP, 6);
+    });
+
+    it('Given 50 % capacity lost and 1 000 kg left, Then a 5 ly jump (1 200 kg) is refused and the row warns', () => {
+      const p = shrunk(1_000);
+      expect(applyAction(p, { kind: 'jump', distanceLy: 5 }).ok).toBe(false);
+      const row = jumpPropellantRow(p, 5);
+      expect(row.affordable).toBe(false);
+      expect(row.tone).toBe('warn');
+    });
+
+    it('Given 50 % capacity lost and 1 300 kg left, Then a 5 ly jump is affordable and the row is normal', () => {
+      const p = shrunk(1_300);
+      const row = jumpPropellantRow(p, 5);
+      expect(row.affordable).toBe(true);
+      expect(row.tone).toBe('normal');
+    });
+  });
+});

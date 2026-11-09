@@ -242,3 +242,27 @@ describe('cannibalize only an empty tank', () => {
     expect(p.capacityLossFrac).toBe(0);
   });
 });
+
+describe('emergency — mutation hardening', () => {
+  it('Given a fractional timesUsed of 1.7, Then it is floored to 1: the loss is 12 %', () => {
+    expect(cannibalizeLossFrac(1.7)).toBeCloseTo(0.12, 12);
+    expect(cannibalizeLossFrac(1.7)).toBe(cannibalizeLossFrac(1));
+  });
+
+  it('Given the remaining capacity exactly equals the loss, Then cannibalize is refused (equality refused)', () => {
+    // 1 - 0.88 === 0.12 === 0.08 · 1.5 in floating point
+    const p = emptyTank(0.88);
+    expect(1 - p.capacityLossFrac).toBe(cannibalizeLossFrac(1));
+    expect(cannibalizeYield(p, 1)).toBeNull();
+    expect(applyCannibalize(p, 1)).toEqual({ ok: false, kg: 0, reason: 'capacity' });
+    expect(p.capacityLossFrac).toBe(0.88);
+  });
+
+  it('Given a heavily shrunk tank (90 % lost), When cannibalized, Then the loss lands first and the tank ends at exactly the 2 % that is left (400 kg)', () => {
+    const p = emptyTank(0.9);
+    expect(applyCannibalize(p, 0)).toEqual({ ok: true, kg: 0 });
+    expect(p.capacityLossFrac).toBeCloseTo(0.98, 12);
+    expect(p.capacityKg).toBeCloseTo(0.02 * BASE, 6);
+    expect(p.massKg).toBeCloseTo(0.02 * BASE, 6);
+  });
+});

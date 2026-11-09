@@ -103,3 +103,42 @@ describe('landingEstimateKg is conservative', () => {
     expect(autoLandVerdict(CAP, estimate)).toBe('go');
   }, 60_000);
 });
+
+describe('propellantReadout — mutation hardening', () => {
+  it('Given a tank at exactly 10 %, Then the tone is caution (warning is strictly below)', () => {
+    expect(propellantTone(0.1)).toBe('caution');
+  });
+
+  it('Given a tank just below 10 %, Then the tone is warning', () => {
+    expect(propellantTone(0.0999)).toBe('warning');
+  });
+
+  it('Given a tank at 12 %, Then the tone is caution (the warning threshold is 10 %, not higher)', () => {
+    expect(propellantTone(0.12)).toBe('caution');
+  });
+
+  it('Given NaN, Then the tone is warning', () => {
+    expect(propellantTone(NaN)).toBe('warning');
+  });
+
+  function hull(speed: number, fill: number, extra: number): FlightModel {
+    const fm = new FlightModel(DEFAULT_SHIP_CONFIG);
+    fm.attachPropellant(new Propellant(CAP, fill), EXHAUST_VELOCITY_KMS);
+    fm.extraMassKg = extra;
+    fm.teleport(new Vector3(0, 0, 0), new Vector3(speed, 0, 0));
+    return fm;
+  }
+
+  it('Given 5 km/s, 10 000 kg of propellant and 5 000 kg extra mass, Then the estimate is 1356.7445559 kg', () => {
+    // dv = 14·(5 + 0.2) = 72.8; m0 = 2e5 + 1e4 + 5e3; m0·(1 − exp(−dv/11500))
+    expect(landingEstimateKg(hull(5, 0.5, 5000))).toBeCloseTo(1356.744555905811, 5);
+  });
+
+  it('Given a hull at rest with no extra mass, Then only the hover allowance counts: 51.1242107 kg', () => {
+    expect(landingEstimateKg(hull(0, 0.5, 0))).toBeCloseTo(51.1242107130927, 5);
+  });
+
+  it('Given a negative extra mass, Then it counts as 0 (max(0))', () => {
+    expect(landingEstimateKg(hull(0, 0.5, -5000))).toBeCloseTo(51.1242107130927, 5);
+  });
+});

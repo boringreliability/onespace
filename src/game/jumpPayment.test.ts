@@ -97,3 +97,13 @@ describe('paidJump — pay, engage, refund on reject', () => {
     expect(texts()).toContain('JUMP AUTHORISED — Vassa');
   });
 });
+
+describe('paidJump — mutation hardening', () => {
+  it('Given a half-full tank and a paid jump, When the warp rejects, Then the refund is exactly the price: the tank ends where it started', async () => {
+    const tank = new Propellant(CAP, 0.5);
+    const before = tank.massKg;
+    const w = warp('reject');
+    await paidJump({ tank, distanceLy: 5, name: 'Vassa', warpIdle: true, engage: w.engage });
+    expect(tank.massKg).toBe(before);
+  });
+});

@@ -141,3 +141,30 @@ describe('bad input', () => {
     expect(tank.massKg).toBeCloseTo(12_000, 6);
   });
 });
+
+describe('propellant — mutation hardening', () => {
+  it('Given a fill above 1, Then the tank starts exactly full, never overfull', () => {
+    expect(new Propellant(20_000, 5).massKg).toBe(20_000);
+  });
+
+  it('Given a capacityLossFrac above 1, Then it is clamped to 1 and the tank holds nothing', () => {
+    const tank = new Propellant(20_000, 1);
+    tank.capacityLossFrac = 5;
+    expect(tank.capacityLossFrac).toBe(1);
+    expect(tank.capacityKg).toBe(0);
+    expect(tank.massKg).toBe(0);
+  });
+
+  it('Given a zero exhaust velocity, Then propellantForImpulse is exactly 0 (no NaN, no Infinity)', () => {
+    expect(propellantForImpulse(1, 1000, 1, 0)).toBe(0);
+  });
+
+  it('Given extra mass, Then deltaVRemaining counts it in both the empty and the loaded mass', () => {
+    // m1 = 1000 + 500, m0 = m1 + 500: 10 · ln(2000/1500)
+    expect(deltaVRemaining(1000, 500, 500, 10)).toBeCloseTo(10 * Math.log(2000 / 1500), 12);
+  });
+
+  it('Given extra mass, Then massScale is dry / (dry + prop + extra) exactly', () => {
+    expect(massScale(1000, 500, 500)).toBe(0.5);
+  });
+});
