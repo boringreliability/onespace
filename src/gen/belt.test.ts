@@ -23,15 +23,13 @@ import {
   FIELDS_PER_BELT,
   FIELD_RADIUS_KM,
   beltFor,
+  fieldOrbits,
   fieldSpec,
   nearestFieldIndex,
   type BeltSpec,
   type FieldSpec,
   type Resource,
 } from './belt';
-
-/** Gravitational parameter of one solar mass, km^3/s^2 (as Universe.ts). */
-const MU_SUN = 1.32712440018e11;
 
 /** The 24 start candidates of `Universe.pickStartSystem`, freshly generated. */
 function startCandidates(seed: number): StarSystemSpec[] {
@@ -189,14 +187,67 @@ describe('fieldSpec — orbit', () => {
 
 describe('nearestFieldIndex', () => {
   it('Given a world position placed exactly at field k\'s position at time t, Then nearestFieldIndex returns k (for t = 0 and t = one tenth of an orbit)', () => {
-    const starMu = MU_SUN * FYSS.stars[0]!.mass;
+    const orbits = fieldOrbits(FYSS_BELT, FYSS.seed);
     for (const k of [0, 1, 2, 137, 256, FIELDS_PER_BELT - 2, FIELDS_PER_BELT - 1]) {
       const f = FYSS_FIELDS[k]!;
       for (const t of [0, f.orbit.period / 10]) {
         const pos = orbitalPosition(f.orbit, t);
-        expect(nearestFieldIndex(FYSS_BELT, FYSS.seed, pos, t, starMu), `k=${k} t=${t}`).toBe(k);
+        expect(nearestFieldIndex(orbits, pos, t), `k=${k} t=${t}`).toBe(k);
       }
     }
+  });
+
+  it('Given t = 10 years and a position 30 km off field k\'s centre, Then nearestFieldIndex still returns k (differential rotation and off-centre ships)', () => {
+    const orbits = fieldOrbits(FYSS_BELT, FYSS.seed);
+    const t = 10 * 365.25 * 86_400;
+    for (const k of [0, 3, 200, 401, FIELDS_PER_BELT - 1]) {
+      const p = orbitalPosition(FYSS_FIELDS[k]!.orbit, t);
+      const pos = { x: p.x + 18, y: p.y - 12, z: p.z + 20.8 }; // |offset| ≈ 30 km
+      expect(nearestFieldIndex(orbits, pos, t), `k=${k}`).toBe(k);
+    }
+  });
+});
+
+describe('R6 — fieldOrbits, readonly offsets, guarded k', () => {
+  it('Given Fyss\'s belt, Then fieldOrbits returns FIELDS_PER_BELT orbits, orbit k deep-equal to fieldSpec(k).orbit', () => {
+    const orbits = fieldOrbits(FYSS_BELT, FYSS.seed);
+    expect(orbits.length).toBe(FIELDS_PER_BELT);
+    for (let k = 0; k < FIELDS_PER_BELT; k++) {
+      expect(orbits[k], `k=${k}`).toEqual(FYSS_FIELDS[k]!.orbit);
+    }
+  });
+
+  it('Given fieldOrbits called twice for the same system, Then the same array is returned (computed once per system, not per call)', () => {
+    expect(fieldOrbits(FYSS_BELT, FYSS.seed)).toBe(fieldOrbits(FYSS_BELT, FYSS.seed));
+    // An equal belt rebuilt from a fresh generation of the same system hits the same cache.
+    const again = fyss();
+    expect(fieldOrbits(beltFor(again) as BeltSpec, again.seed)).toBe(fieldOrbits(FYSS_BELT, FYSS.seed));
+  });
+
+  it('Given another belted system, Then its fieldOrbits differ from Fyss\'s (the cache is keyed per system)', () => {
+    const other = CANDIDATES.find((s) => s.hasAsteroidBelt && s.id !== FYSS.id)!;
+    const b = beltFor(other) as BeltSpec;
+    const orbits = fieldOrbits(b, other.seed);
+    expect(orbits).not.toBe(fieldOrbits(FYSS_BELT, FYSS.seed));
+    expect(orbits[7]).toEqual(fieldSpec(b, other.seed, 7).orbit);
+  });
+
+  it('Given k outside [0, FIELDS_PER_BELT) or not an integer, Then fieldSpec throws', () => {
+    for (const k of [-1, FIELDS_PER_BELT, FIELDS_PER_BELT + 10, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => fieldSpec(FYSS_BELT, FYSS.seed, k), `k=${k}`).toThrow();
+    }
+    expect(() => fieldSpec(FYSS_BELT, FYSS.seed, 0)).not.toThrow();
+    expect(() => fieldSpec(FYSS_BELT, FYSS.seed, FIELDS_PER_BELT - 1)).not.toThrow();
+  });
+
+  it('Given an AsteroidSpec, Then offsetKm is a readonly tuple (compile-time: `tsc --noEmit` rejects a write)', () => {
+    // Never executed; checked by the type checker. The directive itself fails
+    // `npm run typecheck` while offsetKm is still a mutable tuple.
+    const mustNotCompile = (f: FieldSpec): void => {
+      // @ts-expect-error offsetKm is readonly [number, number, number]
+      f.asteroids[0]!.offsetKm[0] = 1;
+    };
+    expect(typeof mustNotCompile).toBe('function');
   });
 });
 

@@ -92,6 +92,19 @@ describe('recording', () => {
     expect(log.byKind('world').length).toBe(0);
   });
 
+  it("Given a scan:complete with kind 'asteroid' (v4 sub-plan 2), Then it is filed once as a note under scan:<ast id>, not as a world or a contact", () => {
+    const log = open();
+    const rock: ScanResult = { targetId: 'ast:s1:398:4', name: 'asteroid 398-4', lines: ['ice ...... 4 200 kg'], kind: 'asteroid' };
+    bus.emit('scan:complete', rock);
+    bus.emit('scan:complete', rock);
+    const notes = log.byKind('note');
+    expect(notes.length).toBe(1);
+    expect(notes[0]!.key).toBe('scan:ast:s1:398:4');
+    expect(notes[0]!.visits).toBe(2);
+    expect(log.byKind('world').length).toBe(0);
+    expect(log.byKind('contact').length).toBe(0);
+  });
+
   it('treats a scan with no kind as a world', () => {
     // The showroom fixtures predate the field. They must not become contacts.
     const log = open();

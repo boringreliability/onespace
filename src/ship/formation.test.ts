@@ -74,6 +74,15 @@ describe('mayHoldFormation: only against a real, near, targeted vessel', () => {
   it('Given the cruise drive, Then not', () => {
     expect(mayHoldFormation({ ...ok, cruise: true })).toBe(false);
   });
+  it('Given an asteroid targeted within range (v4 sub-plan 2), Then formation is allowed with the same FA / range / cruise gates', () => {
+    const rock = { fa: true, targetIsVessel: false, targetIsAsteroid: true, distanceKm: 2, cruise: false };
+    expect(mayHoldFormation(rock)).toBe(true);
+    expect(mayHoldFormation({ ...rock, distanceKm: FORMATION_RANGE_KM })).toBe(true);
+    expect(mayHoldFormation({ ...rock, distanceKm: FORMATION_RANGE_KM + 1 })).toBe(false);
+    expect(mayHoldFormation({ ...rock, fa: false })).toBe(false);
+    expect(mayHoldFormation({ ...rock, cruise: true })).toBe(false);
+    expect(mayHoldFormation({ ...rock, targetIsAsteroid: false })).toBe(false);
+  });
   it('Given the key, Then it is one no other binding uses (K)', () => {
     expect(FORMATION_KEY).toBe('KeyK');
   });
