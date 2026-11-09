@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { bus } from '@/core/EventBus';
 import { PROBE_TANK_CAPACITY_KG, Propellant } from '@/ship/propellant';
 import { paidJump } from './jumpPayment';
+import { JUMP_NO_SELECTION_HINT } from './jumpKey';
 
 const CAP = PROBE_TANK_CAPACITY_KG;
 
@@ -105,5 +106,104 @@ describe('paidJump — mutation hardening', () => {
     const w = warp('reject');
     await paidJump({ tank, distanceLy: 5, name: 'Vassa', warpIdle: true, engage: w.engage });
     expect(tank.massKg).toBe(before);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Final whole-branch review, I2 — no jump to the system the ship is in.
+// The chart's Enter reached MapMode.jump with the origin selected and paid the
+// 4 % floor while the COST cell read `--`. paidJump (MapMode's seam) is told
+// which system is the target and which is the origin, and refuses the origin
+// before anything is charged, with the J key's own refusal line.
+// ---------------------------------------------------------------------------
+
+describe('final review I2 — the origin system is not a jump target', () => {
+  it('Given the origin system selected, When Enter/J requests a jump, Then nothing is charged and the jump is refused', async () => {
+    const tank = new Propellant(CAP, 1);
+    const w = warp('arrive');
+    const out = await paidJump({
+      tank,
+      distanceLy: 0,
+      name: 'Remit',
+      systemId: 'sys:remit',
+      originId: 'sys:remit',
+      warpIdle: true,
+      engage: w.engage,
+    } as Parameters<typeof paidJump>[0]);
+    expect(out).not.toBe('jumped');
+    expect(w.calls).toBe(0);
+    expect(tank.massKg).toBe(CAP);
+    expect(texts().some((t) => t.startsWith('JUMP AUTHORISED'))).toBe(false);
+  });
+
+  it('Given the origin system selected, When a jump is requested, Then the log says what the J key says: SELECT A SYSTEM ON THE CHART — M', async () => {
+    const w = warp('arrive');
+    await paidJump({
+      tank: new Propellant(CAP, 1),
+      distanceLy: 0,
+      name: 'Remit',
+      systemId: 'sys:remit',
+      originId: 'sys:remit',
+      warpIdle: true,
+      engage: w.engage,
+    } as Parameters<typeof paidJump>[0]);
+    expect(texts()).toEqual([JUMP_NO_SELECTION_HINT]);
+  });
+
+  it('Given a hull without a tank and the origin selected, Then the jump is refused too (no free hop to where the ship already is)', async () => {
+    const w = warp('arrive');
+    const out = await paidJump({
+      tank: null,
+      distanceLy: 0,
+      name: 'Remit',
+      systemId: 'sys:remit',
+      originId: 'sys:remit',
+      warpIdle: true,
+      engage: w.engage,
+    } as Parameters<typeof paidJump>[0]);
+    expect(out).not.toBe('jumped');
+    expect(w.calls).toBe(0);
+  });
+
+  it('Given another system selected, Then the jump is paid and authorised as before', async () => {
+    const tank = new Propellant(CAP, 1);
+    const w = warp('arrive');
+    const out = await paidJump({
+      tank,
+      distanceLy: 5,
+      name: 'Vassa',
+      systemId: 'sys:vassa',
+      originId: 'sys:remit',
+      warpIdle: true,
+      engage: w.engage,
+    } as Parameters<typeof paidJump>[0]);
+    expect(out).toBe('jumped');
+    expect(tank.massKg).toBeCloseTo(0.94 * CAP, 6);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Final whole-branch review, I4 — the refund is a named action.
+// ---------------------------------------------------------------------------
+
+describe('final review I4 — a rejected jump is refunded through applyAction', () => {
+  type Seen = { action: { kind: string; kg?: number }; ok: boolean; kg: number };
+
+  it('Given a refund, Then it is applied as a named action (jump-refund, the full price) and propellant:action is emitted', async () => {
+    const seen: Seen[] = [];
+    const offAction = bus.on('propellant:action' as never, ((e: Seen) => seen.push(e)) as never);
+    try {
+      const tank = new Propellant(CAP, 1);
+      const w = warp('reject');
+      await paidJump({ tank, distanceLy: 5, name: 'Vassa', warpIdle: true, engage: w.engage });
+      expect(seen.map((e) => e.action.kind)).toEqual(['jump', 'jump-refund']);
+      const refund = seen[1]!;
+      expect(refund.ok).toBe(true);
+      expect(refund.action.kg).toBeCloseTo(0.06 * CAP, 6);
+      expect(refund.kg).toBeCloseTo(0.06 * CAP, 6);
+      expect(tank.massKg).toBe(CAP);
+    } finally {
+      offAction();
+    }
   });
 });

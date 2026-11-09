@@ -36,3 +36,26 @@ describe('jumpCostCell — the PROPELLANT cell in the info row and the confirm p
     expect(jumpCostCell(null, 5, false)).toEqual({ text: '--', warn: false });
   });
 });
+
+// Final whole-branch review, I3: after a cannibalization the cell and the HUD
+// tank % speak the same unit, a share of the CURRENT tank. The price itself is
+// still kg of BASE capacity (R17), so affordability does not move.
+describe('final review I3 — the cell is a share of the current tank', () => {
+  it('Given 50 % capacity lost, Then the jump cell shows the price as a share of the current tank: 5 ly reads PROPELLANT 12 %', () => {
+    const p = new Propellant(CAP, 1);
+    p.capacityLossFrac = 0.5;
+    const cell = jumpCostCell(p, 5, false);
+    expect(cell.text).toBe('PROPELLANT 12 %');
+    expect(cell.warn).toBe(false);
+  });
+
+  it('Given 50 % capacity lost and 1 000 kg left (10 % on the HUD), Then a 5 ly jump reads 12 % and warns, so the two numbers compare directly', () => {
+    const p = new Propellant(CAP, 1);
+    p.capacityLossFrac = 0.5;
+    p.consume(p.massKg - 1_000);
+    expect(Math.round(p.fraction * 100)).toBe(10);
+    const cell = jumpCostCell(p, 5, false);
+    expect(cell.text).toBe('PROPELLANT 12 %');
+    expect(cell.warn).toBe(true);
+  });
+});

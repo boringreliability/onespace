@@ -15,6 +15,9 @@
  * module the same way the real Input delivers them: code → action.
  */
 
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { bus } from '@/core/EventBus';
@@ -423,5 +426,77 @@ describe('the exit only acts when its prompt is shown (R16)', () => {
     expect(advisoryText({ ...FLYING, inFlight: false }, {}, EMERGENCY_PROMPT)).toBeNull();
     // No emergency line: the ordinary lesson text.
     expect(advisoryText(FLYING, {}, null)).toBe('W/S — THROTTLE · MOUSE — STEER');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Final whole-branch review, I4 — the picks are named actions (P3).
+// Cannibalize and beacon change the tank only through applyAction, which
+// announces each with `propellant:action`; emergency:used carries the count.
+// ---------------------------------------------------------------------------
+
+describe('final review I4 — Emergency picks go through applyAction', () => {
+  type Seen = { action: { kind: string; part?: string; timesUsed?: number }; ok: boolean; kg: number };
+
+  function listen(): Seen[] {
+    const seen: Seen[] = [];
+    offs.push(bus.on('propellant:action' as never, ((e: Seen) => seen.push(e)) as never));
+    return seen;
+  }
+
+  it('Given Emergency picks cannibalize, Then it goes through applyAction: one propellant:action { cannibalize, part tank, timesUsed 0 }, ok', () => {
+    const h = harness({ fill: 0 });
+    const seen = listen();
+    h.press(EMERGENCY_KEYS.open);
+    h.press(EMERGENCY_KEYS.cannibalize);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.action).toMatchObject({ kind: 'cannibalize', part: 'tank', timesUsed: 0 });
+    expect(seen[0]!.ok).toBe(true);
+  });
+
+  it('Given a restored count of 2, When cannibalize is picked, Then the action is priced by it (timesUsed 2)', () => {
+    const h = harness({ fill: 0 });
+    h.em.timesUsed = 2;
+    const seen = listen();
+    h.press(EMERGENCY_KEYS.open);
+    h.press(EMERGENCY_KEYS.cannibalize);
+    expect(seen[0]!.action).toMatchObject({ kind: 'cannibalize', timesUsed: 2 });
+  });
+
+  it('Given Emergency picks the beacon, Then it goes through applyAction: one propellant:action { beacon }', () => {
+    const h = harness({ fill: 0 });
+    const seen = listen();
+    h.press(EMERGENCY_KEYS.open);
+    h.press(EMERGENCY_KEYS.beacon);
+    expect(seen.map((e) => e.action.kind)).toEqual(['beacon']);
+  });
+
+  it('Given a cannibalization, Then emergency:used carries timesUsed — the count after this use (1, then 2)', () => {
+    const h = harness({ fill: 0 });
+    const events: Array<{ kind: string; timesUsed?: number }> = [];
+    offs.push(bus.on('emergency:used', (e) => events.push(e as { kind: string; timesUsed?: number })));
+    h.press(EMERGENCY_KEYS.open);
+    h.press(EMERGENCY_KEYS.cannibalize);
+    h.tank.consume(h.tank.massKg);
+    h.tick();
+    h.press(EMERGENCY_KEYS.open);
+    h.press(EMERGENCY_KEYS.cannibalize);
+    expect(events).toEqual([
+      { kind: 'cannibalize', timesUsed: 1 },
+      { kind: 'cannibalize', timesUsed: 2 },
+    ]);
+  });
+
+  it('Given the game code, Then no module outside ship/ calls the emergency rules directly (applyCannibalize / applyBeacon)', () => {
+    const offenders: string[] = [];
+    for (const dir of ['../game', '../ui']) {
+      const abs = fileURLToPath(new URL(`${dir}/`, import.meta.url));
+      for (const f of readdirSync(abs)) {
+        if (!f.endsWith('.ts') || f.endsWith('.test.ts')) continue;
+        const src = readFileSync(join(abs, f), 'utf8');
+        if (/\bapply(Cannibalize|Beacon)\s*\(/.test(src)) offenders.push(`${dir}/${f}`);
+      }
+    }
+    expect(offenders).toEqual([]);
   });
 });

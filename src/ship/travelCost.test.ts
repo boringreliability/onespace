@@ -15,6 +15,7 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { bus } from '@/core/EventBus';
 import { Rng, hashSeed } from '@/math/rng';
 import { generateGalaxy, sampleSystemsNear, type StarSystemStub } from '@/gen/galaxy';
 import { AU, type Vec3 } from '@/gen/types';
@@ -314,5 +315,142 @@ describe('travelCost — mutation hardening', () => {
       expect(row.affordable).toBe(true);
       expect(row.tone).toBe('normal');
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Final whole-branch review, I3 — one tank unit on screen.
+// The price stays in BASE kg (R17); the chart shows it as a share of the
+// CURRENT tank, the same unit as the HUD's tank %.
+// ---------------------------------------------------------------------------
+
+describe('final review I3 — the chart shows the jump price as a share of the current tank', () => {
+  function shrunk(massKg: number): Propellant {
+    const p = new Propellant(CAP, 1);
+    p.capacityLossFrac = 0.5;
+    p.consume(p.massKg - massKg);
+    return p;
+  }
+
+  it('Given 50 % capacity lost, When a 5 ly jump is shown, Then the row reads PROPELLANT 12 % (1 200 kg of a 10 000 kg tank), not 6 %', () => {
+    expect(jumpPropellantRow(shrunk(10_000), 5).text).toBe('PROPELLANT 12 %');
+  });
+
+  it('Given 50 % capacity lost, When the jump is paid, Then the kg charged is still 6 % of BASE capacity (R17 unchanged)', () => {
+    const p = shrunk(10_000);
+    expect(applyAction(p, { kind: 'jump', distanceLy: 5 }).kg).toBeCloseTo(0.06 * CAP, 6);
+  });
+
+  it('Given 50 % capacity lost and 1 000 kg left, Then the 12 % row is still judged by the 1 200 kg price: unaffordable, warning', () => {
+    const row = jumpPropellantRow(shrunk(1_000), 5);
+    expect(row.text).toBe('PROPELLANT 12 %');
+    expect(row.affordable).toBe(false);
+    expect(row.tone).toBe('warn');
+  });
+
+  it('Given 20 % capacity lost, When a 3.8 ly jump (1 104 kg) is shown, Then the current-tank share 1 104 / 16 000 = 6.9 % rounds to 7 %', () => {
+    const p = new Propellant(CAP, 1);
+    p.capacityLossFrac = 0.2;
+    expect(jumpPropellantRow(p, 3.8).text).toBe('PROPELLANT 7 %');
+  });
+
+  it('Given no capacity lost, Then the row is unchanged: 5 ly reads PROPELLANT 6 %', () => {
+    expect(jumpPropellantRow(tank(1), 5).text).toBe('PROPELLANT 6 %');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Final whole-branch review, I4 — every tank change is a named action (P3),
+// and applyAction is the one voice that announces it: `propellant:action`.
+// ---------------------------------------------------------------------------
+
+describe('final review I4 — named actions and the propellant:action event', () => {
+  type Seen = { action: PropellantAction; ok: boolean; kg: number };
+  const seen: Seen[] = [];
+  let off: (() => void) | null = null;
+  function listen(): void {
+    seen.length = 0;
+    off = bus.on('propellant:action' as never, ((e: Seen) => seen.push(e)) as never);
+  }
+  afterEach(() => {
+    off?.();
+    off = null;
+  });
+
+  it('The action type carries the refund kinds — jump-refund {kg} and spool-refund {kg}', () => {
+    const kinds: PropellantAction[] = [
+      { kind: 'jump-refund', kg: 1 } as PropellantAction,
+      { kind: 'spool-refund', kg: 1 } as PropellantAction,
+    ];
+    expect(kinds).toHaveLength(2);
+  });
+
+  it('Given a half tank, When a jump-refund of 1 200 kg is applied, Then it is ok, the tank holds 1 200 kg more, and kg reports what went back in', () => {
+    const p = tank(0.5);
+    const r = applyAction(p, { kind: 'jump-refund', kg: 1_200 } as PropellantAction);
+    expect(r.ok).toBe(true);
+    expect(r.kg).toBeCloseTo(1_200, 6);
+    expect(p.massKg).toBeCloseTo(0.5 * CAP + 1_200, 6);
+  });
+
+  it('Given a half tank, When a spool-refund of 100 kg is applied, Then it is ok and the tank holds 100 kg more', () => {
+    const p = tank(0.5);
+    const r = applyAction(p, { kind: 'spool-refund', kg: 100 } as PropellantAction);
+    expect(r.ok).toBe(true);
+    expect(r.kg).toBeCloseTo(100, 6);
+    expect(p.massKg).toBeCloseTo(0.5 * CAP + 100, 6);
+  });
+
+  it('Given 50 kg of free space, When a 1 200 kg refund is applied, Then the tank is clamped to capacity and kg reports only the 50 kg that fit', () => {
+    const p = new Propellant(CAP, 1);
+    p.consume(50);
+    const r = applyAction(p, { kind: 'jump-refund', kg: 1_200 } as PropellantAction);
+    expect(p.massKg).toBe(CAP);
+    expect(r.kg).toBeCloseTo(50, 6);
+  });
+
+  it('Given a refund of NaN or a negative kg, Then nothing is added', () => {
+    const p = tank(0.5);
+    applyAction(p, { kind: 'spool-refund', kg: Number.NaN } as PropellantAction);
+    applyAction(p, { kind: 'jump-refund', kg: -500 } as PropellantAction);
+    expect(p.massKg).toBeCloseTo(0.5 * CAP, 9);
+  });
+
+  it('Given an applied action, Then applyAction emits exactly one propellant:action carrying { action, ok, kg }', () => {
+    listen();
+    const a: PropellantAction = { kind: 'jump', distanceLy: 5 };
+    const r = applyAction(tank(1), a);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.action).toEqual(a);
+    expect(seen[0]!.ok).toBe(r.ok);
+    expect(seen[0]!.kg).toBeCloseTo(r.kg, 9);
+  });
+
+  it('Given a refused action (5 % left, 6 % jump), Then propellant:action is still emitted once, with ok false and kg 0', () => {
+    listen();
+    applyAction(tank(0.05), { kind: 'jump', distanceLy: 5 });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.ok).toBe(false);
+    expect(seen[0]!.kg).toBe(0);
+  });
+
+  it('Given each kind (spool, leg, jump, both refunds, cannibalize, beacon), Then each emits one propellant:action named for it', () => {
+    listen();
+    applyAction(tank(1), { kind: 'cruise-spool' });
+    applyAction(tank(1), { kind: 'cruise-leg', distanceKm: AU });
+    applyAction(tank(1), { kind: 'jump', distanceLy: 1 });
+    applyAction(tank(0.5), { kind: 'jump-refund', kg: 10 } as PropellantAction);
+    applyAction(tank(0.5), { kind: 'spool-refund', kg: 10 } as PropellantAction);
+    applyAction(tank(0), { kind: 'cannibalize', part: 'tank' });
+    applyAction(tank(0), { kind: 'beacon' });
+    expect(seen.map((e) => e.action.kind)).toEqual([
+      'cruise-spool',
+      'cruise-leg',
+      'jump',
+      'jump-refund',
+      'spool-refund',
+      'cannibalize',
+      'beacon',
+    ]);
   });
 });

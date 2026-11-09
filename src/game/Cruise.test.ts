@@ -674,5 +674,83 @@ describe('v4-fuel: cruise is paid for out of the tank', () => {
     r.step(CRUISE_DEFAULTS.spoolTime + 0.3);
     expect(r.cruise.drive.phase).toBe('cruise');
   });
+
+  // -------------------------------------------------------------------------
+  // Final whole-branch review, I4 — every tank change is a named action, and
+  // the cruise leg is announced per leg segment, not per frame.
+  // -------------------------------------------------------------------------
+
+  describe('final review I4 — named actions from cruise', () => {
+    type Seen = { action: { kind: string; kg?: number }; ok: boolean; kg: number };
+    let actions: Seen[] = [];
+    let offAction: (() => void) | null = null;
+    beforeEach(() => {
+      actions = [];
+      offAction = bus.on('propellant:action' as never, ((e: Seen) => actions.push(e)) as never);
+    });
+    afterEach(() => {
+      offAction?.();
+      offAction = null;
+    });
+    const of = (kind: string): Seen[] => actions.filter((e) => e.action.kind === kind);
+
+    it('Given a spool released mid-charge, Then the refund is applied as a named action (spool-refund, the spool price) and propellant:action is emitted', () => {
+      const r = fuelled(CAP);
+      r.press.add('cruise');
+      r.step(0.5);
+      r.press.add('cruise'); // G again: abort the charge
+      r.step(H);
+      const refunds = of('spool-refund');
+      expect(refunds).toHaveLength(1);
+      expect(refunds[0]!.ok).toBe(true);
+      expect(refunds[0]!.action.kg).toBeCloseTo(SPOOL_KG, 6);
+      expect(refunds[0]!.kg).toBeCloseTo(SPOOL_KG, 6);
+      expect(r.flight.propellant!.massKg).toBeCloseTo(CAP, 6);
+    });
+
+    it('Given a spool cut short by a recovery, Then that refund is a named action too', () => {
+      const r = fuelled(CAP);
+      r.press.add('cruise');
+      r.step(0.5);
+      expect(r.cruise.drive.phase).toBe('spooling');
+      bus.emit('ship:recovered', { cause: 'requested' });
+      r.step(H);
+      expect(of('spool-refund')).toHaveLength(1);
+      expect(r.flight.propellant!.massKg).toBeCloseTo(CAP, 6);
+    });
+
+    it('Given a cruise leg, Then propellant:action is not emitted every frame (at most one per second of cruise)', () => {
+      const r = fuelled(CAP);
+      r.press.add('cruise');
+      r.step(CRUISE_DEFAULTS.spoolTime + 0.5);
+      expect(r.cruise.drive.phase).toBe('cruise');
+      actions = [];
+      const frames = 4 * 60; // 4 s at 60 fps
+      r.step(frames * H);
+      expect(r.cruise.drive.phase).toBe('cruise');
+      expect(of('cruise-leg').length).toBeLessThanOrEqual(5);
+      expect(of('cruise-leg').length).toBeLessThan(frames / 10);
+    });
+
+    it('Given a cruise leg flown and dropped out of, Then the emitted cruise-leg kg add up to what left the tank for the leg', () => {
+      const r = fuelled(CAP);
+      r.press.add('cruise');
+      r.step(CRUISE_DEFAULTS.spoolTime + 0.5);
+      expect(r.cruise.drive.phase).toBe('cruise');
+      const kg0 = r.flight.propellant!.massKg;
+      actions = [];
+      r.step(3);
+      r.press.add('cruise'); // release: cruise → dropping → idle
+      r.step(5);
+      expect(r.cruise.drive.phase).toBe('idle');
+      const billed = kg0 - r.flight.propellant!.massKg;
+      const announced = of('cruise-leg').reduce((s, e) => s + e.kg, 0);
+      expect(billed).toBeGreaterThan(0);
+      expect(of('cruise-leg').length).toBeGreaterThan(0);
+      expect(Math.abs(announced - billed) / billed).toBeLessThan(1e-6);
+      // Nothing else touched the tank in that stretch.
+      expect(actions.every((e) => e.action.kind === 'cruise-leg')).toBe(true);
+    });
+  });
 });
 

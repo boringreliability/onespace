@@ -18,6 +18,7 @@ import {
   PAUSE_CLOSED,
   pauseContextFor,
   pauseStep,
+  returnToOrbitLabel,
   type PauseContext,
   type PauseState,
 } from './pauseState';
@@ -127,5 +128,18 @@ describe('pauseContextFor — pause belongs to flight (review-p2)', () => {
   it('Given the pause is open and flight is no longer shown, When Esc arrives, Then it still closes', () => {
     const ctx = pauseContextFor({ flightShown: false, menuOpen: false, busy: false });
     expect(pauseStep(openAt(0), { type: 'escKey', t: ESC_DEBOUNCE_MS + 1 }, ctx).state.open).toBe(false);
+  });
+});
+
+// Final whole-branch review, I1: with a tank, RETURN TO ORBIT costs what the
+// beacon costs, and the sheet says so before the pilot picks it. Pause.ts
+// writes the button from this label; the DOM does not run in node.
+describe('final review I1 — the RETURN TO ORBIT label tells the price', () => {
+  it('Given a tank attached, Then the button reads RETURN TO ORBIT · COSTS AS BEACON', () => {
+    expect(returnToOrbitLabel(true)).toBe('RETURN TO ORBIT · COSTS AS BEACON');
+  });
+
+  it('Given no tank (a v3 hull), Then the button reads RETURN TO ORBIT, as before', () => {
+    expect(returnToOrbitLabel(false)).toBe('RETURN TO ORBIT');
   });
 });
