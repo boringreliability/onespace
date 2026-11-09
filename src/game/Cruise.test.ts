@@ -35,6 +35,8 @@ interface Rig {
   step: (seconds?: number) => void;
   /** Space held (the pilot's brake). */
   brake: boolean;
+  /** Physics slices per frame (Universe's time-compression slicing); 1 = real time. */
+  slices: number;
 }
 
 function facing(dir: Vector3): Quaternion {
@@ -89,7 +91,7 @@ function build(pos: Vector3, nose: Vector3): Rig {
 
   const step = (seconds = H): void => {
     for (let t = 0; t < seconds - 1e-9; t += H) {
-      flight.update(H); // Universe
+      for (let s = 0; s < r.slices; s++) flight.update(H); // Universe
       (world as { nearestGapKm: number }).nearestGapKm = flight.position.length() - R;
       flight.applyInput(axes, false, r.brake); // Pilot
       cruise.update(H, ctx);
@@ -98,7 +100,7 @@ function build(pos: Vector3, nose: Vector3): Rig {
     }
   };
 
-  const r: Rig = { cruise, flight, world, axes, press, logs, step, brake: false };
+  const r: Rig = { cruise, flight, world, axes, press, logs, step, brake: false, slices: 1 };
   rig = r;
   return r;
 }
@@ -606,6 +608,63 @@ describe('v4-fuel: cruise is paid for out of the tank', () => {
     // A drop is an answer: the drive does not spool up again on an empty tank.
     r.step(3);
     expect(r.cruise.drive.phase).toBe('idle');
+  });
+
+  it('Given a spool that never reaches cruise (the toggle released mid-charge), Then the spool price is refunded', () => {
+    const r = fuelled(CAP);
+    r.press.add('cruise');
+    r.step(0.5);
+    expect(r.cruise.drive.phase).toBe('spooling');
+    expect(r.flight.propellant!.massKg).toBeCloseTo(CAP - SPOOL_KG, 6);
+    r.press.add('cruise'); // G again: abort the charge
+    r.step(H);
+    expect(r.cruise.drive.phase).toBe('idle');
+    expect(r.flight.propellant!.massKg).toBeCloseTo(CAP, 6);
+    r.step(1);
+    expect(r.flight.propellant!.massKg).toBeCloseTo(CAP, 6);
+  });
+
+  it('Given a spool that reaches cruise, Then the spool price stays paid (no refund on a later drop)', () => {
+    const r = fuelled(CAP);
+    r.press.add('cruise');
+    r.step(CRUISE_DEFAULTS.spoolTime + 0.2);
+    expect(r.cruise.drive.phase).toBe('cruise');
+    r.press.add('cruise'); // release: cruise → dropping → idle
+    r.step(5);
+    expect(r.cruise.drive.phase).toBe('idle');
+    expect(r.flight.propellant!.massKg).toBeLessThan(CAP - SPOOL_KG + 1e-9);
+  });
+
+  it('Given the same cruise distance at 1× and 100×, Then the same kg is charged (the bill is by sim distance)', () => {
+    /** kg per km over `frames` cruise frames with `slices` physics slices per frame. */
+    const rate = (slices: number, frames: number): { kgPerKm: number; km: number } => {
+      const r = fuelled(CAP);
+      r.press.add('cruise');
+      r.step(CRUISE_DEFAULTS.spoolTime + 0.5);
+      expect(r.cruise.drive.phase).toBe('cruise');
+      r.slices = slices;
+      const kg0 = r.flight.propellant!.massKg;
+      const last = r.flight.worldPosition.clone();
+      let km = 0;
+      for (let i = 0; i < frames; i++) {
+        r.step(H);
+        km += r.flight.worldPosition.distanceTo(last);
+        last.copy(r.flight.worldPosition);
+      }
+      expect(r.cruise.drive.phase).toBe('cruise');
+      const out = { kgPerKm: (kg0 - r.flight.propellant!.massKg) / km, km };
+      r.cruise.dispose();
+      offLog?.();
+      return out;
+    };
+    // The same 200 sim-frames: 200 frames at 1×, or 2 frames of 100 slices.
+    const real = rate(1, 200);
+    const fast = rate(100, 2);
+    expect(fast.km / real.km).toBeGreaterThan(0.5); // about the same distance flown
+    expect(fast.km / real.km).toBeLessThan(2);
+    const perKm = (0.01 * CAP) / AU;
+    expect(Math.abs(real.kgPerKm - perKm) / perKm).toBeLessThan(1e-3);
+    expect(Math.abs(fast.kgPerKm - real.kgPerKm) / real.kgPerKm).toBeLessThan(0.01);
   });
 
   it('Given no tank attached (a bare hull), Then cruise is not charged and engages as before', () => {
