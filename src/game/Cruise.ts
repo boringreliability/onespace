@@ -61,6 +61,7 @@ import { steerToward } from '@/ship/cruiseSteer';
 import type { Universe } from '@/game/Universe';
 import { shotOwnsScene } from '@/game/Shots';
 import { SOLAR_RADIUS } from '@/gen/types';
+import { applyAction, canAfford, cruiseSpoolKg } from '@/ship/travelCost'; // [v4-fuel]
 
 /** What the pilot is told when the drive refuses. */
 const REFUSAL: Record<CruiseBlock, string> = {
@@ -181,6 +182,11 @@ export class Cruise implements GameModule {
   /** The insertion orbit's plane normal, fixed when the drop starts. */
   private readonly dropNormal = new Vector3();
   private dropPlaneSet = false;
+  /** [v4-fuel] Where the ship was at the last cruise frame, to bill the distance. */
+  private readonly lastCruisePos = new Vector3();
+  private haveLastCruisePos = false;
+  /** [v4-fuel] The tank ran dry this frame: the drop that follows says so. */
+  private ranDry = false;
 
   private readonly arrivalIn: Mutable<CruiseArrival> = {
     clearanceKm: 0,
@@ -340,6 +346,28 @@ export class Cruise implements GameModule {
     // Landing, or asking for an interstellar jump, means you are done cruising.
     if (ctx.input.pressed('land') || ctx.input.pressed('warp')) this.wanted = false;
 
+    // [v4-fuel] Cruise is paid for out of the tank (a hull without one flies free).
+    const tank = flight.propellant;
+    if (tank) {
+      // The distance flown under cruise since last frame (the physics step that
+      // just ran). Running dry releases the toggle: the drive drops normally.
+      if (this.drive.phase === 'cruise' && this.haveLastCruisePos) {
+        const km = flight.worldPosition.distanceTo(this.lastCruisePos);
+        if (!applyAction(tank, { kind: 'cruise-leg', distanceKm: km }).ok) {
+          this.wanted = false;
+          this.ranDry = true;
+        }
+      }
+      // Refuse to spool what cannot be paid for.
+      if (this.wanted && this.drive.phase === 'idle' && !canAfford(tank, cruiseSpoolKg(tank.capacityKg))) {
+        this.wanted = false;
+        if (ctx.elapsed - this.refusedAt > 3) {
+          this.refusedAt = ctx.elapsed;
+          bus.emit('log', { text: 'CRUISE · NO PROPELLANT', tone: 'warn' });
+        }
+      }
+    }
+
     // What the drive is closing on: the locked target, else the nearest body.
     const target = this.target();
     const toward = target ?? this.universe.nearest;
@@ -393,16 +421,34 @@ export class Cruise implements GameModule {
       }
     }
     this.drive.update(dt, di);
+    // [v4-fuel] The spool is paid when the drive actually starts to spool
+    // (affordability was checked above, so a blocked request costs nothing).
+    if (tank && wasPhase !== 'spooling' && this.drive.phase === 'spooling') {
+      if (!applyAction(tank, { kind: 'cruise-spool' }).ok) {
+        this.wanted = false;
+        this.drive.reset();
+        flight.setCruise(null);
+      }
+    }
+    if (this.drive.phase === 'cruise') {
+      this.lastCruisePos.copy(flight.worldPosition);
+      this.haveLastCruisePos = true;
+    } else {
+      this.haveLastCruisePos = false;
+    }
     // A drop is an answer, not a pause: whatever started it, the toggle is
     // released so the drive does not spool up again by itself.
     if (wasPhase === 'cruise' && this.drive.phase === 'dropping') {
       this.wanted = false;
       // An obstacle drop used to read only CRUISE DISENGAGED: say why.
       const why = this.drive.dropReason;
-      if (why === 'mass' || why === 'atmosphere') {
+      if (this.ranDry) {
+        bus.emit('log', { text: 'CRUISE DROPPED — NO PROPELLANT', tone: 'warn' });
+      } else if (why === 'mass' || why === 'atmosphere') {
         bus.emit('log', { text: why === 'mass' ? 'CRUISE DROPPED — MASS LOCK' : 'CRUISE DROPPED — ATMOSPHERE', tone: 'warn' });
       }
     }
+    if (this.drive.phase !== 'cruise') this.ranDry = false;
 
     if (wasEngaged && !this.drive.engaged) {
       // The handover. In orbit if there is anything to orbit, else the
@@ -529,6 +575,8 @@ export class Cruise implements GameModule {
     this.heldLever = null;
     this.settling = false;
     this._skirting = null;
+    this.haveLastCruisePos = false;
+    this.ranDry = false;
     this.drive.reset();
     this.universe.flight.setCruise(null);
     this.lastPhase = 'idle';

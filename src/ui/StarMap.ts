@@ -26,6 +26,8 @@ import { registerShot } from '@/game/Shots';
 import type { SpectralClass, Vec3 } from '@/gen/types';
 import { hashSeed, Rng } from '@/math/rng';
 import { jumpEstimateSeconds } from '@/ship/warpTimeline';
+import type { Propellant } from '@/ship/propellant';
+import { jumpPropellantRow } from '@/ship/travelCost'; // [v4-fuel]
 
 // ---------------------------------------------------------------------------
 // Public interface
@@ -294,6 +296,31 @@ export class StarMap implements GameModule {
     this.details = fn;
     this.lastInfoKey = '';
     this.lastConfirmKey = '';
+  }
+
+  /** [v4-fuel] The tank a jump is paid from; null hides the price (a hull without one). */
+  private propellantSource: (() => Propellant | null) | null = null;
+  setPropellantSource(fn: (() => Propellant | null) | null): void {
+    this.propellantSource = fn;
+    this.lastInfoKey = '';
+    this.lastConfirmKey = '';
+  }
+
+  /** [v4-fuel] Writes the PROPELLANT row for a jump of `distanceLy` (or '--'), tone included. */
+  private setFuelVal(bag: Record<string, HTMLDivElement>, distanceLy: number | null): void {
+    const el = bag['fuel'];
+    if (!el) return;
+    const p = this.propellantSource?.() ?? null;
+    const row = p && distanceLy !== null ? jumpPropellantRow(p, distanceLy) : null;
+    const text = row ? row.text : '--';
+    if (el.textContent !== text) el.textContent = text;
+    el.classList.toggle('is-warn', row?.tone === 'warn');
+  }
+
+  /** Cache-key part that changes when the tank's answer for `distanceLy` could. */
+  private fuelKey(distanceLy: number): string {
+    const p = this.propellantSource?.() ?? null;
+    return p ? `${jumpPropellantRow(p, distanceLy).affordable}` : '-';
   }
 
   /** Tell the chart where the ship is, so distances mean something. */
@@ -1058,7 +1085,7 @@ export class StarMap implements GameModule {
 
     if (this.infoEl) {
       this.infoEl.classList.toggle('is-on', !!e);
-      const key = e ? `${e.id}|${e.distanceLy.toFixed(3)}|${e.temperature}` : '';
+      const key = e ? `${e.id}|${e.distanceLy.toFixed(3)}|${e.temperature}|${this.fuelKey(e.distanceLy)}` : '';
       if (key !== this.lastInfoKey) {
         this.lastInfoKey = key;
         if (e) {
@@ -1086,6 +1113,7 @@ export class StarMap implements GameModule {
             'jump',
             e.id === this.originId ? '--' : formatDuration(this.jumpSeconds(e.distanceLy)),
           );
+          this.setFuelVal(this.infoVals, e.id === this.originId ? null : e.distanceLy);
           this.setVal(this.infoVals, 'note', det?.note ?? civNote(det?.civilisation));
         }
       }
@@ -1094,7 +1122,7 @@ export class StarMap implements GameModule {
     const sel = this.selectedId ? this.findEntry(this.selectedId) : null;
     if (this.confirmEl) {
       this.confirmEl.classList.toggle('is-on', !!sel);
-      const key = sel ? `${sel.id}|${sel.distanceLy.toFixed(3)}` : '';
+      const key = sel ? `${sel.id}|${sel.distanceLy.toFixed(3)}|${this.fuelKey(sel.distanceLy)}` : '';
       if (key !== this.lastConfirmKey) {
         this.lastConfirmKey = key;
         if (sel) {
@@ -1103,6 +1131,7 @@ export class StarMap implements GameModule {
           this.setVal(this.confirmVals, 'from', this.originLabel);
           this.setVal(this.confirmVals, 'dist', formatLy(sel.distanceLy));
           this.setVal(this.confirmVals, 'eta', formatDuration(this.jumpSeconds(sel.distanceLy)));
+          this.setFuelVal(this.confirmVals, sel.distanceLy);
           this.setVal(
             this.confirmVals,
             'class',
@@ -1195,7 +1224,11 @@ export class StarMap implements GameModule {
       name: sel.name,
       distanceLy: sel.distanceLy,
     });
-    bus.emit('log', { text: `JUMP AUTHORISED — ${sel.name}`, tone: 'good' });
+    // [v4-fuel] MapMode refuses (and says so) a jump the tank cannot pay for.
+    const p = this.propellantSource?.() ?? null;
+    if (!p || jumpPropellantRow(p, sel.distanceLy).affordable) {
+      bus.emit('log', { text: `JUMP AUTHORISED — ${sel.name}`, tone: 'good' });
+    }
     this.setOpen(false);
   }
 
@@ -1540,6 +1573,7 @@ const STARMAP_HTML = /* html */ `
   <div class="row"><span>PLANETS</span><div data-v="planets">--</div></div>
   <div class="row"><span>RANGE</span><div data-v="dist">--</div></div>
   <div class="row"><span>JUMP EST</span><div data-v="jump">--</div></div>
+  <div class="row"><span>JUMP COST</span><div data-v="fuel">--</div></div>
   <div class="note" data-v="note">--</div>
 </div>
 
@@ -1550,6 +1584,7 @@ const STARMAP_HTML = /* html */ `
     <div class="col"><span>FROM</span><div data-v="from">--</div></div>
     <div class="col"><span>RANGE</span><div data-v="dist">--</div></div>
     <div class="col"><span>JUMP EST</span><div data-v="eta">--</div></div>
+    <div class="col"><span>COST</span><div data-v="fuel">--</div></div>
     <div class="col"><span>CLASS</span><div data-v="class">--</div></div>
   </div>
   <div class="acts"><b>[ENTER]</b> ENGAGE JUMP<i></i><b>[ESC]</b> CANCEL</div>
@@ -1778,6 +1813,7 @@ html.os-map-recede canvas#gl {
 }
 .os-sm-info .row span { color: var(--dim); font-size: 9px; letter-spacing: 0.24em; }
 .os-sm-info .row div { color: #dfe7ec; }
+.os-sm-info .row div.is-warn, .os-sm-confirm .col div.is-warn { color: var(--warn); }
 .os-sm-info .note {
   margin-top: 12px; font-size: 9px; letter-spacing: 0.2em; color: var(--cyan); opacity: 0.75;
 }
