@@ -315,10 +315,15 @@ export class StarMap implements GameModule {
     el.classList.toggle('is-warn', cell.warn);
   }
 
-  /** Cache-key part that changes when the tank's answer for `distanceLy` could. */
+  /**
+   * Cache-key part that changes when the tank's answer for `distanceLy` could:
+   * affordability, and the shown share, which moves with the current capacity (I3).
+   */
   private fuelKey(distanceLy: number): string {
     const p = this.propellantSource?.() ?? null;
-    return p ? `${jumpPropellantRow(p, distanceLy).affordable}` : '-';
+    if (!p) return '-';
+    const row = jumpPropellantRow(p, distanceLy);
+    return `${row.affordable}|${row.text}`;
   }
 
   /** Tell the chart where the ship is, so distances mean something. */
@@ -1224,6 +1229,9 @@ export class StarMap implements GameModule {
     });
     // [v4-fuel] JUMP AUTHORISED (or the refusal) is logged by paidJump, the one
     // place the tank is judged — it has already paid by the time we return.
+    // I2: MapMode refuses the origin (and says so); the chart stays open for
+    // the pilot to pick another system.
+    if (sel.id === this.originId) return;
     this.setOpen(false);
   }
 

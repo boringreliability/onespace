@@ -8,6 +8,7 @@
  */
 
 import type { GameScale, PlanetSpec, StarSystemSpec, GalaxySpec, ScanResult } from '@/gen/types';
+import type { PropellantAction } from '@/ship/travelCost';
 
 export interface GameEvents {
   /** Boot progress, 0..1, plus a status line for the loading veil. */
@@ -76,7 +77,17 @@ export interface GameEvents {
   'ship:recovered': { cause: 'crash' | 'star' | 'requested' | 'beacon' };
 
   /** [v4-fuel] The pilot took the emergency exit on an empty tank (sub-plan 3 logs it). */
-  'emergency:used': { kind: 'cannibalize' | 'beacon' };
+  'emergency:used': {
+    kind: 'cannibalize' | 'beacon';
+    /** Cannibalizations so far, this one included (cannibalize only). */
+    timesUsed?: number;
+  };
+
+  /**
+   * [v4-fuel] A named tank action was applied (P3). `kg`: taken from the tank,
+   * or put back for a refund. Cruise legs are announced per leg segment.
+   */
+  'propellant:action': { action: PropellantAction; ok: boolean; kg: number };
 
   /** The star map's open transition started/ended. Flight input should stand down. */
   'ui:map-opened': void;

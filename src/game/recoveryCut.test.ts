@@ -78,7 +78,7 @@ describe('final review I1 — RETURN TO ORBIT costs as the beacon', () => {
     const actions: string[] = [];
     offs.push(bus.on('emergency:used', ({ kind }) => used.push(kind)));
     offs.push(
-      bus.on('propellant:action' as never, ((e: { action: { kind: string } }) => actions.push(e.action.kind)) as never),
+      bus.on('propellant:action', (e) => actions.push(e.action.kind)),
     );
     const run = (cause: 'requested' | 'crash' | 'star'): void => {
       cut.request(cause);

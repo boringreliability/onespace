@@ -370,7 +370,7 @@ describe('final review I4 — named actions and the propellant:action event', ()
   let off: (() => void) | null = null;
   function listen(): void {
     seen.length = 0;
-    off = bus.on('propellant:action' as never, ((e: Seen) => seen.push(e)) as never);
+    off = bus.on('propellant:action', (e: Seen) => seen.push(e));
   }
   afterEach(() => {
     off?.();
@@ -379,15 +379,15 @@ describe('final review I4 — named actions and the propellant:action event', ()
 
   it('The action type carries the refund kinds — jump-refund {kg} and spool-refund {kg}', () => {
     const kinds: PropellantAction[] = [
-      { kind: 'jump-refund', kg: 1 } as PropellantAction,
-      { kind: 'spool-refund', kg: 1 } as PropellantAction,
+      { kind: 'jump-refund', kg: 1 },
+      { kind: 'spool-refund', kg: 1 },
     ];
     expect(kinds).toHaveLength(2);
   });
 
   it('Given a half tank, When a jump-refund of 1 200 kg is applied, Then it is ok, the tank holds 1 200 kg more, and kg reports what went back in', () => {
     const p = tank(0.5);
-    const r = applyAction(p, { kind: 'jump-refund', kg: 1_200 } as PropellantAction);
+    const r = applyAction(p, { kind: 'jump-refund', kg: 1_200 });
     expect(r.ok).toBe(true);
     expect(r.kg).toBeCloseTo(1_200, 6);
     expect(p.massKg).toBeCloseTo(0.5 * CAP + 1_200, 6);
@@ -395,7 +395,7 @@ describe('final review I4 — named actions and the propellant:action event', ()
 
   it('Given a half tank, When a spool-refund of 100 kg is applied, Then it is ok and the tank holds 100 kg more', () => {
     const p = tank(0.5);
-    const r = applyAction(p, { kind: 'spool-refund', kg: 100 } as PropellantAction);
+    const r = applyAction(p, { kind: 'spool-refund', kg: 100 });
     expect(r.ok).toBe(true);
     expect(r.kg).toBeCloseTo(100, 6);
     expect(p.massKg).toBeCloseTo(0.5 * CAP + 100, 6);
@@ -404,15 +404,15 @@ describe('final review I4 — named actions and the propellant:action event', ()
   it('Given 50 kg of free space, When a 1 200 kg refund is applied, Then the tank is clamped to capacity and kg reports only the 50 kg that fit', () => {
     const p = new Propellant(CAP, 1);
     p.consume(50);
-    const r = applyAction(p, { kind: 'jump-refund', kg: 1_200 } as PropellantAction);
+    const r = applyAction(p, { kind: 'jump-refund', kg: 1_200 });
     expect(p.massKg).toBe(CAP);
     expect(r.kg).toBeCloseTo(50, 6);
   });
 
   it('Given a refund of NaN or a negative kg, Then nothing is added', () => {
     const p = tank(0.5);
-    applyAction(p, { kind: 'spool-refund', kg: Number.NaN } as PropellantAction);
-    applyAction(p, { kind: 'jump-refund', kg: -500 } as PropellantAction);
+    applyAction(p, { kind: 'spool-refund', kg: Number.NaN });
+    applyAction(p, { kind: 'jump-refund', kg: -500 });
     expect(p.massKg).toBeCloseTo(0.5 * CAP, 9);
   });
 
@@ -439,8 +439,8 @@ describe('final review I4 — named actions and the propellant:action event', ()
     applyAction(tank(1), { kind: 'cruise-spool' });
     applyAction(tank(1), { kind: 'cruise-leg', distanceKm: AU });
     applyAction(tank(1), { kind: 'jump', distanceLy: 1 });
-    applyAction(tank(0.5), { kind: 'jump-refund', kg: 10 } as PropellantAction);
-    applyAction(tank(0.5), { kind: 'spool-refund', kg: 10 } as PropellantAction);
+    applyAction(tank(0.5), { kind: 'jump-refund', kg: 10 });
+    applyAction(tank(0.5), { kind: 'spool-refund', kg: 10 });
     applyAction(tank(0), { kind: 'cannibalize', part: 'tank' });
     applyAction(tank(0), { kind: 'beacon' });
     expect(seen.map((e) => e.action.kind)).toEqual([

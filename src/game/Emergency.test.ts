@@ -440,7 +440,7 @@ describe('final review I4 — Emergency picks go through applyAction', () => {
 
   function listen(): Seen[] {
     const seen: Seen[] = [];
-    offs.push(bus.on('propellant:action' as never, ((e: Seen) => seen.push(e)) as never));
+    offs.push(bus.on('propellant:action', (e: Seen) => seen.push(e)));
     return seen;
   }
 
@@ -474,7 +474,7 @@ describe('final review I4 — Emergency picks go through applyAction', () => {
   it('Given a cannibalization, Then emergency:used carries timesUsed — the count after this use (1, then 2)', () => {
     const h = harness({ fill: 0 });
     const events: Array<{ kind: string; timesUsed?: number }> = [];
-    offs.push(bus.on('emergency:used', (e) => events.push(e as { kind: string; timesUsed?: number })));
+    offs.push(bus.on('emergency:used', (e) => events.push(e)));
     h.press(EMERGENCY_KEYS.open);
     h.press(EMERGENCY_KEYS.cannibalize);
     h.tank.consume(h.tank.massKg);

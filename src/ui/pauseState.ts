@@ -47,6 +47,14 @@ export function pauseContextFor(s: {
   return { overlayOpen: s.menuOpen || !s.flightShown, busy: s.busy };
 }
 
+/**
+ * [v4-fuel] I1: with a tank, RETURN TO ORBIT costs what the beacon costs, and
+ * the sheet says so before it is picked. A hull without a tank: v3, free.
+ */
+export function returnToOrbitLabel(hasTank: boolean): string {
+  return hasTank ? 'RETURN TO ORBIT · COSTS AS BEACON' : 'RETURN TO ORBIT';
+}
+
 /** What the caller must do as a result. */
 export type PauseEffect = 'none' | 'requestLock' | 'respawn';
 

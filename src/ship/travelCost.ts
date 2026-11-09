@@ -6,6 +6,7 @@
  * shows the price (`jumpPropellantRow`) beside JUMP EST.
  */
 
+import { bus } from '@/core/EventBus';
 import { AU } from '@/gen/types';
 import type { Propellant } from './propellant';
 import { applyBeacon, applyCannibalize } from './emergency';
@@ -16,11 +17,15 @@ export type PropellantAction =
   | { kind: 'jump'; distanceLy: number }
   /** `timesUsed`: cannibalizations so far (prices the loss); omitted = 0. */
   | { kind: 'cannibalize'; part: 'tank' | 'cargo'; timesUsed?: number }
-  | { kind: 'beacon' };
+  | { kind: 'beacon' }
+  /** A jump the warp rejected: its price goes back. */
+  | { kind: 'jump-refund'; kg: number }
+  /** A spool that never became cruise: its price goes back. */
+  | { kind: 'spool-refund'; kg: number };
 
 export interface ActionResult {
   ok: boolean;
-  /** kg actually taken from the tank. */
+  /** kg actually taken from the tank (for a refund: actually put back). */
   kg: number;
   /**
    * `capacity`: the tank cannot carry a cannibalization's loss; `not-empty`: only a
@@ -64,8 +69,39 @@ function payAll(p: Propellant, kg: number): ActionResult {
   return { ok: true, kg: p.consume(kg) };
 }
 
-export function applyAction(p: Propellant, a: PropellantAction): ActionResult {
+/**
+ * The one way the game changes the tank (P3): apply the named action and
+ * announce it once on the bus (`propellant:action`), refused or not.
+ *
+ * `announce: false` is for cruise legs only: Cruise bills the tank every
+ * frame but announces the leg once per segment (`announceAction`), so the
+ * bus is not flooded at 60 Hz.
+ */
+export function applyAction(
+  p: Propellant,
+  a: PropellantAction,
+  opts: { announce?: boolean } = {},
+): ActionResult {
+  const r = apply(p, a);
+  if (opts.announce !== false) announceAction(a, r);
+  return r;
+}
+
+/** The single `propellant:action` emit. */
+export function announceAction(a: PropellantAction, r: ActionResult): void {
+  bus.emit('propellant:action', { action: a, ok: r.ok, kg: r.kg });
+}
+
+/** A refund puts back up to `kg` (clamped to the free space); `kg` reports what fit. */
+function refund(p: Propellant, kg: number): ActionResult {
+  return { ok: true, kg: p.add(kg) };
+}
+
+function apply(p: Propellant, a: PropellantAction): ActionResult {
   switch (a.kind) {
+    case 'jump-refund':
+    case 'spool-refund':
+      return refund(p, a.kg);
     case 'cruise-spool':
       return payAll(p, cruiseSpoolKg(p.baseCapacityKg)); // R17: prices are fractions of BASE capacity
     case 'jump':
@@ -91,9 +127,15 @@ export interface JumpPropellantRow {
   affordable: boolean;
 }
 
-/** The chart's PROPELLANT row for a jump of `distanceLy`. */
+/**
+ * The chart's PROPELLANT row for a jump of `distanceLy`. The price is kg of
+ * BASE capacity (R17); it is SHOWN as a share of the CURRENT tank, the unit of
+ * the HUD's tank %, so the two numbers compare directly after a cannibalization.
+ */
 export function jumpPropellantRow(p: Propellant, distanceLy: number): JumpPropellantRow {
-  const frac = jumpPropellantFraction(distanceLy);
-  const affordable = canAfford(p, frac * p.baseCapacityKg);
-  return { text: `PROPELLANT ${Math.round(frac * 100)} %`, tone: affordable ? 'normal' : 'warn', affordable };
+  const kg = jumpPropellantFraction(distanceLy) * p.baseCapacityKg;
+  const affordable = canAfford(p, kg);
+  const cap = p.capacityKg;
+  const shown = cap > 0 ? Math.round((kg / cap) * 100) : 0;
+  return { text: `PROPELLANT ${shown} %`, tone: affordable ? 'normal' : 'warn', affordable };
 }

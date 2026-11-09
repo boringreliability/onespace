@@ -18,7 +18,8 @@
 import type { EngineContext, GameModule } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
 import { EMERGENCY_KEYS } from '@/core/Input';
-import { applyBeacon, applyCannibalize, cannibalizeYield, emergencyMayAct } from '@/ship/emergency';
+import { cannibalizeYield, emergencyMayAct } from '@/ship/emergency';
+import { applyAction } from '@/ship/travelCost';
 import type { Propellant } from '@/ship/propellant';
 
 export type EmergencyChoice = 'cannibalize' | 'beacon';
@@ -138,15 +139,16 @@ export class Emergency implements GameModule {
     // and here may have changed it, but the pick is what must never slip.
     if (!this.stranded) return;
     if (input.pressed('emergencyCannibalize')) {
-      if (!applyCannibalize(tank, this.uses).ok) return; // refused: the beacon still answers
+      const r = applyAction(tank, { kind: 'cannibalize', part: 'tank', timesUsed: this.uses });
+      if (!r.ok) return; // refused: the beacon still answers
       this.uses++;
       this.choosing = false;
       bus.emit('log', { text: 'TANK CANNIBALIZED', tone: 'warn' });
-      bus.emit('emergency:used', { kind: 'cannibalize' });
+      bus.emit('emergency:used', { kind: 'cannibalize', timesUsed: this.uses });
     } else if (input.pressed('emergencyBeacon')) {
       this.choosing = false;
       this.opts.universe.recoverToOrbit();
-      applyBeacon(tank);
+      applyAction(tank, { kind: 'beacon' });
       // Arrive coasting (RecoveryCut does the same).
       input.setThrottle(0);
       const cmd = this.opts.universe.flight.command;

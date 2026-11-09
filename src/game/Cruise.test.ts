@@ -686,7 +686,7 @@ describe('v4-fuel: cruise is paid for out of the tank', () => {
     let offAction: (() => void) | null = null;
     beforeEach(() => {
       actions = [];
-      offAction = bus.on('propellant:action' as never, ((e: Seen) => actions.push(e)) as never);
+      offAction = bus.on('propellant:action', (e: Seen) => actions.push(e));
     });
     afterEach(() => {
       offAction?.();
@@ -735,10 +735,13 @@ describe('v4-fuel: cruise is paid for out of the tank', () => {
     it('Given a cruise leg flown and dropped out of, Then the emitted cruise-leg kg add up to what left the tank for the leg', () => {
       const r = fuelled(CAP);
       r.press.add('cruise');
-      r.step(CRUISE_DEFAULTS.spoolTime + 0.5);
-      expect(r.cruise.drive.phase).toBe('cruise');
+      r.step(H); // the spool is paid on this frame; the leg has not begun
+      // Start counting at the segment's start: a window opened mid-segment
+      // would catch kg billed before kg0 in the first announcement.
       const kg0 = r.flight.propellant!.massKg;
       actions = [];
+      r.step(CRUISE_DEFAULTS.spoolTime + 0.5);
+      expect(r.cruise.drive.phase).toBe('cruise');
       r.step(3);
       r.press.add('cruise'); // release: cruise → dropping → idle
       r.step(5);

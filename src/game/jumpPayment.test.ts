@@ -129,7 +129,7 @@ describe('final review I2 — the origin system is not a jump target', () => {
       originId: 'sys:remit',
       warpIdle: true,
       engage: w.engage,
-    } as Parameters<typeof paidJump>[0]);
+    });
     expect(out).not.toBe('jumped');
     expect(w.calls).toBe(0);
     expect(tank.massKg).toBe(CAP);
@@ -146,7 +146,7 @@ describe('final review I2 — the origin system is not a jump target', () => {
       originId: 'sys:remit',
       warpIdle: true,
       engage: w.engage,
-    } as Parameters<typeof paidJump>[0]);
+    });
     expect(texts()).toEqual([JUMP_NO_SELECTION_HINT]);
   });
 
@@ -160,7 +160,7 @@ describe('final review I2 — the origin system is not a jump target', () => {
       originId: 'sys:remit',
       warpIdle: true,
       engage: w.engage,
-    } as Parameters<typeof paidJump>[0]);
+    });
     expect(out).not.toBe('jumped');
     expect(w.calls).toBe(0);
   });
@@ -176,7 +176,7 @@ describe('final review I2 — the origin system is not a jump target', () => {
       originId: 'sys:remit',
       warpIdle: true,
       engage: w.engage,
-    } as Parameters<typeof paidJump>[0]);
+    });
     expect(out).toBe('jumped');
     expect(tank.massKg).toBeCloseTo(0.94 * CAP, 6);
   });
@@ -191,7 +191,7 @@ describe('final review I4 — a rejected jump is refunded through applyAction', 
 
   it('Given a refund, Then it is applied as a named action (jump-refund, the full price) and propellant:action is emitted', async () => {
     const seen: Seen[] = [];
-    const offAction = bus.on('propellant:action' as never, ((e: Seen) => seen.push(e)) as never);
+    const offAction = bus.on('propellant:action', (e: Seen) => seen.push(e));
     try {
       const tank = new Propellant(CAP, 1);
       const w = warp('reject');

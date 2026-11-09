@@ -15,6 +15,7 @@ import { bus } from '@/core/EventBus';
 import { shotOwnsScene } from '@/game/Shots';
 import type { Universe } from '@/game/Universe';
 import { RecoveryTimeline } from '@/game/recovery';
+import { applyAction } from '@/ship/travelCost';
 
 export type RecoveryCause = 'crash' | 'star' | 'requested';
 
@@ -70,6 +71,14 @@ export class RecoveryCut implements GameModule {
       // the fade flew it — an FA-ON speed hold that kicked the fresh orbit
       // eccentric (playtest: e = 0.12 from a 60 % lever).
       this.universe.flight.command.throttle = 0;
+      // [v4-fuel] I1 (owner ruling): RETURN TO ORBIT with a tank is a rescue,
+      // not a refill — it costs exactly what the beacon costs. A crash or star
+      // recovery stays free (v3), and so does a hull without a tank.
+      const tank = this.universe.flight.propellant;
+      if (this.cause === 'requested' && tank) {
+        applyAction(tank, { kind: 'beacon' });
+        bus.emit('emergency:used', { kind: 'beacon' });
+      }
       // review-p1: the cruise drive kept running through the cut and flew the
       // ship straight back out of the recovery orbit.
       bus.emit('ship:recovered', { cause: this.cause });

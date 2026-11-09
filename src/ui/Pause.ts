@@ -18,7 +18,14 @@ import { Config, config, type QualityTier } from '@/core/Config';
 import { shotOwnsScene } from '@/game/Shots';
 import type { Universe } from '@/game/Universe';
 import type { RecoveryCut } from '@/game/RecoveryCut';
-import { PAUSE_CLOSED, pauseContextFor, pauseStep, type PauseEvent, type PauseState } from '@/ui/pauseState';
+import {
+  PAUSE_CLOSED,
+  pauseContextFor,
+  pauseStep,
+  returnToOrbitLabel,
+  type PauseEvent,
+  type PauseState,
+} from '@/ui/pauseState';
 import {
   SENSITIVITY_MAX,
   SENSITIVITY_MIN,
@@ -90,6 +97,7 @@ export class Pause implements GameModule {
 
   private root: HTMLDivElement | null = null;
   private sensVal: HTMLSpanElement | null = null;
+  private returnBtn: HTMLButtonElement | null = null;
   private canvas: HTMLElement | null = null;
   private stick: StickSettings = loadStickSettings(storage());
   private disposers: Array<() => void> = [];
@@ -334,7 +342,7 @@ export class Pause implements GameModule {
     sheet.appendChild(actions);
     const resume = this.button(actions, 'RESUME', () => this.dispatch({ type: 'resume' }));
     resume.classList.add('is-primary');
-    this.button(actions, 'RETURN TO ORBIT', () => this.dispatch({ type: 'returnToOrbit' }));
+    this.returnBtn = this.button(actions, returnToOrbitLabel(false), () => this.dispatch({ type: 'returnToOrbit' }));
 
     const foot = document.createElement('footer');
     foot.className = 'os-pz-foot';
@@ -359,6 +367,8 @@ export class Pause implements GameModule {
   private syncSettings(): void {
     this.stick = loadStickSettings(storage());
     if (this.sensVal) this.sensVal.textContent = `${this.stick.sensitivity.toFixed(2)}×`;
+    // [v4-fuel] I1: the price of RETURN TO ORBIT follows the hull (tank or not).
+    if (this.returnBtn) this.returnBtn.textContent = returnToOrbitLabel(this.universe.flight.propellant !== null);
     this.syncInputs();
   }
 

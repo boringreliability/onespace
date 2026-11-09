@@ -61,7 +61,10 @@ import { steerToward } from '@/ship/cruiseSteer';
 import type { Universe } from '@/game/Universe';
 import { shotOwnsScene } from '@/game/Shots';
 import { SOLAR_RADIUS } from '@/gen/types';
-import { applyAction, canAfford, cruiseSpoolKg } from '@/ship/travelCost'; // [v4-fuel]
+import { announceAction, applyAction, canAfford, cruiseSpoolKg } from '@/ship/travelCost'; // [v4-fuel]
+
+/** [v4-fuel] A long cruise leg is announced (`propellant:action`) at most this often, s. */
+const LEG_ANNOUNCE_S = 1;
 
 /** What the pilot is told when the drive refuses. */
 const REFUSAL: Record<CruiseBlock, string> = {
@@ -190,9 +193,31 @@ export class Cruise implements GameModule {
   /** [v4-fuel] Spool price paid for the charge in progress; refunded if it never reaches cruise. */
   private spoolPaidKg = 0;
 
+  /**
+   * [v4-fuel] The cruise leg segment being billed. The tank is billed every
+   * frame (exact, by sim distance); the `propellant:action` for it is
+   * announced once per segment — when cruise ends, or every LEG_ANNOUNCE_S.
+   */
+  private legKm = 0;
+  private legKg = 0;
+  private legOk = true;
+  private legAge = 0;
+
   private refundSpool(): void {
-    if (this.spoolPaidKg > 0) this.universe.flight.propellant?.add(this.spoolPaidKg);
+    const tank = this.universe.flight.propellant;
+    if (tank && this.spoolPaidKg > 0) applyAction(tank, { kind: 'spool-refund', kg: this.spoolPaidKg });
     this.spoolPaidKg = 0;
+  }
+
+  /** Announce the leg billed so far as one named action, and start a new segment. */
+  private flushLeg(): void {
+    if (this.legKm > 0 || this.legKg > 0) {
+      announceAction({ kind: 'cruise-leg', distanceKm: this.legKm }, { ok: this.legOk, kg: this.legKg });
+    }
+    this.legKm = 0;
+    this.legKg = 0;
+    this.legOk = true;
+    this.legAge = 0;
   }
 
   private readonly arrivalIn: Mutable<CruiseArrival> = {
@@ -237,6 +262,7 @@ export class Cruise implements GameModule {
   }
 
   dispose(): void {
+    this.flushLeg();
     for (const off of this.offs) off();
     this.offs.length = 0;
   }
@@ -360,10 +386,16 @@ export class Cruise implements GameModule {
       // just ran). Running dry releases the toggle: the drive drops normally.
       if (this.drive.phase === 'cruise' && this.haveLastCruisePos) {
         const km = flight.worldPosition.distanceTo(this.lastCruisePos);
-        if (!applyAction(tank, { kind: 'cruise-leg', distanceKm: km }).ok) {
+        const leg = applyAction(tank, { kind: 'cruise-leg', distanceKm: km }, { announce: false });
+        this.legKm += km;
+        this.legKg += leg.kg;
+        this.legAge += dt;
+        if (!leg.ok) {
+          this.legOk = false;
           this.wanted = false;
           this.ranDry = true;
         }
+        if (!leg.ok || this.legAge >= LEG_ANNOUNCE_S) this.flushLeg();
       }
       // Refuse to spool what cannot be paid for.
       if (this.wanted && this.drive.phase === 'idle' && !canAfford(tank, cruiseSpoolKg(tank.baseCapacityKg))) {
@@ -449,6 +481,7 @@ export class Cruise implements GameModule {
       this.haveLastCruisePos = true;
     } else {
       this.haveLastCruisePos = false;
+      this.flushLeg(); // the segment ends with cruise
     }
     // A drop is an answer, not a pause: whatever started it, the toggle is
     // released so the drive does not spool up again by itself.
@@ -590,6 +623,7 @@ export class Cruise implements GameModule {
     this.settling = false;
     this._skirting = null;
     this.haveLastCruisePos = false;
+    this.flushLeg();
     this.ranDry = false;
     // A charge cut short (jump, new system, recovery) never became cruise.
     if (this.drive.phase === 'spooling') this.refundSpool();

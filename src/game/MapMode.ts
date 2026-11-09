@@ -25,7 +25,8 @@ import { StarMap, registerStarMapShots, type GalaxyViewAdapter } from '@/ui/Star
 import type { Warp } from '@/ship/Warp';
 import type { Universe } from '@/game/Universe';
 import { activeShotName, shotOwnsScene } from '@/game/Shots';
-import { paidJump } from '@/game/jumpPayment'; // [v4-fuel]
+import { isOriginJump, paidJump } from '@/game/jumpPayment'; // [v4-fuel]
+import { JUMP_NO_SELECTION_HINT } from '@/game/jumpKey';
 
 /**
  * Radius of the neighbourhood the chart samples, in light years, and the range
@@ -265,6 +266,14 @@ export class MapMode implements GameModule {
       bus.emit('log', { text: `NO CHART FIX ON ${name.toUpperCase()}`, tone: 'warn' });
       return;
     }
+    // [v4-fuel] I2: the system the ship is in is no jump target (Enter on the
+    // origin used to pay the 4 % floor). Refused before the chart closes, so
+    // the pilot stays on the chart to pick another system.
+    const originId = this.universe.system.id;
+    if (isOriginJump(systemId, originId)) {
+      bus.emit('log', { text: JUMP_NO_SELECTION_HINT, tone: 'normal' });
+      return;
+    }
     if (this.open) this.toggle();
 
     // [v4-fuel] Paid in full before the drive engages, or not at all; refunded
@@ -276,6 +285,8 @@ export class MapMode implements GameModule {
       distanceLy: Math.hypot(stub.position[0] - sys[0], stub.position[1] - sys[1], stub.position[2] - sys[2]),
       name: stub.name,
       warpIdle: this.warp.phase === 'idle',
+      systemId,
+      originId,
       engage: () => this.warp.engage({ name: stub.name, positionLy: stub.position }),
     });
     if (outcome !== 'jumped') return;
