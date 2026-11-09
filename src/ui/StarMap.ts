@@ -306,15 +306,13 @@ export class StarMap implements GameModule {
     this.lastConfirmKey = '';
   }
 
-  /** [v4-fuel] Writes the PROPELLANT row for a jump of `distanceLy` (or '--'), tone included. */
-  private setFuelVal(bag: Record<string, HTMLDivElement>, distanceLy: number | null): void {
+  /** [v4-fuel] Writes the PROPELLANT cell for a jump of `distanceLy`, tone included. */
+  private setFuelVal(bag: Record<string, HTMLDivElement>, distanceLy: number, isOrigin: boolean): void {
     const el = bag['fuel'];
     if (!el) return;
-    const p = this.propellantSource?.() ?? null;
-    const row = p && distanceLy !== null ? jumpPropellantRow(p, distanceLy) : null;
-    const text = row ? row.text : '--';
-    if (el.textContent !== text) el.textContent = text;
-    el.classList.toggle('is-warn', row?.tone === 'warn');
+    const cell = jumpCostCell(this.propellantSource?.() ?? null, distanceLy, isOrigin);
+    if (el.textContent !== cell.text) el.textContent = cell.text;
+    el.classList.toggle('is-warn', cell.warn);
   }
 
   /** Cache-key part that changes when the tank's answer for `distanceLy` could. */
@@ -1113,7 +1111,7 @@ export class StarMap implements GameModule {
             'jump',
             e.id === this.originId ? '--' : formatDuration(this.jumpSeconds(e.distanceLy)),
           );
-          this.setFuelVal(this.infoVals, e.id === this.originId ? null : e.distanceLy);
+          this.setFuelVal(this.infoVals, e.distanceLy, e.id === this.originId);
           this.setVal(this.infoVals, 'note', det?.note ?? civNote(det?.civilisation));
         }
       }
@@ -1131,7 +1129,7 @@ export class StarMap implements GameModule {
           this.setVal(this.confirmVals, 'from', this.originLabel);
           this.setVal(this.confirmVals, 'dist', formatLy(sel.distanceLy));
           this.setVal(this.confirmVals, 'eta', formatDuration(this.jumpSeconds(sel.distanceLy)));
-          this.setFuelVal(this.confirmVals, sel.distanceLy);
+          this.setFuelVal(this.confirmVals, sel.distanceLy, sel.id === this.originId);
           this.setVal(
             this.confirmVals,
             'class',
@@ -1224,11 +1222,8 @@ export class StarMap implements GameModule {
       name: sel.name,
       distanceLy: sel.distanceLy,
     });
-    // [v4-fuel] MapMode refuses (and says so) a jump the tank cannot pay for.
-    const p = this.propellantSource?.() ?? null;
-    if (!p || jumpPropellantRow(p, sel.distanceLy).affordable) {
-      bus.emit('log', { text: `JUMP AUTHORISED — ${sel.name}`, tone: 'good' });
-    }
+    // [v4-fuel] JUMP AUTHORISED (or the refusal) is logged by paidJump, the one
+    // place the tank is judged — it has already paid by the time we return.
     this.setOpen(false);
   }
 
@@ -1455,6 +1450,21 @@ export class StarMap implements GameModule {
 
 /** MK boundaries, in kelvin. Derived from the adapter's temperature — the
  *  chart never invents a class it was not given a temperature for. */
+/**
+ * [v4-fuel] The PROPELLANT cell of the info row and the confirm column: the
+ * jump's price, warning-toned when the tank cannot pay it; `--` for the origin
+ * system or a hull without a tank.
+ */
+export function jumpCostCell(
+  p: Propellant | null,
+  distanceLy: number,
+  isOrigin: boolean,
+): { text: string; warn: boolean } {
+  if (!p || isOrigin) return { text: '--', warn: false };
+  const row = jumpPropellantRow(p, distanceLy);
+  return { text: row.text, warn: row.tone === 'warn' };
+}
+
 export function spectralFromTemperature(k: number): SpectralClass {
   if (k >= 30000) return 'O';
   if (k >= 10000) return 'B';

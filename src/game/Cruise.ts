@@ -187,6 +187,13 @@ export class Cruise implements GameModule {
   private haveLastCruisePos = false;
   /** [v4-fuel] The tank ran dry this frame: the drop that follows says so. */
   private ranDry = false;
+  /** [v4-fuel] Spool price paid for the charge in progress; refunded if it never reaches cruise. */
+  private spoolPaidKg = 0;
+
+  private refundSpool(): void {
+    if (this.spoolPaidKg > 0) this.universe.flight.propellant?.add(this.spoolPaidKg);
+    this.spoolPaidKg = 0;
+  }
 
   private readonly arrivalIn: Mutable<CruiseArrival> = {
     clearanceKm: 0,
@@ -424,12 +431,19 @@ export class Cruise implements GameModule {
     // [v4-fuel] The spool is paid when the drive actually starts to spool
     // (affordability was checked above, so a blocked request costs nothing).
     if (tank && wasPhase !== 'spooling' && this.drive.phase === 'spooling') {
-      if (!applyAction(tank, { kind: 'cruise-spool' }).ok) {
+      const paid = applyAction(tank, { kind: 'cruise-spool' });
+      if (paid.ok) {
+        this.spoolPaidKg = paid.kg;
+      } else {
         this.wanted = false;
         this.drive.reset();
         flight.setCruise(null);
       }
     }
+    // R12: a charge that never became cruise (released, mass-lock) is refunded;
+    // once the drive engages the spool is spent.
+    if (this.drive.phase === 'cruise') this.spoolPaidKg = 0;
+    else if (wasPhase === 'spooling' && this.drive.phase === 'idle') this.refundSpool();
     if (this.drive.phase === 'cruise') {
       this.lastCruisePos.copy(flight.worldPosition);
       this.haveLastCruisePos = true;
@@ -577,6 +591,9 @@ export class Cruise implements GameModule {
     this._skirting = null;
     this.haveLastCruisePos = false;
     this.ranDry = false;
+    // A charge cut short (jump, new system, recovery) never became cruise.
+    if (this.drive.phase === 'spooling') this.refundSpool();
+    this.spoolPaidKg = 0;
     this.drive.reset();
     this.universe.flight.setCruise(null);
     this.lastPhase = 'idle';

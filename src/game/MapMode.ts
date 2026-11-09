@@ -25,7 +25,7 @@ import { StarMap, registerStarMapShots, type GalaxyViewAdapter } from '@/ui/Star
 import type { Warp } from '@/ship/Warp';
 import type { Universe } from '@/game/Universe';
 import { activeShotName, shotOwnsScene } from '@/game/Shots';
-import { applyAction } from '@/ship/travelCost'; // [v4-fuel]
+import { paidJump } from '@/game/jumpPayment'; // [v4-fuel]
 
 /**
  * Radius of the neighbourhood the chart samples, in light years, and the range
@@ -267,28 +267,18 @@ export class MapMode implements GameModule {
     }
     if (this.open) this.toggle();
 
-    // [v4-fuel] A jump is paid in full before the drive engages, or not at
-    // all. A hull without a tank jumps free (v3 behaviour).
-    const tank = this.universe.flight.propellant;
-    if (tank) {
-      const distanceLy = Math.hypot(
-        stub.position[0] - this.universe.system.position[0],
-        stub.position[1] - this.universe.system.position[1],
-        stub.position[2] - this.universe.system.position[2],
-      );
-      if (!applyAction(tank, { kind: 'jump', distanceLy }).ok) {
-        bus.emit('log', { text: 'JUMP · NO PROPELLANT', tone: 'warn' });
-        return;
-      }
-    }
-
-    try {
-      await this.warp.engage({ name: stub.name, positionLy: stub.position });
-    } catch {
-      // A cancelled jump is a normal outcome, not an error.
-      bus.emit('log', { text: 'JUMP ABORTED', tone: 'warn' });
-      return;
-    }
+    // [v4-fuel] Paid in full before the drive engages, or not at all; refunded
+    // if the warp rejects. paidJump owns the jump's log lines. A hull without
+    // a tank jumps free (v3 behaviour).
+    const sys = this.universe.system.position;
+    const outcome = await paidJump({
+      tank: this.universe.flight.propellant,
+      distanceLy: Math.hypot(stub.position[0] - sys[0], stub.position[1] - sys[1], stub.position[2] - sys[2]),
+      name: stub.name,
+      warpIdle: this.warp.phase === 'idle',
+      engage: () => this.warp.engage({ name: stub.name, positionLy: stub.position }),
+    });
+    if (outcome !== 'jumped') return;
 
     this.universe.enterSystem(generateSystem(this.universe.galaxy, stub), ctx);
   }
