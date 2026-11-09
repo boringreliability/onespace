@@ -24,7 +24,6 @@ import {
   saveHintCounts,
   selectHint,
   type HintCounts,
-  type HintId,
   type KeyValueStore,
   type RetirableHintId,
 } from '@/ui/hintRules';
@@ -39,6 +38,11 @@ export interface HintsOptions {
   readonly pause: Pause;
   readonly recovery: RecoveryCut;
   readonly warp: { readonly phase: string };
+  /**
+   * [v4-fuel] The emergency exit's line ("EMERGENCY · H", or its menu). When
+   * set it outranks every lesson: a dry tank is not a tutorial moment.
+   */
+  readonly emergency?: { readonly line: string | null };
 }
 
 function storage(): KeyValueStore | null {
@@ -60,7 +64,8 @@ export class Hints implements GameModule {
 
   private el: HTMLDivElement | null = null;
   private textEl: HTMLSpanElement | null = null;
-  private shown: HintId | null = null;
+  /** The text on the line (a hint's, or the emergency line). */
+  private shown: string | null = null;
   private opacity = 0;
   private lastOpacity = -1;
   private disposers: Array<() => void> = [];
@@ -142,13 +147,26 @@ export class Hints implements GameModule {
           this.counts,
         );
 
+    // [v4-fuel] The emergency line takes the slot whenever a hint could show.
+    const urgent =
+      !shotOwnsScene() &&
+      modes.current === 'flight' &&
+      !this.chartOpen &&
+      !codexOpen &&
+      !pause.isOpen &&
+      !recovery.active &&
+      warp.phase === 'idle'
+        ? (this.opts.emergency?.line ?? null)
+        : null;
+    const wantText: string | null = urgent ?? (want ? HINT_TEXT[want] : null);
+
     // Fade out, swap while invisible, fade in. A changed hint never cuts.
-    const goal = want !== null && want === this.shown ? 1 : 0;
+    const goal = wantText !== null && wantText === this.shown ? 1 : 0;
     this.opacity += (goal - this.opacity) * Math.min(1, dt / FADE);
     if (Math.abs(goal - this.opacity) < 0.002) this.opacity = goal;
-    if (this.opacity < SWAP_AT && want !== this.shown) {
-      this.shown = want;
-      if (this.textEl) this.textEl.textContent = want ? HINT_TEXT[want] : '';
+    if (this.opacity < SWAP_AT && wantText !== this.shown) {
+      this.shown = wantText;
+      if (this.textEl) this.textEl.textContent = wantText ?? '';
     }
 
     if (this.el && Math.abs(this.opacity - this.lastOpacity) > 0.002) {

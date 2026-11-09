@@ -73,7 +73,10 @@ export interface GameEvents {
    * (crash, star contact or RETURN TO ORBIT). Anything flying the ship — the
    * cruise drive above all — must let go, or it flies the ship out again.
    */
-  'ship:recovered': { cause: 'crash' | 'star' | 'requested' };
+  'ship:recovered': { cause: 'crash' | 'star' | 'requested' | 'beacon' };
+
+  /** [v4-fuel] The pilot took the emergency exit on an empty tank (sub-plan 3 logs it). */
+  'emergency:used': { kind: 'cannibalize' | 'beacon' };
 
   /** The star map's open transition started/ended. Flight input should stand down. */
   'ui:map-opened': void;

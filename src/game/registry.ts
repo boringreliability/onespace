@@ -60,6 +60,7 @@ import { selectionFromRoute, toShipParams } from '@/game/showroom/catalog';
 import { RecoveryCut } from '@/game/RecoveryCut';
 import { Pause } from '@/ui/Pause';
 import { Hints } from '@/ui/Hints';
+import { Emergency } from '@/game/Emergency'; // [v4-fuel]
 import { Warp, registerWarpShots } from '@/ship/Warp';
 import { registerCameraShots } from '@/ship/CameraRig';
 import { registerShipShots } from '@/ship/Ship';
@@ -377,7 +378,10 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   await engine.add(recovery);
   const pause = new Pause({ universe, recovery, warp, input: engine.input });
   await engine.add(pause);
-  await engine.add(new Hints({ universe, pause, recovery, warp }));
+  // [v4-fuel] the emergency exit on an empty tank; its line rides NAV ADVISORY.
+  const emergency = new Emergency({ universe });
+  await engine.add(emergency);
+  await engine.add(new Hints({ universe, pause, recovery, warp, emergency }));
   // --- end track D -------------------------------------------------------------
 
   progress(0.88, 'assembling gallery');

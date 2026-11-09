@@ -8,19 +8,22 @@
 
 import { AU } from '@/gen/types';
 import type { Propellant } from './propellant';
+import { applyBeacon, applyCannibalize } from './emergency';
 
 export type PropellantAction =
   | { kind: 'cruise-spool' }
   | { kind: 'cruise-leg'; distanceKm: number }
   | { kind: 'jump'; distanceLy: number }
-  | { kind: 'cannibalize'; part: 'tank' | 'cargo' }
+  /** `timesUsed`: cannibalizations so far (prices the loss); omitted = 0. */
+  | { kind: 'cannibalize'; part: 'tank' | 'cargo'; timesUsed?: number }
   | { kind: 'beacon' };
 
 export interface ActionResult {
   ok: boolean;
   /** kg actually taken from the tank. */
   kg: number;
-  reason?: 'insufficient' | 'nothing-left';
+  /** `capacity`: the tank cannot carry a cannibalization's loss; `cargo-reserved`: sub-plan 2. */
+  reason?: 'insufficient' | 'nothing-left' | 'capacity' | 'cargo-reserved';
 }
 
 const JUMP_BASE = 0.04;
@@ -71,9 +74,11 @@ export function applyAction(p: Propellant, a: PropellantAction): ActionResult {
       return taken < bill ? { ok: false, kg: taken, reason: 'nothing-left' } : { ok: true, kg: taken };
     }
     case 'cannibalize':
+      // Cargo cannibalization arrives with cargo (sub-plan 2).
+      if (a.part === 'cargo') return { ok: false, kg: 0, reason: 'cargo-reserved' };
+      return applyCannibalize(p, a.timesUsed ?? 0);
     case 'beacon':
-      // Task 6.
-      return { ok: true, kg: 0 };
+      return applyBeacon(p);
   }
 }
 

@@ -49,7 +49,17 @@ export type ActionName =
   | 'flightAssist'
   // [v2-p4] time compression steps (game/TimeCompression.ts)
   | 'timeSlower'
-  | 'timeFaster';
+  | 'timeFaster'
+  // [v4-fuel] the emergency exit (game/Emergency.ts)
+  | 'emergency'
+  | 'emergencyCannibalize'
+  | 'emergencyBeacon';
+
+/**
+ * [v4-fuel] The emergency exit's keys: `open` offers the choice on an empty
+ * tank, then `cannibalize` / `beacon` pick. H, 1 and 2 were free.
+ */
+export const EMERGENCY_KEYS = { open: 'KeyH', cannibalize: 'Digit1', beacon: 'Digit2' } as const;
 
 const KEY_ACTIONS: Record<string, ActionName> = {
   ShiftLeft: 'boost',
@@ -70,7 +80,16 @@ const KEY_ACTIONS: Record<string, ActionName> = {
   // [v2-p4] `,` / `.` step time compression 1× / 10× / 100× (the KSP keys).
   Comma: 'timeSlower',
   Period: 'timeFaster',
+  // [v4-fuel]
+  [EMERGENCY_KEYS.open]: 'emergency',
+  [EMERGENCY_KEYS.cannibalize]: 'emergencyCannibalize',
+  [EMERGENCY_KEYS.beacon]: 'emergencyBeacon',
 };
+
+/** The action a key code is bound to, if any. */
+export function actionForKey(code: string): ActionName | undefined {
+  return Object.prototype.hasOwnProperty.call(KEY_ACTIONS, code) ? KEY_ACTIONS[code] : undefined;
+}
 
 // ---------------------------------------------------------------------------
 // [v3-T2] Key-axis ramps (PLAN phase B)

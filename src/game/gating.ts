@@ -56,6 +56,8 @@ export const MODULE_MODES: Readonly<Record<string, readonly Mode[]>> = {
   // v2 phase 4.
   autopilot: PILOTING,
   'time-compression': PILOTING,
+  // v4 sub-plan 1: the emergency exit (keys only in flight; never mid-chart).
+  emergency: ['flight'],
 };
 
 /**
