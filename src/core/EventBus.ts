@@ -9,6 +9,7 @@
 
 import type { GameScale, PlanetSpec, StarSystemSpec, GalaxySpec, ScanResult } from '@/gen/types';
 import type { PropellantAction } from '@/ship/travelCost';
+import type { CargoAction, CargoResult } from '@/ship/cargo';
 
 export interface GameEvents {
   /** Boot progress, 0..1, plus a status line for the loading veil. */
@@ -88,6 +89,9 @@ export interface GameEvents {
    * or put back for a refund. Cruise legs are announced per leg segment.
    */
   'propellant:action': { action: PropellantAction; ok: boolean; kg: number };
+
+  /** [v4-mining] A named hold action was applied; refusals are announced too. */
+  'cargo:action': { action: CargoAction; result: CargoResult };
 
   /** The star map's open transition started/ended. Flight input should stand down. */
   'ui:map-opened': void;
