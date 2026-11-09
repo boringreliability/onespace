@@ -37,6 +37,7 @@ import {
   type AutopilotPhase,
   type AutopilotRefusal,
 } from '@/ship/autopilot';
+import { autoLandVerdict, landingEstimateKg } from '@/ui/propellantReadout';
 
 /**
  * The part of Universe this module reads — structural, so node tests can
@@ -85,6 +86,12 @@ export interface AutoPilotOptions {
 export const AUTOPILOT_DISENGAGED = 'AUTOPILOT DISENGAGED';
 export const AUTOPILOT_QUEUED = 'AUTOPILOT QUEUED — LANDING AFTER CRUISE';
 export const AUTOPILOT_QUEUE_CANCELLED = 'AUTOPILOT QUEUE CANCELLED';
+/** v4 fuel: L refused, the tank holds less than half the landing estimate. */
+export const AUTOPILOT_PROPELLANT_LOW = 'AUTOPILOT · PROPELLANT LOW';
+/** v4 fuel: L engaged, but the tank holds less than the landing estimate. */
+export const AUTOPILOT_PROPELLANT_MARGINAL = 'AUTOPILOT · PROPELLANT MARGINAL';
+/** v4 fuel: the tank ran dry mid-leg; the computer lets go. */
+export const AUTOPILOT_OFF_PROPELLANT = 'AUTOPILOT OFF · PROPELLANT';
 
 function refusalText(r: AutopilotRefusal, preset: FlightPresetSpec): string {
   switch (r) {
@@ -176,6 +183,7 @@ export class AutoPilot implements GameModule {
    */
   sliceStep(h: number): void {
     if (!this.core.active) return;
+    if (this.releaseIfStarved()) return;
     // review-v3b: Universe re-parents after each slice; at 10× the rest of
     // the frame must not be flown with the old world against the new frame.
     if (this.universe.shipParent !== this.parent) {
@@ -205,6 +213,8 @@ export class AutoPilot implements GameModule {
 
     if (this._queued) {
       this.updateQueue(input, flight);
+    } else if (this.core.active && this.releaseIfStarved()) {
+      // v4 fuel: the tank ran dry — handed back, nothing else to judge.
     } else if (this.core.active) {
       const k = this.keys;
       k.throttleKeys = input.isDown('KeyW') || input.isDown('KeyS');
@@ -283,9 +293,22 @@ export class AutoPilot implements GameModule {
       return;
     }
 
+    const goal: AutopilotGoal = flight.grounded ? 'orbit' : 'land';
+    // v4 fuel: a landing checks the tank first. No tank = v3, no check; no
+    // pre-check for the climb to orbit (ruling R14).
+    let marginal = false;
+    const tank = flight.propellant;
+    if (goal === 'land' && tank !== null) {
+      const verdict = autoLandVerdict(tank.massKg, landingEstimateKg(flight));
+      if (verdict === 'refuse') {
+        bus.emit('log', { text: AUTOPILOT_PROPELLANT_LOW, tone: 'warn' });
+        return;
+      }
+      marginal = verdict === 'marginal';
+    }
+
     this.parent = parent;
     this.syncWorld();
-    const goal: AutopilotGoal = flight.grounded ? 'orbit' : 'land';
     this.core.engage(goal, flight, this.world);
     this.lastPhase = this.core.phase;
     // The lever goes to the coast detent, so the hand-back — at the end or on
@@ -297,6 +320,18 @@ export class AutoPilot implements GameModule {
         : 'AUTOPILOT ENGAGED — TO ORBIT',
       tone: 'good',
     });
+    if (marginal) bus.emit('log', { text: AUTOPILOT_PROPELLANT_MARGINAL, tone: 'warn' });
+  }
+
+  /**
+   * v4 fuel: the tank ran dry (thrust was wanted and the engine starved), so
+   * the computer lets go with its own log. It never re-engages by itself.
+   */
+  private releaseIfStarved(): boolean {
+    if (!this.universe.flight.thrustStarved) return false;
+    this.disengage(false);
+    bus.emit('log', { text: AUTOPILOT_OFF_PROPELLANT, tone: 'warn' });
+    return true;
   }
 
   private announcePhase(): void {

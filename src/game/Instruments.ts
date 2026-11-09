@@ -29,6 +29,7 @@ import {
 } from '@/game/flightAids';
 import type { Hud, HudInstruments } from '@/ui/Hud';
 import { assistReadout } from '@/game/assistReadout';
+import { EXHAUST_VELOCITY_KMS, deltaVRemaining } from '@/ship/propellant';
 import { cruiseArrivalEta, cruiseReadout } from '@/game/cruiseReadout';
 import { WorldMarker } from '@/game/worldMarker';
 import type { CruisePhase } from '@/ship/CruiseDrive';
@@ -169,6 +170,17 @@ export class Instruments implements GameModule {
     const f = this.universe.flight;
     this.publishCruise();
     this.hud.setAssist(assistReadout(f.assistState, f.assistTargetKmS));
+    // [v4-fuel] the tank and the Δv it still buys; no tank = no readout (v3).
+    const tank = f.propellant;
+    if (tank !== null) {
+      this.hud.setPropellant(
+        tank.fraction,
+        deltaVRemaining(f.config.mass, tank.massKg, f.extraMassKg, EXHAUST_VELOCITY_KMS),
+        f.thrustStarved,
+      );
+    } else {
+      this.hud.clearPropellant();
+    }
     const ax = ctx.input.axes;
     const sd = ctx.input.stickDeflection;
     this.hud.setControlActivity(

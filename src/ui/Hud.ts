@@ -25,6 +25,7 @@ import { AU, type GameScale, type ScanResult } from '@/gen/types';
 import { MAX_CONTACT_BRACKETS, edgePlace, type EdgePlacement } from '@/game/contacts';
 import type { CruiseReadout } from '@/game/cruiseReadout';
 import { gReadout } from '@/ui/gReadout';
+import { effectiveThrottle, propellantTone, type PropellantTone } from '@/ui/propellantReadout';
 import { createLadderFade, stepLadderFade } from '@/ui/ladderFade';
 import {
   TAPE_PX_PER_DECADE,
@@ -596,6 +597,18 @@ export class Hud implements GameModule {
   private vThrottleFill!: CssVar;
   private tThrottleNum!: TextSlot;
   private tAssist: TextSlot | null = null;
+  // [v4-fuel] the tank, under the FA line. Hidden for a hull without a tank.
+  private elProp!: HTMLElement;
+  private vPropFill!: CssVar;
+  private tPropNum!: TextSlot;
+  private tPropDv!: TextSlot;
+  private hasProp = false;
+  private propFraction = 0;
+  private propDvKmS = 0;
+  private propStarved = false;
+  private propTone: PropellantTone | '' = '';
+  private readonly rProp = new Readout();
+  private readonly rPropDv = new Readout();
   private vThrottleIdx!: CssVar;
 
   private speedTape!: Tape;
@@ -808,6 +821,24 @@ export class Hud implements GameModule {
     this.stickY = clamp(y, -1, 1);
   }
 
+  /**
+   * [v4-fuel] The tank: fill 0..1, Δv left in km/s, and whether the engine
+   * starved this frame (the THR gauge then reads 0). Primitives, so the
+   * caller allocates nothing per frame.
+   */
+  setPropellant(fraction: number, deltaVKmS: number, starved: boolean): void {
+    this.hasProp = true;
+    this.propFraction = clamp(Number.isFinite(fraction) ? fraction : 0, 0, 1);
+    this.propDvKmS = Number.isFinite(deltaVKmS) ? Math.max(0, deltaVKmS) : 0;
+    this.propStarved = starved;
+  }
+
+  /** [v4-fuel] No tank on this hull: no readout, the gauge as in v3. */
+  clearPropellant(): void {
+    this.hasProp = false;
+    this.propStarved = false;
+  }
+
   /** The flight-assist line under the throttle gauge (game/assistReadout.ts). */
   setAssist(text: string): void {
     // Under cruise the line belongs to the drive's ETA (setCruise).
@@ -935,10 +966,29 @@ export class Hud implements GameModule {
   // =========================================================================
 
   private drawThrottle(): void {
-    this.vThrottleFill.set(this.throttle);
-    this.vThrottleIdx.set(this.throttle);
-    const pct = this.rThrottle.step(this.throttle * 100, 1);
+    // [v4-fuel] a starved engine delivers nothing: the gauge never shows it thrusting.
+    const thr = effectiveThrottle(this.throttle, this.propStarved);
+    this.vThrottleFill.set(thr);
+    this.vThrottleIdx.set(thr);
+    const pct = this.rThrottle.step(thr * 100, 1);
     this.tThrottleNum.set(fixed(pct, 0).padStart(3, '0'));
+    this.drawPropellant();
+  }
+
+  private drawPropellant(): void {
+    this.elProp.classList.toggle('os-void', !this.hasProp);
+    if (!this.hasProp) return;
+    const f = this.propFraction;
+    this.vPropFill.set(f);
+    this.tPropNum.set(fixed(this.rProp.step(f * 100, 1), 0));
+    const dv = this.propDvKmS;
+    const q = dv >= 100 ? 1 : dv >= 10 ? 0.1 : 0.01;
+    this.tPropDv.set(fixed(this.rPropDv.step(dv, q), q === 1 ? 0 : q === 0.1 ? 1 : 2));
+    const tone = propellantTone(f);
+    if (tone !== this.propTone) {
+      this.propTone = tone;
+      this.elProp.dataset.tone = tone;
+    }
   }
 
   private drawTapes(): void {
@@ -1410,6 +1460,20 @@ export class Hud implements GameModule {
     // engine output (0 % while holding speed in vacuum), so this line is the
     // only place the set speed is visible.
     this.tAssist = new TextSlot(el('div', 'os-thr-fa', p));
+    // [v4-fuel] the tank: a bar, the fill in %, and Δv left in km/s.
+    const prop = el('div', 'os-thr-prop os-void', p);
+    this.elProp = prop;
+    const head = el('div', 'os-prop-head', prop);
+    el('span', 'os-label', head, 'prop');
+    const pnum = el('span', 'os-prop-num', head);
+    this.tPropNum = new TextSlot(el('span', 'os-num', pnum));
+    el('span', 'os-unit', pnum, '%');
+    const bar = el('div', 'os-prop-track', prop);
+    this.vPropFill = new CssVar(el('i', 'os-prop-fill', bar), '--fill', 0.002, 3);
+    const dvRow = el('div', 'os-prop-dv', prop);
+    el('span', 'os-label', dvRow, 'Δv');
+    this.tPropDv = new TextSlot(el('span', 'os-num', dvRow));
+    el('span', 'os-unit', dvRow, 'km/s');
     // v3: the G meter lives here now, off the hull and the plume it used to
     // sit on in the middle of the frame.
     const g = el('div', 'os-thr-g', p);
@@ -2129,6 +2193,16 @@ const CSS = /* css */ `
 }
 .os-hud .os-g-num[data-tone='idle'] { opacity: 0.6; }
 .os-hud .os-g-num[data-tone='high'] { color: var(--os-amber); text-shadow: var(--os-glow); }
+/* [v4-fuel] the tank, under the FA line. Amber like every ship system; the
+   caution tone brightens it, the warning tone is the log's red. */
+.os-hud .os-thr-prop { margin-top: 10px; font-size: 9px; letter-spacing: 0.12em; color: var(--os-amber); text-shadow: var(--os-shadow); transition: opacity 0.4s ease; }
+.os-hud .os-thr-prop.os-void { display: none; }
+.os-hud .os-prop-head, .os-hud .os-prop-dv { display: flex; gap: 6px; align-items: baseline; white-space: nowrap; }
+.os-hud .os-prop-track { position: relative; height: 3px; margin: 4px 0; background: rgba(255, 255, 255, 0.08); overflow: hidden; }
+.os-hud .os-prop-fill { position: absolute; inset: 0; background: currentColor; transform-origin: left center; transform: scaleX(var(--fill, 0)); }
+.os-hud .os-thr-prop[data-tone='normal'] { opacity: 0.8; }
+.os-hud .os-thr-prop[data-tone='caution'] { text-shadow: var(--os-glow); }
+.os-hud .os-thr-prop[data-tone='warning'] { color: var(--os-warn); text-shadow: var(--os-shadow), 0 0 8px rgba(255, 95, 86, 0.4); }
 .os-thr-fa {
   margin-top: 6px;
   font-size: 9px;
