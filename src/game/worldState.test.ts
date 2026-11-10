@@ -62,3 +62,35 @@ describe('WorldState — depletion (P2)', () => {
     expect(ws.entries()).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Mutation hardening (Task 8, phase A).
+// ---------------------------------------------------------------------------
+
+describe('WorldState — the shared empty record and the by field (hardening)', () => {
+  it('Given two ids never mined, Then depleted() returns the SAME frozen record for both (allocation-free, unwritable)', () => {
+    const { ws } = rig();
+    const a = ws.depleted('ast:never:1');
+    const b = ws.depleted('ast:never:2');
+    expect(a).toBe(b);
+    expect(Object.isFrozen(a)).toBe(true);
+    expect(a).toEqual({ ice: 0, metal: 0, silicate: 0, rare: 0 });
+    expect(ws.depleted('ast:never:1')).toBe(a);
+  });
+
+  it('Given an id that was mined, Then depleted() is its own (unfrozen, unshared) record, not the empty one', () => {
+    const { ws } = rig();
+    const none = ws.depleted('ast:other');
+    ws.recordMined(AST, 'ice', 3, 'local');
+    expect(ws.depleted(AST)).not.toBe(none);
+    expect(ws.depleted(AST).ice).toBe(3);
+    expect(ws.depleted('ast:other')).toBe(none);
+    expect(none.ice).toBe(0);
+  });
+
+  it('Given recordMined with a given `by`, Then the entry carries exactly that value', () => {
+    const { ws } = rig();
+    ws.recordMined(AST, 'metal', 2, 'someone-else' as never);
+    expect(ws.entries()[0]!.by).toBe('someone-else');
+  });
+});

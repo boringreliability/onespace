@@ -25,7 +25,7 @@ import { generateSystem } from '@/gen/system';
 import { AU, type StarSystemSpec, type Vec3 } from '@/gen/types';
 import { DEFAULT_UNIVERSE_SEED } from '@/game/Universe';
 import { fyssBelt, startSystem, startUniverse } from '@/game/testing/beltFixture';
-import { beltNodeTarget, beltRing, chartMaxKm, radial } from './beltChart';
+import { CHART_R, beltNodeTarget, beltRing, chartMaxKm, radial } from './beltChart';
 import { planetsCell, systemDetailsOf } from './StarMap';
 
 /** The planet-only chart scale, as SystemMap.rebuild computed it before the belt (R21). */
@@ -145,5 +145,40 @@ describe('the galaxy chart info panel', () => {
 
   it('Given no details for a contact, Then the cell still reads -- (nothing invented)', () => {
     expect(planetsCell(null)).toBe('--');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Mutation hardening (Task 8, phase A): radial()'s clamps and constants.
+// ---------------------------------------------------------------------------
+
+describe('radial — the log scale, pinned with numbers (hardening)', () => {
+  it('Then the chart radius is 500 and the floor of the scale is 1e5 km', () => {
+    expect(CHART_R).toBe(500);
+    expect(radial(1e5, 1e9)).toBe(0);
+    expect(radial(1e9, 1e9)).toBeCloseTo(500, 9);
+    // 1e6 km is one decade of four: a quarter of the way out.
+    expect(radial(1e6, 1e9)).toBeCloseTo(500 * (1 / 4), 9);
+    // log scale about 1e5: a floor of 2e5 would give 500·ln5/ln(1e9/2e5) instead
+    expect(radial(1e7, 1e9)).toBeCloseTo(500 * (2 / 4), 9);
+    expect(radial(1.5e5, 1e9)).toBeCloseTo((500 * Math.log(1.5)) / Math.log(1e4), 9);
+  });
+
+  it('Given a radius below the floor, Then it is clamped to 0 (never negative)', () => {
+    expect(radial(5e4, 1e9)).toBe(0);
+    expect(radial(0, 1e9)).toBe(0);
+    expect(radial(-100, 1e9)).toBe(0);
+  });
+
+  it('Given a radius beyond maxKm, Then it is capped at CHART_R', () => {
+    expect(radial(1e10, 1e9)).toBe(500);
+    expect(radial(Number.POSITIVE_INFINITY, 1e9)).toBe(500);
+  });
+
+  it('Given a tiny maxKm, Then the span is at least a decade (1e6 km): no division by zero', () => {
+    // maxKm = 1e5 → span = ln(10), not ln(1) = 0.
+    expect(radial(2e5, 1e5)).toBeCloseTo((500 * Math.log(2)) / Math.log(10), 9);
+    expect(radial(1e6, 1e5)).toBeCloseTo(500, 9);
+    expect(radial(2e5, 0)).toBeCloseTo((500 * Math.log(2)) / Math.log(10), 9);
   });
 });

@@ -355,3 +355,91 @@ describe('Task 6 — payBeacon', () => {
     expect(notes(reloaded).map((e) => e.key).sort()).toEqual(['beacon:1', 'beacon:2', 'beacon:3']);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Mutation hardening (Task 8, phase A): the beacon counter and the note text.
+// ---------------------------------------------------------------------------
+
+describe('payBeacon — counter, key anchoring and note text (hardening)', () => {
+  type Rec = { key: string; kind: 'note'; system: string; title: string; body: readonly string[] };
+  function fakeLog(keys: string[]) {
+    const recorded: Rec[] = [];
+    return {
+      recorded,
+      all: () => keys.map((key) => ({ key })),
+      record: (e: Rec) => {
+        recorded.push(e);
+      },
+    };
+  }
+  function cargoWith(kg: Partial<Record<'ice' | 'metal' | 'silicate' | 'rare', number>>): Cargo {
+    const c = new Cargo(CARGO_CAPACITY_KG);
+    c.restore(kg);
+    return c;
+  }
+
+  it('Given a log that dropped its older beacons (only beacon:3 and beacon:7 left), Then the next key is beacon:8 (max + 1, not count + 1)', () => {
+    const log = fakeLog(['beacon:3', 'beacon:7']);
+    payBeacon(emptyTank(), null, log, 'Fyss');
+    expect(log.recorded.map((r) => r.key)).toEqual(['beacon:8']);
+  });
+
+  it('Given keys in descending order (beacon:7 then beacon:3), Then the next key is still beacon:8 (not last + 1)', () => {
+    const log = fakeLog(['beacon:7', 'beacon:3']);
+    payBeacon(emptyTank(), null, log, 'Fyss');
+    expect(log.recorded[0]!.key).toBe('beacon:8');
+  });
+
+  it("Given 'xbeacon:9' and 'beacon:9x' among the keys, Then neither counts (the key pattern is anchored at both ends)", () => {
+    const log = fakeLog(['xbeacon:9', 'beacon:9x', 'beacon:2']);
+    payBeacon(emptyTank(), null, log, 'Fyss');
+    expect(log.recorded[0]!.key).toBe('beacon:3');
+  });
+
+  it('Given an empty log, Then the first key is beacon:1', () => {
+    const log = fakeLog([]);
+    payBeacon(emptyTank(), null, log, 'Fyss');
+    expect(log.recorded[0]!.key).toBe('beacon:1');
+  });
+
+  it('Given an empty hold, Then the note is exactly the BEACON RECOVERY note with "hold empty · nothing jettisoned"', () => {
+    const log = fakeLog([]);
+    payBeacon(emptyTank(), cargoWith({}), log, 'Fyss');
+    expect(log.recorded[0]).toEqual({
+      key: 'beacon:1',
+      kind: 'note',
+      system: 'Fyss',
+      title: 'BEACON RECOVERY',
+      body: ['distress beacon answered · returned to a safe orbit', 'hold empty · nothing jettisoned'],
+    });
+  });
+
+  it('Given a hull without a hold (null cargo) and a log, Then the note is still written with the empty-hold text', () => {
+    const log = fakeLog(['beacon:4']);
+    payBeacon(emptyTank(), null, log, 'Remit');
+    expect(log.recorded).toHaveLength(1);
+    expect(log.recorded[0]!.key).toBe('beacon:5');
+    expect(log.recorded[0]!.system).toBe('Remit');
+    expect(log.recorded[0]!.body[1]).toBe('hold empty · nothing jettisoned');
+  });
+
+  it('Given 1 000.6 kg in the hold, Then the note names it rounded to nearest: "hold jettisoned · 1001 kg"', () => {
+    const log = fakeLog([]);
+    payBeacon(emptyTank(), cargoWith({ ice: 1_000.6 }), log, 'Fyss');
+    expect(log.recorded[0]!.body[1]).toBe('hold jettisoned · 1001 kg');
+  });
+
+  it('Given 1 000.4 kg in the hold, Then it rounds down to 1000 kg', () => {
+    const log = fakeLog([]);
+    payBeacon(emptyTank(), cargoWith({ metal: 1_000.4 }), log, 'Fyss');
+    expect(log.recorded[0]!.body[1]).toBe('hold jettisoned · 1000 kg');
+  });
+
+  it('Given no log (null), Then the tank is still set to 5 % and the hold is jettisoned', () => {
+    const tank = emptyTank();
+    const cargo = cargoWith({ metal: 500 });
+    payBeacon(tank, cargo, null, 'Fyss');
+    expect(tank.massKg).toBeCloseTo(0.05 * BASE, 9);
+    expect(cargo.totalKg).toBe(0);
+  });
+});

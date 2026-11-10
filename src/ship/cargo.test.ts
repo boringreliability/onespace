@@ -485,3 +485,42 @@ describe('no ghost ice (R18)', () => {
     expect(c.kg('silicate')).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Mutation hardening (Task 8, phase A).
+// ---------------------------------------------------------------------------
+
+describe('cannibalize-cargo — the 1 000 kg line (hardening)', () => {
+  it('Given exactly 1 000 kg, Then it succeeds (the minimum is inclusive)', () => {
+    const c = hold({ metal: 1_000 });
+    const r = applyCargoAction(c, new Propellant(20_000, 0), { kind: 'cannibalize-cargo' });
+    expect(r.ok).toBe(true);
+    expect(r.kgOut).toBe(1_000);
+    expect(c.totalKg).toBe(0);
+  });
+
+  it("Given 999.999 kg, Then it is refused 'insufficient'", () => {
+    const c = hold({ metal: 999.999 });
+    const r = applyCargoAction(c, new Propellant(20_000, 0), { kind: 'cannibalize-cargo' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('insufficient');
+    expect(c.totalKg).toBeCloseTo(999.999, 9);
+  });
+});
+
+describe('Cargo — capacity sanitising (hardening)', () => {
+  it('Given NaN, negative, infinite or zero capacity, Then the hold has capacity 0 and takes nothing', () => {
+    for (const cap of [Number.NaN, -1, -8_000, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 0]) {
+      const c = new Cargo(cap);
+      expect(c.capacityKg, `cap=${cap}`).toBe(0);
+      expect(c.freeKg).toBe(0);
+      const r = mine(c, 'ice', 10);
+      expect(r.ok).toBe(false);
+      expect(r.reason).toBe('hold-full');
+    }
+  });
+
+  it('Given a positive finite capacity, Then it is kept as given', () => {
+    expect(new Cargo(1234.5).capacityKg).toBe(1234.5);
+  });
+});

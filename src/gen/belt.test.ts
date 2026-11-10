@@ -281,3 +281,167 @@ describe('seeds', () => {
     expect(fyss()).toEqual(sys);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Mutation hardening (Task 8, phase A): a hand-built system pins the gap rule.
+// ---------------------------------------------------------------------------
+
+/** A synthetic system: only what beltFor reads (luminosity, mass, planet axes). */
+function synth(luminosity: number | null, axesAu: readonly number[], withStar = true): StarSystemSpec {
+  return {
+    id: 'sys-synth',
+    seed: 4242,
+    name: 'Synth',
+    hasAsteroidBelt: true,
+    stars: withStar ? [{ luminosity: luminosity ?? 0, mass: 1 }] : [],
+    planets: axesAu.map((a) => ({ orbit: { semiMajorAxis: a * AU } })),
+  } as unknown as StarSystemSpec;
+}
+
+/** Snow line of luminosity 1 is 2.7 AU: window [1.62, 8.1]. */
+const SNOW1 = 2.7;
+
+describe('beltFor — the gap-selection rule, on a synthetic system', () => {
+  it('Given no planets, Then the fallback band is centred on 1.2·snow, ±15 %, half-thickness 0.03·c', () => {
+    const b = beltFor(synth(1, []))!;
+    const c = 1.2 * SNOW1;
+    expect(b.innerAU).toBeCloseTo(0.85 * c, 12);
+    expect(b.outerAU).toBeCloseTo(1.15 * c, 12);
+    expect(b.halfThicknessAU).toBeCloseTo(0.03 * c, 12);
+    expect(b.fieldCount).toBe(512);
+    expect(b.systemId).toBe('sys-synth');
+  });
+
+  it('Given a gap of exactly ratio 1.4 (2.5 → 3.5 AU), Then it qualifies: centre √(a_in·a_out), half-width 0.15·c, half-thickness 0.03·c', () => {
+    const b = beltFor(synth(1, [2.5, 3.5]))!;
+    const c = Math.sqrt(2.5 * 3.5);
+    expect(b.innerAU).toBeCloseTo(Math.max(0.85 * c, 1.62, 2.5 * 1.02), 12);
+    expect(b.outerAU).toBeCloseTo(1.15 * c, 12);
+    expect(b.halfThicknessAU).toBeCloseTo(0.03 * c, 12);
+    // not the fallback centre 3.24
+    expect(Math.abs(b.halfThicknessAU - 0.03 * 1.2 * SNOW1)).toBeGreaterThan(1e-4);
+  });
+
+  it('Given gaps of ratio 1.39 and 1.35, Then neither qualifies and the fallback band is used', () => {
+    for (const out of [3.475, 3.375]) {
+      const b = beltFor(synth(1, [2.5, out]))!;
+      expect(b.halfThicknessAU, `out=${out}`).toBeCloseTo(0.03 * 1.2 * SNOW1, 12);
+      expect(b.innerAU).toBeCloseTo(0.85 * 1.2 * SNOW1, 12);
+    }
+  });
+
+  it('Given a qualifying gap of ratio 1.42, Then the inner edge keeps 2 % clear of the inner planet (a_in·1.02 beats 0.85·c)', () => {
+    const b = beltFor(synth(1, [2.5, 3.55]))!;
+    const c = Math.sqrt(2.5 * 3.55);
+    expect(0.85 * c).toBeLessThan(2.5 * 1.02); // the fixture is right
+    expect(b.innerAU).toBeCloseTo(2.5 * 1.02, 12);
+    expect(b.outerAU).toBeCloseTo(1.15 * c, 12);
+  });
+
+  it("Given a gap whose outer planet is below 0.6·snow, Then it is ignored: the window starts at 0.6·snow", () => {
+    // 1.0 → 1.5 AU: ratio 1.5, a_out = 1.5 < 0.6·2.7 = 1.62.
+    const b = beltFor(synth(1, [1.0, 1.5]))!;
+    expect(b.halfThicknessAU).toBeCloseTo(0.03 * 1.2 * SNOW1, 12);
+  });
+
+  it('Given two qualifying gaps, Then the wider (larger ratio) one wins', () => {
+    const b = beltFor(synth(1, [2.5, 3.55, 5.5]))!; // 1.42 then 1.549
+    const c = Math.sqrt(3.55 * 5.5);
+    expect(b.halfThicknessAU).toBeCloseTo(0.03 * c, 12);
+  });
+
+  it('Given planet axes out of order, Then they are sorted before gaps are read', () => {
+    const b = beltFor(synth(1, [3.5, 2.5]))!;
+    expect(b.halfThicknessAU).toBeCloseTo(0.03 * Math.sqrt(2.5 * 3.5), 12);
+  });
+
+  it('Given luminosity far below 0.02 (or no star at all), Then the snow line is floored at 2.7·√0.02', () => {
+    const c = 1.2 * 2.7 * Math.sqrt(0.02);
+    for (const sys of [synth(0.0001, []), synth(0, []), synth(null, [], false)]) {
+      const b = beltFor(sys)!;
+      expect(b.halfThicknessAU).toBeCloseTo(0.03 * c, 12);
+      expect(b.innerAU).toBeCloseTo(0.85 * c, 12);
+    }
+  });
+
+  it('Given hasAsteroidBelt false, Then beltFor is null', () => {
+    expect(beltFor({ ...synth(1, []), hasAsteroidBelt: false } as StarSystemSpec)).toBeNull();
+  });
+});
+
+describe('fieldSpec — constants and composition rules', () => {
+  it('Then FIELDS_PER_BELT is 512', () => {
+    expect(FIELDS_PER_BELT).toBe(512);
+    expect(FYSS_BELT.fieldCount).toBe(512);
+    expect(fieldOrbits(FYSS_BELT, FYSS.seed).length).toBe(512);
+  });
+
+  it('Given any asteroid, Then its extractable mass is 5000 + 60000·(radius fraction), to rounding', () => {
+    for (const f of ALL_FIELDS) {
+      for (const a of f.asteroids) {
+        const sum = RESOURCES.reduce((s, r) => s + a.composition[r], 0);
+        const expected = 5000 + 60000 * ((a.radiusKm - 0.05) / (0.6 - 0.05));
+        expect(Math.abs(sum - expected)).toBeLessThanOrEqual(2);
+      }
+    }
+  });
+
+  it('Given any asteroid, Then it sits at most FIELD_RADIUS_KM − 1 km from the field centre', () => {
+    for (const f of ALL_FIELDS) {
+      for (const a of f.asteroids) {
+        expect(Math.hypot(...a.offsetKm)).toBeLessThanOrEqual(FIELD_RADIUS_KM - 1 + 1e-9);
+      }
+    }
+  });
+
+  it('Given every field, Then asteroids 0, 1, 2 are ice-major (≥ 60 % ice) and asteroid 3 is an ordinary draw', () => {
+    const share = (a: FieldSpec['asteroids'][number]): number => {
+      const t = RESOURCES.reduce((s, r) => s + a.composition[r], 0);
+      return a.composition.ice / t;
+    };
+    let nonIcyAtThree = 0;
+    for (const f of ALL_FIELDS) {
+      for (let n = 0; n < 3; n++) expect(share(f.asteroids[n]!), `${f.id} #${n}`).toBeGreaterThan(0.59);
+      if (share(f.asteroids[3]!) < 0.5) nonIcyAtThree++;
+    }
+    expect(nonIcyAtThree).toBeGreaterThan(0);
+  });
+});
+
+describe('fieldOrbits — cache keyed by system id AND seed', () => {
+  it('Given the same belt asked with two different seeds, Then the orbits differ and each equals its own fieldSpec orbits', () => {
+    const sA = FYSS.seed;
+    const sB = FYSS.seed + 1;
+    const a1 = fieldOrbits(FYSS_BELT, sA);
+    const b1 = fieldOrbits(FYSS_BELT, sB);
+    expect(b1).not.toBe(a1);
+    expect(b1[5]).not.toEqual(a1[5]);
+    expect(b1[5]).toEqual(fieldSpec(FYSS_BELT, sB, 5).orbit);
+    const a2 = fieldOrbits(FYSS_BELT, sA);
+    expect(a2[5]).toEqual(fieldSpec(FYSS_BELT, sA, 5).orbit);
+  });
+});
+
+describe('nearestFieldIndex — the shortlist is wider than one', () => {
+  it('Given a field the planar estimate loves but whose eccentric orbit puts it far away, Then the exactly-placed runner-up wins', () => {
+    const base = {
+      inclination: 0,
+      longitudeOfAscendingNode: 0,
+      argumentOfPeriapsis: 0,
+      meanAnomalyAtEpoch: 0,
+      period: 1e7,
+    };
+    const A = 1e8;
+    // k=0: a = A but e = 0.5, so at periapsis it is at 0.5·A from the star.
+    const eccentric = { ...base, semiMajorAxis: A, eccentricity: 0.5 };
+    // k=1: circular at 0.9·A.
+    const circular = { ...base, semiMajorAxis: 0.9 * A, eccentricity: 0 };
+    const ship = { x: A, y: 0, z: 0 };
+    const p0 = orbitalPosition(eccentric, 0);
+    const p1 = orbitalPosition(circular, 0);
+    const exact0 = Math.hypot(p0.x - ship.x, p0.y - ship.y, p0.z - ship.z);
+    const exact1 = Math.hypot(p1.x - ship.x, p1.y - ship.y, p1.z - ship.z);
+    expect(exact1).toBeLessThan(exact0); // fixture sanity: k=1 is truly nearer
+    expect(nearestFieldIndex([eccentric, circular], ship, 0)).toBe(1);
+  });
+});

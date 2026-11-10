@@ -240,3 +240,46 @@ describe('one hold-full rule; dust is depleted (R18)', () => {
     expect(chooseResource(all(0.4, 0, 0.5, 0), 'ice')).toBe('silicate');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Mutation hardening (Task 8, phase A).
+// ---------------------------------------------------------------------------
+
+describe('mayMine — hold-full boundary at the hold epsilon (hardening)', () => {
+  it('Given exactly 1e-6 kg free, Then ok (the hold\'s own epsilon is inclusive); just under, Then hold-full', () => {
+    expect(mayMine({ ...OK, holdFreeKg: 1e-6 })).toEqual({ ok: true });
+    expect(mayMine({ ...OK, holdFreeKg: 9.9e-7 })).toEqual({ ok: false, reason: 'hold-full' });
+    expect(mayMine({ ...OK, holdFreeKg: 0 })).toEqual({ ok: false, reason: 'hold-full' });
+  });
+});
+
+describe('formatKg — negatives (hardening)', () => {
+  it('Given negative amounts, Then the sign leads and digits group as for positives', () => {
+    expect(formatKg(-5)).toBe('-5');
+    expect(formatKg(-1_234)).toBe('-1 234');
+    expect(formatKg(-1_234_567)).toBe('-1 234 567');
+    expect(formatKg(-999.6)).toBe('-1 000');
+  });
+
+  it('Given a negative that rounds to zero, Then there is no sign ("0", not "-0")', () => {
+    expect(formatKg(-0.4)).toBe('0');
+    expect(formatKg(-0)).toBe('0');
+  });
+
+  it('Given NaN or infinity, Then "0"', () => {
+    expect(formatKg(Number.NaN)).toBe('0');
+    expect(formatKg(Number.POSITIVE_INFINITY)).toBe('0');
+    expect(formatKg(Number.NEGATIVE_INFINITY)).toBe('0');
+  });
+});
+
+describe('repairedLog — rounds to the nearest percent (hardening)', () => {
+  it('Given a restored fraction of 0.29 (28.999999999999996 %), Then the text says +29 %, not +28 %', () => {
+    expect(repairedLog(0.29)).toBe('REPAIRED · TANK +29 %');
+  });
+
+  it('Given 0.285 and 0.2849, Then 29 % and 28 % (nearest)', () => {
+    expect(repairedLog(0.2851)).toBe('REPAIRED · TANK +29 %');
+    expect(repairedLog(0.2849)).toBe('REPAIRED · TANK +28 %');
+  });
+});
