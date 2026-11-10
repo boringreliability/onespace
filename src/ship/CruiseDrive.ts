@@ -216,6 +216,17 @@ export interface CruiseInputs {
   /** The body being approached (the locked target, else the nearest), if any. */
   readonly arrival?: CruiseArrival | null;
   /**
+   * [v4-mining] A further gap the CEILING follows but the envelope does not:
+   * a belt field is no mass (it never mass-locks), yet the drive must brake
+   * for it or it steps straight through. Omitted = `clearanceKm` alone.
+   */
+  readonly limitKm?: number;
+  /**
+   * [v4-mining] Arrival wins over the mass lock on the frame both trip (a
+   * field target): the drop is an arrival, not a refusal.
+   */
+  readonly arrivalFirst?: boolean;
+  /**
    * Speed the drop bleeds down to, km/s: the circular speed about the ship's
    * parent where it is. Omitted = `config.exitSpeedKmS`.
    */
@@ -328,7 +339,7 @@ export class CruiseDrive {
           // B1 (v3): the engage frame already flies under the law. A 0 here
           // reached FlightModel's hard clamp and took the ship 5 → 0 km/s for
           // one frame before the drive picked it back up.
-          this.capKmS = cruiseCapKmS(i.clearanceKm, c);
+          this.capKmS = cruiseCapKmS(this.limit(i), c);
         }
         break;
       }
@@ -339,7 +350,8 @@ export class CruiseDrive {
         const arrived =
           !!a && a.closing && a.clearanceKm < arrivalClearanceKm(a.radiusKm, a.soiRadiusKm, c);
         if (!i.requested || this.blocked !== null || arrived) {
-          this.dropReason = this.blocked ?? (i.requested ? 'arrival' : 'released');
+          this.dropReason =
+            arrived && i.requested && i.arrivalFirst ? 'arrival' : this.blocked ?? (i.requested ? 'arrival' : 'released');
           this.dropFrom = Math.max(this.capKmS, this.exitSpeed(i));
           this.phase = 'dropping';
           this.progress = 1;
@@ -350,7 +362,7 @@ export class CruiseDrive {
           this.stepDrop(dt, i);
           break;
         }
-        this.capKmS = cruiseCapKmS(i.clearanceKm, c);
+        this.capKmS = cruiseCapKmS(this.limit(i), c);
         break;
       }
 
@@ -358,6 +370,12 @@ export class CruiseDrive {
         this.stepDrop(dt, i);
         break;
     }
+  }
+
+  /** The gap the ceiling follows: the clearance, or a nearer `limitKm`. */
+  private limit(i: CruiseInputs): number {
+    const l = i.limitKm;
+    return l !== undefined && l < i.clearanceKm ? Math.max(l, 0) : i.clearanceKm;
   }
 
   private exitSpeed(i: CruiseInputs): number {
@@ -373,7 +391,7 @@ export class CruiseDrive {
       // the exit speed (k = 0 below) rather than hand over a snapped velocity.
       this.alignHeld += dt;
       this.progress = 0;
-      this.capKmS = Math.min(this.exitSpeed(i), cruiseCapKmS(i.clearanceKm, c));
+      this.capKmS = Math.min(this.exitSpeed(i), cruiseCapKmS(this.limit(i), c));
       return;
     }
     if (this.progress <= 0) {
@@ -391,7 +409,7 @@ export class CruiseDrive {
     const bleed = exit * Math.pow(from / exit, k);
     // The bleed is still under the law: the gap can keep closing while it
     // runs, and the ceiling must keep falling with it.
-    this.capKmS = Math.min(bleed, cruiseCapKmS(i.clearanceKm, c));
+    this.capKmS = Math.min(bleed, cruiseCapKmS(this.limit(i), c));
   }
 
   /** Back to a cold drive. Used when the world is replaced under the ship. */

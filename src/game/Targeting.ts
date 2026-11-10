@@ -247,7 +247,7 @@ export class Targeting implements GameModule {
       const f = belt.nearestField();
       const w = new Vector3();
       if (f && belt.fieldWorld(f.id, w) && w.distanceTo(this.shipWorld) > f.radiusKm) {
-        cands.push({ id: f.id, name: beltTargetName(f.id) ?? f.id, rel: w.sub(this.shipWorld) });
+        cands.push({ id: f.id, name: beltTargetName(f.id, this.universe.system?.name) ?? f.id, rel: w.sub(this.shipWorld) });
       }
     }
     const ordered = orderByNoseAngle(cands, nose).map((c) => c.id);
@@ -442,7 +442,7 @@ export class Targeting implements GameModule {
       return;
     }
     if (id.startsWith('ast:') || id.startsWith('field:')) {
-      this.targetName = beltTargetName(id) ?? id;
+      this.targetName = beltTargetName(id, this.universe.system?.name) ?? id;
       this.targetKind = id.startsWith('ast:') ? 'asteroid' : 'field';
       return;
     }

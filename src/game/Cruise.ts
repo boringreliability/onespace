@@ -61,6 +61,9 @@ import { steerToward } from '@/ship/cruiseSteer';
 import type { Universe } from '@/game/Universe';
 import { shotOwnsScene } from '@/game/Shots';
 import { SOLAR_RADIUS } from '@/gen/types';
+import { FIELD_RADIUS_KM } from '@/gen/belt';
+import type { Belt } from '@/game/Belt';
+import { beltFieldName } from '@/game/Belt';
 import { announceAction, applyAction, canAfford, cruiseSpoolKg } from '@/ship/travelCost'; // [v4-fuel]
 
 /** [v4-fuel] A long cruise leg is announced (`propellant:action`) at most this often, s. */
@@ -120,6 +123,11 @@ const ZERO3 = new Vector3();
 
 export interface CruiseOptions {
   readonly universe: CruiseWorld;
+  /**
+   * [v4-mining] Resolves `field:` nav targets. Without it (or without a belt
+   * in the system) a field target is ignored, exactly as before.
+   */
+  readonly belt?: Pick<Belt, 'fieldWorld'> | null;
 }
 
 /**
@@ -147,6 +155,20 @@ export class Cruise implements GameModule {
 
   readonly drive = new CruiseDrive();
   private readonly universe: CruiseWorld;
+  private readonly belt: Pick<Belt, 'fieldWorld'> | null;
+  /**
+   * [v4-mining] A locked belt field, as the drive sees a target: a body of
+   * radius FIELD_RADIUS_KM with no SOI. One object, reused (no allocation per
+   * frame; `departedFrom` compares by identity).
+   */
+  private readonly fieldBody = {
+    spec: { id: '', name: '', radius: FIELD_RADIUS_KM },
+    world: new Vector3(),
+    soiRadius: Number.POSITIVE_INFINITY,
+    parent: null,
+  };
+  /** The field id `fieldBody`'s name was built for. */
+  private fieldNamedFor: string | null = null;
 
   /** The toggle. Distinct from the drive's phase, which lags it by the spool. */
   private wanted = false;
@@ -234,10 +256,13 @@ export class Cruise implements GameModule {
     nearestRadiusKm: 0,
     arrival: null,
     exitSpeedKmS: undefined,
+    limitKm: undefined,
+    arrivalFirst: false,
   };
 
   constructor(opts: CruiseOptions) {
     this.universe = opts.universe;
+    this.belt = opts.belt ?? null;
   }
 
   init(): void {
@@ -332,6 +357,8 @@ export class Cruise implements GameModule {
   private target(): Body | null {
     const id = this.targetId;
     if (id === null) return null;
+    // [v4-mining] A belt field: closed on like a body of radius FIELD_RADIUS_KM.
+    if (id.startsWith('field:')) return this.fieldTarget(id);
     // A loop, not `.find(closure)`: this runs every frame.
     const bodies = this.universe.allBodies();
     for (let i = 0; i < bodies.length; i++) {
@@ -341,6 +368,19 @@ export class Cruise implements GameModule {
       }
     }
     return null;
+  }
+
+  /** [v4-mining] The locked field as a target, or null (no belt, unknown id). */
+  private fieldTarget(id: string): Body | null {
+    const fb = this.fieldBody;
+    if (!this.belt || !this.belt.fieldWorld(id, fb.world)) return null;
+    if (this.fieldNamedFor !== id) {
+      // Allocates once per new target, never per frame.
+      this.fieldNamedFor = id;
+      fb.spec.id = id;
+      fb.spec.name = beltFieldName(this.universe.system?.name ?? '', Number(id.slice(id.lastIndexOf(':') + 1)));
+    }
+    return fb as unknown as Body;
   }
 
   /**
@@ -412,6 +452,9 @@ export class Cruise implements GameModule {
     const toward = target ?? this.universe.nearest;
     let arrival: CruiseArrival | null = null;
     let limbKm = 0;
+    // [v4-mining] A field is no mass: its gap limits the ceiling, not the envelope.
+    const toField = target !== null && target === (this.fieldBody as unknown as Body);
+    let limitKm: number | undefined;
     if (toward) {
       const rel = this.sRel.subVectors(toward.world, flight.worldPosition);
       const radius = toward.spec.radius;
@@ -434,6 +477,7 @@ export class Cruise implements GameModule {
       }
       arrival = this.departedFrom === toward ? null : a;
       limbKm = LIMB_FRACTION * (radius + arrivalClearanceKm(radius, toward.soiRadius, this.drive.config));
+      if (toField) limitKm = a.clearanceKm;
     }
 
     const wasEngaged = this.drive.engaged;
@@ -445,6 +489,8 @@ export class Cruise implements GameModule {
     di.atmosphericDensity = flight.atmosphericDensity;
     di.nearestRadiusKm = this.nearestRadiusKm();
     di.arrival = arrival;
+    di.limitKm = limitKm;
+    di.arrivalFirst = toField;
     di.exitSpeedKmS = circularSpeed(flight.parent?.mu ?? 0, flight.position.length()) || undefined;
     // v3: during the drop, is the carried velocity (and the nose) on the
     // insertion tangent yet? The drive waits for it.

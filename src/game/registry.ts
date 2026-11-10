@@ -334,7 +334,13 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   // After Universe, whose `nearestGapKm` is its speed limit.
   // [v3-t5] kept in a const so Instruments can read the drive's phase (and
   // v3 T4's FlightSense, its field).
-  const cruise = new Cruise({ universe });
+  // [v4-mining] The belt as game state: depletion (P2, in memory) and the
+  // field/asteroid queries. Before Cruise (R21: it flies to `field:` targets)
+  // and before Targeting, which resolves its targets.
+  const worldState = new WorldState({ orbitSeconds: () => universe.orbitSeconds, wallMs: () => Date.now() });
+  const belt = new Belt({ universe, worldState });
+  await engine.add(belt);
+  const cruise = new Cruise({ universe, belt });
   await engine.add(cruise);
   // [v2-p4] L: auto-land / auto-orbit. After Pilot (it overwrites the command
   // Pilot copied from the stick) and after Cruise (which also reads L).
@@ -351,11 +357,6 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   // Targeting before Scanner: the array scans the nav target. After Pilot, so
   // the camera it projects through has already moved this frame; Instruments
   // likewise, and its altitude replaces the sphere one Pilot just published.
-  // [v4-mining] The belt as game state: depletion (P2, in memory) and the
-  // field/asteroid queries. Before Targeting, which resolves its targets.
-  const worldState = new WorldState({ orbitSeconds: () => universe.orbitSeconds, wallMs: () => Date.now() });
-  const belt = new Belt({ universe, worldState });
-  await engine.add(belt);
   // [v4-mining] The rocks themselves: after the Belt (its memo is current) and
   // after Universe (the origin has already rebased this frame).
   await engine.add(new Asteroids({ belt, universe }));

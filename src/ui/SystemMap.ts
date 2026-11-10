@@ -30,14 +30,11 @@ import { orbitalPosition } from '@/gen/orbit';
 import { AU, SOLAR_RADIUS, type PlanetSpec, type StarSystemSpec } from '@/gen/types';
 import { cruiseEtaSeconds } from '@/ship/CruiseDrive';
 import type { Universe } from '@/game/Universe';
+import { FIELD_RADIUS_KM, beltFor, fieldOrbits, nearestFieldIndex, type BeltSpec } from '@/gen/belt';
+import type { OrbitSpec } from '@/gen/types';
+import { beltFieldName, beltNodeTarget, beltRing, chartMaxKm, radial } from '@/ui/beltChart';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
-
-/** Chart radius in viewBox units. The viewBox is square and centred on 0,0. */
-const R = 500;
-
-/** Inner end of the log scale, km. Comfortably inside any star. */
-const R_FLOOR_KM = 1e5;
 
 /** Samples per orbit polyline. 64 is smooth at chart scale and free. */
 const ORBIT_SAMPLES = 64;
@@ -72,11 +69,19 @@ interface Node {
   label: SVGTextElement | null;
 }
 
-/** log-scaled radius: km from the star to viewBox units. */
-function radial(km: number, maxKm: number): number {
-  const r = Math.max(km, R_FLOOR_KM);
-  const span = Math.log(Math.max(maxKm, R_FLOOR_KM * 10) / R_FLOOR_KM);
-  return (R * Math.min(1, Math.log(r / R_FLOOR_KM) / span));
+/**
+ * [v4-mining] The belt as the chart needs it: the band, its field orbits, and
+ * the selectable BELT node, which sits on the field nearest the ship.
+ */
+interface BeltNode {
+  readonly belt: BeltSpec;
+  readonly orbits: readonly OrbitSpec[];
+  el: SVGCircleElement | null;
+  label: SVGTextElement | null;
+  /** The field the BELT selection locked (index), or -1. */
+  lockedK: number;
+  /** Distance from the ship to the locked field's centre, km. */
+  distanceKm: number;
 }
 
 /** "4 m 12 s", "1 h 06 m" — a crossing time a pilot can act on. */
@@ -128,6 +133,10 @@ export class SystemMap implements GameModule {
   private maxKm = AU;
   private selected: Node | null = null;
   private builtFor: string | null = null;
+  /** [v4-mining] The belt and its node, or null in a system without one. */
+  private beltNode: BeltNode | null = null;
+  /** [v4-mining] The BELT node is the selection (exclusive with `selected`). */
+  private beltSelected = false;
 
   private readonly disposers: Array<() => void> = [];
   private onKey: ((e: KeyboardEvent) => void) | null = null;
@@ -168,6 +177,7 @@ export class SystemMap implements GameModule {
       bus.on('system:entered', () => {
         this.builtFor = null;
         this.selected = null;
+        this.beltSelected = false;
       }),
     );
 
@@ -259,10 +269,11 @@ export class SystemMap implements GameModule {
     this.gOrbits.replaceChildren();
     this.gBodies.replaceChildren();
     this.nodes = [];
+    this.beltNode = null;
+    this.beltSelected = false;
 
-    this.maxKm =
-      sys.planets.reduce((m, p) => Math.max(m, p.orbit.semiMajorAxis * (1 + p.orbit.eccentricity)), AU) *
-      1.12;
+    // [v4-mining] The scale includes the belt (a belt with no planets still needs one).
+    this.maxKm = chartMaxKm(sys);
 
     if (this.titleEl) this.titleEl.textContent = sys.name;
 
@@ -278,10 +289,40 @@ export class SystemMap implements GameModule {
       this.gOrbits.appendChild(c);
     }
 
+    // [v4-mining] The belt: a dashed annulus under the orbits' nodes.
+    const belt = beltFor(sys);
+    if (belt) this.makeBelt(belt, sys.seed);
+
     for (const p of sys.planets) {
       this.gOrbits.appendChild(this.orbitPath(p));
       this.nodes.push(this.makeNode(p, null));
     }
+  }
+
+  /** [v4-mining] The dashed annulus and the selectable BELT node. */
+  private makeBelt(belt: BeltSpec, seed: number): void {
+    const ring = beltRing(belt, this.maxKm);
+    const band = document.createElementNS(SVG_NS, 'path');
+    band.setAttribute('class', 'os-sm2-belt');
+    const circle = (r: number): string => `M${r.toFixed(2)} 0A${r.toFixed(2)} ${r.toFixed(2)} 0 1 0 ${(-r).toFixed(2)} 0A${r.toFixed(2)} ${r.toFixed(2)} 0 1 0 ${r.toFixed(2)} 0Z`;
+    band.setAttribute('d', `${circle(ring.outer)}${circle(ring.inner)}`);
+    band.setAttribute('fill-rule', 'evenodd');
+    this.gOrbits!.appendChild(band);
+
+    const node: BeltNode = { belt, orbits: fieldOrbits(belt, seed), el: null, label: null, lockedK: -1, distanceKm: 0 };
+    const c = document.createElementNS(SVG_NS, 'circle');
+    c.setAttribute('class', 'os-sm2-body os-sm2-beltnode');
+    c.setAttribute('r', '5');
+    c.addEventListener('click', () => this.selectBelt());
+    this.gBodies!.appendChild(c);
+    node.el = c;
+    const t = document.createElementNS(SVG_NS, 'text');
+    t.setAttribute('class', 'os-sm2-label');
+    t.textContent = 'BELT';
+    t.addEventListener('click', () => this.selectBelt());
+    this.gBodies!.appendChild(t);
+    node.label = t;
+    this.beltNode = node;
   }
 
   /** The orbit as a closed polyline through the real Kepler solution. */
@@ -343,6 +384,26 @@ export class SystemMap implements GameModule {
       n.el?.setAttribute('data-on', this.selected === n ? '1' : '0');
     }
 
+    // [v4-mining] The BELT node rides the field nearest the ship.
+    const bn = this.beltNode;
+    if (bn) {
+      const k = nearestFieldIndex(bn.orbits, shipWorld, orbitT);
+      const v = orbitalPosition(bn.orbits[k]!, orbitT);
+      const r = Math.hypot(v.x, v.z);
+      const s = radial(r, this.maxKm) / Math.max(r, 1e-9);
+      const x = v.x * s;
+      const y = v.z * s;
+      bn.el?.setAttribute('cx', x.toFixed(2));
+      bn.el?.setAttribute('cy', y.toFixed(2));
+      bn.label?.setAttribute('x', (x + 10).toFixed(2));
+      bn.label?.setAttribute('y', (y + 4).toFixed(2));
+      bn.el?.setAttribute('data-on', this.beltSelected ? '1' : '0');
+      if (bn.lockedK >= 0) {
+        const f = bn.lockedK === k ? v : orbitalPosition(bn.orbits[bn.lockedK]!, orbitT);
+        bn.distanceKm = Math.hypot(f.x - shipWorld.x, f.y - shipWorld.y, f.z - shipWorld.z);
+      }
+    }
+
     // The ship, projected the same way as everything else.
     const sr = Math.hypot(shipWorld.x, shipWorld.z);
     const sk = radial(sr, this.maxKm) / Math.max(sr, 1e-9);
@@ -362,9 +423,24 @@ export class SystemMap implements GameModule {
 
   private select(n: Node): void {
     this.selected = n;
+    this.beltSelected = false;
     // Canonical target id (shared contract): `body:<spec.name>`.
     bus.emit('target:changed', { id: `body:${n.spec.name}`, name: n.spec.name });
     this.quote();
+  }
+
+  /** [v4-mining] Select the BELT node: lock the field nearest the ship, now. */
+  private selectBelt(): void {
+    const sys = this.universe.system;
+    const bn = this.beltNode;
+    if (!sys || !bn) return;
+    const pick = beltNodeTarget(sys, this.universe.flight.worldPosition, this.universe.orbitSeconds);
+    if (!pick) return;
+    this.selected = null;
+    this.beltSelected = true;
+    bn.lockedK = Number(pick.id.slice(pick.id.lastIndexOf(':') + 1));
+    bus.emit('target:changed', pick);
+    this.refresh();
   }
 
   /** Fill the readout for the current selection. */
@@ -373,6 +449,15 @@ export class SystemMap implements GameModule {
       const el = this.infoEls[k];
       if (el && el.textContent !== v) el.textContent = v;
     };
+    const bn = this.beltNode;
+    if (this.beltSelected && bn && bn.lockedK >= 0) {
+      set('name', beltFieldName(this.universe.system?.name ?? '', bn.lockedK));
+      set('type', `asteroid belt · ${bn.belt.innerAU.toFixed(2)}–${bn.belt.outerAU.toFixed(2)} au`);
+      set('range', formatRange(Math.max(0, bn.distanceKm - FIELD_RADIUS_KM)));
+      set('eta', formatEta(cruiseEtaSeconds(bn.distanceKm, FIELD_RADIUS_KM)));
+      set('gravity', '—');
+      return;
+    }
     const n = this.selected;
     if (!n) {
       set('name', 'no selection');
@@ -533,6 +618,11 @@ const SYSMAP_CSS = /* css */ `
 }
 
 .os-sm2-orbit { fill: none; stroke: rgba(95,215,224,0.22); stroke-width: 1.1; }
+.os-sm2-belt {
+  fill: rgba(200,160,102,0.06); stroke: rgba(200,160,102,0.45);
+  stroke-width: 1; stroke-dasharray: 4 6;
+}
+.os-sm2-beltnode { fill: #c8a066; }
 .os-sm2-star { filter: drop-shadow(0 0 14px rgba(255,200,120,0.75)); }
 
 .os-sm2-body { cursor: pointer; stroke: rgba(0,0,0,0.85); stroke-width: 1.5; }

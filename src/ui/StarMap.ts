@@ -23,7 +23,7 @@
 import type { EngineContext, GameModule } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
 import { registerShot } from '@/game/Shots';
-import type { SpectralClass, Vec3 } from '@/gen/types';
+import type { SpectralClass, StarSystemSpec, Vec3 } from '@/gen/types';
 import { hashSeed, Rng } from '@/math/rng';
 import { jumpEstimateSeconds } from '@/ship/warpTimeline';
 import type { Propellant } from '@/ship/propellant';
@@ -63,6 +63,26 @@ export interface SystemDetails {
   /** 0..1 — drives the "settled / picked over" annotation. */
   readonly civilisation?: number;
   readonly note?: string;
+  /** [v4-mining] The system has an asteroid belt; the PLANETS cell says so. */
+  readonly belt?: boolean;
+}
+
+/**
+ * [v4-mining] What the info panel knows about a generated system. MapMode's
+ * details provider (which already generates the system) returns this.
+ */
+export function systemDetailsOf(sys: StarSystemSpec): SystemDetails {
+  return {
+    spectralClass: sys.stars[0]?.spectralClass,
+    planetCount: sys.planets.length,
+    belt: sys.hasAsteroidBelt,
+  };
+}
+
+/** [v4-mining] The PLANETS cell: the count, plus BELT where there is one; `--` when unknown. */
+export function planetsCell(det: SystemDetails | null): string {
+  if (!det || det.planetCount === undefined) return '--';
+  return det.belt ? `${det.planetCount} · BELT` : String(det.planetCount);
 }
 
 export type SystemDetailsProvider = (systemId: string) => SystemDetails | null;
@@ -1101,11 +1121,7 @@ export class StarMap implements GameModule {
             'lum',
             e.luminosity >= 0.01 ? `${e.luminosity.toFixed(2)} L☉` : e.luminosity.toExponential(1),
           );
-          this.setVal(
-            this.infoVals,
-            'planets',
-            det?.planetCount === undefined ? '--' : String(det.planetCount),
-          );
+          this.setVal(this.infoVals, 'planets', planetsCell(det)); // [v4-mining] lists BELT
           this.setVal(
             this.infoVals,
             'dist',

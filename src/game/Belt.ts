@@ -60,8 +60,16 @@ export interface MutableVec3Like {
 const MEMO_SPAN = 2;
 const MEMO_SLOTS = 2 * MEMO_SPAN + 1;
 
-/** Display name of a field or asteroid target id, or null if it is neither. */
-export function beltTargetName(id: string): string | null {
+/** Display name of belt field k: the chart, the nav target and the ORBIT log (R21). */
+export function beltFieldName(systemName: string, k: number): string {
+  return `BELT · ${systemName} ${k}`;
+}
+
+/**
+ * Display name of a field or asteroid target id, or null if it is neither.
+ * With the system's name a field reads as `beltFieldName`.
+ */
+export function beltTargetName(id: string, systemName?: string): string | null {
   // Allocates: called on selection and scan, never per frame.
   if (id.startsWith('ast:')) {
     const p = id.split(':');
@@ -69,7 +77,8 @@ export function beltTargetName(id: string): string | null {
   }
   if (id.startsWith('field:')) {
     const p = id.split(':');
-    return `Field ${p[p.length - 1]}`;
+    const k = p[p.length - 1]!;
+    return systemName ? beltFieldName(systemName, Number(k)) : `Field ${k}`;
   }
   return null;
 }

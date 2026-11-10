@@ -21,7 +21,7 @@ import type { Vec3 } from '@/gen/types';
 
 import { GalaxyView, registerGalaxyViewShots } from '@/render/GalaxyView';
 import { MutableViewState } from '@/render/ViewState';
-import { StarMap, registerStarMapShots, type GalaxyViewAdapter } from '@/ui/StarMap';
+import { StarMap, registerStarMapShots, systemDetailsOf, type GalaxyViewAdapter } from '@/ui/StarMap';
 import type { Warp } from '@/ship/Warp';
 import type { Universe } from '@/game/Universe';
 import { activeShotName, shotOwnsScene } from '@/game/Shots';
@@ -139,10 +139,9 @@ export class MapMode implements GameModule {
       if (!stub) return null;
       const sys = generateSystem(this.universe.galaxy, stub);
       return {
+        ...systemDetailsOf(sys), // [v4-mining] spectral class, planet count, BELT
         id: sys.id,
         name: sys.name,
-        spectralClass: sys.stars[0]!.spectralClass,
-        planetCount: sys.planets.length,
         blurb: sys.blurb,
       };
     });
