@@ -8,10 +8,20 @@
  * from the seed). Eight shared geometries from `asteroidShape`, eight draw
  * calls, whatever the field holds.
  *
- * Positions are uploaded in RENDER space: the belt's world position (float64,
- * star frame) through `ctx.origin.toRenderXYZ`, rewritten every frame, so a
- * floating-origin rebase moves every rock the same frame it happens (Universe
- * rebases before this module updates).
+ * CAMERA-RELATIVE (ruling R15). Render space reaches ~10 000 km from zero
+ * before the floating origin rebases, and float32 there steps by ~1 m: had
+ * the GPU composed `viewMatrix * modelMatrix * instanceMatrix` with render-
+ * absolute translations, a 50 m spinning rock would shimmer by half a metre.
+ * So each instance translation is `asteroidWorld − cameraWorld`, taken in
+ * float64 on the CPU (|t| ≤ ~400 km, sub-millimetre in float32), and the
+ * root Group sits at the camera's render position as a pure translation:
+ * three.js builds `modelViewMatrix` on the CPU in float64, where that
+ * translation cancels the view's to within rounding of the camera itself.
+ * The shader is `projectionMatrix * modelViewMatrix * instanceMatrix`.
+ *
+ * Two phases: `update` picks the rocks and assigns slots (after Universe has
+ * rebased and the Belt has re-memoised); `lateUpdate` writes the matrices
+ * and moves the root, after every camera writer (as Dust pins its cube).
  *
  * Distant fields are not drawn at all in this task (decision recorded for
  * DECISIONS): past 400 km an asteroid of ≤ 0.6 km is under a pixel anyway.
@@ -19,7 +29,10 @@
  * Light: the one key light (render/keyLight.ts), Lambert plus a weak ambient
  * of the same light, and a Blinn specular whose strength the composition sets.
  * The composition also gives the tint: ice light blue-grey, metal darker with
- * a stronger highlight, silicate brown-grey.
+ * a stronger highlight, silicate brown-grey. The sun direction is in world
+ * (= render) axes; the root is a pure translation, so instance-rotated
+ * normals are in those axes too, and the view vector is the negated
+ * camera-relative position.
  *
  * Scene contract (as Dust): linear HDR, toneMapped false, no colorspace or
  * dither, all four logdepthbuf chunks.
@@ -97,21 +110,19 @@ const VERT = /* glsl */ `
 
 attribute vec4 aSurface;   // rgb linear albedo, a specular strength
 
-varying vec3 vNormal;
-varying vec3 vWorld;
+varying vec3 vNormal;      // world (= render) axes
+varying vec3 vRel;         // camera-relative position, world axes, km
 varying vec4 vSurface;
 
 void main() {
-  mat4 inst = mat4(1.0);
-  #ifdef USE_INSTANCING
-  inst = instanceMatrix;
-  #endif
-  vec4 wp = modelMatrix * inst * vec4(position, 1.0);
-  vWorld = wp.xyz;
+  // The root is a pure translation to the camera, so the instance matrix
+  // alone is camera-relative position and world-axis rotation.
+  vec4 rel = instanceMatrix * vec4(position, 1.0);
+  vRel = rel.xyz;
   // Uniform scale: the rotation part is enough for the normal.
-  vNormal = normalize(mat3(modelMatrix * inst) * normal);
+  vNormal = normalize(mat3(instanceMatrix) * normal);
   vSurface = aSurface;
-  gl_Position = projectionMatrix * viewMatrix * wp;
+  gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position, 1.0);
   #include <logdepthbuf_vertex>
 }
 `;
@@ -125,13 +136,13 @@ uniform vec3  uSunColor;   // key light, linear HDR
 uniform float uAmbient;
 
 varying vec3 vNormal;
-varying vec3 vWorld;
+varying vec3 vRel;
 varying vec4 vSurface;
 
 void main() {
   #include <logdepthbuf_fragment>
   vec3 n = normalize(vNormal);
-  vec3 v = normalize(cameraPosition - vWorld);
+  vec3 v = normalize(-vRel);
   float ndl = max(dot(n, uSunDir), 0.0);
   vec3 h = normalize(uSunDir + v);
   float spec = vSurface.a * pow(max(dot(n, h), 0.0), 24.0) * ndl;
@@ -143,6 +154,7 @@ void main() {
 export class Asteroids implements GameModule {
   readonly name = 'asteroids';
   readonly activeIn = ACTIVE;
+  /** Holds the meshes; a pure translation to the camera's render position. */
   readonly root = new Group();
   readonly meshes: readonly InstancedMesh[];
 
@@ -151,6 +163,11 @@ export class Asteroids implements GameModule {
   private readonly material: ShaderMaterial;
   private readonly geometries: BufferGeometry[] = [];
   private readonly surfaces: InstancedBufferAttribute[] = [];
+  /** One reusable update range per mesh (three clears the list after upload). */
+  private readonly matrixRanges: Array<{ start: number; count: number }> = [];
+  private readonly surfaceRanges: Array<{ start: number; count: number }> = [];
+  /** The asteroid id in each slot of each variant, so an unchanged slot is not re-uploaded. */
+  private readonly slotIds: Array<Array<string | null>> = [];
 
   // Per-frame scratch, grown rarely (amortised), never per frame.
   private readonly near: string[] = [];
@@ -160,7 +177,16 @@ export class Asteroids implements GameModule {
   private readonly counts = new Int32Array(ASTEROID_VARIANTS);
   private readonly byDistance = (a: number, b: number): number => this.dist[a]! - this.dist[b]!;
 
+  // The rocks kept by update, for lateUpdate: index into near/world, variant, slot, seed, radius.
+  private kept = 0;
+  private readonly keptIndex = new Int32Array(MAX_ASTEROID_INSTANCES);
+  private readonly keptVariant = new Int32Array(MAX_ASTEROID_INSTANCES);
+  private readonly keptSlot = new Int32Array(MAX_ASTEROID_INSTANCES);
+  private readonly keptSeed = new Uint32Array(MAX_ASTEROID_INSTANCES);
+  private readonly keptRadius = new Float64Array(MAX_ASTEROID_INSTANCES);
+
   private readonly w = { x: 0, y: 0, z: 0 };
+  private readonly cam = new Vector3();
   private readonly p = new Vector3();
   private readonly q = new Quaternion();
   private readonly s = new Vector3();
@@ -182,7 +208,7 @@ export class Asteroids implements GameModule {
       toneMapped: false,
     });
 
-    // All eight up front: 642 vertices each, well under a millisecond apiece.
+    // All eight up front: 642 vertices each, ~0.2 ms apiece.
     const meshes: InstancedMesh[] = [];
     for (let v = 0; v < ASTEROID_VARIANTS; v++) {
       const shape = asteroidShape((VARIANT_SEED_BASE + v) >>> 0);
@@ -202,6 +228,9 @@ export class Asteroids implements GameModule {
       mesh.frustumCulled = false;
       this.geometries.push(g);
       this.surfaces.push(surface);
+      this.matrixRanges.push({ start: 0, count: 0 });
+      this.surfaceRanges.push({ start: 0, count: 0 });
+      this.slotIds.push(new Array<string | null>(MAX_ASTEROID_INSTANCES).fill(null));
       meshes.push(mesh);
       this.root.add(mesh);
     }
@@ -218,9 +247,11 @@ export class Asteroids implements GameModule {
     if (!ACTIVE.includes(to)) this.root.visible = false;
   }
 
-  update(_dt: number, ctx: EngineContext): void {
+  /** Which rocks, and which slot each one takes. */
+  update(_dt: number, _ctx: EngineContext): void {
     // A review shot owns the scene (same rule as Traffic).
     if (shotOwnsScene()) {
+      this.kept = 0;
       this.root.visible = false;
       return;
     }
@@ -247,35 +278,51 @@ export class Asteroids implements GameModule {
     if (order.length > MAX_ASTEROID_INSTANCES) order.sort(this.byDistance);
     const keep = Math.min(order.length, MAX_ASTEROID_INSTANCES);
 
-    const t = Number.isFinite(this.universe.orbitSeconds) ? this.universe.orbitSeconds : 0;
     const counts = this.counts;
     counts.fill(0);
     let total = 0;
     for (let k = 0; k < keep; k++) {
       const i = order[k]!;
-      const spec = this.belt.asteroidSpec(this.near[i]!);
+      const id = this.near[i]!;
+      const spec = this.belt.asteroidSpec(id);
       if (!spec) continue;
       const seed = spec.seed >>> 0;
       const v = seed % ASTEROID_VARIANTS;
       const slot = counts[v]!;
-
-      ctx.origin.toRenderXYZ(world[i * 3]!, world[i * 3 + 1]!, world[i * 3 + 2]!, this.p);
-      spinOf(seed, t, this.axis, this.q);
-      this.s.setScalar(spec.radiusKm);
-      this.m.compose(this.p, this.q, this.s);
-      this.meshes[v]!.setMatrixAt(slot, this.m);
-      writeSurface(spec, this.surfaces[v]!.array as Float32Array, slot * 4);
-
+      const ids = this.slotIds[v]!;
+      if (ids[slot] !== id) {
+        // A new occupant: its tint goes up; an unchanged slot uploads nothing.
+        ids[slot] = id;
+        writeSurface(spec, this.surfaces[v]!.array as Float32Array, slot * 4);
+        const r = this.surfaceRanges[v]!;
+        if (r.count === 0) {
+          r.start = slot * 4;
+          r.count = 4;
+        } else {
+          const end = Math.max(r.start + r.count, slot * 4 + 4);
+          r.start = Math.min(r.start, slot * 4);
+          r.count = end - r.start;
+        }
+      }
+      this.keptIndex[total] = i;
+      this.keptVariant[total] = v;
+      this.keptSlot[total] = slot;
+      this.keptSeed[total] = seed;
+      this.keptRadius[total] = spec.radiusKm;
       counts[v] = slot + 1;
       total++;
     }
+    this.kept = total;
 
     for (let v = 0; v < ASTEROID_VARIANTS; v++) {
       const mesh = this.meshes[v]!;
       mesh.count = counts[v]!;
-      if (mesh.count > 0) {
-        mesh.instanceMatrix.needsUpdate = true;
-        this.surfaces[v]!.needsUpdate = true;
+      const r = this.surfaceRanges[v]!;
+      if (r.count > 0) {
+        const surface = this.surfaces[v]!;
+        surface.updateRanges.length = 0;
+        surface.updateRanges.push(r);
+        surface.needsUpdate = true;
       }
     }
     this.root.visible = total > 0;
@@ -283,10 +330,48 @@ export class Asteroids implements GameModule {
 
     // The key light at the ship: every rock within 400 km sees the same star.
     const u = this.material.uniforms;
-    const r = Math.hypot(ship.x, ship.y, ship.z);
-    if (r > 0) u.uSunDir!.value.set(-ship.x / r, -ship.y / r, -ship.z / r);
-    const level = keyLightAt(this.universe.system?.stars[0]?.luminosity ?? 1, r);
+    const d = Math.hypot(ship.x, ship.y, ship.z);
+    if (d > 0) u.uSunDir!.value.set(-ship.x / d, -ship.y / d, -ship.z / d);
+    const level = keyLightAt(this.universe.system?.stars[0]?.luminosity ?? 1, d);
     u.uSunColor!.value.set(SUN_BASE[0] * level, SUN_BASE[1] * level, SUN_BASE[2] * level);
+  }
+
+  /** After every camera writer: matrices relative to the camera, root at the camera. */
+  lateUpdate(_dt: number, ctx: EngineContext): void {
+    // Upload ranges are consumed (and cleared) by the renderer; reset ours for next frame.
+    for (let v = 0; v < ASTEROID_VARIANTS; v++) this.surfaceRanges[v]!.count = 0;
+    if (!this.root.visible || this.kept === 0) return;
+
+    ctx.camera.getWorldPosition(this.cam);
+    this.root.position.copy(this.cam);
+    // Camera in world space, float64.
+    const off = ctx.origin.offset;
+    const cx = off.x + this.cam.x;
+    const cy = off.y + this.cam.y;
+    const cz = off.z + this.cam.z;
+
+    const t = Number.isFinite(this.universe.orbitSeconds) ? this.universe.orbitSeconds : 0;
+    const world = this.world;
+    for (let k = 0; k < this.kept; k++) {
+      const i = this.keptIndex[k]!;
+      this.p.set(world[i * 3]! - cx, world[i * 3 + 1]! - cy, world[i * 3 + 2]! - cz);
+      spinOf(this.keptSeed[k]!, t, this.axis, this.q);
+      this.s.setScalar(this.keptRadius[k]!);
+      this.m.compose(this.p, this.q, this.s);
+      this.meshes[this.keptVariant[k]!]!.setMatrixAt(this.keptSlot[k]!, this.m);
+    }
+
+    for (let v = 0; v < ASTEROID_VARIANTS; v++) {
+      const mesh = this.meshes[v]!;
+      const attr = mesh.instanceMatrix;
+      attr.updateRanges.length = 0;
+      if (mesh.count === 0) continue;
+      const r = this.matrixRanges[v]!;
+      r.start = 0;
+      r.count = mesh.count * 16;
+      attr.updateRanges.push(r);
+      attr.needsUpdate = true;
+    }
   }
 
   dispose(): void {
