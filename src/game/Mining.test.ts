@@ -136,6 +136,8 @@ function rig(o: RigOpts = {}) {
   const input = new StubInput();
   const ctx = { input, elapsed: 0 } as unknown as EngineContext;
   mining.init?.(ctx);
+  // R18 (6): the module is torn down with the rig — no bus listener outlives its test.
+  offs.push(() => mining.dispose?.());
   /** One wall frame of 1/60 s that advanced `rate` × as much sim time (0 while paused/frozen). */
   let rate = 1;
   const tick = (n = 1): void => {
@@ -685,4 +687,112 @@ describe('refine and repair abort cleanly (R16)', () => {
       expect(r.logs.some((l) => l.endsWith('ABORTED'))).toBe(false);
     });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Task 5 fix round 1 (R18): one hold-full rule, dust is depleted, and the
+// aborts the review found untested — leaving flight, and a new target.
+// ---------------------------------------------------------------------------
+
+/** Listeners on the shared bus for one event (the bus keeps them private). */
+function listeners(event: string): number {
+  return (bus as unknown as { handlers: Map<string, Set<unknown>> }).handlers.get(event)?.size ?? 0;
+}
+
+describe('one hold-full rule; dust is depleted (R18)', () => {
+  it('Given 5e-7 kg free, Then B is refused HOLD FULL at the press', () => {
+    const r = rig();
+    r.cargo.restore({ silicate: CARGO_CAPACITY_KG - 5e-7 });
+    expect(r.cargo.freeKg).toBeGreaterThan(0);
+    r.press(MINING_KEYS.mine);
+    expect(r.mining.busy).toBeNull();
+    expect(r.logs).toEqual(['HOLD FULL']);
+    r.tick(300);
+    expect(r.actions).toEqual([]);
+    expect(r.worldState.entries()).toHaveLength(0);
+  });
+
+  it('Given a rock with 0.3 kg left of everything, Then B is refused DEPLETED (never "MINED · 0 KG")', () => {
+    const r = rig();
+    for (const res of ['ice', 'metal', 'silicate', 'rare'] as const) {
+      r.worldState.recordMined(r.ast.id, res, r.ast.composition[res] - 0.3, 'local');
+    }
+    const before = r.worldState.entries().length;
+    r.press(MINING_KEYS.mine);
+    r.tick(300);
+    expect(r.mining.busy).toBeNull();
+    expect(r.logs).toEqual(['DEPLETED']);
+    expect(r.actions).toEqual([]);
+    expect(r.cargo.totalKg).toBe(0);
+    expect(r.worldState.entries()).toHaveLength(before);
+  });
+});
+
+describe('more clean aborts (R18)', () => {
+  it('Given a mine 2 s in, When the game leaves flight (onModeChange), Then it aborts with one MINING ABORTED and nothing applied', () => {
+    const r = rig();
+    r.press(MINING_KEYS.mine);
+    r.tick(119);
+    r.mining.onModeChange?.('flight', 'map');
+    expect(r.mining.busy).toBeNull();
+    expect(r.logs).toEqual(['MINING ABORTED']);
+    // Back in flight: it does not resume, and nothing is logged twice.
+    r.mining.onModeChange?.('map', 'flight');
+    r.tick(600);
+    expect(r.mining.busy).toBeNull();
+    expect(r.logs).toEqual(['MINING ABORTED']);
+    expect(r.cargo.totalKg).toBe(0);
+    expect(r.actions).toEqual([]);
+    expect(r.worldState.entries()).toHaveLength(0);
+  });
+
+  it('Given a refine underway, When the game leaves flight, Then REFINING ABORTED and the tank is untouched', () => {
+    const r = rig({ fill: 0.5 });
+    r.cargo.restore({ ice: 1_000 });
+    const mass = r.tank.massKg;
+    r.press(MINING_KEYS.refine);
+    r.tick(60);
+    r.mining.onModeChange?.('flight', 'yard');
+    r.tick(600);
+    expect(r.logs).toEqual(['REFINING ABORTED']);
+    expect(r.tank.massKg).toBe(mass);
+    expect(r.cargo.kg('ice')).toBe(1_000);
+    expect(r.actions).toEqual([]);
+  });
+
+  it('Given nothing underway, When the game leaves flight, Then nothing is logged', () => {
+    const r = rig();
+    r.mining.onModeChange?.('flight', 'map');
+    expect(r.logs).toEqual([]);
+  });
+
+  it('Given a mine 2 s in, When the target switches to another asteroid that is itself in range and matched, Then the mine aborts (it belongs to the rock it started on)', () => {
+    const r = rig();
+    const other = fyssField(0).asteroids.find((a) => a.id !== r.ast.id)!;
+    const w = new Vector3();
+    expect(r.belt.asteroidWorld(other.id, w)).toBe(true);
+    r.press(MINING_KEYS.mine);
+    r.tick(119);
+    // Same field, same velocity: beside the other rock the ship is matched.
+    r.targeting.targetId = other.id;
+    r.world.flight.worldPosition.copy(w).add(new Vector3(other.radiusKm + 0.2, 0, 0));
+    r.tick();
+    expect(r.mining.asteroidInRange).toBe(true); // the new target passes the gate on its own
+    expect(r.mining.busy).toBeNull();
+    expect(r.logs).toEqual(['MINING ABORTED']);
+    r.tick(600);
+    expect(r.cargo.totalKg).toBe(0);
+    expect(r.actions).toEqual([]);
+    expect(r.worldState.entries()).toHaveLength(0);
+  });
+});
+
+describe('the rig cleans up after itself (R18)', () => {
+  it('Given the rigs of every earlier test, Then no Mining listener is left on the bus; and a disposed Mining releases its own', () => {
+    expect(listeners('ship:recovered')).toBe(0);
+    const r = rig();
+    expect(listeners('ship:recovered')).toBe(1);
+    r.mining.dispose?.();
+    expect(listeners('ship:recovered')).toBe(0);
+  });
 });

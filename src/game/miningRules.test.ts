@@ -213,3 +213,30 @@ describe('the log texts', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Task 5 fix round 1, ruling R18 — one hold-full rule, and no "MINED · 0 KG".
+// The gate counts the hold full by the hold's own EPS_KG (1e-6 kg), so a press
+// it accepts can never end in HOLD FULL; and a rock with less than 0.5 kg of
+// every resource is depleted (0.5 kg is what rounds to "0 KG" in the log).
+// ---------------------------------------------------------------------------
+
+describe('one hold-full rule; dust is depleted (R18)', () => {
+  it('Given 5e-7 kg free (below the hold\'s EPS_KG), Then mayMine says hold-full', () => {
+    expect(mayMine({ ...OK, holdFreeKg: 5e-7 })).toEqual({ ok: false, reason: 'hold-full' });
+  });
+
+  it('Given less than 0.5 kg left in the rock, Then depleted; exactly 0.5 kg, Then ok', () => {
+    expect(mayMine({ ...OK, remainingKg: 0.4 })).toEqual({ ok: false, reason: 'depleted' });
+    expect(mayMine({ ...OK, remainingKg: 0.5 })).toEqual({ ok: true });
+  });
+
+  it('Given 0.3 kg of every resource, Then chooseResource finds nothing (null)', () => {
+    expect(chooseResource(all(0.3, 0.3, 0.3, 0.3))).toBeNull();
+  });
+
+  it('Given 0.4 kg ice and 0.5 kg silicate, Then chooseResource skips the ice dust and takes silicate', () => {
+    expect(chooseResource(all(0.4, 0, 0.5, 0))).toBe('silicate');
+    expect(chooseResource(all(0.4, 0, 0.5, 0), 'ice')).toBe('silicate');
+  });
+});

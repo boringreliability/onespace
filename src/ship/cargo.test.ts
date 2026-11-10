@@ -438,3 +438,50 @@ describe('conservation — a seeded random sequence of actions', () => {
     expect(cannibalized).toBeGreaterThan(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Task 5 fix round 1, ruling R18 — no ghost ice. `(x·0.8)/0.8` is often one
+// ulp below x, so "use all the ice" left ~1e-14 kg behind and the HUD showed
+// "ICE 0 KG" forever. The hold snaps at the source: a resource whose remainder
+// would be below EPS_KG (1e-6 kg) becomes exactly 0.
+// ---------------------------------------------------------------------------
+
+describe('no ghost ice (R18)', () => {
+  it('Given 43 kg ice and room in the tank, When refined, Then the hold has exactly 0 ice', () => {
+    const c = hold({ ice: 43 });
+    const tank = new Propellant(20_000, 0);
+    const r = applyCargoAction(c, tank, { kind: 'refine' });
+    expect(r.ok).toBe(true);
+    expect(c.kg('ice')).toBe(0);
+    expect(c.totalKg).toBe(0);
+    expect(r.kgOut).toBe(43);
+  });
+
+  it('Given every whole ice load from 1 to 8 000 kg and room in the tank, When refined, Then exactly 0 ice is left', () => {
+    const ghosts: number[] = [];
+    for (let n = 1; n <= 8_000; n++) {
+      const c = new Cargo(CARGO_CAPACITY_KG);
+      c.restore({ ice: n });
+      applyCargoAction(c, new Propellant(20_000, 0), { kind: 'refine' });
+      if (c.kg('ice') !== 0) ghosts.push(n);
+    }
+    expect(ghosts).toEqual([]);
+  });
+
+  it('Given a tank that takes only part of the ice, When refined, Then the rest stays (the snap only eats dust)', () => {
+    const c = hold({ ice: 5_000 });
+    const tank = new Propellant(20_000, (20_000 - 1_000) / 20_000);
+    applyCargoAction(c, tank, { kind: 'refine' });
+    expect(c.kg('ice')).toBeCloseTo(3_750, 9);
+  });
+
+  it('Given metal and silicate a hair over the repair cost, When repaired, Then exactly 0 of each is left', () => {
+    const c = new Cargo(CARGO_CAPACITY_KG);
+    c.restore({ metal: REPAIR_METAL_KG + 5e-7, silicate: REPAIR_SILICATE_KG + 5e-7 });
+    const tank = new Propellant(20_000, 0.5);
+    tank.capacityLossFrac = 0.1;
+    expect(applyCargoAction(c, tank, { kind: 'repair' }).ok).toBe(true);
+    expect(c.kg('metal')).toBe(0);
+    expect(c.kg('silicate')).toBe(0);
+  });
+});

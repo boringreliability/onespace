@@ -11,7 +11,8 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { CARGO_CAPACITY_KG, Cargo } from '@/ship/cargo';
+import { CARGO_CAPACITY_KG, Cargo, applyCargoAction } from '@/ship/cargo';
+import { Propellant } from '@/ship/propellant';
 import { cargoLineText, cargoTotalText, createCargoReadout, readCargo } from './cargoReadout';
 
 function hold(c: Partial<Record<'ice' | 'metal' | 'silicate' | 'rare', number>>): Cargo {
@@ -66,5 +67,14 @@ describe('HUD CARGO block', () => {
     expect(b.resources[0]).toBe('metal');
     expect(b.kg[0]).toBe(2);
     expect(b.visible).toBe(true);
+  });
+
+  it('Given 43 kg ice and room in the tank, When refined, Then the hold has exactly 0 ice and the CARGO block is hidden (R18: no ghost "ICE 0 KG")', () => {
+    const cargo = hold({ ice: 43 });
+    expect(applyCargoAction(cargo, new Propellant(20_000, 0), { kind: 'refine' }).ok).toBe(true);
+    expect(cargo.kg('ice')).toBe(0);
+    const r = readCargo(cargo, createCargoReadout());
+    expect(r.visible).toBe(false);
+    expect(r.count).toBe(0);
   });
 });
