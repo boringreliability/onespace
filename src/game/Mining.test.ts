@@ -570,3 +570,86 @@ describe('a hull without a tank or a hold — inert', () => {
     });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Ruling R16 — refine and repair abort on the same conditions as a mine
+// (pause, frozen, cruise, warp, the beacon / ship:recovered), with nothing
+// applied, and log REFINING ABORTED / REPAIR ABORTED. Unlike a mine they do
+// not depend on the target, the range or the relative speed.
+// ---------------------------------------------------------------------------
+
+describe('refine and repair abort cleanly (R16)', () => {
+  type R = ReturnType<typeof rig>;
+  const blockers: Array<[string, (r: R) => void, (r: R) => void]> = [
+    ['pause', (r) => (r.world.paused = true), (r) => (r.world.paused = false)],
+    ['freeze', (r) => (r.world.frozen = true), (r) => (r.world.frozen = false)],
+    ['cruise', (r) => (r.cruise.busy = true), (r) => (r.cruise.busy = false)],
+    ['warp', (r) => (r.warp.phase = 'charging'), (r) => (r.warp.phase = 'idle')],
+    ['the emergency beacon (ship:recovered)', () => bus.emit('ship:recovered', { cause: 'beacon' }), () => undefined],
+  ];
+  const kinds = [
+    { kind: 'refine', key: MINING_KEYS.refine, frames: 480, log: 'REFINING ABORTED' },
+    { kind: 'repair', key: MINING_KEYS.repair, frames: 600, log: 'REPAIR ABORTED' },
+  ] as const;
+
+  /** Ice to refine, materials to repair with, room in the tank and loss to repair. */
+  function stocked(): R {
+    const r = rig({ fill: 0.5, lossFrac: 0.1 });
+    r.cargo.restore({ ice: 5_000, metal: 600, silicate: 400 });
+    return r;
+  }
+
+  function expectUntouched(r: R, mass: number): void {
+    expect(r.mining.busy).toBeNull();
+    expect(r.actions).toEqual([]);
+    expect(r.cargo.snapshot()).toEqual({ ice: 5_000, metal: 600, silicate: 400, rare: 0 });
+    expect(r.tank.massKg).toBe(mass);
+    expect(r.tank.capacityLossFrac).toBeCloseTo(0.1, 12);
+  }
+
+  for (const k of kinds) {
+    for (const [why, block, clear] of blockers) {
+      it(`Given a ${k.kind} half done, When ${why}, Then it aborts: nothing applied, no cargo:action, log ${k.log}`, () => {
+        const r = stocked();
+        const mass = r.tank.massKg;
+        r.press(k.key);
+        r.tick(k.frames / 2);
+        expect(r.mining.busy?.kind).toBe(k.kind);
+        block(r);
+        r.tick();
+        expect(r.logs).toEqual([k.log]);
+        // And it stays aborted: clearing the blocker does not resume it.
+        clear(r);
+        r.tick(k.frames + 60);
+        expectUntouched(r, mass);
+        expect(r.logs).toEqual([k.log]);
+      });
+    }
+
+    it(`Given the gate fails on the very frame the ${k.kind} would complete, Then it aborts instead (re-checked at completion)`, () => {
+      const r = stocked();
+      const mass = r.tank.massKg;
+      r.press(k.key);
+      r.tick(k.frames - 1);
+      expect(r.mining.busy?.kind).toBe(k.kind);
+      r.warp.phase = 'charging';
+      r.tick(1);
+      expectUntouched(r, mass);
+      expect(r.logs).toEqual([k.log]);
+    });
+
+    it(`Given a ${k.kind} underway, When the target is dropped and the ship drifts off at speed, Then it still completes (no target, range or speed gate)`, () => {
+      const r = stocked();
+      r.press(k.key);
+      r.tick(10);
+      r.targeting.targetId = null;
+      r.placeAt(500);
+      r.world.flight.velocity.add(new Vector3(1, 0, 0));
+      r.tick(k.frames - 10);
+      expect(r.mining.busy).toBeNull();
+      expect(r.actions.map((a) => a.action.kind)).toEqual([k.kind]);
+      expect(r.actions[0]!.result.ok).toBe(true);
+      expect(r.logs.some((l) => l.endsWith('ABORTED'))).toBe(false);
+    });
+  }
+});
