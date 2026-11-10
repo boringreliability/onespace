@@ -64,6 +64,7 @@ import { RecoveryCut } from '@/game/RecoveryCut';
 import { Pause } from '@/ui/Pause';
 import { Hints } from '@/ui/Hints';
 import { Emergency } from '@/game/Emergency'; // [v4-fuel]
+import { Mining } from '@/game/Mining'; // [v4-mining]
 import { Warp, registerWarpShots } from '@/ship/Warp';
 import { registerCameraShots } from '@/ship/CameraRig';
 import { registerShipShots } from '@/ship/Ship';
@@ -392,7 +393,11 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   // [v4-fuel] the emergency exit on an empty tank; its line rides NAV ADVISORY.
   const emergency = new Emergency({ universe, recovery, warp });
   await engine.add(emergency);
-  await engine.add(new Hints({ universe, pause, recovery, warp, emergency }));
+  // [v4-mining] B/U/Y. After Belt and Targeting (this frame's target and rock),
+  // Cruise and the emergency exit; its in-range flag drives the 'mine' hint.
+  const mining = new Mining({ universe, belt, worldState, targeting, cruise, warp });
+  await engine.add(mining);
+  await engine.add(new Hints({ universe, pause, recovery, warp, emergency, mining }));
   // --- end track D -------------------------------------------------------------
 
   progress(0.88, 'assembling gallery');

@@ -53,13 +53,24 @@ export type ActionName =
   // [v4-fuel] the emergency exit (game/Emergency.ts)
   | 'emergency'
   | 'emergencyCannibalize'
-  | 'emergencyBeacon';
+  | 'emergencyBeacon'
+  // [v4-mining] mine, refine, repair (game/Mining.ts)
+  | 'mine'
+  | 'refine'
+  | 'repair';
 
 /**
  * [v4-fuel] The emergency exit's keys: `open` offers the choice on an empty
  * tank, then `cannibalize` / `beacon` pick. H, 1 and 2 were free.
  */
 export const EMERGENCY_KEYS = { open: 'KeyH', cannibalize: 'Digit1', beacon: 'Digit2' } as const;
+
+/**
+ * [v4-mining] Mine (B), refine (U), repair (N). Not Y (R17): Yard.ts reads Y
+ * raw in flight to enter the Yard. B, U and N are read nowhere else
+ * (Mining.test.ts scans the raw handlers).
+ */
+export const MINING_KEYS = { mine: 'KeyB', refine: 'KeyU', repair: 'KeyN' } as const;
 
 const KEY_ACTIONS: Record<string, ActionName> = {
   ShiftLeft: 'boost',
@@ -84,6 +95,10 @@ const KEY_ACTIONS: Record<string, ActionName> = {
   [EMERGENCY_KEYS.open]: 'emergency',
   [EMERGENCY_KEYS.cannibalize]: 'emergencyCannibalize',
   [EMERGENCY_KEYS.beacon]: 'emergencyBeacon',
+  // [v4-mining]
+  [MINING_KEYS.mine]: 'mine',
+  [MINING_KEYS.refine]: 'refine',
+  [MINING_KEYS.repair]: 'repair',
 };
 
 /** The action a key code is bound to, if any. */

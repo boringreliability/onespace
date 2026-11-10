@@ -30,6 +30,7 @@ import {
 import type { Hud, HudInstruments } from '@/ui/Hud';
 import { assistReadout } from '@/game/assistReadout';
 import { EXHAUST_VELOCITY_KMS, deltaVRemaining } from '@/ship/propellant';
+import { createCargoReadout, readCargo } from '@/ui/cargoReadout'; // [v4-mining]
 import { cruiseArrivalEta, cruiseReadout } from '@/game/cruiseReadout';
 import { WorldMarker } from '@/game/worldMarker';
 import type { CruisePhase } from '@/ship/CruiseDrive';
@@ -92,6 +93,9 @@ export class Instruments implements GameModule {
     proxBody: null,
     proxAltKm: null,
   };
+
+  /** [v4-mining] Refilled in place every frame. */
+  private readonly cargoReadout = createCargoReadout();
 
   constructor(opts: InstrumentsOptions) {
     this.universe = opts.universe;
@@ -181,6 +185,8 @@ export class Instruments implements GameModule {
     } else {
       this.hud.clearPropellant();
     }
+    // [v4-mining] the hold, under PROP; a hull without a tank shows none.
+    this.hud.setCargo(readCargo(tank !== null ? this.universe.cargo : null, this.cargoReadout));
     const ax = ctx.input.axes;
     const sd = ctx.input.stickDeflection;
     this.hud.setControlActivity(

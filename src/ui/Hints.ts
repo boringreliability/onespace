@@ -20,6 +20,7 @@ import type { Pause } from '@/ui/Pause';
 import {
   advisoryText,
   loadHintCounts,
+  recordCargoAction,
   recordUse,
   saveHintCounts,
   type HintCounts,
@@ -42,6 +43,8 @@ export interface HintsOptions {
    * set it outranks every lesson: a dry tank is not a tutorial moment.
    */
   readonly emergency?: { readonly line: string | null };
+  /** [v4-mining] Whether an asteroid is targeted within mining range. */
+  readonly mining?: { readonly asteroidInRange: boolean };
 }
 
 function storage(): KeyValueStore | null {
@@ -103,6 +106,13 @@ export class Hints implements GameModule {
       bus.on('target:changed', ({ id }) => {
         this.hasTarget = id !== null;
       }),
+      // [v4-mining] a completed mine counts towards retiring the 'mine' hint.
+      bus.on('cargo:action', (e) => {
+        const next = recordCargoAction(this.counts, e);
+        if (next === this.counts) return;
+        this.counts = next;
+        saveHintCounts(storage(), this.counts);
+      }),
       // A new system means the old target is gone.
       bus.on('system:entered', () => {
         this.hasTarget = false;
@@ -145,6 +155,7 @@ export class Hints implements GameModule {
             busy: warp.phase !== 'idle' || recovery.active,
             hasTarget: this.hasTarget,
             cruising: universe.flight.cruising,
+            asteroidInRange: this.opts.mining?.asteroidInRange ?? false,
           },
           this.counts,
           this.opts.emergency?.line ?? null,

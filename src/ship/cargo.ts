@@ -60,7 +60,12 @@ export class Cargo {
   }
 
   get totalKg(): number {
-    return RESOURCES.reduce((s, r) => s + this.kg(r), 0);
+    // A plain loop: Universe reads this every frame for the mass sync, and a
+    // reduce would allocate its closure each call.
+    const h = contents.get(this)!;
+    let s = 0;
+    for (let i = 0; i < RESOURCES.length; i++) s += h[RESOURCES[i]!];
+    return s;
   }
 
   get freeKg(): number {
@@ -120,6 +125,28 @@ function result(ok: boolean, p: Partial<CargoResult> = {}): CargoResult {
 }
 const refuse = (reason: NonNullable<CargoResult['reason']>): CargoResult => result(false, { reason });
 
+type Reason = NonNullable<CargoResult['reason']>;
+
+/**
+ * Why a refine would be refused right now, or null if it would run. The same
+ * check `applyCargoAction` makes, so a caller can judge a key press without
+ * applying (or announcing) anything.
+ */
+export function refineRefusal(cargo: Cargo, tank: Propellant | null): Reason | null {
+  if (!tank) return 'no-tank';
+  if (cargo.kg('ice') < EPS_KG) return 'nothing-to-refine';
+  if (tank.capacityKg - tank.massKg <= 0) return 'tank-full';
+  return null;
+}
+
+/** Why a repair would be refused right now, or null if it would run. */
+export function repairRefusal(cargo: Cargo, tank: Propellant | null): Reason | null {
+  if (!tank) return 'no-tank';
+  if (tank.capacityLossFrac < EPS_LOSS) return 'nothing-to-repair';
+  if (cargo.kg('metal') < REPAIR_METAL_KG || cargo.kg('silicate') < REPAIR_SILICATE_KG) return 'insufficient';
+  return null;
+}
+
 function run(cargo: Cargo, tank: Propellant | null, a: CargoAction): CargoResult {
   switch (a.kind) {
     case 'mine': {
@@ -130,21 +157,17 @@ function run(cargo: Cargo, tank: Propellant | null, a: CargoAction): CargoResult
       return result(true, { kgIn: kg });
     }
     case 'refine': {
-      if (!tank) return refuse('no-tank');
+      const no = refineRefusal(cargo, tank);
+      if (no || !tank) return refuse(no ?? 'no-tank');
       const ice = cargo.kg('ice');
-      if (ice < EPS_KG) return refuse('nothing-to-refine');
-      if (tank.capacityKg - tank.massKg <= 0) return refuse('tank-full');
       const fuel = tank.add(ice * REFINE_ICE_TO_FUEL);
       const used = Math.min(ice, fuel / REFINE_ICE_TO_FUEL);
       take(cargo, 'ice', used);
       return result(true, { kgOut: used, fuelKg: fuel });
     }
     case 'repair': {
-      if (!tank) return refuse('no-tank');
-      if (tank.capacityLossFrac < EPS_LOSS) return refuse('nothing-to-repair');
-      if (cargo.kg('metal') < REPAIR_METAL_KG || cargo.kg('silicate') < REPAIR_SILICATE_KG) {
-        return refuse('insufficient');
-      }
+      const no = repairRefusal(cargo, tank);
+      if (no || !tank) return refuse(no ?? 'no-tank');
       const before = tank.capacityLossFrac;
       const after = Math.max(0, before - REPAIR_RESTORE_FRAC);
       tank.capacityLossFrac = after;

@@ -49,7 +49,7 @@ asteroide og tank op".
   plads. Uforbrugt is bliver i lasten. Tager `REFINE_ACTION_S = 8` s.
 - **Reparation:** bruger `REPAIR_METAL_KG = 600` + `REPAIR_SILICATE_KG = 400` og sænker
   `capacityLossFrac` med `REPAIR_RESTORE_FRAC = 0.04`, aldrig under 0. Tager `REPAIR_ACTION_S = 10` s.
-- **Taster (min beslutning, D14):** B = udvind, U = raffinér, Y = reparér. De er frie i
+- **Taster (min beslutning, D14):** B = udvind, U = raffinér, N = reparér (R17: Y åbner Yard'en fra flight). De er frie i
   `src/core/Input.ts`, og en test sikrer det.
 - **Sim-tid:** alle handlingstider er sim-tid. Formation-assist og handlinger skal virke ved 1×, og
   time compression må ikke ødelægge en handling (afbrydes rent).
@@ -290,7 +290,7 @@ asteroide og tank op".
   - `src/game/Mining.ts` (`GameModule`)
   - `src/game/miningRules.ts` (pure gates: `mayMine`, `chooseResource`)
 - Modify:
-  - `src/core/Input.ts` (`MINING_KEYS = { mine: 'KeyB', refine: 'KeyU', repair: 'KeyY' }`)
+  - `src/core/Input.ts` (`MINING_KEYS = { mine: 'KeyB', refine: 'KeyU', repair: 'KeyN' }`)
   - `src/ui/Hud.ts` + `src/game/Instruments.ts` (CARGO block under PROP, following the
     `setPropellant`/`drawPropellant`/`os-void` pattern)
   - `src/ui/hintRules.ts` (hint `'mine'`)
@@ -338,7 +338,7 @@ asteroide og tank op".
     - hidden without cargo
     - the `'mine'` hint appears the first time an asteroid is targeted in range and retires after 2
       completed mines
-  - `Given a hull without a tank or cargo, Then B/U/Y do nothing`
+  - `Given a hull without a tank or cargo, Then B/U/N do nothing`
 - [ ] **Step 2:** Run → FAIL.
 - [ ] **Step 3: ⏸** Wait for owner approval.
 - [ ] **Step 4:** Implement. Keys are re-checked at completion (as R16).

@@ -5,10 +5,15 @@
  * Order, first match wins:
  *   not in flight/overlay/pause/busy → nothing (the overlay speaks for itself)
  *   pointer not captured → CLICK (never retires: it is a state, not a lesson)
+ *   [v4-mining] mine (an asteroid targeted within mining range) — ahead of
+ *     every lesson: it is a situation, not a curriculum step
  *   fly → cruise (only with a target, not already cruising) → scan → chart → pause
  */
 
-export type HintId = 'click' | 'fly' | 'cruise' | 'scan' | 'chart' | 'pause';
+import { MINING_KEYS } from '@/core/Input';
+import type { CargoAction, CargoResult } from '@/ship/cargo';
+
+export type HintId = 'click' | 'fly' | 'cruise' | 'scan' | 'chart' | 'pause' | 'mine';
 export type RetirableHintId = Exclude<HintId, 'click'>;
 
 export const HINT_TEXT: Readonly<Record<HintId, string>> = {
@@ -18,6 +23,7 @@ export const HINT_TEXT: Readonly<Record<HintId, string>> = {
   scan: 'T — SCAN',
   chart: 'M — CHART',
   pause: 'ESC — PAUSE',
+  mine: `${MINING_KEYS.mine.replace(/^Key/, '')} — MINE`,
 };
 
 /** Uses after which a hint stops being shown. */
@@ -27,6 +33,8 @@ export const HINT_RETIRE_AFTER: Readonly<Record<RetirableHintId, number>> = {
   scan: 2,
   chart: 2,
   pause: 2,
+  /** [v4-mining] Retires after 2 COMPLETED mines (`recordCargoAction`). */
+  mine: 2,
 };
 
 export type HintCounts = Partial<Record<RetirableHintId, number>>;
@@ -46,6 +54,8 @@ export interface HintState {
   readonly busy: boolean;
   readonly hasTarget: boolean;
   readonly cruising: boolean;
+  /** [v4-mining] An asteroid is targeted within mining range (`Mining.asteroidInRange`). */
+  readonly asteroidInRange?: boolean;
 }
 
 export const HINT_COUNTS_KEY = 'os.hints.v1';
@@ -65,9 +75,21 @@ export function recordUse(counts: HintCounts, id: RetirableHintId): HintCounts {
   return { ...counts, [id]: (counts[id] ?? 0) + 1 };
 }
 
+/**
+ * [v4-mining] Counts a `cargo:action` towards the 'mine' hint: only a
+ * successful mine counts. Anything else returns `counts` itself.
+ */
+export function recordCargoAction(
+  counts: HintCounts,
+  e: { readonly action: CargoAction; readonly result: CargoResult },
+): HintCounts {
+  return e.action.kind === 'mine' && e.result.ok ? recordUse(counts, 'mine') : counts;
+}
+
 export function selectHint(state: HintState, counts: HintCounts): HintId | null {
   if (!state.inFlight || state.overlayOpen || state.paused || state.busy) return null;
   if (!state.pointerLocked) return 'click';
+  if (state.asteroidInRange === true && !isRetired(counts, 'mine')) return 'mine';
   if (!isRetired(counts, 'fly')) return 'fly';
   if (state.hasTarget && !state.cruising && !isRetired(counts, 'cruise')) return 'cruise';
   if (!isRetired(counts, 'scan')) return 'scan';

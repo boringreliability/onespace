@@ -60,6 +60,8 @@ export const MODULE_MODES: Readonly<Record<string, readonly Mode[]>> = {
   emergency: ['flight'],
   // v4 sub-plan 2: the belt's queries follow the flight (Targeting reads them).
   belt: FLIGHT,
+  // v4 sub-plan 2: B/U/Y only in flight (never mid-chart); leaving flight aborts.
+  mining: ['flight'],
 };
 
 /**

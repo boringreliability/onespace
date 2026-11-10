@@ -26,6 +26,8 @@ import { MAX_CONTACT_BRACKETS, edgePlace, type EdgePlacement } from '@/game/cont
 import type { CruiseReadout } from '@/game/cruiseReadout';
 import { gReadout } from '@/ui/gReadout';
 import { effectiveThrottle, propellantTone, type PropellantTone } from '@/ui/propellantReadout';
+import { cargoLineText, cargoTotalText, type CargoReadout } from '@/ui/cargoReadout'; // [v4-mining]
+import type { Resource } from '@/gen/belt';
 import { createLadderFade, stepLadderFade } from '@/ui/ladderFade';
 import {
   TAPE_PX_PER_DECADE,
@@ -609,6 +611,24 @@ export class Hud implements GameModule {
   private propTone: PropellantTone | '' = '';
   private readonly rProp = new Readout();
   private readonly rPropDv = new Readout();
+  // [v4-mining] the hold, under PROP. Hidden without cargo.
+  private elCargo!: HTMLElement;
+  private tCargoTotal!: TextSlot;
+  private readonly elCargoLines: HTMLElement[] = [];
+  private readonly tCargoLines: TextSlot[] = [];
+  /** What the caller last handed in (copied: primitives only). */
+  private cargoVisible = false;
+  private cargoTotal = 0;
+  private cargoCap = 0;
+  private cargoCount = 0;
+  private readonly cargoRes: Resource[] = ['ice', 'metal', 'silicate', 'rare'];
+  private readonly cargoKg: number[] = [0, 0, 0, 0];
+  /** What is on the glass, so text is rebuilt only when a whole kg changes. */
+  private cargoShownVisible = false;
+  private cargoShownTotal = Number.NaN;
+  private cargoShownCap = Number.NaN;
+  private readonly cargoShownRes: Array<Resource | null> = [null, null, null, null];
+  private readonly cargoShownKg: number[] = [Number.NaN, Number.NaN, Number.NaN, Number.NaN];
   private vThrottleIdx!: CssVar;
 
   private speedTape!: Tape;
@@ -833,6 +853,22 @@ export class Hud implements GameModule {
     this.propStarved = starved;
   }
 
+  /**
+   * [v4-mining] The hold (ui/cargoReadout.ts). The readout's numbers are
+   * copied, so the caller may refill it next frame; nothing is allocated.
+   */
+  setCargo(r: CargoReadout): void {
+    this.cargoVisible = r.visible;
+    this.cargoTotal = r.totalKg;
+    this.cargoCap = r.capacityKg;
+    const n = Math.min(r.count, this.cargoRes.length);
+    this.cargoCount = n;
+    for (let i = 0; i < n; i++) {
+      this.cargoRes[i] = r.resources[i]!;
+      this.cargoKg[i] = r.kg[i]!;
+    }
+  }
+
   /** [v4-fuel] No tank on this hull: no readout, the gauge as in v3. */
   clearPropellant(): void {
     this.hasProp = false;
@@ -973,6 +1009,40 @@ export class Hud implements GameModule {
     const pct = this.rThrottle.step(thr * 100, 1);
     this.tThrottleNum.set(fixed(pct, 0).padStart(3, '0'));
     this.drawPropellant();
+    this.drawCargo();
+  }
+
+  /** [v4-mining] Text is rebuilt only when a whole kilogram on the glass changes. */
+  private drawCargo(): void {
+    const vis = this.cargoVisible;
+    if (vis !== this.cargoShownVisible) {
+      this.cargoShownVisible = vis;
+      this.elCargo.classList.toggle('os-void', !vis);
+    }
+    if (!vis) return;
+    const total = Math.round(this.cargoTotal);
+    const cap = Math.round(this.cargoCap);
+    if (total !== this.cargoShownTotal || cap !== this.cargoShownCap) {
+      this.cargoShownTotal = total;
+      this.cargoShownCap = cap;
+      this.tCargoTotal.set(cargoTotalText(total, cap));
+    }
+    for (let i = 0; i < this.elCargoLines.length; i++) {
+      const was = this.cargoShownRes[i] ?? null;
+      if (i >= this.cargoCount) {
+        if (was === null) continue;
+        this.cargoShownRes[i] = null;
+        this.elCargoLines[i]!.classList.add('os-void');
+        continue;
+      }
+      const res = this.cargoRes[i]!;
+      const kg = Math.round(this.cargoKg[i]!);
+      if (res === was && kg === this.cargoShownKg[i]) continue;
+      if (was === null) this.elCargoLines[i]!.classList.remove('os-void');
+      this.cargoShownRes[i] = res;
+      this.cargoShownKg[i] = kg;
+      this.tCargoLines[i]!.set(cargoLineText(res, kg));
+    }
   }
 
   private drawPropellant(): void {
@@ -1474,6 +1544,15 @@ export class Hud implements GameModule {
     el('span', 'os-label', dvRow, 'Δv');
     this.tPropDv = new TextSlot(el('span', 'os-num', dvRow));
     el('span', 'os-unit', dvRow, 'km/s');
+    // [v4-mining] the hold: total / capacity, then one line per resource held.
+    const cargo = el('div', 'os-thr-cargo os-void', p);
+    this.elCargo = cargo;
+    this.tCargoTotal = new TextSlot(el('div', 'os-cargo-total', cargo));
+    for (let i = 0; i < this.cargoRes.length; i++) {
+      const line = el('div', 'os-cargo-line os-void', cargo);
+      this.elCargoLines.push(line);
+      this.tCargoLines.push(new TextSlot(line));
+    }
     // v3: the G meter lives here now, off the hull and the plume it used to
     // sit on in the middle of the frame.
     const g = el('div', 'os-thr-g', p);
@@ -2202,6 +2281,9 @@ const CSS = /* css */ `
 .os-hud .os-prop-fill { position: absolute; inset: 0; background: currentColor; transform-origin: left center; transform: scaleX(var(--fill, 0)); }
 .os-hud .os-thr-prop[data-tone='normal'] { opacity: 0.8; }
 .os-hud .os-thr-prop[data-tone='caution'] { text-shadow: var(--os-glow); }
+.os-hud .os-thr-cargo { margin-top: 8px; font-size: 9px; letter-spacing: 0.12em; color: var(--os-amber); text-shadow: var(--os-shadow); opacity: 0.8; white-space: nowrap; }
+.os-hud .os-thr-cargo.os-void, .os-hud .os-cargo-line.os-void { display: none; }
+.os-hud .os-cargo-line { margin-top: 2px; opacity: 0.85; }
 .os-hud .os-thr-prop[data-tone='warning'] { color: var(--os-warn); text-shadow: var(--os-shadow), 0 0 8px rgba(255, 95, 86, 0.4); }
 .os-thr-fa {
   margin-top: 6px;
