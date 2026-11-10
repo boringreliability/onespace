@@ -79,7 +79,7 @@ export interface GameEvents {
 
   /** [v4-fuel] The pilot took the emergency exit on an empty tank (sub-plan 3 logs it). */
   'emergency:used': {
-    kind: 'cannibalize' | 'beacon';
+    kind: 'cannibalize' | 'cannibalize-cargo' | 'beacon';
     /** Cannibalizations so far, this one included (cannibalize only). */
     timesUsed?: number;
   };

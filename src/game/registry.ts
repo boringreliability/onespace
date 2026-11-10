@@ -386,12 +386,12 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   // J reads the galaxy chart's selection; the chart only exists from here on.
   pilot.attachJump(map.ui, warp);
   progress(0.865, 'arming the recovery beacon');
-  const recovery = new RecoveryCut(universe);
+  const recovery = new RecoveryCut(universe, shipLog);
   await engine.add(recovery);
   const pause = new Pause({ universe, recovery, warp, input: engine.input });
   await engine.add(pause);
   // [v4-fuel] the emergency exit on an empty tank; its line rides NAV ADVISORY.
-  const emergency = new Emergency({ universe, recovery, warp });
+  const emergency = new Emergency({ universe, recovery, warp, log: shipLog });
   await engine.add(emergency);
   // [v4-mining] B/U/N. After Belt and Targeting (this frame's target and rock),
   // Cruise and the emergency exit; its in-range flag drives the 'mine' hint.

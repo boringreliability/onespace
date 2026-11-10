@@ -10,8 +10,9 @@
  * The tank is changed only through capacityLossFrac / consume / add.
  */
 
+import { applyCargoAction, type Cargo } from './cargo';
 import type { Propellant } from './propellant';
-import type { ActionResult } from './travelCost';
+import { applyAction, type ActionResult } from './travelCost';
 
 /** Propellant gained by cannibalizing, fraction of BASE capacity. */
 export const CANNIBALIZE_GAIN_FRAC = 0.03;
@@ -90,4 +91,67 @@ export function applyBeacon(p: Propellant): ActionResult {
   p.consume(p.massKg);
   p.add(BEACON_FILL_FRAC * p.capacityKg);
   return { ok: true, kg: 0 };
+}
+
+/** Title of the logbook note every beacon writes. */
+export const BEACON_NOTE_TITLE = 'BEACON RECOVERY';
+const BEACON_KEY = /^beacon:(\d+)$/;
+
+/** What payBeacon needs of the ship's log (`ShipLog` satisfies it). */
+export interface BeaconLog {
+  all(): readonly { readonly key: string }[];
+  record(e: {
+    key: string;
+    kind: 'note';
+    system: string;
+    title: string;
+    body: readonly string[];
+  }): void;
+}
+
+/**
+ * The next beacon's number: the highest `beacon:<n>` the log holds, + 1 (R19).
+ * The counter lives in the log, so it is saved with it. Max, not count: the log
+ * drops its oldest entries, and a count would then reuse a surviving key.
+ */
+function nextBeacon(log: BeaconLog): number {
+  let n = 0;
+  for (const e of log.all()) {
+    const m = BEACON_KEY.exec(e.key);
+    if (m) n = Math.max(n, Number(m[1]));
+  }
+  return n + 1;
+}
+
+/**
+ * [v4-mining] Task 6 — the beacon's whole price, in ONE place: Emergency key 2
+ * and RecoveryCut's RETURN TO ORBIT with a tank (D11) both pay through here.
+ * The tank is set to 5 % (the beacon action), the whole hold is jettisoned
+ * (one `jettison-all`, announced even when the hold is empty) and the log gets
+ * a 'BEACON RECOVERY' note under its own key. `system`: where it happened, from
+ * the caller. Callers announce `ship:recovered` AFTER this, so whatever lets go
+ * on it (Mining aborts, applying nothing) already sees the empty hold.
+ *
+ * A hull without a hold (null) has nothing to jettison; without a log
+ * (null) no note is written — the tank price is paid regardless.
+ */
+export function payBeacon(
+  tank: Propellant,
+  cargo: Cargo | null,
+  log: BeaconLog | null,
+  system: string,
+): void {
+  applyAction(tank, { kind: 'beacon' });
+  const kg = cargo ? Math.round(applyCargoAction(cargo, tank, { kind: 'jettison-all' }).kgOut) : 0;
+  if (!log) return;
+  log.record({
+    key: `beacon:${nextBeacon(log)}`,
+    kind: 'note',
+    system,
+    title: BEACON_NOTE_TITLE,
+    body: [
+      'distress beacon answered · returned to a safe orbit',
+      kg > 0 ? `hold jettisoned · ${kg} kg` : 'hold empty · nothing jettisoned',
+    ],
+  });
 }

@@ -16,7 +16,8 @@ export type PropellantAction =
   | { kind: 'cruise-leg'; distanceKm: number }
   | { kind: 'jump'; distanceLy: number }
   /** `timesUsed`: cannibalizations so far (prices the loss); omitted = 0. */
-  | { kind: 'cannibalize'; part: 'tank' | 'cargo'; timesUsed?: number }
+  /** The tank only: the hold burns through `applyCargoAction('cannibalize-cargo')` (R19). */
+  | { kind: 'cannibalize'; part: 'tank'; timesUsed?: number }
   | { kind: 'beacon' }
   /** A jump the warp rejected: its price goes back. */
   | { kind: 'jump-refund'; kg: number }
@@ -29,9 +30,9 @@ export interface ActionResult {
   kg: number;
   /**
    * `capacity`: the tank cannot carry a cannibalization's loss; `not-empty`: only a
-   * dry tank is cannibalized; `cargo-reserved`: sub-plan 2.
+   * dry tank is cannibalized.
    */
-  reason?: 'insufficient' | 'nothing-left' | 'capacity' | 'not-empty' | 'cargo-reserved';
+  reason?: 'insufficient' | 'nothing-left' | 'capacity' | 'not-empty';
 }
 
 const JUMP_BASE = 0.04;
@@ -113,8 +114,6 @@ function apply(p: Propellant, a: PropellantAction): ActionResult {
       return taken < bill ? { ok: false, kg: taken, reason: 'nothing-left' } : { ok: true, kg: taken };
     }
     case 'cannibalize':
-      // Cargo cannibalization arrives with cargo (sub-plan 2).
-      if (a.part === 'cargo') return { ok: false, kg: 0, reason: 'cargo-reserved' };
       return applyCannibalize(p, a.timesUsed ?? 0);
     case 'beacon':
       return applyBeacon(p);

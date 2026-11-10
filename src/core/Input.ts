@@ -54,6 +54,7 @@ export type ActionName =
   | 'emergency'
   | 'emergencyCannibalize'
   | 'emergencyBeacon'
+  | 'emergencyCannibalizeCargo'
   // [v4-mining] mine, refine, repair (game/Mining.ts)
   | 'mine'
   | 'refine'
@@ -63,7 +64,13 @@ export type ActionName =
  * [v4-fuel] The emergency exit's keys: `open` offers the choice on an empty
  * tank, then `cannibalize` / `beacon` pick. H, 1 and 2 were free.
  */
-export const EMERGENCY_KEYS = { open: 'KeyH', cannibalize: 'Digit1', beacon: 'Digit2' } as const;
+export const EMERGENCY_KEYS = {
+  open: 'KeyH',
+  cannibalize: 'Digit1',
+  beacon: 'Digit2',
+  /** [v4-mining] Burn the hold (≥ 1 000 kg). 3 was free (Emergency.test.ts scans raw handlers). */
+  cannibalizeCargo: 'Digit3',
+} as const;
 
 /**
  * [v4-mining] Mine (B), refine (U), repair (N). Not Y (R17): Yard.ts reads Y
@@ -95,6 +102,7 @@ const KEY_ACTIONS: Record<string, ActionName> = {
   [EMERGENCY_KEYS.open]: 'emergency',
   [EMERGENCY_KEYS.cannibalize]: 'emergencyCannibalize',
   [EMERGENCY_KEYS.beacon]: 'emergencyBeacon',
+  [EMERGENCY_KEYS.cannibalizeCargo]: 'emergencyCannibalizeCargo',
   // [v4-mining]
   [MINING_KEYS.mine]: 'mine',
   [MINING_KEYS.refine]: 'refine',

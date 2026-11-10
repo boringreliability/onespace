@@ -13,16 +13,22 @@
  * screen and what the keys do cannot drift apart.
  *
  * `timesUsed` lives here (get/set) — sub-plan 3 saves and restores it.
+ *
+ * [v4-mining] Task 6 — the exit knows the cargo. 3 burns the whole hold for
+ * 3 % of BASE tank capacity (`cannibalize-cargo`), offered FIRST when the hold
+ * holds ≥ 1 000 kg: 3, 1, 2. The beacon pays through `payBeacon` — the tank
+ * price, the hold jettisoned, a BEACON RECOVERY note — shared with RecoveryCut.
  */
 
 import type { EngineContext, GameModule } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
 import { EMERGENCY_KEYS } from '@/core/Input';
-import { cannibalizeYield, emergencyMayAct } from '@/ship/emergency';
+import { CANNIBALIZE_CARGO_MIN_KG, applyCargoAction, type Cargo } from '@/ship/cargo';
+import { cannibalizeYield, emergencyMayAct, payBeacon, type BeaconLog } from '@/ship/emergency';
 import { applyAction } from '@/ship/travelCost';
 import type { Propellant } from '@/ship/propellant';
 
-export type EmergencyChoice = 'cannibalize' | 'beacon';
+export type EmergencyChoice = 'cannibalize-cargo' | 'cannibalize' | 'beacon';
 
 /** What the module reads and drives of the universe. `Universe` satisfies it. */
 export interface EmergencyWorld {
@@ -31,6 +37,10 @@ export interface EmergencyWorld {
     /** Zeroed after the beacon, as RecoveryCut does: arrive coasting. */
     readonly command?: { throttle: number };
   };
+  /** [v4-mining] The hold: burned by 3, jettisoned by the beacon. Absent: no hold (v4-fuel stubs). */
+  readonly cargo?: Cargo;
+  /** The system the ship is in; named in the beacon's logbook note. */
+  readonly system?: { readonly name: string };
   readonly paused: boolean;
   /** Pause sheet, recovery cut or an overlay holds the world (ui/Pause.ts). */
   readonly frozen: boolean;
@@ -41,6 +51,8 @@ export interface EmergencyOptions {
   readonly universe: EmergencyWorld;
   readonly recovery: { readonly active: boolean };
   readonly warp: { readonly phase: string };
+  /** [v4-mining] The ship's log: the beacon writes its note here (registry passes it). */
+  readonly log?: BeaconLog;
 }
 
 /** 'KeyH' → 'H', 'Digit1' → '1'. */
@@ -49,6 +61,12 @@ function keyLabel(code: string): string {
 }
 
 export const EMERGENCY_PROMPT = `EMERGENCY · ${keyLabel(EMERGENCY_KEYS.open)}`;
+
+const OFFER_TEXT: Readonly<Record<EmergencyChoice, string>> = {
+  'cannibalize-cargo': `${keyLabel(EMERGENCY_KEYS.cannibalizeCargo)} · CANNIBALIZE CARGO`,
+  cannibalize: `${keyLabel(EMERGENCY_KEYS.cannibalize)} · CANNIBALIZE TANK`,
+  beacon: `${keyLabel(EMERGENCY_KEYS.beacon)} · BEACON`,
+};
 
 export class Emergency implements GameModule {
   readonly name = 'emergency';
@@ -93,26 +111,33 @@ export class Emergency implements GameModule {
     return this.choosing && this.stranded;
   }
 
-  /** What may be picked; [] unless the gate holds. Cannibalize only when the tank can pay. */
+  /** The hold can be burned: ≥ 1 000 kg aboard and a tank that can take anything. */
+  private get cargoBurnable(): boolean {
+    const c = this.opts.universe.cargo;
+    const t = this.tank;
+    return !!c && !!t && c.totalKg >= CANNIBALIZE_CARGO_MIN_KG && t.capacityKg > 0;
+  }
+
+  /**
+   * What may be picked, in menu order; [] unless the gate holds. The cargo
+   * first (it costs the tank nothing), the tank only when it can pay, the
+   * beacon always.
+   */
   get offers(): EmergencyChoice[] {
     const t = this.tank;
     if (!t || !this.stranded) return [];
-    return cannibalizeYield(t, this.uses) ? ['cannibalize', 'beacon'] : ['beacon'];
+    const o: EmergencyChoice[] = [];
+    if (this.cargoBurnable) o.push('cannibalize-cargo');
+    if (cannibalizeYield(t, this.uses)) o.push('cannibalize');
+    o.push('beacon');
+    return o;
   }
 
   /** The NAV ADVISORY line: the menu while choosing, the prompt otherwise. */
   get line(): string | null {
     if (!this.stranded) return null;
     if (!this.choosing) return EMERGENCY_PROMPT;
-    const parts: string[] = [];
-    for (const o of this.offers) {
-      parts.push(
-        o === 'cannibalize'
-          ? `${keyLabel(EMERGENCY_KEYS.cannibalize)} · CANNIBALIZE TANK`
-          : `${keyLabel(EMERGENCY_KEYS.beacon)} · BEACON`,
-      );
-    }
-    return parts.join('   ');
+    return this.offers.map((o) => OFFER_TEXT[o]).join('   ');
   }
 
   init(): void {
@@ -138,7 +163,15 @@ export class Emergency implements GameModule {
     // Re-check at the moment of the pick (R16): nothing between the gate above
     // and here may have changed it, but the pick is what must never slip.
     if (!this.stranded) return;
-    if (input.pressed('emergencyCannibalize')) {
+    if (input.pressed('emergencyCannibalizeCargo')) {
+      // Only when offered: below 1 000 kg the key is silent, not a refusal.
+      if (!this.cargoBurnable || !this.opts.universe.cargo) return;
+      const r = applyCargoAction(this.opts.universe.cargo, tank, { kind: 'cannibalize-cargo' });
+      if (!r.ok) return;
+      this.choosing = false;
+      bus.emit('log', { text: 'CARGO CANNIBALIZED', tone: 'warn' });
+      bus.emit('emergency:used', { kind: 'cannibalize-cargo' });
+    } else if (input.pressed('emergencyCannibalize')) {
       const r = applyAction(tank, { kind: 'cannibalize', part: 'tank', timesUsed: this.uses });
       if (!r.ok) return; // refused: the beacon still answers
       this.uses++;
@@ -147,8 +180,11 @@ export class Emergency implements GameModule {
       bus.emit('emergency:used', { kind: 'cannibalize', timesUsed: this.uses });
     } else if (input.pressed('emergencyBeacon')) {
       this.choosing = false;
-      this.opts.universe.recoverToOrbit();
-      applyAction(tank, { kind: 'beacon' });
+      const { universe, log } = this.opts;
+      universe.recoverToOrbit();
+      // The tank price, the hold, the note — before ship:recovered (Mining
+      // aborts on it, applying nothing, and must find the hold settled).
+      payBeacon(tank, universe.cargo ?? null, log ?? null, universe.system?.name ?? '—');
       // Arrive coasting (RecoveryCut does the same).
       input.setThrottle(0);
       const cmd = this.opts.universe.flight.command;
