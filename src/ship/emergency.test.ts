@@ -314,7 +314,7 @@ describe('Task 6 — payBeacon', () => {
     const log = new ShipLog();
     const seen: Array<{ kind: string; ok: boolean; kgOut: number }> = [];
     offs.push(bus.on('cargo:action', ({ action, result }) => seen.push({ kind: action.kind, ok: result.ok, kgOut: result.kgOut })));
-    payBeacon(tank, cargo, log);
+    payBeacon(tank, cargo, log, 'Fyss');
     expect(tank.massKg).toBeCloseTo(0.05 * 0.8 * BASE, 9);
     expect(tank.capacityLossFrac).toBeCloseTo(0.2, 12);
     expect(cargo.totalKg).toBe(0);
@@ -323,6 +323,7 @@ describe('Task 6 — payBeacon', () => {
     expect(n).toHaveLength(1);
     expect(n[0]!.key).toBe('beacon:1');
     expect(n[0]!.kind).toBe('note');
+    expect(n[0]!.system).toBe('Fyss');
     expect(n[0]!.body.length).toBeGreaterThan(0);
   });
 
@@ -330,15 +331,15 @@ describe('Task 6 — payBeacon', () => {
     const tank = emptyTank();
     const cargo = hold({});
     const log = new ShipLog();
-    expect(() => payBeacon(tank, cargo, log)).not.toThrow();
+    expect(() => payBeacon(tank, cargo, log, 'Fyss')).not.toThrow();
     expect(notes(log)).toHaveLength(1);
     expect(tank.massKg).toBeCloseTo(0.05 * BASE, 9);
   });
 
   it('Given payBeacon twice, Then two notes beacon:1 and beacon:2 (each its own, visits 1)', () => {
     const log = new ShipLog();
-    payBeacon(emptyTank(), hold({ metal: 1_000 }), log);
-    payBeacon(emptyTank(), hold({ ice: 1_000 }), log);
+    payBeacon(emptyTank(), hold({ metal: 1_000 }), log, 'Fyss');
+    payBeacon(emptyTank(), hold({ ice: 1_000 }), log, 'Fyss');
     const n = notes(log);
     expect(n.map((e) => e.key).sort()).toEqual(['beacon:1', 'beacon:2']);
     expect(n.every((e) => e.visits === 1)).toBe(true);
@@ -347,10 +348,10 @@ describe('Task 6 — payBeacon', () => {
   it('Given two beacons saved with the log, When the log is reloaded, Then the next beacon is beacon:3 (the counter survives a save)', () => {
     vi.stubGlobal('localStorage', new MemoryStorage());
     const first = new ShipLog();
-    payBeacon(emptyTank(), hold({}), first);
-    payBeacon(emptyTank(), hold({}), first);
+    payBeacon(emptyTank(), hold({}), first, 'Fyss');
+    payBeacon(emptyTank(), hold({}), first, 'Fyss');
     const reloaded = new ShipLog();
-    payBeacon(emptyTank(), hold({}), reloaded);
+    payBeacon(emptyTank(), hold({}), reloaded, 'Fyss');
     expect(notes(reloaded).map((e) => e.key).sort()).toEqual(['beacon:1', 'beacon:2', 'beacon:3']);
   });
 });

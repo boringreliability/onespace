@@ -65,7 +65,7 @@ interface Harness {
   input: StubInput;
   recoveries: number;
   logs: string[];
-  used: Array<'cannibalize' | 'beacon'>;
+  used: Array<'cannibalize' | 'cannibalize-cargo' | 'beacon'>;
   recovered: number;
   tick(n?: number): void;
   press(code: string): void;
@@ -85,7 +85,7 @@ function harness(opts: { fill?: number; lossFrac?: number; noTank?: boolean } = 
     input,
     recoveries: 0,
     logs: [] as string[],
-    used: [] as Array<'cannibalize' | 'beacon'>,
+    used: [] as Array<'cannibalize' | 'cannibalize-cargo' | 'beacon'>,
     recovered: 0,
   } as Harness;
   const world: Harness['world'] = {
