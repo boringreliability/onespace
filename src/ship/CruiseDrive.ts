@@ -372,10 +372,17 @@ export class CruiseDrive {
     }
   }
 
-  /** The gap the ceiling follows: the clearance, or a nearer `limitKm`. */
+  /**
+   * The gap the ceiling follows: the clearance, or a nearer `limitKm` — never
+   * below the hold clearance (R22): a limit at or under zero would be a
+   * 0 km/s ceiling with the spool already paid.
+   */
   private limit(i: CruiseInputs): number {
     const l = i.limitKm;
-    return l !== undefined && l < i.clearanceKm ? Math.max(l, 0) : i.clearanceKm;
+    if (l === undefined) return i.clearanceKm;
+    const floor = holdClearanceKm(0, this.config);
+    const lf = l >= floor ? l : floor; // NaN floors too
+    return lf < i.clearanceKm ? lf : i.clearanceKm;
   }
 
   private exitSpeed(i: CruiseInputs): number {

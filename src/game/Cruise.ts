@@ -127,7 +127,7 @@ export interface CruiseOptions {
    * [v4-mining] Resolves `field:` nav targets. Without it (or without a belt
    * in the system) a field target is ignored, exactly as before.
    */
-  readonly belt?: Pick<Belt, 'fieldWorld'> | null;
+  readonly belt?: Pick<Belt, 'fieldWorld' | 'fieldVelocity'> | null;
 }
 
 /**
@@ -155,7 +155,7 @@ export class Cruise implements GameModule {
 
   readonly drive = new CruiseDrive();
   private readonly universe: CruiseWorld;
-  private readonly belt: Pick<Belt, 'fieldWorld'> | null;
+  private readonly belt: Pick<Belt, 'fieldWorld' | 'fieldVelocity'> | null;
   /**
    * [v4-mining] A locked belt field, as the drive sees a target: a body of
    * radius FIELD_RADIUS_KM with no SOI. One object, reused (no allocation per
@@ -167,6 +167,8 @@ export class Cruise implements GameModule {
     soiRadius: Number.POSITIVE_INFINITY,
     parent: null,
   };
+  /** [v4-mining] Scratch: the field's velocity at a handover. */
+  private readonly sFieldVel = new Vector3();
   /** The field id `fieldBody`'s name was built for. */
   private fieldNamedFor: string | null = null;
 
@@ -336,6 +338,32 @@ export class Cruise implements GameModule {
     return true;
   }
 
+  /**
+   * [v4-mining] Leave cruise at the locked field's velocity (parent-relative),
+   * engine cut, and start the settle onto the field centre. False, changing
+   * nothing, if the field cannot be resolved.
+   */
+  private fieldHandover(field: Body): boolean {
+    const id = this.targetId;
+    const flight = this.universe.flight;
+    if (id === null || !this.belt || !this.belt.fieldVelocity(id, this.sFieldVel)) return false;
+    // The field's velocity is star-frame; the flight model's is its parent's.
+    const parent = flight.parent;
+    if (parent) this.sFieldVel.sub(parent.velocity);
+    flight.exitCruiseWithVelocity(this.sFieldVel);
+    // Nose on the field centre, roof radial-out from the parent.
+    this.sFwd.subVectors(field.world, flight.worldPosition);
+    this.sUp.copy(flight.position).normalize();
+    if (this.sFwd.lengthSq() > 1e-18) {
+      this.sFwd.normalize();
+      this.sMat.lookAt(ZERO3, this.sFwd, this.sUp);
+      this.arrivalQuat.setFromRotationMatrix(this.sMat).normalize();
+      this.settling = true;
+      this.settleRate = 0;
+    }
+    return true;
+  }
+
   /** Turn the hull towards `target` by at most `maxStep` rad; returns the angle left. */
   private turnToward(target: Quaternion, maxStep: number): number {
     const flight = this.universe.flight;
@@ -477,7 +505,10 @@ export class Cruise implements GameModule {
       }
       arrival = this.departedFrom === toward ? null : a;
       limbKm = LIMB_FRACTION * (radius + arrivalClearanceKm(radius, toward.soiRadius, this.drive.config));
-      if (toField) limitKm = a.clearanceKm;
+      // R22: only while arrival is armed (departing the field it is not, and
+      // its gap must not hold the drive back), and never below the hold
+      // clearance — a gap ≤ 0 inside the field would be a 0 km/s ceiling.
+      if (toField && arrival !== null) limitKm = Math.max(a.clearanceKm, holdClearanceKm(FIELD_RADIUS_KM, this.drive.config));
     }
 
     const wasEngaged = this.drive.engaged;
@@ -497,7 +528,8 @@ export class Cruise implements GameModule {
     let haveDropTarget = false;
     di.aligned = undefined;
     if (this.drive.phase !== 'dropping') this.dropPlaneSet = false;
-    if (this.drive.phase === 'dropping') {
+    // [v4-mining] A field drop is no orbit insertion: no tangent to turn onto.
+    if (this.drive.phase === 'dropping' && !toField) {
       haveDropTarget = this.insertionAttitude(this.dropQuat);
       if (haveDropTarget) {
         this.sFwd.copy(NOSE).applyQuaternion(this.dropQuat);
@@ -543,7 +575,12 @@ export class Cruise implements GameModule {
     }
     if (this.drive.phase !== 'cruise') this.ranDry = false;
 
-    if (wasEngaged && !this.drive.engaged) {
+    if (wasEngaged && !this.drive.engaged && toField && this.drive.dropReason === 'arrival' && this.fieldHandover(toward!)) {
+      // [v4-mining] R22: arrived at a field — standing still with it, facing it.
+      this.dropPlaneSet = false;
+      this.heldLever = ctx.input.axes.throttle;
+      bus.emit('log', { text: `ORBIT — ${toward!.spec.name.toUpperCase()}`, tone: 'good' });
+    } else if (wasEngaged && !this.drive.engaged) {
       // The handover. In orbit if there is anything to orbit, else the
       // legacy sublight exit along the nose.
       // v3: along the tangent the drop has been flying to, when it had one.
@@ -570,7 +607,7 @@ export class Cruise implements GameModule {
     }
 
     // v3: fly the nose onto the insertion tangent while the drop bleeds.
-    if (this.drive.phase === 'dropping') {
+    if (this.drive.phase === 'dropping' && !toField) {
       if (!haveDropTarget) haveDropTarget = this.insertionAttitude(this.dropQuat);
       if (haveDropTarget) {
         const c = this.drive.config;

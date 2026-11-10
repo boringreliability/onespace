@@ -25,8 +25,8 @@ import type { ScanResult } from '@/gen/types';
 import type { Traffic } from '@/game/Traffic';
 import type { Universe, UniverseBody } from '@/game/Universe';
 import { beltTargetName, type Belt } from '@/game/Belt';
-import { asteroidInScanRange, chooseScanTarget, type ScanBody } from '@/game/scanChoice';
-import type { Resource } from '@/gen/belt';
+import { ASTEROID_SCAN_RANGE_KM, asteroidInScanRange, chooseScanTarget, type ScanBody } from '@/game/scanChoice';
+import { FIELD_RADIUS_KM, type Resource } from '@/gen/belt';
 import { bodyTargetId } from '@/game/targets';
 
 /** Seconds the array takes to resolve a target. Long enough to feel worked for. */
@@ -41,7 +41,7 @@ export interface ScannerOptions {
   /** The nav target, if targeting is wired. Read only. */
   readonly targeting?: { readonly targetId: string | null } | null;
   /** [v4-mining] Asteroid targets are assayed through it. Absent: v3 behaviour. */
-  readonly belt?: Pick<Belt, 'asteroidSpec' | 'asteroidWorld' | 'remainingKg'> | null;
+  readonly belt?: Pick<Belt, 'asteroidSpec' | 'asteroidWorld' | 'remainingKg' | 'fieldWorld'> | null;
 }
 
 export class Scanner implements GameModule {
@@ -124,6 +124,21 @@ export class Scanner implements GameModule {
     }
 
     const targetId = this.targeting?.targetId ?? null;
+    // [v4-mining] A belt field is not scanned as a whole (R23): beyond the
+    // array's reach it is named; within it, the pilot is pointed at a rock.
+    if (targetId !== null && this.belt && targetId.startsWith('field:')) {
+      const at = new Vector3();
+      if (this.belt.fieldWorld(targetId, at)) {
+        const edgeKm = at.distanceTo(ship) - FIELD_RADIUS_KM;
+        const name = beltTargetName(targetId, this.universe.system?.name) ?? targetId;
+        bus.emit('log', {
+          text: edgeKm > ASTEROID_SCAN_RANGE_KM ? `${name.toUpperCase()} BEYOND ARRAY RANGE` : 'TAB TO TARGET A ROCK',
+          tone: 'warn',
+        });
+        this.outOfRangeReported = true;
+        return null;
+      }
+    }
     let target: { id: string; inRange: boolean } | null = null;
     let asteroid = false;
     if (targetId !== null) {
@@ -152,7 +167,7 @@ export class Scanner implements GameModule {
     if (choice.kind === 'out-of-range') {
       const b = byId.get(choice.id);
       bus.emit('log', {
-        text: `${(b?.spec.name ?? beltTargetName(choice.id) ?? choice.id).toUpperCase()} BEYOND ARRAY RANGE`,
+        text: `${(b?.spec.name ?? beltTargetName(choice.id, this.universe.system?.name) ?? choice.id).toUpperCase()} BEYOND ARRAY RANGE`,
         tone: 'warn',
       });
       this.outOfRangeReported = true;
