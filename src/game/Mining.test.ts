@@ -1,5 +1,5 @@
 /**
- * v4 sub-plan 2, Task 5 — mine (B), refine (U), repair (Y). The success
+ * v4 sub-plan 2, Task 5 — mine (B), refine (U), repair (N). The success
  * criterion's "mine an asteroid and refuel".
  *
  * Contract with the pilot:
@@ -8,7 +8,7 @@
  *   `applyCargoAction` (one `cargo:action` mine) and `worldState.recordMined`
  *   (once per completed mine — never per tick), and logs "MINED · 2 000 KG ICE".
  * - U refines all the ice the tank can take (0.8 kg fuel per kg ice) in 8 s;
- *   Y repairs 0.04 of tank capacity loss for 600 kg metal + 400 kg silicate
+ *   N repairs 0.04 of tank capacity loss for 600 kg metal + 400 kg silicate
  *   in 10 s. Both complete through `applyCargoAction`.
  * - A refusal logs its reason (`REFUSAL_LOG`) and starts nothing.
  * - A mine is aborted cleanly — no yield, no action, "MINING ABORTED" — by
@@ -17,13 +17,16 @@
  * - Time is SIM time (`universe.simulatedSeconds`), so 10× finishes in 0.4 s
  *   wall. Completion lands on the frame the duration is reached (a 1e-6 s
  *   float tolerance: 240 × 1/60 sums to 3.99999999999999).
- * - No tank or no hold: B/U/Y do nothing at all.
+ * - No tank or no hold: B/U/N do nothing at all.
  *
  * Fixture: a REAL Belt over Fyss (beltRig), its WorldState, and the ship
  * placed beside a real asteroid. The orbit clock stands still, so the rock
  * stays put; the ship's velocity is set equal to the rock's ("matched").
  */
 
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { Vector3 } from 'three';
 
@@ -93,6 +96,7 @@ interface RigOpts {
 
 function rig(o: RigOpts = {}) {
   const b = beltRig();
+  b.frame(); // the Belt enters the system on its first update
   const ast = richAsteroid();
   const astWorld = new Vector3();
   const astVel = new Vector3();
@@ -112,8 +116,8 @@ function rig(o: RigOpts = {}) {
 
   const velocity = astVel.clone().add(new Vector3(0, o.relKmS ?? 0, 0));
   const world = {
-    paused: false,
-    frozen: false,
+    paused: false as boolean,
+    frozen: false as boolean,
     simulatedSeconds: 0,
     cargo: o.noCargo ? null : cargo,
     flight: { propellant: o.noTank ? null : tank, worldPosition: b.world.flight.worldPosition, velocity },
@@ -172,8 +176,8 @@ function rig(o: RigOpts = {}) {
 // ---------------------------------------------------------------------------
 
 describe('the keys', () => {
-  it('Given MINING_KEYS, Then B, U and Y are bound in Input to mine, refine and repair', () => {
-    expect(MINING_KEYS).toEqual({ mine: 'KeyB', refine: 'KeyU', repair: 'KeyY' });
+  it('Given MINING_KEYS, Then B, U and N are bound in Input to mine, refine and repair (R17: Y is the Yard)', () => {
+    expect(MINING_KEYS).toEqual({ mine: 'KeyB', refine: 'KeyU', repair: 'KeyN' });
     expect(actionForKey(MINING_KEYS.mine)).toBe('mine');
     expect(actionForKey(MINING_KEYS.refine)).toBe('refine');
     expect(actionForKey(MINING_KEYS.repair)).toBe('repair');
@@ -195,6 +199,35 @@ describe('the keys', () => {
     for (const code of all) {
       const a = actionForKey(code);
       if (a === 'mine' || a === 'refine' || a === 'repair') expect(codes, code).toContain(code);
+    }
+  });
+
+  it('Given every raw key handler in src (e.code === \'KeyY\' and the like), Then none reads a mining key (R17)', () => {
+    const root = fileURLToPath(new URL('../', import.meta.url));
+    const files: string[] = [];
+    const walk = (dir: string): void => {
+      for (const f of readdirSync(dir, { withFileTypes: true })) {
+        const abs = join(dir, f.name);
+        if (f.isDirectory()) walk(abs);
+        else if (f.name.endsWith('.ts') && !f.name.endsWith('.test.ts')) files.push(abs);
+      }
+    };
+    walk(root);
+    const inputTs = join(root, 'core', 'Input.ts');
+    const raw = new Map<string, string[]>();
+    for (const file of files) {
+      if (file === inputTs) continue; // the binding table itself
+      const src = readFileSync(file, 'utf8');
+      for (const m of src.matchAll(/['"`]((?:Key[A-Z])|(?:Digit[0-9]))['"`]/g)) {
+        const list = raw.get(m[1]!) ?? [];
+        list.push(file.slice(root.length));
+        raw.set(m[1]!, list);
+      }
+    }
+    // The scan sees the Yard's raw Y (the reason repair left Y).
+    expect(raw.get('KeyY') ?? []).toContain('game/Yard.ts');
+    for (const c of Object.values(MINING_KEYS)) {
+      expect(raw.get(c) ?? [], `${c} is read raw elsewhere`).toEqual([]);
     }
   });
 });
@@ -355,7 +388,7 @@ describe('mine refusals — logged, nothing started', () => {
     expect(r.logs).toEqual(['BUSY', 'BUSY']);
   });
 
-  it('Given paused or frozen, When B/U/Y, Then the keys do nothing — not even a log', () => {
+  it('Given paused or frozen, When B/U/N, Then the keys do nothing — not even a log', () => {
     const r = rig();
     r.cargo.restore({ ice: 5_000, metal: 1_000, silicate: 1_000 });
     r.tank.capacityLossFrac = 0.1;
@@ -371,7 +404,7 @@ describe('mine refusals — logged, nothing started', () => {
     expect(r.actions).toEqual([]);
   });
 
-  it('Given a mine underway, When B, U or Y is pressed, Then "BUSY" and the mine carries on to completion', () => {
+  it('Given a mine underway, When B, U or N is pressed, Then "BUSY" and the mine carries on to completion', () => {
     const r = rig();
     r.cargo.restore({ ice: 1_000 });
     r.press(MINING_KEYS.mine);
@@ -513,8 +546,8 @@ describe('refine (U) — the tank op', () => {
   });
 });
 
-describe('repair (Y)', () => {
-  it('Given materials and loss, When Y, Then after 10 s the loss falls by 0.04 and the log says REPAIRED · TANK +4 %', () => {
+describe('repair (N)', () => {
+  it('Given materials and loss, When N, Then after 10 s the loss falls by 0.04 and the log says REPAIRED · TANK +4 %', () => {
     const r = rig({ lossFrac: 0.1 });
     r.cargo.restore({ metal: 600, silicate: 400 });
     r.press(MINING_KEYS.repair);
@@ -530,7 +563,7 @@ describe('repair (Y)', () => {
     expect(r.logs).toEqual(['REPAIRED · TANK +4 %']);
   });
 
-  it('Given no loss, When Y, Then "TANK UNDAMAGED" and nothing starts', () => {
+  it('Given no loss, When N, Then "TANK UNDAMAGED" and nothing starts', () => {
     const r = rig({ lossFrac: 0 });
     r.cargo.restore({ metal: 600, silicate: 400 });
     r.press(MINING_KEYS.repair);
@@ -538,7 +571,7 @@ describe('repair (Y)', () => {
     expect(r.logs).toEqual(['TANK UNDAMAGED']);
   });
 
-  it('Given too little metal or silicate, When Y, Then "NEED 600 KG METAL · 400 KG SILICATE" and nothing starts', () => {
+  it('Given too little metal or silicate, When N, Then "NEED 600 KG METAL · 400 KG SILICATE" and nothing starts', () => {
     const r = rig({ lossFrac: 0.1 });
     r.cargo.restore({ metal: 599, silicate: 400 });
     r.press(MINING_KEYS.repair);
@@ -554,7 +587,7 @@ describe('a hull without a tank or a hold — inert', () => {
     ['no tank', { noTank: true }],
     ['no hold', { noCargo: true }],
   ] as const) {
-    it(`Given ${why}, Then B/U/Y do nothing: no action, no log, no worldState entry`, () => {
+    it(`Given ${why}, Then B/U/N do nothing: no action, no log, no worldState entry`, () => {
       const r = rig({ ...o, lossFrac: 0.1 });
       r.cargo.restore({ ice: 5_000, metal: 1_000, silicate: 1_000 });
       r.press(MINING_KEYS.mine);
