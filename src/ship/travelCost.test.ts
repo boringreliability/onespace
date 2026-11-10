@@ -173,10 +173,10 @@ describe('applyAction — all-or-nothing for spool and jump; cruise-leg takes wh
       { kind: 'cruise-leg', distanceKm: 1 },
       { kind: 'jump', distanceLy: 1 },
       { kind: 'cannibalize', part: 'tank' },
-      { kind: 'cannibalize', part: 'cargo' },
+      // [v4-mining] Task 6: no part 'cargo' — the hold burns via applyCargoAction.
       { kind: 'beacon' },
     ];
-    expect(kinds).toHaveLength(6);
+    expect(kinds).toHaveLength(5);
   });
 });
 

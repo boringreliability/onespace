@@ -7,11 +7,16 @@
  *   (null) when the remaining capacity cannot carry the loss.
  * - beacon: the tank is set to 5 % of the CURRENT capacity.
  * - `applyAction` routes 'cannibalize' / 'beacon' through the same rules;
- *   cargo cannibalization is reserved for sub-plan 2 and refused.
+ *   cargo cannibalization is the cargo action `cannibalize-cargo` (sub-plan 2).
  */
 
-import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { bus } from '@/core/EventBus';
+import { ShipLog } from '@/game/Log';
+import { CARGO_CAPACITY_KG, Cargo } from './cargo';
 import { PROBE_TANK_CAPACITY_KG, Propellant } from './propellant';
 import { applyAction } from './travelCost';
 import {
@@ -22,6 +27,7 @@ import {
   cannibalizeLossFrac,
   cannibalizeYield,
   emergencyMayAct,
+  payBeacon,
 } from './emergency';
 
 const BASE = PROBE_TANK_CAPACITY_KG;
@@ -165,13 +171,11 @@ describe('applyAction routes the emergency kinds through the same rules', () => 
     expect(a.capacityLossFrac).toBeCloseTo(b.capacityLossFrac, 12);
   });
 
-  it("cannibalize 'cargo' is reserved for sub-plan 2: refused, tank untouched", () => {
-    const p = emptyTank();
-    const r = applyAction(p, { kind: 'cannibalize', part: 'cargo' });
-    expect(r.ok).toBe(false);
-    expect(r.reason).toBe('cargo-reserved');
-    expect(p.massKg).toBe(0);
-    expect(p.capacityLossFrac).toBe(0);
+  it("Task 6 (sub-plan 2): the reserved cannibalize part:'cargo' path is gone — cargo burns only through applyCargoAction('cannibalize-cargo')", () => {
+    // The tank action has no hold to burn; one path for one rule (P3).
+    const src = readFileSync(fileURLToPath(new URL('./travelCost.ts', import.meta.url)), 'utf8');
+    expect(src).not.toContain('cargo-reserved');
+    expect(src).not.toMatch(/part:\s*'tank'\s*\|\s*'cargo'/);
   });
 
   it('beacon via applyAction sets the tank to 5 % of current capacity and takes nothing', () => {
@@ -264,5 +268,89 @@ describe('emergency — mutation hardening', () => {
     expect(p.capacityLossFrac).toBeCloseTo(0.98, 12);
     expect(p.capacityKg).toBeCloseTo(0.02 * BASE, 6);
     expect(p.massKg).toBeCloseTo(0.02 * BASE, 6);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v4 sub-plan 2 (mining), Task 6 — payBeacon(tank, cargo, log): the ONE place
+// the beacon is paid (Emergency key 2 and RecoveryCut's RETURN TO ORBIT, D11).
+// The tank is set to 5 % (the beacon action), the whole hold is jettisoned
+// (one `jettison-all`), and the log gets a 'BEACON RECOVERY' note keyed
+// `beacon:<n>`. n is derived from the log itself (the highest beacon:<n> it
+// holds, + 1), so it is saved with the log and needs no counter of its own.
+// ---------------------------------------------------------------------------
+
+/** A localStorage that behaves like the real one. */
+class MemoryStorage {
+  map = new Map<string, string>();
+  getItem(k: string): string | null {
+    return this.map.get(k) ?? null;
+  }
+  setItem(k: string, v: string): void {
+    this.map.set(k, v);
+  }
+  removeItem(k: string): void {
+    this.map.delete(k);
+  }
+}
+
+describe('Task 6 — payBeacon', () => {
+  const offs: Array<() => void> = [];
+  afterEach(() => {
+    for (const o of offs.splice(0)) o();
+    vi.unstubAllGlobals();
+  });
+
+  function hold(kg: Partial<Record<'ice' | 'metal' | 'silicate' | 'rare', number>>): Cargo {
+    const c = new Cargo(CARGO_CAPACITY_KG);
+    c.restore(kg);
+    return c;
+  }
+  const notes = (log: ShipLog) => log.all().filter((e) => e.title === 'BEACON RECOVERY');
+
+  it('Given cargo 3 t and an empty tank, When payBeacon, Then the tank is at 5 % of current capacity, the hold is empty via one jettison-all, and one BEACON RECOVERY note (kind note, key beacon:1) exists', () => {
+    const tank = emptyTank(0.2);
+    const cargo = hold({ metal: 2_000, rare: 1_000 });
+    const log = new ShipLog();
+    const seen: Array<{ kind: string; ok: boolean; kgOut: number }> = [];
+    offs.push(bus.on('cargo:action', ({ action, result }) => seen.push({ kind: action.kind, ok: result.ok, kgOut: result.kgOut })));
+    payBeacon(tank, cargo, log);
+    expect(tank.massKg).toBeCloseTo(0.05 * 0.8 * BASE, 9);
+    expect(tank.capacityLossFrac).toBeCloseTo(0.2, 12);
+    expect(cargo.totalKg).toBe(0);
+    expect(seen).toEqual([{ kind: 'jettison-all', ok: true, kgOut: 3_000 }]);
+    const n = notes(log);
+    expect(n).toHaveLength(1);
+    expect(n[0]!.key).toBe('beacon:1');
+    expect(n[0]!.kind).toBe('note');
+    expect(n[0]!.body.length).toBeGreaterThan(0);
+  });
+
+  it('Given an empty hold, When payBeacon, Then it does not throw and still writes the note', () => {
+    const tank = emptyTank();
+    const cargo = hold({});
+    const log = new ShipLog();
+    expect(() => payBeacon(tank, cargo, log)).not.toThrow();
+    expect(notes(log)).toHaveLength(1);
+    expect(tank.massKg).toBeCloseTo(0.05 * BASE, 9);
+  });
+
+  it('Given payBeacon twice, Then two notes beacon:1 and beacon:2 (each its own, visits 1)', () => {
+    const log = new ShipLog();
+    payBeacon(emptyTank(), hold({ metal: 1_000 }), log);
+    payBeacon(emptyTank(), hold({ ice: 1_000 }), log);
+    const n = notes(log);
+    expect(n.map((e) => e.key).sort()).toEqual(['beacon:1', 'beacon:2']);
+    expect(n.every((e) => e.visits === 1)).toBe(true);
+  });
+
+  it('Given two beacons saved with the log, When the log is reloaded, Then the next beacon is beacon:3 (the counter survives a save)', () => {
+    vi.stubGlobal('localStorage', new MemoryStorage());
+    const first = new ShipLog();
+    payBeacon(emptyTank(), hold({}), first);
+    payBeacon(emptyTank(), hold({}), first);
+    const reloaded = new ShipLog();
+    payBeacon(emptyTank(), hold({}), reloaded);
+    expect(notes(reloaded).map((e) => e.key).sort()).toEqual(['beacon:1', 'beacon:2', 'beacon:3']);
   });
 });

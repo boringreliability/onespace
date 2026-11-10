@@ -9,6 +9,8 @@ import { bus } from '@/core/EventBus';
 import type { EngineContext } from '@/core/Engine';
 import type { Universe } from '@/game/Universe';
 import { PROBE_TANK_CAPACITY_KG, Propellant } from '@/ship/propellant';
+import { CARGO_CAPACITY_KG, Cargo, type Resource } from '@/ship/cargo';
+import { ShipLog } from './Log';
 import { RecoveryCut } from './RecoveryCut';
 
 const offs: Array<() => void> = [];
@@ -61,30 +63,43 @@ describe('review-p1: RecoveryCut', () => {
 describe('final review I1 — RETURN TO ORBIT costs as the beacon', () => {
   const CAP = PROBE_TANK_CAPACITY_KG;
 
-  function fuelledRig(tank: Propellant | null) {
+  // [v4-mining] Task 6: the universe carries the hold, and the cut writes the
+  // beacon's logbook note — RecoveryCut is built with the ship's log.
+  function fuelledRig(tank: Propellant | null, hold: Partial<Record<Resource, number>> = {}) {
     const command = { throttle: 0 };
     let recovered = 0;
+    const cargo = new Cargo(CARGO_CAPACITY_KG);
+    cargo.restore(hold);
+    const log = new ShipLog();
     const universe = {
       insideStar: false,
       paused: false,
       flight: { command, propellant: tank },
+      cargo,
       recoverToOrbit: () => {
         recovered++;
       },
     };
     const ctx = { input: { setThrottle: () => {} } } as unknown as EngineContext;
-    const cut = new RecoveryCut(universe as unknown as Universe);
+    const cut = new RecoveryCut(universe as unknown as Universe, log);
     const used: string[] = [];
     const actions: string[] = [];
+    const cargoActions: Array<{ kind: string; ok: boolean; kgOut: number }> = [];
     offs.push(bus.on('emergency:used', ({ kind }) => used.push(kind)));
     offs.push(
       bus.on('propellant:action', (e) => actions.push(e.action.kind)),
+    );
+    offs.push(
+      bus.on('cargo:action', ({ action, result }) =>
+        cargoActions.push({ kind: action.kind, ok: result.ok, kgOut: result.kgOut }),
+      ),
     );
     const run = (cause: 'requested' | 'crash' | 'star'): void => {
       cut.request(cause);
       for (let i = 0; i < 120; i++) cut.update(1 / 60, ctx);
     };
-    return { cut, run, used, actions, recovered: () => recovered };
+    const beaconNotes = () => log.all().filter((e) => e.title === 'BEACON RECOVERY');
+    return { cut, run, used, actions, cargo, log, cargoActions, beaconNotes, recovered: () => recovered };
   }
 
   it("Given a tank, When RETURN TO ORBIT is chosen from pause, Then the ship is recovered and the tank is set to 5 % of current capacity and emergency:used {kind:'beacon'} is emitted", () => {
@@ -135,5 +150,68 @@ describe('final review I1 — RETURN TO ORBIT costs as the beacon', () => {
     r.run('star');
     expect(tank.massKg).toBeCloseTo(0.6 * CAP, 9);
     expect(r.used).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // v4 sub-plan 2 (mining), Task 6 — D11: RETURN TO ORBIT with a tank IS the
+  // beacon, cargo included (payBeacon). Crash and star recoveries stay free
+  // and keep the hold (v3).
+  // -------------------------------------------------------------------------
+
+  it('Given cargo and RETURN TO ORBIT with a tank, Then the same as the beacon: hold emptied via one jettison-all, a BEACON RECOVERY note, tank at 5 %, emergency:used beacon', () => {
+    const tank = new Propellant(CAP, 0.6);
+    const r = fuelledRig(tank, { metal: 2_000, ice: 1_000 });
+    r.run('requested');
+    expect(r.recovered()).toBe(1);
+    expect(r.cargo.totalKg).toBe(0);
+    expect(r.cargoActions).toEqual([{ kind: 'jettison-all', ok: true, kgOut: 3_000 }]);
+    const notes = r.beaconNotes();
+    expect(notes).toHaveLength(1);
+    expect(notes[0]!.kind).toBe('note');
+    expect(notes[0]!.key).toBe('beacon:1');
+    expect(tank.massKg).toBeCloseTo(0.05 * CAP, 6);
+    expect(r.actions).toEqual(['beacon']);
+    expect(r.used).toEqual(['beacon']);
+  });
+
+  it('Given RETURN TO ORBIT with a tank and an EMPTY hold, Then the note is still written and nothing throws', () => {
+    const r = fuelledRig(new Propellant(CAP, 0.6));
+    expect(() => r.run('requested')).not.toThrow();
+    expect(r.beaconNotes()).toHaveLength(1);
+    expect(r.cargoActions).toEqual([{ kind: 'jettison-all', ok: false, kgOut: 0 }]);
+  });
+
+  it('Given two RETURN TO ORBITs, Then each gets its own note (beacon:1, beacon:2)', () => {
+    const r = fuelledRig(new Propellant(CAP, 0.6), { metal: 3_000 });
+    r.run('requested');
+    r.run('requested');
+    expect(r.beaconNotes().map((e) => e.key).sort()).toEqual(['beacon:1', 'beacon:2']);
+  });
+
+  it('Given a crash recovery, Then the cargo is untouched (free, v3): no cargo:action, no note', () => {
+    const r = fuelledRig(new Propellant(CAP, 0.6), { metal: 2_000, ice: 1_000 });
+    r.run('crash');
+    expect(r.recovered()).toBe(1);
+    expect(r.cargo.totalKg).toBe(3_000);
+    expect(r.cargo.kg('metal')).toBe(2_000);
+    expect(r.cargoActions).toEqual([]);
+    expect(r.beaconNotes()).toEqual([]);
+  });
+
+  it('Given a star recovery, Then the cargo is untouched (free, v3)', () => {
+    const r = fuelledRig(new Propellant(CAP, 0.6), { metal: 3_000 });
+    r.run('star');
+    expect(r.cargo.totalKg).toBe(3_000);
+    expect(r.cargoActions).toEqual([]);
+    expect(r.beaconNotes()).toEqual([]);
+  });
+
+  it('Given no tank, When RETURN TO ORBIT, Then free as in v3: the cargo is kept and no note is written', () => {
+    const r = fuelledRig(null, { metal: 3_000 });
+    r.run('requested');
+    expect(r.recovered()).toBe(1);
+    expect(r.cargo.totalKg).toBe(3_000);
+    expect(r.cargoActions).toEqual([]);
+    expect(r.beaconNotes()).toEqual([]);
   });
 });

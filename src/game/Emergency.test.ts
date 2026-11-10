@@ -26,6 +26,8 @@ import { EMERGENCY_KEYS, actionForKey, type ActionName } from '@/core/Input';
 import { PROBE_TANK_CAPACITY_KG, Propellant } from '@/ship/propellant';
 import { emergencyMayAct } from '@/ship/emergency';
 import { advisoryText, type HintState } from '@/ui/hintRules';
+import { CARGO_CAPACITY_KG, Cargo, type Resource } from '@/ship/cargo';
+import { ShipLog } from './Log';
 import { EMERGENCY_PROMPT, Emergency, type EmergencyWorld } from './Emergency';
 
 const BASE = PROBE_TANK_CAPACITY_KG;
@@ -125,9 +127,9 @@ describe('the keys', () => {
     expect(actionForKey(EMERGENCY_KEYS.beacon)).toBe('emergencyBeacon');
   });
 
-  it('are three different keys', () => {
+  it('are four different keys (Task 6: 3 burns the cargo)', () => {
     const codes = new Set(Object.values(EMERGENCY_KEYS));
-    expect(codes.size).toBe(3);
+    expect(codes.size).toBe(4);
   });
 });
 
@@ -498,5 +500,277 @@ describe('final review I4 — Emergency picks go through applyAction', () => {
       }
     }
     expect(offenders).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v4 sub-plan 2 (mining), Task 6 — the emergency exit knows the cargo.
+//
+// - Key 3 (`EMERGENCY_KEYS.cannibalizeCargo`, Digit3) burns the whole hold for
+//   3 % of BASE tank capacity — no capacity loss — via the cargo action
+//   `cannibalize-cargo`. Offered FIRST (3, 1, 2) when the hold holds ≥ 1 000 kg.
+// - The beacon (key 2) pays through `payBeacon(tank, cargo, log)`: the hold is
+//   jettisoned (`jettison-all`, one `cargo:action`) and the ship's log gets a
+//   'BEACON RECOVERY' note under its own key `beacon:<n>`.
+// ---------------------------------------------------------------------------
+
+describe('Task 6 — key 3 is its own key', () => {
+  it('Given EMERGENCY_KEYS, Then cannibalizeCargo is Digit3 and maps to emergencyCannibalizeCargo', () => {
+    const keys = EMERGENCY_KEYS as Record<string, string>;
+    expect(keys.cannibalizeCargo).toBe('Digit3');
+    expect(actionForKey('Digit3')).toBe('emergencyCannibalizeCargo');
+  });
+
+  it('Given every bound key, Then only Digit3 reaches emergencyCannibalizeCargo, and Digit3 means nothing else', () => {
+    const all = ['ShiftLeft', 'ShiftRight', 'Space', 'Tab', 'Escape', 'F2', 'Comma', 'Period']
+      .concat(Array.from({ length: 26 }, (_, i) => `Key${String.fromCharCode(65 + i)}`))
+      .concat(Array.from({ length: 10 }, (_, i) => `Digit${i}`));
+    const reaching = all.filter((c) => actionForKey(c) === 'emergencyCannibalizeCargo');
+    expect(reaching).toEqual(['Digit3']);
+  });
+
+  it('Given every raw key handler in src, Then none reads Digit3 (it was free)', () => {
+    const root = fileURLToPath(new URL('../', import.meta.url));
+    const offenders: string[] = [];
+    const walk = (dir: string): void => {
+      for (const f of readdirSync(dir, { withFileTypes: true })) {
+        const abs = join(dir, f.name);
+        if (f.isDirectory()) walk(abs);
+        else if (f.name.endsWith('.ts') && !f.name.endsWith('.test.ts')) {
+          if (abs === join(root, 'core', 'Input.ts')) continue; // the binding table itself
+          if (/['"`]Digit3['"`]/.test(readFileSync(abs, 'utf8'))) offenders.push(abs.slice(root.length));
+        }
+      }
+    };
+    walk(root);
+    expect(offenders).toEqual([]);
+  });
+});
+
+interface CargoHarness {
+  em: Emergency;
+  tank: Propellant;
+  cargo: Cargo;
+  log: ShipLog;
+  recoveries: number;
+  used: Array<{ kind: string; timesUsed?: number }>;
+  cargoActions: Array<{ kind: string; ok: boolean; kgOut: number }>;
+  /** Hold total at the moment ship:recovered was announced. */
+  holdAtRecovered: number[];
+  press(code: string): void;
+  tick(n?: number): void;
+}
+
+function cargoHarness(
+  opts: { fill?: number; lossFrac?: number; hold?: Partial<Record<Resource, number>> } = {},
+): CargoHarness {
+  const tank = new Propellant(BASE, opts.fill ?? 0);
+  tank.capacityLossFrac = opts.lossFrac ?? 0;
+  const cargo = new Cargo(CARGO_CAPACITY_KG);
+  cargo.restore(opts.hold ?? {});
+  // Node has no localStorage: the log keeps its entries in memory.
+  const log = new ShipLog();
+  const input = new StubInput();
+  const h = {
+    tank,
+    cargo,
+    log,
+    recoveries: 0,
+    used: [],
+    cargoActions: [],
+    holdAtRecovered: [],
+  } as unknown as CargoHarness;
+  const world = {
+    flight: { propellant: tank },
+    cargo,
+    paused: false,
+    frozen: false,
+    recoverToOrbit: () => {
+      h.recoveries++;
+    },
+  };
+  h.em = new Emergency({
+    universe: world,
+    recovery: { active: false },
+    warp: { phase: 'idle' },
+    log,
+  } as ConstructorParameters<typeof Emergency>[0]);
+  offs.push(bus.on('emergency:used', (e) => h.used.push({ ...e })));
+  offs.push(
+    bus.on('cargo:action', ({ action, result }) =>
+      h.cargoActions.push({ kind: action.kind, ok: result.ok, kgOut: result.kgOut }),
+    ),
+  );
+  offs.push(bus.on('ship:recovered', () => h.holdAtRecovered.push(cargo.totalKg)));
+  const ctx = { input, elapsed: 0 } as unknown as EngineContext;
+  h.em.init?.();
+  h.tick = (n = 1) => {
+    for (let i = 0; i < n; i++) {
+      h.em.update(1 / 60, ctx);
+      input.endFrame();
+    }
+  };
+  h.press = (code: string) => {
+    input.pressKey(code);
+    h.tick();
+  };
+  return h;
+}
+
+/** Key 3; falls back to the literal so the RED run fails on behaviour, not on a lookup. */
+const KEY3 = (EMERGENCY_KEYS as Record<string, string>).cannibalizeCargo ?? 'Digit3';
+
+function beaconNotes(log: ShipLog) {
+  return log.all().filter((e) => e.title === 'BEACON RECOVERY');
+}
+
+describe('Task 6 — cannibalize cargo (key 3)', () => {
+  it("Given cargo 3 t and an empty tank, Then the menu offers 3 (cargo), 1 (tank), 2 (beacon); When 3, Then the hold empties, the tank gains 3 % of base, capacity is untouched, emergency:used {kind:'cannibalize-cargo'}", () => {
+    const h = cargoHarness({ hold: { metal: 2_000, silicate: 1_000 } });
+    h.press(EMERGENCY_KEYS.open);
+    expect(h.em.open).toBe(true);
+    expect(h.em.offers).toEqual(['cannibalize-cargo', 'cannibalize', 'beacon']);
+    h.press(KEY3);
+    expect(h.cargo.totalKg).toBe(0);
+    expect(h.tank.massKg).toBeCloseTo(0.03 * BASE, 9);
+    expect(h.tank.capacityLossFrac).toBe(0);
+    expect(h.used).toEqual([{ kind: 'cannibalize-cargo' }]);
+    // A cargo burn is not a tank cannibalization: the tank's price does not rise.
+    expect(h.em.timesUsed).toBe(0);
+    expect(h.recoveries).toBe(0);
+    expect(h.em.open).toBe(false);
+    expect(h.em.prompt).toBeNull();
+  });
+
+  it('Given cargo 3 t and the choice open, Then the NAV ADVISORY line lists 3 (CARGO), 1, 2 in that order', () => {
+    const h = cargoHarness({ hold: { ice: 3_000 } });
+    h.press(EMERGENCY_KEYS.open);
+    const line = h.em.line ?? '';
+    const i3 = line.indexOf(`${label(KEY3)} · CANNIBALIZE CARGO`);
+    const i1 = line.indexOf(`${label(EMERGENCY_KEYS.cannibalize)} · CANNIBALIZE TANK`);
+    const i2 = line.indexOf(`${label(EMERGENCY_KEYS.beacon)} · BEACON`);
+    expect(i3, line).toBeGreaterThanOrEqual(0);
+    expect(i3, line).toBeLessThan(i1);
+    expect(i1, line).toBeLessThan(i2);
+  });
+
+  it('Given cargo 500 kg, Then 3 is not offered, and pressing 3 does nothing', () => {
+    const h = cargoHarness({ hold: { metal: 500 } });
+    h.press(EMERGENCY_KEYS.open);
+    expect(h.em.offers).toEqual(['cannibalize', 'beacon']);
+    expect(h.em.line ?? '').not.toContain('CARGO');
+    h.press(KEY3);
+    expect(h.cargo.totalKg).toBe(500);
+    expect(h.tank.massKg).toBe(0);
+    expect(h.used).toEqual([]);
+    expect(h.cargoActions).toEqual([]);
+    expect(h.em.open).toBe(true);
+  });
+
+  it('Given exactly 1 000 kg, Then 3 is offered first (the threshold is inclusive)', () => {
+    const h = cargoHarness({ hold: { silicate: 1_000 } });
+    h.press(EMERGENCY_KEYS.open);
+    expect(h.em.offers[0]).toBe('cannibalize-cargo');
+  });
+
+  it('Given cargo 3 t and a tank that is NOT empty, Then cargo cannibalization is not offered and 3 does nothing', () => {
+    const h = cargoHarness({ fill: 0.001, hold: { metal: 3_000 } });
+    h.press(EMERGENCY_KEYS.open);
+    expect(h.em.offers).toEqual([]);
+    h.press(KEY3);
+    expect(h.cargo.totalKg).toBe(3_000);
+    expect(h.tank.massKg).toBeCloseTo(0.001 * BASE, 9);
+    expect(h.used).toEqual([]);
+    expect(h.cargoActions).toEqual([]);
+  });
+
+  it('Given cargo 3 t, When 3 without opening the choice first, Then nothing happens', () => {
+    const h = cargoHarness({ hold: { metal: 3_000 } });
+    h.press(KEY3);
+    expect(h.cargo.totalKg).toBe(3_000);
+    expect(h.used).toEqual([]);
+    expect(h.cargoActions).toEqual([]);
+  });
+
+  it('Given cargo 3 t, When 3, Then it goes through the cargo action only: one cargo:action cannibalize-cargo, no propellant:action', () => {
+    const h = cargoHarness({ hold: { metal: 3_000 } });
+    const tankActions: string[] = [];
+    offs.push(bus.on('propellant:action', (e) => tankActions.push(e.action.kind)));
+    h.press(EMERGENCY_KEYS.open);
+    h.press(KEY3);
+    expect(h.cargoActions).toEqual([{ kind: 'cannibalize-cargo', ok: true, kgOut: 3_000 }]);
+    expect(tankActions).toEqual([]);
+  });
+
+  it('Given a damaged tank (20 % lost) and cargo 3 t, When 3, Then it still gains 3 % of BASE and the loss is unchanged', () => {
+    const h = cargoHarness({ lossFrac: 0.2, hold: { metal: 3_000 } });
+    h.press(EMERGENCY_KEYS.open);
+    h.press(KEY3);
+    expect(h.tank.massKg).toBeCloseTo(0.03 * BASE, 9);
+    expect(h.tank.capacityLossFrac).toBeCloseTo(0.2, 12);
+  });
+});
+
+describe('Task 6 — the beacon (key 2) jettisons the hold and logs it', () => {
+  it('Given cargo and a beacon (key 2), Then the hold is emptied via jettison-all and a BEACON RECOVERY logbook note exists', () => {
+    const h = cargoHarness({ hold: { metal: 2_000, ice: 1_000 } });
+    h.press(EMERGENCY_KEYS.open);
+    h.press(EMERGENCY_KEYS.beacon);
+    expect(h.recoveries).toBe(1);
+    expect(h.cargo.totalKg).toBe(0);
+    expect(h.cargoActions).toEqual([{ kind: 'jettison-all', ok: true, kgOut: 3_000 }]);
+    const notes = beaconNotes(h.log);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]!.kind).toBe('note');
+    expect(notes[0]!.key).toBe('beacon:1');
+    // The beacon's tank price is unchanged.
+    expect(h.tank.massKg).toBeCloseTo(0.05 * h.tank.capacityKg, 9);
+    expect(h.used).toEqual([{ kind: 'beacon' }]);
+  });
+
+  it('Given the beacon, Then jettison emits exactly one cargo:action, and the hold is already empty when ship:recovered is announced', () => {
+    const h = cargoHarness({ hold: { metal: 3_000 } });
+    h.press(EMERGENCY_KEYS.open);
+    h.press(EMERGENCY_KEYS.beacon);
+    h.tick(60);
+    expect(h.cargoActions).toEqual([{ kind: 'jettison-all', ok: true, kgOut: 3_000 }]);
+    // Mining aborts on ship:recovered: by then the hold is settled.
+    expect(h.holdAtRecovered).toEqual([0]);
+  });
+
+  it('Given an EMPTY hold, When the beacon fires, Then it still writes the BEACON RECOVERY note and nothing throws', () => {
+    const h = cargoHarness({});
+    h.press(EMERGENCY_KEYS.open);
+    expect(() => h.press(EMERGENCY_KEYS.beacon)).not.toThrow();
+    expect(h.recoveries).toBe(1);
+    expect(h.cargo.totalKg).toBe(0);
+    expect(beaconNotes(h.log)).toHaveLength(1);
+    // One jettison asked, refused as 'empty' — still exactly one cargo:action.
+    expect(h.cargoActions).toEqual([{ kind: 'jettison-all', ok: false, kgOut: 0 }]);
+    expect(h.used).toEqual([{ kind: 'beacon' }]);
+  });
+
+  it('Given two beacons, Then each is its own note (beacon:1, beacon:2) — not one note visited twice', () => {
+    const h = cargoHarness({ hold: { metal: 3_000 } });
+    h.press(EMERGENCY_KEYS.open);
+    h.press(EMERGENCY_KEYS.beacon);
+    h.tank.consume(h.tank.massKg);
+    h.tick();
+    h.press(EMERGENCY_KEYS.open);
+    h.press(EMERGENCY_KEYS.beacon);
+    const notes = beaconNotes(h.log);
+    expect(notes.map((e) => e.key).sort()).toEqual(['beacon:1', 'beacon:2']);
+    expect(notes.every((e) => e.visits === 1)).toBe(true);
+  });
+});
+
+describe('Task 6 — one shared payBeacon', () => {
+  it('Given the game code, Then Emergency and RecoveryCut both pay the beacon through payBeacon, and neither jettisons or applies the beacon action itself', () => {
+    for (const f of ['./Emergency.ts', './RecoveryCut.ts']) {
+      const src = readFileSync(fileURLToPath(new URL(f, import.meta.url)), 'utf8');
+      expect(src, f).toMatch(/\bpayBeacon\s*\(/);
+      expect(src, f).not.toMatch(/applyAction\([^)]*kind:\s*'beacon'/);
+      expect(src, f).not.toContain('jettison-all');
+    }
   });
 });
