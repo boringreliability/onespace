@@ -58,11 +58,22 @@ interface FieldRig {
   axes: { pitch: number; yaw: number; roll: number; throttle: number; strafeX: number; strafeY: number; strafeZ: number };
   press: Set<ActionName>;
   brake: boolean;
+  logs: string[];
   step: (seconds?: number) => void;
 }
 
+interface FieldRigOptions {
+  /** Pass the Belt to Cruise (default true). */
+  readonly withBelt?: boolean;
+  /** A planet this far beyond the field (on the far side from the ship), km centre to centre. */
+  readonly planetBeyondKm?: number;
+}
+
+const PLANET_R = 7_240;
+
 /** The ship `START_GAP_KM` above field 398 (along +Y), nose `nose`. */
-function fieldRig(nose: (toField: Vector3) => Vector3, withBelt = true): FieldRig {
+function fieldRig(nose: (toField: Vector3) => Vector3, opts: FieldRigOptions = {}): FieldRig {
+  const withBelt = opts.withBelt ?? true;
   const sys = startSystem();
   const field = fyssField(FIELD_K);
   const centre = fieldCentre(field, 0);
@@ -74,13 +85,25 @@ function fieldRig(nose: (toField: Vector3) => Vector3, withBelt = true): FieldRi
   const pos = centre.clone().add(new Vector3(0, START_GAP_KM, 0));
   flight.teleport(pos, new Vector3(), facing(nose(centre.clone().sub(pos))));
 
+  // Optional planet beyond the field: the nearest body, farther than the field.
+  const planet =
+    opts.planetBeyondKm === undefined
+      ? null
+      : (() => {
+          const at = centre.clone().add(new Vector3(0, -opts.planetBeyondKm!, 0));
+          const frame: ParentBody = { position: at, velocity: new Vector3(), mu: 9.8e-3 * PLANET_R * PLANET_R, radius: PLANET_R };
+          return { spec: { id: 'body:Far World', name: 'Far World', radius: PLANET_R }, world: at, frame, soiRadius: 5e5, parent: null };
+        })();
+  const gapOf = (p: Vector3): number =>
+    Math.min(p.length() - starR, planet ? p.distanceTo(planet.world) - PLANET_R : Number.POSITIVE_INFINITY);
+
   const world = {
     flight,
     paused: false,
     frozen: false,
-    nearestGapKm: pos.length() - starR,
-    nearest: null,
-    allBodies: () => [],
+    nearestGapKm: gapOf(pos),
+    nearest: planet,
+    allBodies: () => (planet ? [planet] : []),
     system: sys,
   } as unknown as CruiseWorld;
 
@@ -96,6 +119,8 @@ function fieldRig(nose: (toField: Vector3) => Vector3, withBelt = true): FieldRi
 
   const axes = { pitch: 0, yaw: 0, roll: 0, throttle: 1, strafeX: 0, strafeY: 0, strafeZ: 0 };
   const press = new Set<ActionName>();
+  const logs: string[] = [];
+  const offLog = bus.on('log', (e) => logs.push(e.text));
   let elapsed = 0;
   const ctx = {
     input: { axes, pressed: (a: ActionName) => press.has(a), held: () => false },
@@ -112,10 +137,11 @@ function fieldRig(nose: (toField: Vector3) => Vector3, withBelt = true): FieldRi
     axes,
     press,
     brake: false,
+    logs,
     step: (seconds = H) => {
       for (let t = 0; t < seconds - 1e-9; t += H) {
         flight.update(H); // Universe
-        (world as { nearestGapKm: number }).nearestGapKm = flight.worldPosition.length() - starR;
+        (world as { nearestGapKm: number }).nearestGapKm = gapOf(flight.worldPosition);
         b.world.flight.worldPosition.copy(flight.worldPosition);
         b.frame();
         flight.applyInput(axes, false, r.brake); // Pilot
@@ -125,7 +151,10 @@ function fieldRig(nose: (toField: Vector3) => Vector3, withBelt = true): FieldRi
       }
     },
   };
-  cleanup = () => cruise.dispose();
+  cleanup = () => {
+    cruise.dispose();
+    offLog();
+  };
   return r;
 }
 
@@ -165,6 +194,42 @@ describe('cruise to a belt field', () => {
     expect(dropAtKm).toBeGreaterThan(0.97 * ARRIVE_CENTRE_KM);
     // Through the bleed and a second after it, the ship stays outside the cluster.
     expect(minKm).toBeGreaterThan(FIELD_RADIUS_KM);
+    // R21: the arrival is announced under the field's display name.
+    expect(r.logs.some((t) => /^ORBIT — BELT · FYSS 398$/i.test(t))).toBe(true);
+  });
+
+  it('Given a field target and a planet farther away, Then cruise does not overshoot the field (speed limited by the field\'s gap)', () => {
+    // The planet sits 3 000 000 km beyond the field: its gap (and the star's)
+    // would let the drive run at ~10^6 km/s — 17 000 km a frame, far past a
+    // 740 km arrival sphere. The field's own gap has to govern.
+    const r = fieldRig((toField) => toField, { planetBeyondKm: 3_000_000 });
+    const start = r.flight.worldPosition.clone();
+    const outward = start.clone().sub(r.centre).normalize();
+    bus.emit('target:changed', { id: r.fieldId, name: `BELT · Fyss ${FIELD_K}` });
+    r.press.add('cruise');
+
+    let engagedFrames = 0;
+    let worstCapOverLaw = 0;
+    let minAlong = Number.POSITIVE_INFINITY;
+    let dropReason: string | null = null;
+    for (let i = 0; i < 60 * 60 && dropReason === null; i++) {
+      const before = r.cruise.drive.phase;
+      r.step(H);
+      // Signed distance along the ship's side of the field: < 0 is past it.
+      minAlong = Math.min(minAlong, r.flight.worldPosition.clone().sub(r.centre).dot(outward));
+      if (r.cruise.drive.phase === 'cruise') {
+        engagedFrames++;
+        const edgeGap = r.flight.worldPosition.distanceTo(r.centre) - FIELD_RADIUS_KM;
+        worstCapOverLaw = Math.max(worstCapOverLaw, r.cruise.drive.capKmS / (CRUISE_DEFAULTS.rate * edgeGap));
+      }
+      if (before === 'cruise' && r.cruise.drive.phase === 'dropping') dropReason = r.cruise.drive.dropReason;
+    }
+    expect(engagedFrames).toBeGreaterThan(0);
+    // The ceiling follows the field's gap, not the planet's or the star's.
+    expect(worstCapOverLaw).toBeLessThan(1.05);
+    expect(dropReason).toBe('arrival');
+    // Never past the field, never into it.
+    expect(minAlong).toBeGreaterThan(FIELD_RADIUS_KM);
   });
 
   it('Given target:changed for a field id, When cruise is engaged hands-off, Then the nose is flown onto the limb of the field’s arrival sphere', () => {
@@ -185,7 +250,7 @@ describe('cruise to a belt field', () => {
   });
 
   it('Given a field target but no Belt wired into Cruise, Then it is ignored rather than steered at', () => {
-    const r = fieldRig((toField) => new Vector3(1, 0, 0).projectOnPlane(toField.clone().normalize()).normalize(), false);
+    const r = fieldRig((toField) => new Vector3(1, 0, 0).projectOnPlane(toField.clone().normalize()).normalize(), { withBelt: false });
     bus.emit('target:changed', { id: r.fieldId, name: `BELT · Fyss ${FIELD_K}` });
     r.press.add('cruise');
     r.step(CRUISE_DEFAULTS.spoolTime + 0.1);

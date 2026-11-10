@@ -18,22 +18,73 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { fieldOrbits, nearestFieldIndex, type BeltSpec } from '@/gen/belt';
-import { AU, type StarSystemSpec } from '@/gen/types';
+import { Rng, hashSeed } from '@/math/rng';
+import { beltFor, fieldOrbits, nearestFieldIndex, type BeltSpec } from '@/gen/belt';
+import { generateGalaxy, sampleSystemsNear } from '@/gen/galaxy';
+import { generateSystem } from '@/gen/system';
+import { AU, type StarSystemSpec, type Vec3 } from '@/gen/types';
+import { DEFAULT_UNIVERSE_SEED } from '@/game/Universe';
 import { fyssBelt, startSystem, startUniverse } from '@/game/testing/beltFixture';
-import { beltNodeTarget, beltRing, radial } from './beltChart';
+import { beltNodeTarget, beltRing, chartMaxKm, radial } from './beltChart';
 import { planetsCell, systemDetailsOf } from './StarMap';
 
-/** The local chart's outer radius for a system, as SystemMap.rebuild computes it. */
-function chartMaxKm(sys: StarSystemSpec): number {
+/** The planet-only chart scale, as SystemMap.rebuild computed it before the belt (R21). */
+function planetMaxKm(sys: StarSystemSpec): number {
   return sys.planets.reduce((m, p) => Math.max(m, p.orbit.semiMajorAxis * (1 + p.orbit.eccentricity)), AU) * 1.12;
 }
+
+/** A start-survey system by name (the 24 candidates `Universe.pickStartSystem` samples). */
+function surveyed(name: string): StarSystemSpec {
+  const seed = DEFAULT_UNIVERSE_SEED;
+  const galaxy = generateGalaxy(seed);
+  const rng = new Rng(hashSeed(seed, 'start'));
+  const r = galaxy.radiusLy * 0.34;
+  const theta = rng.range(0, Math.PI * 2);
+  const probe: Vec3 = [r * Math.cos(theta), rng.gaussian(0, 30), r * Math.sin(theta)];
+  const stub = sampleSystemsNear(galaxy, probe, 260, 96)
+    .slice(0, 24)
+    .find((s) => generateSystem(galaxy, s).name === name);
+  if (!stub) throw new Error(`${name} is not in the start survey`);
+  return generateSystem(galaxy, stub);
+}
+
+describe('chartMaxKm — the system chart scale includes the belt (R21)', () => {
+  // CZ-9100 (belt 0.39–0.53 AU) and Ghoxak (0.84–1.13 AU — past the 1 AU
+  // floor's 1.12 AU scale, so a planets-only scale clamps its ring to the rim).
+  for (const name of ['CZ-9100', 'Ghoxak']) {
+    it(`Given a belt system with no planets (${name}), Then the chart scale is positive and the belt ring fits inside it`, () => {
+      const sys = surveyed(name);
+      expect(sys.planets.length).toBe(0);
+      const belt = beltFor(sys)!;
+      expect(belt).not.toBeNull();
+      const maxKm = chartMaxKm(sys);
+      expect(Number.isFinite(maxKm) && maxKm > 0).toBe(true);
+      expect(maxKm).toBeCloseTo(Math.max(planetMaxKm(sys), belt.outerAU * AU * 1.12), -3);
+      const ring = beltRing(belt, maxKm);
+      expect(ring.inner).toBeGreaterThan(0);
+      expect(ring.inner).toBeLessThan(ring.outer);
+      // Strictly inside the rim: not clamped onto it.
+      expect(ring.outer).toBeLessThan(radial(maxKm, maxKm));
+    });
+  }
+
+  it('Given Fyss, Then maxKm is unchanged by the belt (belt inside the planets)', () => {
+    const sys = startSystem();
+    expect(fyssBelt().outerAU * AU * 1.12).toBeLessThan(planetMaxKm(sys));
+    expect(chartMaxKm(sys)).toBe(planetMaxKm(sys));
+  });
+
+  it('Given a system without a belt, Then the scale is the planets’ alone', () => {
+    const sys: StarSystemSpec = { ...startSystem(), hasAsteroidBelt: false };
+    expect(chartMaxKm(sys)).toBe(planetMaxKm(sys));
+  });
+});
 
 describe('beltRing — the dashed annulus on the system chart', () => {
   it('Given Fyss’s belt, Then inner < outer, both inside the chart’s maximum, through the chart’s radial()', () => {
     const sys = startSystem();
     const belt = fyssBelt();
-    const maxKm = chartMaxKm(sys);
+    const maxKm = planetMaxKm(sys);
     const ring = beltRing(belt, maxKm);
     expect(ring.inner).toBeGreaterThan(0);
     expect(ring.inner).toBeLessThan(ring.outer);
@@ -45,7 +96,7 @@ describe('beltRing — the dashed annulus on the system chart', () => {
 
   it('Given a belt further out (same chart), Then both radii grow — monotonic with AU', () => {
     const belt = fyssBelt();
-    const maxKm = chartMaxKm(startSystem());
+    const maxKm = planetMaxKm(startSystem());
     const near = beltRing(belt, maxKm);
     const far: BeltSpec = { ...belt, innerAU: belt.innerAU * 1.5, outerAU: belt.outerAU * 1.5 };
     const ring = beltRing(far, maxKm);
@@ -59,6 +110,7 @@ describe('beltNodeTarget — selecting the BELT node', () => {
     // At the opening (ship at Remit 31, t = 0) the nearest field is 398, 0.156 AU off.
     const sys = startSystem();
     const ship = startUniverse().flight.worldPosition.clone();
+    // R21: the same 'BELT · <system> <k>' is the field's display / ORBIT-log name.
     expect(beltNodeTarget(sys, ship, 0)).toEqual({ id: `field:${sys.id}:398`, name: 'BELT · Fyss 398' });
 
     // Later on the orbit clock the fields have moved: it is the nearest NOW.
