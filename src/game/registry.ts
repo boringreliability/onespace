@@ -393,7 +393,7 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   // [v4-fuel] the emergency exit on an empty tank; its line rides NAV ADVISORY.
   const emergency = new Emergency({ universe, recovery, warp });
   await engine.add(emergency);
-  // [v4-mining] B/U/Y. After Belt and Targeting (this frame's target and rock),
+  // [v4-mining] B/U/N. After Belt and Targeting (this frame's target and rock),
   // Cruise and the emergency exit; its in-range flag drives the 'mine' hint.
   const mining = new Mining({ universe, belt, worldState, targeting, cruise, warp });
   await engine.add(mining);

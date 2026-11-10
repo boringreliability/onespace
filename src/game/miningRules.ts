@@ -8,7 +8,7 @@
  */
 
 import type { Resource } from '@/gen/belt';
-import { REPAIR_METAL_KG, REPAIR_SILICATE_KG, type CargoResult } from '@/ship/cargo';
+import { CARGO_EPS_KG, REPAIR_METAL_KG, REPAIR_SILICATE_KG, type CargoResult } from '@/ship/cargo';
 
 /** Mining reach, km from the asteroid's SURFACE. */
 export const MINE_RANGE_KM = 0.5;
@@ -18,6 +18,11 @@ export const MINE_MAX_REL_KMS = 0.005;
 export const MINE_ACTION_S = 4;
 /** Most one mine yields, kg. */
 export const MINE_YIELD_KG = 2_000;
+/**
+ * R18: less than this many kg of a resource is dust: it would log as
+ * "MINED · 0 KG". A rock with less of every resource is depleted.
+ */
+export const MINE_MIN_KG = 0.5;
 /** One refine, sim seconds. */
 export const REFINE_ACTION_S = 8;
 /** One repair, sim seconds. */
@@ -64,18 +69,22 @@ export function mayMine(s: MineGate): MayMineResult {
   if (!s.targetIsAsteroid) return REFUSED['no-target'];
   if (!(s.surfaceRangeKm <= MINE_RANGE_KM)) return REFUSED.range;
   if (!(s.relSpeedKmS <= MINE_MAX_REL_KMS)) return REFUSED.speed;
-  if (!(s.holdFreeKg > 0)) return REFUSED['hold-full'];
-  if (!(s.remainingKg > 0)) return REFUSED.depleted;
+  // R18: the hold's own rule, so an accepted press never ends in HOLD FULL.
+  if (!(s.holdFreeKg >= CARGO_EPS_KG)) return REFUSED['hold-full'];
+  if (!(s.remainingKg >= MINE_MIN_KG)) return REFUSED.depleted;
   return OK;
 }
 
 /** Preference order when nothing (or nothing present) is preferred. */
 const ORDER: readonly Resource[] = ['ice', 'rare', 'metal', 'silicate'];
 
-/** The resource a mine takes: `prefer` if present, else ice, rare, metal, silicate. Null when none is left. */
+/**
+ * The resource a mine takes: `prefer` if present, else ice, rare, metal,
+ * silicate. Less than MINE_MIN_KG counts as absent (R18). Null when none is left.
+ */
 export function chooseResource(remaining: Readonly<Record<Resource, number>>, prefer?: Resource): Resource | null {
-  if (prefer !== undefined && remaining[prefer] > 0) return prefer;
-  for (const r of ORDER) if (remaining[r] > 0) return r;
+  if (prefer !== undefined && remaining[prefer] >= MINE_MIN_KG) return prefer;
+  for (const r of ORDER) if (remaining[r] >= MINE_MIN_KG) return r;
   return null;
 }
 

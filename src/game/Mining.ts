@@ -3,7 +3,7 @@
  *
  * - B on a targeted asteroid within MINE_RANGE_KM of its SURFACE, matched to
  *   within MINE_MAX_REL_KMS, starts a MINE_ACTION_S mine.
- * - U refines all the ice the tank can take; Y repairs the tank. Neither needs
+ * - U refines all the ice the tank can take; N repairs the tank. Neither needs
  *   a target.
  *
  * Every action counts SIM time (`universe.simulatedSeconds`, so 10× finishes
@@ -31,6 +31,7 @@ import { applyCargoAction, refineRefusal, repairRefusal, type Cargo } from '@/sh
 import type { Propellant } from '@/ship/propellant';
 import {
   MINE_ACTION_S,
+  MINE_MIN_KG,
   MINE_RANGE_KM,
   MINE_YIELD_KG,
   MINING_ABORTED_TEXT,
@@ -239,7 +240,8 @@ export class Mining implements GameModule {
       const r = RESOURCES[i]!;
       const kg = belt.remainingKg(id, r);
       this.remaining[r] = kg;
-      total += kg;
+      // R18: dust is not minable; the gate sees only what a mine could take.
+      if (kg >= MINE_MIN_KG) total += kg;
     }
     g.remainingKg = total;
     this.inRange = g.surfaceRangeKm <= MINE_RANGE_KM;

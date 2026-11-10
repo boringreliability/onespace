@@ -28,7 +28,8 @@ export const CANNIBALIZE_CARGO_MIN_KG = 1_000;
 const CANNIBALIZE_CARGO_FRAC = 0.03;
 
 /** Below this many kg a hold counts as full, and a hold of ice as empty. */
-const EPS_KG = 1e-6;
+export const CARGO_EPS_KG = 1e-6;
+const EPS_KG = CARGO_EPS_KG;
 /** Below this a capacity-loss fraction counts as zero. */
 const EPS_LOSS = 1e-9;
 
@@ -44,7 +45,10 @@ function put(c: Cargo, r: Resource, kg: number): void {
 }
 function take(c: Cargo, r: Resource, kg: number): void {
   const h = contents.get(c)!;
-  h[r] = kg >= h[r] ? 0 : h[r] - kg;
+  // R18: snap at the source. A remainder below EPS_KG is float dust (e.g.
+  // (x·0.8)/0.8 one ulp under x), not cargo: it would show as "ICE 0 KG".
+  const left = h[r] - kg;
+  h[r] = left < EPS_KG ? 0 : left;
 }
 
 export class Cargo {
@@ -161,7 +165,9 @@ function run(cargo: Cargo, tank: Propellant | null, a: CargoAction): CargoResult
       if (no || !tank) return refuse(no ?? 'no-tank');
       const ice = cargo.kg('ice');
       const fuel = tank.add(ice * REFINE_ICE_TO_FUEL);
-      const used = Math.min(ice, fuel / REFINE_ICE_TO_FUEL);
+      let used = Math.min(ice, fuel / REFINE_ICE_TO_FUEL);
+      // R18: dust left over is part of what was used.
+      if (ice - used < EPS_KG) used = ice;
       take(cargo, 'ice', used);
       return result(true, { kgOut: used, fuelKg: fuel });
     }
