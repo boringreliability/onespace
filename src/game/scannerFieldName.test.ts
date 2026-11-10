@@ -70,4 +70,42 @@ describe('Scanner — a field target is named BELT · <system> <k>', () => {
     expect(logs, logs.join(' | ')).toContain('BELT · FYSS 398 BEYOND ARRAY RANGE');
     expect(logs.some((l) => l.includes('FIELD 398'))).toBe(false);
   });
+
+  it('Given field 398 targeted from within array range (100 km from its centre), When T is pressed, Then the log reads TAB TO TARGET A ROCK — a field is not scanned as a whole', () => {
+    const f = fyssField(398);
+    const centre = fieldCentre(f, 0);
+    // 60 km outside the edge: inside ASTEROID_SCAN_RANGE_KM of the field.
+    const ship = centre.clone().add(new Vector3(0, 100, 0));
+    const universe = {
+      system: startSystem(),
+      orbitSeconds: 0,
+      shipParent: null,
+      allBodies: () => [],
+      flight: { worldPosition: ship, forward: new Vector3(0, -1, 0) },
+    };
+    const worldState = new WorldState({ orbitSeconds: () => 0, wallMs: () => 0 });
+    const belt = new Belt({ universe, worldState });
+    const targeting = { targetId: f.id as string | null };
+    const scanner = new Scanner({ universe, traffic: null, targeting, belt } as unknown as ScannerOptions);
+
+    const logs: string[] = [];
+    const scans: unknown[] = [];
+    offs.push(bus.on('log', ({ text }) => logs.push(text)));
+    offs.push(bus.on('scan:complete', (r) => scans.push(r)));
+    let t = false;
+    const ctx = nodeCtx({ input: { pressed: (a: string) => a === 'scan' && t, down: () => false } });
+    belt.update(1 / 60, ctx);
+    t = true;
+    scanner.update(1 / 60, ctx);
+    t = false;
+    for (let i = 0; i < 120; i++) {
+      belt.update(1 / 60, ctx);
+      scanner.update(1 / 60, ctx);
+    }
+
+    expect(logs, logs.join(' | ')).toContain('TAB TO TARGET A ROCK');
+    expect(logs.some((l) => l.includes('BEYOND ARRAY RANGE'))).toBe(false);
+    expect(scans).toHaveLength(0);
+  });
 });
+
