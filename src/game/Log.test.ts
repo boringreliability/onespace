@@ -246,3 +246,90 @@ describe('lifecycle', () => {
     expect(log.all()).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Final whole-branch review, I3(a) — living assays. An asteroid's note is an
+// assay, and an assay goes stale as the rock is mined: a re-scan REPLACES the
+// body (keys `scan:ast:…`), keeps the first `at`, counts the visit, and is not
+// announced as a new discovery. Every other kind keeps its first body.
+// ---------------------------------------------------------------------------
+
+describe('re-scanning an asteroid updates its assay (final review I3a)', () => {
+  const rock = (left: number): ScanResult => ({
+    targetId: 'ast:s1:398:4',
+    name: 'asteroid 398-4',
+    lines: [`ice ...... 4 200 kg · ${left} left`],
+    kind: 'asteroid',
+  });
+
+  /** Every "LOGGED — …" line the log announces while `fn` runs. */
+  function announced(fn: () => void): string[] {
+    const texts: string[] = [];
+    const off = bus.on('log', ({ text }) => {
+      if (text.startsWith('LOGGED —')) texts.push(text);
+    });
+    fn();
+    off();
+    return texts;
+  }
+
+  it('Given an asteroid scanned, then mined and scanned again, Then its one note carries the NEW body, the FIRST at, and visits 2', () => {
+    const log = open();
+    log.update(100);
+    bus.emit('scan:complete', rock(4_200));
+    const at = log.byKind('note')[0]!.at;
+    log.update(3_600);
+    bus.emit('scan:complete', rock(2_200));
+    const notes = log.byKind('note');
+    expect(notes).toHaveLength(1);
+    expect(notes[0]!.key).toBe('scan:ast:s1:398:4');
+    expect(notes[0]!.body).toEqual(['ice ...... 4 200 kg · 2200 left']);
+    expect(notes[0]!.at).toBe(at);
+    expect(notes[0]!.visits).toBe(2);
+  });
+
+  it('Given an asteroid re-scanned, Then only the first scan announces "LOGGED —"', () => {
+    open();
+    const texts = announced(() => {
+      bus.emit('scan:complete', rock(4_200));
+      bus.emit('scan:complete', rock(2_200));
+      bus.emit('scan:complete', rock(200));
+    });
+    expect(texts).toEqual(['LOGGED — ASTEROID 398-4']);
+  });
+
+  it('Given an asteroid re-scanned, Then the new body is what a reload finds', () => {
+    const log = open();
+    bus.emit('scan:complete', rock(4_200));
+    bus.emit('scan:complete', rock(2_200));
+    log.dispose();
+    const again = open();
+    const note = again.byKind('note').find((e) => e.key === 'scan:ast:s1:398:4');
+    expect(note?.body).toEqual(['ice ...... 4 200 kg · 2200 left']);
+    expect(note?.visits).toBe(2);
+  });
+
+  it('Given an asteroid re-scanned, Then its note keeps its place in the log (not moved to the top)', () => {
+    const log = open();
+    bus.emit('scan:complete', rock(4_200));
+    bus.emit('scan:complete', scan('p1', 'Ghent'));
+    bus.emit('scan:complete', rock(2_200));
+    expect(log.all().map((e) => e.key)).toEqual(['scan:p1', 'scan:ast:s1:398:4']);
+  });
+
+  it('Given a world scanned twice with different lines, Then it keeps its FIRST body (only asteroid assays are replaced)', () => {
+    const log = open();
+    bus.emit('scan:complete', { targetId: 'p1', name: 'Ghent', lines: ['class .......... rocky'] });
+    bus.emit('scan:complete', { targetId: 'p1', name: 'Ghent', lines: ['class .......... ocean'] });
+    const world = log.byKind('world')[0]!;
+    expect(world.body).toEqual(['class .......... rocky']);
+    expect(world.visits).toBe(2);
+  });
+
+  it('Given a hull scanned twice with different lines, Then it keeps its FIRST body', () => {
+    const log = open();
+    bus.emit('scan:complete', { targetId: 'h1', name: 'kestrel', lines: ['hauler'], kind: 'vessel' });
+    bus.emit('scan:complete', { targetId: 'h1', name: 'kestrel', lines: ['courier'], kind: 'vessel' });
+    expect(log.byKind('contact')[0]!.body).toEqual(['hauler']);
+  });
+});

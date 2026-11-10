@@ -11,6 +11,9 @@
  * pointer on purpose when they open. Neither of those is a request to pause.
  */
 
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -141,5 +144,31 @@ describe('final review I1 — the RETURN TO ORBIT label tells the price', () => 
 
   it('Given no tank (a v3 hull), Then the button reads RETURN TO ORBIT, as before', () => {
     expect(returnToOrbitLabel(false)).toBe('RETURN TO ORBIT');
+  });
+});
+
+// Final whole-branch review, I2 (v4-mining): the paid RETURN TO ORBIT pays as
+// the beacon pays — the hold included (RecoveryCut → payBeacon). With cargo
+// aboard the sheet says so; with an empty hold, or no tank (free, the hold is
+// kept), the label is unchanged.
+describe('final review I2 — the RETURN TO ORBIT label says it loses the cargo', () => {
+  it('Given a tank and 6 099 kg aboard, Then the button reads RETURN TO ORBIT · COSTS AS BEACON · LOSES CARGO', () => {
+    expect(returnToOrbitLabel(true, 6_099)).toBe('RETURN TO ORBIT · COSTS AS BEACON · LOSES CARGO');
+  });
+
+  it('Given a tank and an empty hold, Then the button reads RETURN TO ORBIT · COSTS AS BEACON, as before', () => {
+    expect(returnToOrbitLabel(true, 0)).toBe('RETURN TO ORBIT · COSTS AS BEACON');
+  });
+
+  it('Given no tank, Then the button reads RETURN TO ORBIT whatever the hold holds (the free return keeps the cargo)', () => {
+    expect(returnToOrbitLabel(false, 6_099)).toBe('RETURN TO ORBIT');
+    expect(returnToOrbitLabel(false, 0)).toBe('RETURN TO ORBIT');
+  });
+
+  it('Given Pause.ts, Then it writes the button from the hold as well as the tank (returnToOrbitLabel gets the cargo)', () => {
+    const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'Pause.ts'), 'utf8');
+    const calls = src.match(/returnToOrbitLabel\(([^;]*)\)/g) ?? [];
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls.some((c) => /cargo/.test(c)), calls.join(' | ')).toBe(true);
   });
 });

@@ -728,6 +728,35 @@ describe('one hold-full rule; dust is depleted (R18)', () => {
   });
 });
 
+// Final whole-branch review, minor (c): one threshold — MINE_MIN_KG (0.5 kg) —
+// for "the hold is full", at the press and after a mine; FULL_EPS_KG is gone.
+describe('hold-full at MINE_MIN_KG (final review, minor c)', () => {
+  it('Given 0.3 kg free, When B, Then it is refused HOLD FULL at the press (never "MINED · 0 KG", no dust record)', () => {
+    const r = rig();
+    r.cargo.restore({ silicate: CARGO_CAPACITY_KG - 0.3 });
+    r.press(MINING_KEYS.mine);
+    expect(r.mining.busy).toBeNull();
+    r.tick(300);
+    expect(r.logs).toEqual(['HOLD FULL']);
+    expect(r.actions).toEqual([]);
+    expect(r.worldState.entries()).toHaveLength(0);
+  });
+
+  it('Given a mine that leaves 0.3 kg free, When it completes, Then the log says MINED then HOLD FULL', () => {
+    const r = rig();
+    r.cargo.restore({ silicate: CARGO_CAPACITY_KG - 2_000.3 });
+    r.press(MINING_KEYS.mine);
+    r.tick(240);
+    expect(r.cargo.freeKg).toBeCloseTo(0.3, 6);
+    expect(r.logs).toEqual(['MINED · 2 000 KG ICE', 'HOLD FULL']);
+  });
+
+  it('Given Mining.ts, Then it has no FULL_EPS_KG of its own (one threshold, from miningRules)', () => {
+    const src = readFileSync(fileURLToPath(new URL('./Mining.ts', import.meta.url)), 'utf8');
+    expect(src).not.toContain('FULL_EPS_KG');
+  });
+});
+
 describe('more clean aborts (R18)', () => {
   it('Given a mine 2 s in, When the game leaves flight (onModeChange), Then it aborts with one MINING ABORTED and nothing applied', () => {
     const r = rig();

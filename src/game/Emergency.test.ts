@@ -774,3 +774,48 @@ describe('Task 6 — one shared payBeacon', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Final whole-branch review, I2 — an honest beacon (DESIGN §5.4 "tydelig
+// prompt"). The beacon jettisons the whole hold; with cargo aboard the menu
+// says so, with the mass (formatKg). An empty hold: the text is unchanged.
+// ---------------------------------------------------------------------------
+
+describe('final review I2 — the beacon says it loses the cargo', () => {
+  it('Given 6 099 kg in the hold and the choice open, Then the beacon reads "2 · BEACON · LOSE 6 099 KG CARGO"', () => {
+    const h = cargoHarness({ hold: { metal: 4_000, ice: 2_099 } });
+    h.press(EMERGENCY_KEYS.open);
+    const line = h.em.line ?? '';
+    expect(line, line).toContain(`${label(EMERGENCY_KEYS.beacon)} · BEACON · LOSE 6 099 KG CARGO`);
+  });
+
+  it('Given a fractional hold (6 098.6 kg), Then the mass is rounded as formatKg rounds it: "LOSE 6 099 KG CARGO"', () => {
+    const h = cargoHarness({ hold: { silicate: 6_098.6 } });
+    h.press(EMERGENCY_KEYS.open);
+    expect(h.em.line ?? '').toContain(`${label(EMERGENCY_KEYS.beacon)} · BEACON · LOSE 6 099 KG CARGO`);
+  });
+
+  it('Given an empty hold, Then the beacon reads "2 · BEACON" exactly as before (no LOSE)', () => {
+    const h = cargoHarness({});
+    h.press(EMERGENCY_KEYS.open);
+    const line = h.em.line ?? '';
+    expect(line.endsWith(`${label(EMERGENCY_KEYS.beacon)} · BEACON`), line).toBe(true);
+    expect(line).not.toContain('LOSE');
+  });
+
+  it('Given a hull with no hold at all (v4-fuel world), Then the beacon reads "2 · BEACON" (no LOSE)', () => {
+    const h = harness({ fill: 0 });
+    h.press(EMERGENCY_KEYS.open);
+    const line = h.em.line ?? '';
+    expect(line.endsWith(`${label(EMERGENCY_KEYS.beacon)} · BEACON`), line).toBe(true);
+    expect(line).not.toContain('LOSE');
+  });
+
+  it('Given cargo, When the hold empties (the line is asked again), Then the warning goes with it', () => {
+    const h = cargoHarness({ hold: { metal: 500 } });
+    h.press(EMERGENCY_KEYS.open);
+    expect(h.em.line ?? '').toContain('LOSE 500 KG CARGO');
+    h.cargo.restore({});
+    expect(h.em.line ?? '').not.toContain('LOSE');
+  });
+});

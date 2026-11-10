@@ -119,3 +119,82 @@ describe('asteroidShape(seed)', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Final whole-branch review, I1 — "en rigtig form" (DESIGN §5.5). The rocks
+// read as soft discs; the relief must be more pronounced. Two measures, both
+// pinned for the eight variant seeds the renderer uses and for SEEDS:
+//   - radial spread: the standard deviation of |vertex| (the potato), and
+//   - local relief: the mean |r − mean r of its mesh neighbours| (craters and
+//     ridges you can see at the terminator, not just a stretched sphere).
+// The old shapes measured sd 0.042–0.091 and local relief 0.0021–0.0034.
+// The bounds, closure and outward normals above still hold.
+// ---------------------------------------------------------------------------
+
+/** The renderer's variant seeds (render/Asteroids: VARIANT_SEED_BASE + v). */
+const VARIANT_SEEDS: readonly number[] = Array.from({ length: 8 }, (_, v) => (0xa57e0000 + v) >>> 0);
+
+function radii(p: Float32Array): Float64Array {
+  const r = new Float64Array(p.length / 3);
+  for (let i = 0; i < r.length; i++) r[i] = Math.hypot(p[i * 3]!, p[i * 3 + 1]!, p[i * 3 + 2]!);
+  return r;
+}
+
+function radialSd(r: Float64Array): number {
+  let m = 0;
+  for (const x of r) m += x;
+  m /= r.length;
+  let v = 0;
+  for (const x of r) v += (x - m) ** 2;
+  return Math.sqrt(v / r.length);
+}
+
+function localRelief(r: Float64Array, idx: ArrayLike<number>): number {
+  const nb: Set<number>[] = Array.from({ length: r.length }, () => new Set<number>());
+  for (let t = 0; t < idx.length; t += 3) {
+    const a = idx[t]!;
+    const b = idx[t + 1]!;
+    const c = idx[t + 2]!;
+    nb[a]!.add(b).add(c);
+    nb[b]!.add(a).add(c);
+    nb[c]!.add(a).add(b);
+  }
+  let sum = 0;
+  for (let i = 0; i < r.length; i++) {
+    let s = 0;
+    for (const j of nb[i]!) s += r[j]!;
+    sum += Math.abs(r[i]! - s / nb[i]!.size);
+  }
+  return sum / r.length;
+}
+
+describe('asteroidShape — a real shape, not a soft disc (final review I1)', () => {
+  const ALL = [...VARIANT_SEEDS, ...SEEDS];
+
+  it('Given every variant seed (and SEEDS), Then the radial standard deviation is at least 0.07 of nominal', () => {
+    for (const seed of ALL) {
+      const sd = radialSd(radii(asteroidShape(seed).positions));
+      expect(sd, `seed ${seed.toString(16)}`).toBeGreaterThanOrEqual(0.07);
+    }
+  });
+
+  it('Given every variant seed (and SEEDS), Then the local relief (mean |r − neighbour mean|) is at least 0.004 of nominal', () => {
+    for (const seed of ALL) {
+      const s = asteroidShape(seed);
+      const lr = localRelief(radii(s.positions), s.index);
+      expect(lr, `seed ${seed.toString(16)}`).toBeGreaterThanOrEqual(0.004);
+    }
+  });
+
+  it('Given every variant seed, Then every vertex still lies within [0.6, 1.25] and every vertex normal still points outward', () => {
+    for (const seed of VARIANT_SEEDS) {
+      const { positions: p, normals: n } = asteroidShape(seed);
+      for (let i = 0; i < p.length; i += 3) {
+        const r = Math.hypot(p[i]!, p[i + 1]!, p[i + 2]!);
+        expect(r, `seed ${seed.toString(16)}`).toBeGreaterThanOrEqual(0.6);
+        expect(r, `seed ${seed.toString(16)}`).toBeLessThanOrEqual(1.25);
+        expect(n[i]! * p[i]! + n[i + 1]! * p[i + 1]! + n[i + 2]! * p[i + 2]!, `seed ${seed.toString(16)} v ${i / 3}`).toBeGreaterThan(0);
+      }
+    }
+  });
+});

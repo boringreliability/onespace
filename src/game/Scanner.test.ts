@@ -139,4 +139,18 @@ describe('Scanner — asteroids', () => {
     expect(entries[0]!.kind).toBe('note');
     expect(entries[0]!.visits).toBe(2);
   });
+
+  it('Given an asteroid scanned, then mined, then scanned again (final review I3a), Then its logbook note shows the NEW remaining kg, not the first scan\'s', () => {
+    const log = new ShipLog();
+    log.init();
+    offs.push(() => log.dispose());
+    const r = rig();
+    r.scan();
+    r.worldState.recordMined(AST.id, 'ice', 1_000, 'local');
+    const second = r.scan()!;
+    const entries = log.all().filter((e) => e.key === `scan:${AST.id}`);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.body).toEqual(second.lines);
+    expect(numbersIn(lineFor(entries[0]!.body, 'ice'))).toContain(Math.round(AST.composition.ice - 1_000));
+  });
 });

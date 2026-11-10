@@ -15,6 +15,7 @@ import type { Resource } from '@/gen/belt';
 import {
   MINE_ACTION_S,
   MINE_MAX_REL_KMS,
+  MINE_MIN_KG,
   MINE_RANGE_KM,
   MINE_YIELD_KG,
   MINING_ABORTED_TEXT,
@@ -245,10 +246,23 @@ describe('one hold-full rule; dust is depleted (R18)', () => {
 // Mutation hardening (Task 8, phase A).
 // ---------------------------------------------------------------------------
 
-describe('mayMine — hold-full boundary at the hold epsilon (hardening)', () => {
-  it('Given exactly 1e-6 kg free, Then ok (the hold\'s own epsilon is inclusive); just under, Then hold-full', () => {
-    expect(mayMine({ ...OK, holdFreeKg: 1e-6 })).toEqual({ ok: true });
-    expect(mayMine({ ...OK, holdFreeKg: 9.9e-7 })).toEqual({ ok: false, reason: 'hold-full' });
+// Final whole-branch review, minor (c): the hold-full threshold is MINE_MIN_KG
+// (0.5 kg), the same line that makes a rock "depleted" — a hold with less room
+// than that could only ever log "MINED · 0 KG" and leave a dust record. (This
+// replaces the Task 8 pin at the hold's 1e-6 kg epsilon.)
+describe('mayMine — hold-full below MINE_MIN_KG (final review, minor c)', () => {
+  it('Given MINE_MIN_KG, Then it is 0.5 kg', () => {
+    expect(MINE_MIN_KG).toBe(0.5);
+  });
+
+  it('Given 0.3 kg free, Then hold-full', () => {
+    expect(mayMine({ ...OK, holdFreeKg: 0.3 })).toEqual({ ok: false, reason: 'hold-full' });
+  });
+
+  it('Given exactly 0.5 kg free, Then ok (inclusive); 0.49 kg, 1e-6 kg and 0, Then hold-full', () => {
+    expect(mayMine({ ...OK, holdFreeKg: 0.5 })).toEqual({ ok: true });
+    expect(mayMine({ ...OK, holdFreeKg: 0.49 })).toEqual({ ok: false, reason: 'hold-full' });
+    expect(mayMine({ ...OK, holdFreeKg: 1e-6 })).toEqual({ ok: false, reason: 'hold-full' });
     expect(mayMine({ ...OK, holdFreeKg: 0 })).toEqual({ ok: false, reason: 'hold-full' });
   });
 });

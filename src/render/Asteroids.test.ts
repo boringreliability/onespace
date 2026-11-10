@@ -381,3 +381,108 @@ describe('Asteroids — camera-relative instances (R15)', () => {
     expect(surface(v).version).toBeGreaterThan(after[v]!);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Final whole-branch review, minor (a): the surface update range was reset in
+// lateUpdate — before the renderer ever read it — so a changed tint never
+// reached the GPU. At render time (after update AND lateUpdate) the range must
+// cover exactly the slots whose occupant changed this frame.
+// ---------------------------------------------------------------------------
+
+/** The element span [start, end) the ranges with count > 0 cover, or null. */
+function surfaceSpan(attr: InstancedBufferAttribute): { start: number; end: number; total: number } | null {
+  let start = Infinity;
+  let end = -Infinity;
+  let total = 0;
+  for (const r of attr.updateRanges) {
+    if (r.count <= 0) continue;
+    start = Math.min(start, r.start);
+    end = Math.max(end, r.start + r.count);
+    total += r.count;
+  }
+  return total > 0 ? { start, end, total } : null;
+}
+
+describe('Asteroids — the surface update range survives to render time (final review, minor a)', () => {
+  const surface = (a: Asteroids, v: number): InstancedBufferAttribute =>
+    a.meshes[v]!.geometry.getAttribute('aSurface') as InstancedBufferAttribute;
+
+  it("Given the first frame, When update and lateUpdate have both run, Then each drawn variant's surface range covers exactly its occupied slots", () => {
+    const { asteroids, frame } = farRig();
+    frame();
+    let drawnVariants = 0;
+    for (let v = 0; v < asteroids.meshes.length; v++) {
+      const count = asteroids.meshes[v]!.count;
+      if (count === 0) continue;
+      drawnVariants++;
+      const span = surfaceSpan(surface(asteroids, v));
+      expect(span, `variant ${v}: range emptied before render`).not.toBeNull();
+      expect(span!.start, `variant ${v}`).toBe(0);
+      expect(span!.end, `variant ${v}`).toBe(count * 4);
+    }
+    expect(drawnVariants).toBeGreaterThan(0);
+  });
+
+  it("Given a settled field, When one new rock takes a slot, Then at render time its variant's surface range is exactly that slot (4 floats) and is flagged for upload", () => {
+    const { belt, asteroids, frame } = farRig();
+    frame();
+    frame();
+    const seed = 4242;
+    const v = seed % ASTEROID_VARIANTS;
+    // The stub reports new rocks last (and < 256 are never sorted), so it takes the next slot.
+    const slot = asteroids.meshes[v]!.count;
+    const before = surface(asteroids, v).version;
+    belt.add('ast:test:9:0', SHIP.clone().add(new Vector3(1, 0, 0)), 0.3, seed);
+    frame();
+    expect(asteroids.meshes[v]!.count).toBe(slot + 1);
+    const attr = surface(asteroids, v);
+    expect(attr.version).toBeGreaterThan(before);
+    const span = surfaceSpan(attr);
+    expect(span, 'range emptied before render').not.toBeNull();
+    expect(span).toEqual({ start: slot * 4, end: slot * 4 + 4, total: 4 });
+  });
+
+  it('Given a frame that changes nothing after one that changed a slot, Then nothing is re-uploaded (version unchanged)', () => {
+    const { belt, asteroids, frame } = farRig();
+    frame();
+    belt.add('ast:test:9:0', SHIP.clone().add(new Vector3(1, 0, 0)), 0.3, 4242);
+    frame();
+    const versions = asteroids.meshes.map((_, v) => surface(asteroids, v).version);
+    frame();
+    expect(asteroids.meshes.map((_, v) => surface(asteroids, v).version)).toEqual(versions);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Final whole-branch review, I1 — the renderer takes its surface from the pure
+// helper (render/asteroidSurface), and the shader tints and tightens the
+// highlight as ruled. Imported dynamically so a missing helper fails only here.
+// ---------------------------------------------------------------------------
+
+describe('Asteroids — surface from asteroidSurface (final review I1)', () => {
+  it("Given a metal-only rock, Then its aSurface slot holds the helper's albedo (rgb) and specular strength (a)", async () => {
+    const { asteroidSurface } = await import('./asteroidSurface');
+    const { belt, asteroids, frame } = rig();
+    const seed = 3001;
+    const metal: Record<Resource, number> = { ice: 0, metal: 4e6, silicate: 0, rare: 0 };
+    belt.add('ast:test:m:0', SHIP.clone().add(new Vector3(2, 0, 0)), 0.2, seed);
+    belt.specs.set('ast:test:m:0', { ...belt.specs.get('ast:test:m:0')!, composition: metal });
+    frame();
+    const v = seed % ASTEROID_VARIANTS;
+    const arr = (asteroids.meshes[v]!.geometry.getAttribute('aSurface') as InstancedBufferAttribute).array;
+    const s = asteroidSurface(metal);
+    expect(arr[0]).toBeCloseTo(s.albedo[0], 6);
+    expect(arr[1]).toBeCloseTo(s.albedo[1], 6);
+    expect(arr[2]).toBeCloseTo(s.albedo[2], 6);
+    expect(arr[3]).toBeCloseTo(s.spec, 6);
+  });
+
+  it('Given the fragment shader, Then the highlight uses ASTEROID_SPEC_EXPONENT (not 24) and a specColor mixed from white towards the albedo by metalness', async () => {
+    const { ASTEROID_SPEC_EXPONENT } = await import('./asteroidSurface');
+    const { asteroids } = rig();
+    const fs = (asteroids.meshes[0]!.material as ShaderMaterial).fragmentShader;
+    expect(fs).not.toMatch(/pow\([^;]*,\s*24\.0\)/);
+    expect(fs).toContain(ASTEROID_SPEC_EXPONENT.toFixed(1));
+    expect(fs).toMatch(/mix\(\s*vec3\(\s*1(\.0)?\s*\)/);
+  });
+});
