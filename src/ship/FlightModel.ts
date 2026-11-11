@@ -528,6 +528,12 @@ export class FlightModel {
    * curve all stand down.
    */
   private cruiseCap: number | null = null;
+  /**
+   * [v4-mining] Parent-relative velocity of the frame the drive carries the
+   * ship in (a belt field), or unset: the parent's frame (every body, v3).
+   */
+  private readonly cruiseFrameVel = new Vector3();
+  private hasCruiseFrame = false;
   /** Scalar speed along the nose while cruising. The velocity vector follows it. */
   private cruiseSpeed = 0;
 
@@ -780,8 +786,31 @@ export class FlightModel {
       this.cruiseCap = null;
       return;
     }
-    if (this.cruiseCap === null) this.cruiseSpeed = this.velocity.length();
+    if (this.cruiseCap === null) {
+      this.cruiseSpeed = this.hasCruiseFrame
+        ? Math.hypot(
+            this.velocity.x - this.cruiseFrameVel.x,
+            this.velocity.y - this.cruiseFrameVel.y,
+            this.velocity.z - this.cruiseFrameVel.z,
+          )
+        : this.velocity.length();
+    }
     this.cruiseCap = Math.max(0, capKmS);
+  }
+
+  /**
+   * [v4-mining] Carry the ship in a moving frame under cruise: velocity is the
+   * frame's (parent-relative, km/s) plus nose × speed, so the ceiling bounds
+   * the speed RELATIVE to that frame. `null` = the parent's frame (v3).
+   */
+  setCruiseFrame(velocity: Vector3 | null): void {
+    if (velocity === null) {
+      this.hasCruiseFrame = false;
+      this.cruiseFrameVel.set(0, 0, 0);
+      return;
+    }
+    this.hasCruiseFrame = true;
+    this.cruiseFrameVel.copy(velocity);
   }
 
   /** True while the cruise drive is carrying the ship. */
@@ -802,6 +831,7 @@ export class FlightModel {
    */
   exitCruiseWithVelocity(velocity: Vector3): void {
     this.cruiseCap = null;
+    this.setCruiseFrame(null);
     this.velocity.copy(velocity);
     this._throttle = 0;
     this._speed = this.velocity.length();
@@ -1273,6 +1303,7 @@ export class FlightModel {
     this.cruiseSpeed = Math.min(this.cruiseSpeed, cap);
 
     this.velocity.copy(this.forward).multiplyScalar(this.cruiseSpeed);
+    if (this.hasCruiseFrame) this.velocity.add(this.cruiseFrameVel);
     this.position.addScaledVector(this.velocity, h);
 
     // No proper acceleration to report: the drive does not push the crew.

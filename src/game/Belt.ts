@@ -22,6 +22,7 @@
 
 import type { EngineContext, GameModule } from '@/core/Engine';
 import {
+  ASTEROID_RADIUS_KM,
   FIELD_RADIUS_KM,
   beltFor,
   fieldOrbits,
@@ -193,6 +194,68 @@ export class Belt implements GameModule {
       }
     }
     return out.length;
+  }
+
+  /**
+   * Ids of the asteroids whose SURFACE is within `maxKm` of `world` (centre
+   * distance − radius), over the memoised fields. `out` is cleared and
+   * filled; returns its length. Allocation-free.
+   */
+  asteroidsNearSurface(world: Vec3Like, maxKm: number, out: string[]): number {
+    out.length = 0;
+    if (!this.spec) return 0;
+    const t = this.world.orbitSeconds;
+    const c = this.centre;
+    const reach = maxKm + FIELD_RADIUS_KM + ASTEROID_RADIUS_KM[1];
+    for (let s = 0; s < MEMO_SLOTS; s++) {
+      const f = this.memo[s];
+      if (!f) continue;
+      orbitalPosition(f.orbit, t, c);
+      const dx = c.x - world.x;
+      const dy = c.y - world.y;
+      const dz = c.z - world.z;
+      if (dx * dx + dy * dy + dz * dz > reach * reach) continue;
+      for (let i = 0; i < f.asteroids.length; i++) {
+        const a = f.asteroids[i]!;
+        const r = maxKm + a.radiusKm;
+        const ax = dx + a.offsetKm[0];
+        const ay = dy + a.offsetKm[1];
+        const az = dz + a.offsetKm[2];
+        if (ax * ax + ay * ay + az * az <= r * r) out.push(a.id);
+      }
+    }
+    return out.length;
+  }
+
+  /**
+   * The rock to target on arriving at field `fieldId` (owner's usable-belt
+   * ruling): the one nearest `world` by surface distance with at least
+   * `iceKg` ice left, else the nearest rock; null for an unknown or empty field.
+   */
+  firstRockTarget(fieldId: string, world: Vec3Like, iceKg = 1_000): string | null {
+    const f = this.fieldById(fieldId);
+    if (!f) return null;
+    const c = this.centre;
+    orbitalPosition(f.orbit, this.world.orbitSeconds, c);
+    let icy: string | null = null;
+    let icyD = Number.POSITIVE_INFINITY;
+    let any: string | null = null;
+    let anyD = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < f.asteroids.length; i++) {
+      const a = f.asteroids[i]!;
+      const d =
+        Math.hypot(c.x + a.offsetKm[0] - world.x, c.y + a.offsetKm[1] - world.y, c.z + a.offsetKm[2] - world.z) -
+        a.radiusKm;
+      if (d < anyD) {
+        anyD = d;
+        any = a.id;
+      }
+      if (d < icyD && Math.max(0, a.composition.ice - this.worldState.depleted(a.id).ice) >= iceKg) {
+        icyD = d;
+        icy = a.id;
+      }
+    }
+    return icy ?? any;
   }
 
   /** The generated spec of an asteroid, or null. */

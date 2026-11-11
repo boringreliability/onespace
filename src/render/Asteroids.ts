@@ -69,7 +69,7 @@ export const ASTEROID_VARIANTS = 8;
 /** Instances drawn at most, nearest first. */
 export const MAX_ASTEROID_INSTANCES = 256;
 /** Asteroids farther than this from the ship are not drawn. */
-export const ASTEROID_DRAW_KM = 400;
+export const ASTEROID_DRAW_KM = 1_500;
 
 const ACTIVE: readonly Mode[] = ['title', 'flight', 'map'];
 

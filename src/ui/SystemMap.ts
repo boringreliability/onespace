@@ -28,7 +28,7 @@ import type { EngineContext, GameModule } from '@/core/Engine';
 import { activeShotName, registerShot } from '@/game/Shots';
 import { orbitalPosition } from '@/gen/orbit';
 import { AU, SOLAR_RADIUS, type PlanetSpec, type StarSystemSpec } from '@/gen/types';
-import { cruiseEtaSeconds } from '@/ship/CruiseDrive';
+import { FIELD_ARRIVAL_GAP_KM, cruiseEtaSeconds, cruiseTravelSeconds } from '@/ship/CruiseDrive';
 import type { Universe } from '@/game/Universe';
 import { FIELD_RADIUS_KM, beltFor, fieldOrbits, nearestFieldIndex, type BeltSpec } from '@/gen/belt';
 import type { OrbitSpec } from '@/gen/types';
@@ -454,7 +454,7 @@ export class SystemMap implements GameModule {
       set('name', beltFieldName(this.universe.system?.name ?? '', bn.lockedK));
       set('type', `asteroid belt · ${bn.belt.innerAU.toFixed(2)}–${bn.belt.outerAU.toFixed(2)} au`);
       set('range', formatRange(Math.max(0, bn.distanceKm - FIELD_RADIUS_KM)));
-      set('eta', formatEta(cruiseEtaSeconds(bn.distanceKm, FIELD_RADIUS_KM)));
+      set('eta', formatEta(cruiseTravelSeconds(Math.max(bn.distanceKm - FIELD_RADIUS_KM, 1), FIELD_ARRIVAL_GAP_KM)));
       set('gravity', '—');
       return;
     }

@@ -57,9 +57,13 @@ export interface FieldSpec {
 }
 
 export const FIELDS_PER_BELT = 512;
-export const FIELD_RADIUS_KM = 40;
+export const FIELD_RADIUS_KM = 80;
 export const ASTEROIDS_PER_FIELD: readonly [number, number] = [12, 30];
-export const ASTEROID_RADIUS_KM: readonly [number, number] = [0.05, 0.6];
+export const ASTEROID_RADIUS_KM: readonly [number, number] = [0.4, 4];
+/** Clear space kept between any two rocks' surfaces, km. */
+export const ASTEROID_SEPARATION_KM = 0.5;
+/** Placement draws per rock before it is dropped from its field (never reached in practice). */
+const PLACEMENT_TRIES = 64;
 
 /** Gravitational parameter of one solar mass, km³/s² (same value as Universe.ts). */
 const MU_SUN = 1.32712440018e11;
@@ -197,22 +201,31 @@ export function fieldSpec(belt: BeltSpec, systemSeed: number, k: number): FieldS
     // Inside a ball, kept a kilometre inside the field edge, but NOT uniform:
     // the direction is a Gaussian with y halved before normalising, so rocks
     // crowd towards the field's x–z plane; the distance is cube-root (uniform
-    // in volume along each direction).
-    let dx = rng.gaussian();
-    let dy = rng.gaussian() * 0.5;
-    let dz = rng.gaussian();
-    const len = Math.hypot(dx, dy, dz) || 1;
-    const dist = (FIELD_RADIUS_KM - 1) * Math.cbrt(rng.next());
-    dx = (dx / len) * dist;
-    dy = (dy / len) * dist;
-    dz = (dz / len) * dist;
+    // in volume along each direction). Redrawn until it clears every rock
+    // already placed by ASTEROID_SEPARATION_KM, surface to surface.
+    let dx = 0;
+    let dy = 0;
+    let dz = 0;
+    let placed = false;
+    for (let t = 0; t < PLACEMENT_TRIES && !placed; t++) {
+      dx = rng.gaussian();
+      dy = rng.gaussian() * 0.5;
+      dz = rng.gaussian();
+      const len = Math.hypot(dx, dy, dz) || 1;
+      const dist = (FIELD_RADIUS_KM - 1) * Math.cbrt(rng.next());
+      dx = (dx / len) * dist;
+      dy = (dy / len) * dist;
+      dz = (dz / len) * dist;
+      placed = clearOfAll(asteroids, dx, dy, dz, radiusKm);
+    }
+    if (!placed) continue; // a crowded field keeps the rocks it has
     const seed = rng.nextUint();
     asteroids.push({
-      id: `ast:${belt.systemId}:${k}:${n}`,
+      id: `ast:${belt.systemId}:${k}:${asteroids.length}`,
       offsetKm: [dx, dy, dz],
       radiusKm,
       seed,
-      composition: drawComposition(rng, radiusKm, n < GUARANTEED_ICY),
+      composition: drawComposition(rng, radiusKm, asteroids.length < GUARANTEED_ICY),
     });
   }
   return {
@@ -222,6 +235,17 @@ export function fieldSpec(belt: BeltSpec, systemSeed: number, k: number): FieldS
     radiusKm: FIELD_RADIUS_KM,
     asteroids,
   };
+}
+
+function clearOfAll(placed: readonly AsteroidSpec[], x: number, y: number, z: number, r: number): boolean {
+  for (const a of placed) {
+    const min = a.radiusKm + r + ASTEROID_SEPARATION_KM;
+    const ex = a.offsetKm[0] - x;
+    const ey = a.offsetKm[1] - y;
+    const ez = a.offsetKm[2] - z;
+    if (ex * ex + ey * ey + ez * ez < min * min) return false;
+  }
+  return true;
 }
 
 /** One cached entry: the last system asked for (a session sits in one system at a time). */

@@ -147,7 +147,8 @@ export class Scanner implements GameModule {
       if (!tb && this.belt && targetId.startsWith('ast:') && this.belt.asteroidWorld(targetId, astWorld)) {
         // [v4-mining] An asteroid answers only to the array's short reach.
         asteroid = true;
-        target = { id: targetId, inRange: asteroidInScanRange(astWorld.distanceTo(ship)) };
+        const rKm = this.belt.asteroidSpec(targetId)?.radiusKm ?? 0;
+        target = { id: targetId, inRange: asteroidInScanRange(astWorld.distanceTo(ship) - rKm) };
       } else if (tb) {
         target = { id: targetId, inRange: bodies.find((x) => x.id === targetId)!.inRange };
       } else if (this.traffic) {

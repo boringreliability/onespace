@@ -50,6 +50,7 @@ import { openingAttitude } from '@/game/recovery';
 const NOBODY: object = {};
 import {
   CruiseDrive,
+  FIELD_ARRIVAL_GAP_KM,
   arrivalClearanceKm,
   holdClearanceKm,
   type CruiseArrival,
@@ -63,7 +64,7 @@ import { shotOwnsScene } from '@/game/Shots';
 import { SOLAR_RADIUS } from '@/gen/types';
 import { FIELD_RADIUS_KM } from '@/gen/belt';
 import type { Belt } from '@/game/Belt';
-import { beltFieldName } from '@/game/Belt';
+import { beltFieldName, beltTargetName } from '@/game/Belt';
 import { announceAction, applyAction, canAfford, cruiseSpoolKg } from '@/ship/travelCost'; // [v4-fuel]
 
 /** [v4-fuel] A long cruise leg is announced (`propellant:action`) at most this often, s. */
@@ -127,7 +128,7 @@ export interface CruiseOptions {
    * [v4-mining] Resolves `field:` nav targets. Without it (or without a belt
    * in the system) a field target is ignored, exactly as before.
    */
-  readonly belt?: Pick<Belt, 'fieldWorld' | 'fieldVelocity'> | null;
+  readonly belt?: Pick<Belt, 'fieldWorld' | 'fieldVelocity' | 'firstRockTarget'> | null;
 }
 
 /**
@@ -155,7 +156,7 @@ export class Cruise implements GameModule {
 
   readonly drive = new CruiseDrive();
   private readonly universe: CruiseWorld;
-  private readonly belt: Pick<Belt, 'fieldWorld' | 'fieldVelocity'> | null;
+  private readonly belt: Pick<Belt, 'fieldWorld' | 'fieldVelocity' | 'firstRockTarget'> | null;
   /**
    * [v4-mining] A locked belt field, as the drive sees a target: a body of
    * radius FIELD_RADIUS_KM with no SOI. One object, reused (no allocation per
@@ -169,6 +170,9 @@ export class Cruise implements GameModule {
   };
   /** [v4-mining] Scratch: the field's velocity at a handover. */
   private readonly sFieldVel = new Vector3();
+  /** [v4-mining] The field centre last frame, for the cruise frame's velocity. */
+  private readonly fieldSeenAt = new Vector3();
+  private fieldSeenFor: string | null = null;
   /** The field id `fieldBody`'s name was built for. */
   private fieldNamedFor: string | null = null;
 
@@ -339,6 +343,29 @@ export class Cruise implements GameModule {
   }
 
   /**
+   * [v4-mining] The locked field's frame velocity, parent-relative, into
+   * `sFieldVel`: how far its centre moved on the orbit clock per second of
+   * flight (so the ship keeps pace with the field as it is placed, whatever
+   * the clock does), or its orbital velocity on the first frame. False if
+   * the field cannot be resolved.
+   */
+  private fieldFrameVelocity(field: Body, dt: number): boolean {
+    const id = this.targetId;
+    if (id === null || !this.belt) return false;
+    if (this.fieldSeenFor === id && dt > 0) {
+      this.sFieldVel.subVectors(field.world, this.fieldSeenAt).divideScalar(dt);
+    } else if (this.belt.fieldVelocity(id, this.sFieldVel)) {
+      this.fieldSeenFor = id;
+    } else {
+      return false;
+    }
+    this.fieldSeenAt.copy(field.world);
+    const parent = this.universe.flight.parent;
+    if (parent) this.sFieldVel.sub(parent.velocity);
+    return true;
+  }
+
+  /**
    * [v4-mining] Leave cruise at the locked field's velocity (parent-relative),
    * engine cut, and start the settle onto the field centre. False, changing
    * nothing, if the field cannot be resolved.
@@ -504,11 +531,17 @@ export class Cruise implements GameModule {
         if (toward !== this.departedFrom || a.clearanceKm > arriveKm * 1.05) this.departedFrom = NOBODY;
       }
       arrival = this.departedFrom === toward ? null : a;
-      limbKm = LIMB_FRACTION * (radius + arrivalClearanceKm(radius, toward.soiRadius, this.drive.config));
+      // [v4-mining] A field is arrived at FIELD_ARRIVAL_GAP_KM from its edge
+      // (owner's usable-belt ruling); it re-arms, like a body, only once the
+      // ship has been out past the v3 arrival sphere. There is no orbit to
+      // swing onto, so the nose goes straight at its centre and the ship comes
+      // to rest square in front of the rocks. Bodies: v3 exactly.
+      a.arrivalKm = toField ? FIELD_ARRIVAL_GAP_KM : undefined;
+      limbKm = toField ? 0 : LIMB_FRACTION * (radius + arriveKm);
       // R22: only while arrival is armed (departing the field it is not, and
-      // its gap must not hold the drive back), and never below the hold
-      // clearance — a gap ≤ 0 inside the field would be a 0 km/s ceiling.
-      if (toField && arrival !== null) limitKm = Math.max(a.clearanceKm, holdClearanceKm(FIELD_RADIUS_KM, this.drive.config));
+      // its gap must not hold the drive back). The drive floors the limit at
+      // FIELD_ARRIVAL_GAP_KM, so a gap ≤ 0 is never a 0 km/s ceiling.
+      if (toField && arrival !== null) limitKm = a.clearanceKm;
     }
 
     const wasEngaged = this.drive.engaged;
@@ -522,7 +555,8 @@ export class Cruise implements GameModule {
     di.arrival = arrival;
     di.limitKm = limitKm;
     di.arrivalFirst = toField;
-    di.exitSpeedKmS = circularSpeed(flight.parent?.mu ?? 0, flight.position.length()) || undefined;
+    // [v4-mining] In a field's frame the drop bleeds to rest, not to an orbit.
+    di.exitSpeedKmS = toField ? 0 : circularSpeed(flight.parent?.mu ?? 0, flight.position.length()) || undefined;
     // v3: during the drop, is the carried velocity (and the nose) on the
     // insertion tangent yet? The drive waits for it.
     let haveDropTarget = false;
@@ -580,6 +614,9 @@ export class Cruise implements GameModule {
       this.dropPlaneSet = false;
       this.heldLever = ctx.input.axes.throttle;
       bus.emit('log', { text: `ORBIT — ${toward!.spec.name.toUpperCase()}`, tone: 'good' });
+      // The first rock is ready: the nearest ice-rich one, else the nearest.
+      const rock = this.belt!.firstRockTarget(toward!.spec.id, flight.worldPosition);
+      if (rock !== null) bus.emit('target:changed', { id: rock, name: beltTargetName(rock) });
     } else if (wasEngaged && !this.drive.engaged) {
       // The handover. In orbit if there is anything to orbit, else the
       // legacy sublight exit along the nose.
@@ -601,6 +638,15 @@ export class Cruise implements GameModule {
         flight.setCruise(null);
       }
     } else {
+      // [v4-mining] Toward a field the drive carries the ship in the field's
+      // frame: the ceiling bounds the speed RELATIVE to the field, so a ship
+      // chasing it (or met head-on) closes the same way.
+      if (this.drive.engaged && toField && this.fieldFrameVelocity(toward!, dt)) {
+        flight.setCruiseFrame(this.sFieldVel);
+      } else {
+        flight.setCruiseFrame(null);
+        this.fieldSeenFor = null;
+      }
       // The flight model is told the ceiling, not the phase. It has no opinion
       // about why it is allowed to go fast.
       flight.setCruise(this.drive.engaged ? this.drive.capKmS : null);

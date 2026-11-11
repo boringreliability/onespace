@@ -7,12 +7,12 @@
  * whenever traffic was co-orbiting (GAMEPLAY F3).
  */
 
-/** [v4-mining] The array resolves an asteroid's assay within this range, km. */
-export const ASTEROID_SCAN_RANGE_KM = 100;
+/** [v4-mining] The array resolves an asteroid's assay within this range of its surface, km. */
+export const ASTEROID_SCAN_RANGE_KM = 150;
 
-/** [v4-mining] Whether an asteroid target at `distanceKm` is within the array's reach. */
-export function asteroidInScanRange(distanceKm: number): boolean {
-  return Number.isFinite(distanceKm) && distanceKm <= ASTEROID_SCAN_RANGE_KM;
+/** [v4-mining] Whether an asteroid target `surfaceKm` from its surface is within the array's reach. */
+export function asteroidInScanRange(surfaceKm: number): boolean {
+  return Number.isFinite(surfaceKm) && surfaceKm <= ASTEROID_SCAN_RANGE_KM;
 }
 
 /** Slack around a body's disc for "under the reticle": a dot needs a margin. */

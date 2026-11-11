@@ -60,12 +60,12 @@ export interface TargetingOptions {
   /** [v4-mining] Field and asteroid targets resolve through it. Absent: v3 behaviour. */
   readonly belt?: Pick<
     Belt,
-    'nearestField' | 'fieldWorld' | 'fieldVelocity' | 'asteroidWorld' | 'asteroidVelocity' | 'asteroidsNear' | 'asteroidSpec'
+    'nearestField' | 'fieldWorld' | 'fieldVelocity' | 'asteroidWorld' | 'asteroidVelocity' | 'asteroidsNearSurface' | 'asteroidSpec'
   > | null;
 }
 
-/** [v4-mining] Asteroids within this range of the ship join the Tab cycle (≥ a field's radius). */
-export const TAB_ASTEROID_RANGE_KM = 100;
+/** [v4-mining] Asteroids whose surface is within this range of the ship join the Tab cycle. */
+export const TAB_ASTEROID_RANGE_KM = 150;
 
 type MutableHudTarget = { -readonly [K in keyof HudTarget]: HudTarget[K] };
 type MutableContact = { -readonly [K in keyof ContactIn]: ContactIn[K] };
@@ -239,7 +239,7 @@ export class Targeting implements GameModule {
     if (belt) {
       // [v4-mining] Asteroids near the ship, and the nearest field from outside it.
       const ids: string[] = [];
-      belt.asteroidsNear(this.shipWorld, TAB_ASTEROID_RANGE_KM, ids);
+      belt.asteroidsNearSurface(this.shipWorld, TAB_ASTEROID_RANGE_KM, ids);
       for (const id of ids) {
         const w = new Vector3();
         if (belt.asteroidWorld(id, w)) cands.push({ id, name: beltTargetName(id) ?? id, rel: w.sub(this.shipWorld) });

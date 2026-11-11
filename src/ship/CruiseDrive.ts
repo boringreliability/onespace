@@ -157,6 +157,15 @@ export function arrivalClearanceKm(
 }
 
 /**
+ * [v4-mining] Gap to a belt field's EDGE at which a cruise arrival drops, km.
+ * The bleed carries the ship well under a kilometre further, so it rests about
+ * 30 km outside the field — rocks in Tab and scan reach, never inside.
+ * Also the floor of `limitKm`: a field's gap brakes the drive all the way
+ * down to the drop, and a gap ≤ 0 never becomes a 0 km/s ceiling.
+ */
+export const FIELD_ARRIVAL_GAP_KM = 30;
+
+/**
  * The chart's crossing time to a body: centre distance in, seconds to the
  * drive's arrival threshold out. The same thresholds the drive flies by.
  */
@@ -254,6 +263,11 @@ export interface CruiseArrival {
   readonly soiRadiusKm: number;
   /** The ship is moving towards it. Only a closing ship arrives. */
   readonly closing: boolean;
+  /**
+   * [v4-mining] Clearance at which to drop for this target, km. Omitted =
+   * `arrivalClearanceKm(radiusKm, soiRadiusKm)` (every body: v3).
+   */
+  readonly arrivalKm?: number;
 }
 
 export class CruiseDrive {
@@ -348,7 +362,7 @@ export class CruiseDrive {
         this.blocked = this.obstacle(i, true);
         const a = i.arrival;
         const arrived =
-          !!a && a.closing && a.clearanceKm < arrivalClearanceKm(a.radiusKm, a.soiRadiusKm, c);
+          !!a && a.closing && a.clearanceKm < (a.arrivalKm ?? arrivalClearanceKm(a.radiusKm, a.soiRadiusKm, c));
         if (!i.requested || this.blocked !== null || arrived) {
           this.dropReason =
             arrived && i.requested && i.arrivalFirst ? 'arrival' : this.blocked ?? (i.requested ? 'arrival' : 'released');
@@ -374,13 +388,13 @@ export class CruiseDrive {
 
   /**
    * The gap the ceiling follows: the clearance, or a nearer `limitKm` — never
-   * below the hold clearance (R22): a limit at or under zero would be a
-   * 0 km/s ceiling with the spool already paid.
+   * below FIELD_ARRIVAL_GAP_KM (R22, owner's usable-belt ruling): a limit at
+   * or under zero would be a 0 km/s ceiling with the spool already paid.
    */
   private limit(i: CruiseInputs): number {
     const l = i.limitKm;
     if (l === undefined) return i.clearanceKm;
-    const floor = holdClearanceKm(0, this.config);
+    const floor = FIELD_ARRIVAL_GAP_KM;
     const lf = l >= floor ? l : floor; // NaN floors too
     return lf < i.clearanceKm ? lf : i.clearanceKm;
   }
