@@ -29,14 +29,23 @@ import { CRUISE_DEFAULTS, arrivalClearanceKm, cruiseCapKmS, holdClearanceKm } fr
 import { noseErrorRad } from '@/ship/cruiseSteer';
 import { DEFAULT_SHIP_CONFIG, FlightModel, type ParentBody } from '@/ship/FlightModel';
 import { beltRig, fieldCentre, fieldVelocity, fyssBelt, fyssField, startSystem } from '@/game/testing/beltFixture';
+import { beltTargetName } from '@/game/Belt';
 import { Cruise, type CruiseWorld } from './Cruise';
 
 const H = 1 / 60;
 const FIELD_K = 398;
 const START_GAP_KM = 200_000;
 
-/** Centre distance at which a field arrival drops: its edge plus the arrival clearance. */
+/** Centre distance of the field's arrival sphere as v3 bodies see it (limb aim only). */
 const ARRIVE_CENTRE_KM = FIELD_RADIUS_KM + arrivalClearanceKm(FIELD_RADIUS_KM);
+
+/**
+ * Owner decision (usable belt): a field arrival ends co-moving about 30 km
+ * past the field's EDGE — centre distance within this band, for every
+ * approach geometry. Never inside the field.
+ */
+const FINAL_MIN_KM = FIELD_RADIUS_KM + 15;
+const FINAL_MAX_KM = FIELD_RADIUS_KM + 50;
 
 function facing(dir: Vector3): Quaternion {
   return new Quaternion().setFromUnitVectors(new Vector3(0, 0, -1), dir.clone().normalize());
@@ -64,6 +73,8 @@ interface FieldRig {
   centreNow: () => Vector3;
   /** The field centre's velocity (star frame, km/s) on the rig's clock now. */
   fieldVelNow: () => Vector3;
+  /** The real Belt and WorldState the rig runs on (mine rocks before flying). */
+  b: ReturnType<typeof beltRig>;
 }
 
 interface FieldRigOptions {
@@ -159,6 +170,7 @@ function fieldRig(nose: (toField: Vector3) => Vector3, opts: FieldRigOptions = {
       b.belt.fieldVelocity(field.id, out);
       return out;
     },
+    b,
     step: (seconds = H) => {
       for (let t = 0; t < seconds - 1e-9; t += H) {
         if (opts.liveClock) b.world.orbitSeconds += H;
@@ -181,12 +193,13 @@ function fieldRig(nose: (toField: Vector3) => Vector3, opts: FieldRigOptions = {
 }
 
 describe('cruise to a belt field', () => {
-  it('Given G (cruise) toward a field target, Then the drop distance respects FIELD_RADIUS_KM (no drop into the cluster’s middle)', () => {
+  it('Given G (cruise) toward a field target, Then the drive bleeds without tunnelling and the ship ends ~30 km past the field edge (centre distance in [R + 15, R + 50]), never inside', () => {
     const r = fieldRig((toField) => toField);
     bus.emit('target:changed', { id: r.fieldId, name: `BELT · Fyss ${FIELD_K}` });
     r.press.add('cruise');
 
     let dropAtKm = Number.NaN;
+    let finalKm = Number.NaN;
     let minKm = Number.POSITIVE_INFINITY;
     let worstStepOverGap = 0;
     let idleAfter = 0;
@@ -205,15 +218,19 @@ describe('cruise to a belt field', () => {
         dropAtKm = d;
         expect(r.cruise.drive.dropReason).toBe('arrival');
       }
-      if (!Number.isNaN(dropAtKm) && r.cruise.drive.phase === 'idle') idleAfter++;
+      if (!Number.isNaN(dropAtKm) && r.cruise.drive.phase === 'idle') {
+        if (idleAfter === 0) finalKm = d;
+        idleAfter++;
+      }
     }
 
     expect(Number.isNaN(dropAtKm), 'the drive never dropped for the field').toBe(false);
     expect(worstStepOverGap).toBeLessThan(1);
-    // Dropped as it crossed the field's arrival sphere: edge + arrival clearance
-    // (~740 km from the centre), not at the bare clearance from the centre.
-    expect(dropAtKm).toBeLessThan(ARRIVE_CENTRE_KM);
-    expect(dropAtKm).toBeGreaterThan(0.97 * ARRIVE_CENTRE_KM);
+    // Dropped outside the field, and the bleed ended ~30 km past its edge —
+    // close enough that the rocks are in Tab and scan reach.
+    expect(dropAtKm).toBeGreaterThan(FINAL_MIN_KM);
+    expect(finalKm).toBeGreaterThanOrEqual(FINAL_MIN_KM);
+    expect(finalKm).toBeLessThanOrEqual(FINAL_MAX_KM);
     // Through the bleed and a second after it, the ship stays outside the cluster.
     expect(minKm).toBeGreaterThan(FIELD_RADIUS_KM);
     // R21: the arrival is announced under the field's display name.
@@ -222,8 +239,8 @@ describe('cruise to a belt field', () => {
 
   it('Given a field target and a planet farther away, Then cruise does not overshoot the field (speed limited by the field\'s gap)', () => {
     // The planet sits 3 000 000 km beyond the field: its gap (and the star's)
-    // would let the drive run at ~10^6 km/s — 17 000 km a frame, far past a
-    // 740 km arrival sphere. The field's own gap has to govern.
+    // would let the drive run at ~10^6 km/s — 17 000 km a frame, far past the
+    // field. The field's own gap has to govern, all the way down to the drop.
     const r = fieldRig((toField) => toField, { planetBeyondKm: 3_000_000 });
     const start = r.flight.worldPosition.clone();
     const outward = start.clone().sub(r.centre).normalize();
@@ -356,8 +373,11 @@ describe('cruise to a belt field — arrive standing still (R22 §2, §3)', () =
   }
 
   for (const [label, dir] of approaches) {
-    it(`Given an arrival ${label}, Then right after the drop |v_ship − v_field| < 0.01 km/s and the ship stays ≥ FIELD_RADIUS_KM from the centre for 60 s with no input`, () => {
+    it(`Given an arrival ${label}, Then right after the drop the ship is ~30 km past the edge (centre distance in [R + 15, R + 50]), |v_ship − v_field| < 0.01 km/s, and it stays ≥ FIELD_RADIUS_KM from the centre for 60 s with no input`, () => {
       const r = arrive(dir);
+      const handoverKm = r.flight.worldPosition.distanceTo(r.centreNow());
+      expect(handoverKm).toBeGreaterThanOrEqual(FINAL_MIN_KM);
+      expect(handoverKm).toBeLessThanOrEqual(FINAL_MAX_KM);
       // The star is the parent and stands still: flight.velocity is the world velocity.
       const rel = r.flight.velocity.clone().sub(r.fieldVelNow()).length();
       expect(rel).toBeLessThan(0.01);
@@ -374,6 +394,98 @@ describe('cruise to a belt field — arrive standing still (R22 §2, §3)', () =
     const r = arrive(frame.r.clone());
     r.step(4); // the settle is ≤ ~1.5 s; leave it room
     expect(noseErrorRad(r.flight, r.centreNow())).toBeLessThan(5 * (Math.PI / 180));
+  });
+});
+
+describe('cruise to a belt field — the first target is ready (owner decision: usable belt)', () => {
+  const ICE_RICH_KG = 1_000;
+
+  type RockEvent = { id: string; name: string | null };
+
+  /** Fly radially in from outside with the live clock; returns the rig at the handover frame. */
+  function arriveRadial(prepare?: (r: FieldRig) => void): { r: FieldRig; rocks: RockEvent[] } {
+    const r = fieldRig((toField) => toField, { offset: fieldFrame().r.multiplyScalar(START_GAP_KM), liveClock: true });
+    prepare?.(r);
+    bus.emit('target:changed', { id: r.fieldId, name: `BELT · Fyss ${FIELD_K}` });
+    const rocks: RockEvent[] = [];
+    const off = bus.on('target:changed', (e) => {
+      if (e.id !== null && e.id.startsWith('ast:')) rocks.push({ id: e.id, name: e.name });
+    });
+    const prevCleanup = cleanup;
+    cleanup = () => {
+      off();
+      prevCleanup?.();
+    };
+    r.press.add('cruise');
+    let dropped = false;
+    for (let i = 0; i < 90 * 60; i++) {
+      const before = r.cruise.drive.phase;
+      r.step(H);
+      if (before === 'cruise' && r.cruise.drive.phase === 'dropping') dropped = true;
+      if (dropped && r.cruise.drive.phase === 'idle') return { r, rocks };
+    }
+    throw new Error(`no field arrival within 90 s (phase ${r.cruise.drive.phase})`);
+  }
+
+  /** Field 398's rocks by surface distance from the ship now, nearest first. */
+  function bySurfaceDistance(r: FieldRig): Array<{ id: string; km: number }> {
+    const w = new Vector3();
+    return fyssField(FIELD_K)
+      .asteroids.map((a) => {
+        expect(r.b.belt.asteroidWorld(a.id, w)).toBe(true);
+        return { id: a.id, km: w.distanceTo(r.flight.worldPosition) - a.radiusKm };
+      })
+      .sort((x, y) => x.km - y.km);
+  }
+
+  /** The first rock target after the handover (waits at most 1 s for it). */
+  function firstRock(r: FieldRig, rocks: RockEvent[]): RockEvent {
+    for (let i = 0; i < 60 && rocks.length === 0; i++) r.step(H);
+    expect(rocks.length, 'no target:changed to a rock after the field arrival').toBeGreaterThan(0);
+    return rocks[0]!;
+  }
+
+  it('Given a field arrival, Then target:changed selects the nearest ice-rich rock (≥ 1 000 kg ice remaining) of that field, named as Tab names it', () => {
+    const { r, rocks } = arriveRadial();
+    const want = bySurfaceDistance(r).find((x) => r.b.belt.remainingKg(x.id, 'ice') >= ICE_RICH_KG);
+    expect(want, 'the field has an ice-rich rock').toBeDefined();
+    const got = firstRock(r, rocks);
+    expect(got.id).toBe(want!.id);
+    expect(got.id.startsWith(`ast:${startSystem().id}:${FIELD_K}:`)).toBe(true);
+    expect(got.name).toBe(beltTargetName(got.id));
+  });
+
+  it('Given the nearest ice-rich rock already mined below 1 000 kg ice, When the field is reached, Then the next-nearest ice-rich rock is selected', () => {
+    // A dry run finds the rock the arrival would pick (the flight is deterministic).
+    const dry = arriveRadial();
+    const first = firstRock(dry.r, dry.rocks).id;
+    cleanup?.();
+    cleanup = null;
+    bus.emit('target:changed', { id: null, name: null });
+
+    const { r, rocks } = arriveRadial((rig) => {
+      const left = rig.b.belt.remainingKg(first, 'ice');
+      rig.b.worldState.recordMined(first, 'ice', left - (ICE_RICH_KG - 1), 'local');
+      expect(rig.b.belt.remainingKg(first, 'ice')).toBe(ICE_RICH_KG - 1);
+    });
+    const want = bySurfaceDistance(r).find((x) => r.b.belt.remainingKg(x.id, 'ice') >= ICE_RICH_KG);
+    expect(want).toBeDefined();
+    const got = firstRock(r, rocks);
+    expect(got.id).not.toBe(first);
+    expect(got.id).toBe(want!.id);
+  });
+
+  it('Given every rock in the field below 1 000 kg ice, When the field is reached, Then the nearest rock is selected', () => {
+    const { r, rocks } = arriveRadial((rig) => {
+      for (const a of fyssField(FIELD_K).asteroids) {
+        const left = rig.b.belt.remainingKg(a.id, 'ice');
+        if (left >= ICE_RICH_KG) rig.b.worldState.recordMined(a.id, 'ice', left, 'local');
+      }
+    });
+    const ranked = bySurfaceDistance(r);
+    for (const x of ranked) expect(r.b.belt.remainingKg(x.id, 'ice')).toBeLessThan(ICE_RICH_KG);
+    const got = firstRock(r, rocks);
+    expect(got.id).toBe(ranked[0]!.id);
   });
 });
 

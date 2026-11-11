@@ -20,6 +20,7 @@ import { orbitalPosition } from './orbit';
 import { AU, type StarSystemSpec, type Vec3 } from './types';
 import { DEFAULT_UNIVERSE_SEED } from '@/game/Universe';
 import {
+  ASTEROID_RADIUS_KM,
   FIELDS_PER_BELT,
   FIELD_RADIUS_KM,
   beltFor,
@@ -134,16 +135,17 @@ describe('fieldSpec — determinism and identity', () => {
 });
 
 describe('fieldSpec — asteroids', () => {
-  it('Given any field, Then 12–30 asteroids, radii in [0.05, 0.6] km, every offset within FIELD_RADIUS_KM, composition kg all ≥ 0 and finite', () => {
-    expect(FIELD_RADIUS_KM).toBe(40);
+  it('Given any field, Then 12–30 asteroids, radii in [0.4, 4] km, every offset within FIELD_RADIUS_KM (80), composition kg all ≥ 0 and finite', () => {
+    expect(FIELD_RADIUS_KM).toBe(80);
+    expect(ASTEROID_RADIUS_KM).toEqual([0.4, 4]);
     expect(OTHER_FIELDS.length).toBeGreaterThan(0);
     for (const f of ALL_FIELDS) {
       expect(f.radiusKm).toBe(FIELD_RADIUS_KM);
       expect(f.asteroids.length).toBeGreaterThanOrEqual(12);
       expect(f.asteroids.length).toBeLessThanOrEqual(30);
       for (const a of f.asteroids) {
-        expect(a.radiusKm).toBeGreaterThanOrEqual(0.05);
-        expect(a.radiusKm).toBeLessThanOrEqual(0.6);
+        expect(a.radiusKm).toBeGreaterThanOrEqual(0.4);
+        expect(a.radiusKm).toBeLessThanOrEqual(4);
         const [x, y, z] = a.offsetKm;
         expect(Math.hypot(x, y, z)).toBeLessThanOrEqual(FIELD_RADIUS_KM);
         for (const r of RESOURCES) {
@@ -160,6 +162,61 @@ describe('fieldSpec — asteroids', () => {
       const icy = f.asteroids.filter((a) => a.composition.ice >= 1000).length;
       expect(icy, f.id).toBeGreaterThanOrEqual(3);
     }
+  });
+});
+
+describe('fieldSpec — bigger rocks that never overlap (owner decision: usable belt)', () => {
+  /** Every field of every belted start candidate: 512 × the belted systems. */
+  const EVERY_FIELD: FieldSpec[] = CANDIDATES.flatMap((s) => {
+    const b = beltFor(s);
+    return b ? Array.from({ length: b.fieldCount }, (_, k) => fieldSpec(b, s.seed, k)) : [];
+  });
+
+  it('Given every field of every belted start system, Then no two asteroids overlap: centre distance ≥ r1 + r2 + 0.5 km for every pair', () => {
+    expect(EVERY_FIELD.length).toBeGreaterThanOrEqual(2 * FIELDS_PER_BELT);
+    let pairs = 0;
+    for (const f of EVERY_FIELD) {
+      const as = f.asteroids;
+      for (let i = 0; i < as.length; i++) {
+        for (let j = i + 1; j < as.length; j++) {
+          const a = as[i]!;
+          const b = as[j]!;
+          const d = Math.hypot(a.offsetKm[0] - b.offsetKm[0], a.offsetKm[1] - b.offsetKm[1], a.offsetKm[2] - b.offsetKm[2]);
+          pairs++;
+          if (d < a.radiusKm + b.radiusKm + 0.5) {
+            expect.fail(`${a.id} and ${b.id} overlap: centres ${d.toFixed(3)} km apart, radii ${a.radiusKm.toFixed(3)} + ${b.radiusKm.toFixed(3)}`);
+          }
+        }
+      }
+    }
+    expect(pairs).toBeGreaterThan(0);
+  });
+
+  it('Given every field of every belted start system, Then the radii fill [0.4, 4] km (some rocks above 2 km, none below 0.4) and every field keeps ≥ 3 rocks with ≥ 1 000 kg ice', () => {
+    let big = 0;
+    for (const f of EVERY_FIELD) {
+      for (const a of f.asteroids) {
+        expect(a.radiusKm, a.id).toBeGreaterThanOrEqual(0.4);
+        expect(a.radiusKm, a.id).toBeLessThanOrEqual(4);
+        if (a.radiusKm > 2) big++;
+      }
+      expect(f.asteroids.filter((a) => a.composition.ice >= 1000).length, f.id).toBeGreaterThanOrEqual(3);
+    }
+    expect(big).toBeGreaterThan(0);
+  });
+
+  it('Given every asteroid, Then its extractable mass stays in [5 000, 65 000] kg — the resource economy is not scaled with the bigger rocks', () => {
+    let lo = Number.POSITIVE_INFINITY;
+    let hi = 0;
+    for (const f of EVERY_FIELD) {
+      for (const a of f.asteroids) {
+        const sum = RESOURCES.reduce((s, r) => s + a.composition[r], 0);
+        lo = Math.min(lo, sum);
+        hi = Math.max(hi, sum);
+      }
+    }
+    expect(lo).toBeGreaterThanOrEqual(5000 - 2);
+    expect(hi).toBeLessThanOrEqual(65000 + 2);
   });
 });
 
@@ -380,7 +437,7 @@ describe('fieldSpec — constants and composition rules', () => {
     for (const f of ALL_FIELDS) {
       for (const a of f.asteroids) {
         const sum = RESOURCES.reduce((s, r) => s + a.composition[r], 0);
-        const expected = 5000 + 60000 * ((a.radiusKm - 0.05) / (0.6 - 0.05));
+        const expected = 5000 + 60000 * ((a.radiusKm - 0.4) / (4 - 0.4));
         expect(Math.abs(sum - expected)).toBeLessThanOrEqual(2);
       }
     }

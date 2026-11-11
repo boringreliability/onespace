@@ -18,6 +18,7 @@ import type { ScanResult } from '@/gen/types';
 import { Belt } from './Belt';
 import { ShipLog } from './Log';
 import { Scanner, type ScannerOptions } from './Scanner';
+import { ASTEROID_SCAN_RANGE_KM } from './scanChoice';
 import { WorldState } from './worldState';
 import { fieldCentre, fyssField, nodeCtx, startSystem } from './testing/beltFixture';
 
@@ -48,11 +49,13 @@ afterEach(() => {
 const F = fyssField(398);
 const AST = F.asteroids.find((a) => a.composition.ice >= 1_000)!;
 
-function rig() {
+/** `surfaceKm`: put the ship this far from the asteroid's SURFACE (default: 5 km from its centre). */
+function rig(opts: { surfaceKm?: number } = {}) {
   const centre = fieldCentre(F, 0);
   // 5 km from the asteroid, nose on it.
   const astWorld = new Vector3(centre.x + AST.offsetKm[0], centre.y + AST.offsetKm[1], centre.z + AST.offsetKm[2]);
-  const ship = astWorld.clone().add(new Vector3(5, 0, 0));
+  const off = opts.surfaceKm === undefined ? 5 : AST.radiusKm + opts.surfaceKm;
+  const ship = astWorld.clone().add(new Vector3(off, 0, 0));
   const universe = {
     system: startSystem(),
     orbitSeconds: 0,
@@ -152,5 +155,27 @@ describe('Scanner — asteroids', () => {
     expect(entries).toHaveLength(1);
     expect(entries[0]!.body).toEqual(second.lines);
     expect(numbersIn(lineFor(entries[0]!.body, 'ice'))).toContain(Math.round(AST.composition.ice - 1_000));
+  });
+});
+
+describe('Scanner — asteroid reach is 150 km from the surface (owner decision: usable belt)', () => {
+  it('Then ASTEROID_SCAN_RANGE_KM is 150', () => {
+    expect(ASTEROID_SCAN_RANGE_KM).toBe(150);
+  });
+
+  it("Given T on an asteroid target whose SURFACE is 149 km away (centre farther than 150 km), Then it is scanned (kind 'asteroid'), not BEYOND ARRAY RANGE", () => {
+    const r = rig({ surfaceKm: 149 });
+    const res = r.scan();
+    expect(res, `logs: ${r.logs.join(' | ')}`).toBeDefined();
+    expect(res!.targetId).toBe(AST.id);
+    expect(res!.kind).toBe('asteroid');
+    expect(r.logs.some((l) => l.includes('BEYOND ARRAY RANGE'))).toBe(false);
+  });
+
+  it('Given T on an asteroid target whose surface is 151 km away, Then no scan completes and the log says BEYOND ARRAY RANGE', () => {
+    const r = rig({ surfaceKm: 151 });
+    const res = r.scan();
+    expect(res).toBeUndefined();
+    expect(r.logs.some((l) => l.includes('BEYOND ARRAY RANGE')), r.logs.join(' | ')).toBe(true);
   });
 });

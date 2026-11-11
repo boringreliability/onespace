@@ -158,17 +158,17 @@ function idAt(belt: StubBelt, ctx: ReturnType<typeof nodeCtx>, p: Vector3, tolKm
 }
 
 describe('Asteroids — instanced, in render space', () => {
-  it('Given 30 asteroids within 400 km, Then exactly 30 instances are active, spread over ≤ 8 meshes, and each instance\'s matrix places it at origin.toRender(asteroidWorld)', () => {
+  it('Given 30 asteroids within 1 500 km, Then exactly 30 instances are active, spread over ≤ 8 meshes, and each instance\'s matrix places it at origin.toRender(asteroidWorld)', () => {
     const { belt, ctx, asteroids, frame } = rig();
-    expect(ASTEROID_DRAW_KM).toBe(400);
+    expect(ASTEROID_DRAW_KM).toBe(1_500);
     expect(ASTEROID_VARIANTS).toBe(8);
     for (let i = 0; i < 30; i++) {
-      const at = SHIP.clone().add(dir(i, 30).multiplyScalar(5 + i * 13)); // 5 … 382 km
-      belt.add(`ast:test:0:${i}`, at, 0.05 + 0.018 * i, 1000 + i * 7);
+      const at = SHIP.clone().add(dir(i, 30).multiplyScalar(5 + i * 50)); // 5 … 1 455 km
+      belt.add(`ast:test:0:${i}`, at, 0.4 + 0.12 * i, 1000 + i * 7);
     }
     // Beyond the draw distance: never drawn.
     for (let i = 0; i < 5; i++) {
-      belt.add(`ast:test:1:${i}`, SHIP.clone().add(dir(i, 5).multiplyScalar(420 + i * 50)), 0.3, 77 + i);
+      belt.add(`ast:test:1:${i}`, SHIP.clone().add(dir(i, 5).multiplyScalar(1_520 + i * 50)), 2, 77 + i);
     }
 
     frame();

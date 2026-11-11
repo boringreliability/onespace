@@ -10,8 +10,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { FIELD_RADIUS_KM } from '@/gen/belt';
-import { CRUISE_DEFAULTS, CruiseDrive, cruiseCapKmS, holdClearanceKm, type CruiseInputs } from './CruiseDrive';
+import { CRUISE_DEFAULTS, CruiseDrive, cruiseCapKmS, type CruiseInputs } from './CruiseDrive';
 import { sequenceFingerprint } from './testing/cruiseSequence';
 
 /**
@@ -43,15 +42,15 @@ describe('CruiseDrive — a limit at or below zero is never used', () => {
   }
 
   for (const limitKm of [0, -5, -1e6]) {
-    it(`Given cruise with limitKm = ${limitKm}, Then the ceiling is floored at the hold clearance (never 0 km/s)`, () => {
+    it(`Given cruise with limitKm = ${limitKm}, Then the ceiling is floored at the field arrival gap (never 0 km/s)`, () => {
       const d = cruisingWith(limitKm);
       expect(d.phase).toBe('cruise');
       expect(d.capKmS).toBeGreaterThan(0);
-      // holdClearanceKm(FIELD_RADIUS_KM) is the floor R22 names; it equals the
-      // drive's own drop clearance (700 km), so the drive can floor without
-      // knowing what the limit belongs to.
-      expect(holdClearanceKm(FIELD_RADIUS_KM)).toBe(CRUISE_DEFAULTS.dropClearanceKm);
-      expect(d.capKmS).toBeGreaterThanOrEqual(cruiseCapKmS(holdClearanceKm(FIELD_RADIUS_KM)));
+      // Owner decision (usable belt): the limit's floor is the FIELD ARRIVAL
+      // gap (~30 km past the edge, inside [15, 50] km), no longer the 700 km
+      // hold clearance — the drive must bleed down to a ~30 km drop.
+      expect(d.capKmS).toBeGreaterThanOrEqual(cruiseCapKmS(15));
+      expect(d.capKmS).toBeLessThan(cruiseCapKmS(50));
     });
   }
 
@@ -128,11 +127,20 @@ describe('CruiseDrive — the limit never exceeds the clearance (hardening)', ()
     expect(d.capKmS).toBeLessThan(cruiseCapKmS(50_000));
   });
 
-  it('Given limitKm exactly at the floor (700 km), Then the ceiling follows it', () => {
+  it('Given limitKm 700 km (the old floor), Then the ceiling follows it', () => {
     const d = new CruiseDrive();
     const base: CruiseInputs = { requested: true, clearanceKm: 1e6, grounded: false, atmosphericDensity: 0 };
     for (let t = 0; t < CRUISE_DEFAULTS.spoolTime + 0.2; t += 1 / 60) d.update(1 / 60, base);
     for (let i = 0; i < 30; i++) d.update(1 / 60, { ...base, limitKm: 700 });
     expect(d.capKmS).toBe(cruiseCapKmS(700));
+  });
+
+  it('Given limitKm 50 km (below the old 700 km floor, above the field arrival gap), Then the ceiling follows it all the way down', () => {
+    const d = new CruiseDrive();
+    const base: CruiseInputs = { requested: true, clearanceKm: 1e6, grounded: false, atmosphericDensity: 0 };
+    for (let t = 0; t < CRUISE_DEFAULTS.spoolTime + 0.2; t += 1 / 60) d.update(1 / 60, base);
+    for (let i = 0; i < 30; i++) d.update(1 / 60, { ...base, limitKm: 50 });
+    expect(d.phase).toBe('cruise');
+    expect(d.capKmS).toBe(cruiseCapKmS(50));
   });
 });

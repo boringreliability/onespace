@@ -23,7 +23,7 @@ import { closingSpeed } from '@/game/targets';
 import { DEFAULT_SHIP_CONFIG, FlightModel } from '@/ship/FlightModel';
 import type { HudTarget } from '@/ui/Hud';
 import { Belt } from './Belt';
-import { Targeting, type TargetingOptions } from './Targeting';
+import { TAB_ASTEROID_RANGE_KM, Targeting, type TargetingOptions } from './Targeting';
 import { WorldState } from './worldState';
 import { fieldCentre, fieldVelocity, fyssBelt, fyssField, nodeCtx, startSystem } from './testing/beltFixture';
 
@@ -122,6 +122,45 @@ describe('Targeting — asteroids in the Tab cycle', () => {
     for (const id of seen) {
       if (id.startsWith('ast:')) expect(id.startsWith(`ast:${startSystem().id}:${K}:`), id).toBe(true);
     }
+  });
+});
+
+describe('Targeting — Tab reaches rocks 150 km from their surface (owner decision: usable belt)', () => {
+  /** The biggest rock of field K, the ship `surfaceKm` from its surface on the side away from the field centre. */
+  function nearBigRock(surfaceKm: number) {
+    const f = fyssField(K);
+    const a = [...f.asteroids].sort((x, y) => y.radiusKm - x.radiusKm)[0]!;
+    const centre = fieldCentre(f, 0);
+    const astWorld = new Vector3(centre.x + a.offsetKm[0], centre.y + a.offsetKm[1], centre.z + a.offsetKm[2]);
+    const out = new Vector3(...a.offsetKm).normalize();
+    const ship = astWorld.clone().add(out.multiplyScalar(a.radiusKm + surfaceKm));
+    return { f, a, r: rig({ ship }) };
+  }
+
+  function cycle(r: ReturnType<typeof rig>, n: number): Set<string> {
+    const seen = new Set<string>();
+    for (let i = 0; i < n; i++) {
+      const id = r.pressTab();
+      if (id) seen.add(id);
+    }
+    return seen;
+  }
+
+  it('Then TAB_ASTEROID_RANGE_KM is 150', () => {
+    expect(TAB_ASTEROID_RANGE_KM).toBe(150);
+  });
+
+  it('Given a rock whose SURFACE is 149 km away (its centre farther than 150 km), When Tab is cycled, Then that rock is a candidate', () => {
+    const { f, a, r } = nearBigRock(149);
+    expect(a.radiusKm).toBeGreaterThan(0); // centre at 149 + r km
+    const seen = cycle(r, 2 * (f.asteroids.length + r.bodies.length + 1));
+    expect(seen.has(a.id), `${a.id} (r ${a.radiusKm} km) not in ${[...seen].join(', ')}`).toBe(true);
+  });
+
+  it('Given a rock whose surface is 151 km away, When Tab is cycled, Then that rock is not a candidate', () => {
+    const { f, a, r } = nearBigRock(151);
+    const seen = cycle(r, 2 * (f.asteroids.length + r.bodies.length + 1));
+    expect(seen.has(a.id)).toBe(false);
   });
 });
 
