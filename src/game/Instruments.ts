@@ -34,6 +34,7 @@ import { createCargoReadout, readCargo } from '@/ui/cargoReadout'; // [v4-mining
 import { cruiseArrivalEta, cruiseReadout } from '@/game/cruiseReadout';
 import { WorldMarker } from '@/game/worldMarker';
 import type { CruisePhase } from '@/ship/CruiseDrive';
+import { beltTargetName, type Belt } from '@/game/Belt';
 
 /** What Instruments reads of the cruise drive (T3's public state). Read-only. */
 export interface InstrumentsCruise {
@@ -47,6 +48,12 @@ export interface InstrumentsTargeting {
   readonly targetId: string | null;
 }
 
+/** [v4-mining] What Instruments reads of the field frame (FlightSense). Read-only. */
+export interface InstrumentsFieldFrame {
+  /** The field id the ship flies in, or null. */
+  readonly fieldFrame: string | null;
+}
+
 /** Below this stick or axis magnitude the pilot is hands-off. */
 const INPUT_ACTIVE = 0.02;
 
@@ -56,6 +63,12 @@ export interface InstrumentsOptions {
   /** v3: the drive's state for the cruise readout. Optional for tests/shots. */
   readonly cruise?: InstrumentsCruise | null;
   readonly targeting?: InstrumentsTargeting | null;
+  /**
+   * [v4-mining] In a belt field's frame VEL, its label and the velocity
+   * markers are relative to the field. Both absent: v3.
+   */
+  readonly fieldFrame?: InstrumentsFieldFrame | null;
+  readonly belt?: Pick<Belt, 'fieldVelocity'> | null;
 }
 
 export class Instruments implements GameModule {
@@ -65,6 +78,14 @@ export class Instruments implements GameModule {
   private readonly hud: Hud;
   private readonly cruise: InstrumentsCruise | null;
   private readonly targeting: InstrumentsTargeting | null;
+  private readonly fieldFrame: InstrumentsFieldFrame | null;
+  private readonly belt: Pick<Belt, 'fieldVelocity'> | null;
+  /** [v4-mining] VEL relative to the field, parent frame (scratch). */
+  private readonly fieldRel = new Vector3();
+  private readonly fieldVel = new Vector3();
+  /** Cached field label: beltTargetName allocates. */
+  private labelId: string | null = null;
+  private label = '';
 
   // Preallocated (ARCHITECTURE §5).
   private readonly pro = new Vector3();
@@ -92,6 +113,7 @@ export class Instruments implements GameModule {
     velFrame: null,
     proxBody: null,
     proxAltKm: null,
+    speedKmS: null,
   };
 
   /** [v4-mining] Refilled in place every frame. */
@@ -102,6 +124,22 @@ export class Instruments implements GameModule {
     this.hud = opts.hud;
     this.cruise = opts.cruise ?? null;
     this.targeting = opts.targeting ?? null;
+    this.fieldFrame = opts.fieldFrame ?? null;
+    this.belt = opts.belt ?? null;
+  }
+
+  /**
+   * [v4-mining] The field id when in a field's frame, with `fieldRel` set to
+   * the ship's velocity relative to the field; else null.
+   */
+  private fieldRelative(): string | null {
+    const id = this.fieldFrame ? this.fieldFrame.fieldFrame : null;
+    if (id === null || !this.belt || !this.belt.fieldVelocity(id, this.fieldVel)) return null;
+    const u = this.universe;
+    this.fieldRel.copy(u.flight.velocity);
+    if (u.shipParent) this.fieldRel.add(u.shipParent.worldVelocity);
+    this.fieldRel.sub(this.fieldVel);
+    return id;
   }
 
   update(dt: number, ctx: EngineContext): void {
@@ -110,11 +148,16 @@ export class Instruments implements GameModule {
     const flight = u.flight;
     const p = this.packet;
 
+    // [v4-mining] In a field's frame VEL and the markers are field-relative.
+    const fieldId = this.fieldRelative();
+    const vel = fieldId !== null ? this.fieldRel : flight.velocity;
+    p.speedKmS = fieldId !== null ? this.fieldRel.length() : null;
+
     // --- velocity markers: parent-relative, as VEL is ----------------------
     // v3 A8: the direction is damped in world space and the result projected
     // through this frame's camera, so a turning or shaking camera cannot
     // drag the marker off the sky. Retrograde is its exact opposite.
-    p.hasVelocity = velocityMarkers(flight.velocity, this.pro, this.retro);
+    p.hasVelocity = velocityMarkers(vel, this.pro, this.retro);
     if (!p.hasVelocity) this.proMarker.reset();
     if (p.hasVelocity) {
       const d = this.proMarker.step(this.pro, dt);
@@ -144,7 +187,7 @@ export class Instruments implements GameModule {
         nearestName: u.nearest ? u.nearest.spec.name : null,
         nearestAltKm: u.nearestAltitudeKm,
       },
-      parentName ?? u.system.name,
+      fieldId !== null ? this.fieldLabel(fieldId) : (parentName ?? u.system.name),
     );
     const alt = ac.alt;
     p.altitudeKm = alt ? alt.altitudeKm : null;
@@ -200,6 +243,14 @@ export class Instruments implements GameModule {
     // Hidden while the pointer is free: the stick only exists under lock.
     const d = ctx.input.stickDeflection;
     this.hud.setStickDeflection(document.pointerLockElement ? d.x : null, d.y);
+  }
+
+  private fieldLabel(id: string): string {
+    if (id !== this.labelId) {
+      this.labelId = id;
+      this.label = beltTargetName(id, this.universe.system.name) ?? id;
+    }
+    return this.label;
   }
 
   /**

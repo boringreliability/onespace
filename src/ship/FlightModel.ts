@@ -1143,12 +1143,15 @@ export class FlightModel {
     const vset = this._assistState === 'hold' ? assistTargetSpeed(cmd.throttle, vmax) : 0;
     this._assistTarget = vset;
 
-    // Velocity the computer flies to: nose·vset in a hold, rest in a stop.
+    // Velocity the computer flies to: nose·vset in a hold, rest in a stop —
+    // both relative to the reference when there is one.
     // [seam:T4 formation] the reference velocity is added HERE and only here
     // (target = ref + nose·vset); the overspeed cut below then measures
     // |v_p − ref| instead of |v_p|.
     const target = this.sTmp2.copy(this.forward).multiplyScalar(vset);
-    const ref = this._assistState === 'hold' ? this._assistRef : null; // [v3-T4] formation
+    // [v3-T4] formation; [v4-mining] ruling R-rocks (a): Space-stop is a stop
+    // RELATIVE to the reference too (the companion, the rock, the field).
+    const ref = this._assistRef;
     if (ref) target.add(ref);
 
     // Lead-compensated velocity v_p = v + τa·(a_out + g): where v settles if

@@ -38,6 +38,8 @@ import {
   type AutopilotRefusal,
 } from '@/ship/autopilot';
 import { autoLandVerdict, landingEstimateKg } from '@/ui/propellantReadout';
+import { beltTargetName, type Belt } from '@/game/Belt';
+import { APPROACH_FINAL_KM, Approach, approachEstimateKg } from '@/ship/approach';
 
 /**
  * The part of Universe this module reads — structural, so node tests can
@@ -57,6 +59,8 @@ export interface AutoPilotWorld {
       readonly axialTilt?: number;
     };
     readonly frame: { readonly mu: number };
+    /** [v4-mining] World velocity of the parent (the approach's rock velocity is made relative to it). */
+    readonly worldVelocity?: { readonly x: number; readonly y: number; readonly z: number };
   } | null;
 }
 
@@ -81,6 +85,16 @@ export interface AutoPilotOptions {
    * Omitted = only `flight.cruising` counts.
    */
   readonly cruise?: { readonly busy: boolean };
+  /**
+   * [v4-mining] With an asteroid targeted, L parks at it (ship/approach.ts)
+   * instead of landing. The target comes from `target:changed`. Absent: v3.
+   */
+  readonly belt?: Pick<Belt, 'asteroidWorld' | 'asteroidVelocity' | 'asteroidSpec'> | null;
+  /**
+   * [v4-mining] True when the orbit clock has already been advanced for the
+   * slice `sliceStep` is called before (Universe does that). Default false.
+   */
+  readonly orbitClockLeadsSlice?: boolean;
 }
 
 export const AUTOPILOT_DISENGAGED = 'AUTOPILOT DISENGAGED';
@@ -92,6 +106,14 @@ export const AUTOPILOT_PROPELLANT_LOW = 'AUTOPILOT · PROPELLANT LOW';
 export const AUTOPILOT_PROPELLANT_MARGINAL = 'AUTOPILOT · PROPELLANT MARGINAL';
 /** v4 fuel: the tank ran dry mid-leg; the computer lets go. */
 export const AUTOPILOT_OFF_PROPELLANT = 'AUTOPILOT OFF · PROPELLANT';
+/** [v4-mining] L on a rock: the approach has arrived. */
+export const APPROACH_PARKED = 'PARKED · 0.3 KM — B TO MINE';
+/** [v4-mining] L on a rock outside its field's frame (FA is not referenced to the rock). */
+export const APPROACH_DENIED_FIELD = 'AUTOPILOT DENIED — NOT IN THE FIELD';
+
+export function approachLog(rockName: string): string {
+  return `APPROACH — ${rockName.toUpperCase()}`;
+}
 
 function refusalText(r: AutopilotRefusal, preset: FlightPresetSpec): string {
   switch (r) {
@@ -121,6 +143,16 @@ export class AutoPilot implements GameModule {
   private readonly warp: { readonly phase: string };
   private readonly preset: () => FlightPresetSpec;
   private readonly cruise: { readonly busy: boolean } | null;
+  // --- [v4-mining] L on a rock ---------------------------------------------
+  private readonly approach = new Approach();
+  private readonly belt: AutoPilotOptions['belt'] | null;
+  private targetId: string | null = null;
+  /** The rock the approach is flying to. */
+  private approachId: string | null = null;
+  private readonly rockWorld = new Vector3();
+  private readonly rockVel = new Vector3();
+  /** The orbit clock runs one slice ahead of `sliceStep` (Universe's slice loop). */
+  private readonly orbitLead: boolean;
   /** v3: L was pressed during cruise; engage when cruise is idle. */
   private _queued = false;
   /** Set by `sliceStep` when the leg completed inside a slice. */
@@ -140,17 +172,20 @@ export class AutoPilot implements GameModule {
     this.warp = opts.warp;
     this.preset = opts.preset ?? activeFlightPreset;
     this.cruise = opts.cruise ?? null;
+    this.belt = opts.belt ?? null;
+    this.orbitLead = opts.orbitClockLeadsSlice ?? false;
   }
 
   /** True while the computer has the controls — time compression reads it. */
   get active(): boolean {
-    return this.core.active;
+    return this.core.active || this.approach.active;
   }
   get goal(): AutopilotGoal | null {
-    return this.core.goal;
+    return this.approach.active ? 'approach' : this.core.goal;
   }
   /** The leg's phase ('idle' when nothing flies) — TimeControl's rate reads it. */
   get phase(): AutopilotPhase {
+    if (this.approach.active) return this.approach.toGoKm > APPROACH_FINAL_KM ? 'approach' : 'approach-final';
     return this.core.phase;
   }
   /** A landing is waiting for cruise to finish. */
@@ -169,6 +204,9 @@ export class AutoPilot implements GameModule {
       bus.on('ship:recovered', end), // RETURN TO ORBIT keeps the parent: nothing else ends the leg
       bus.on('system:entered', end),
       bus.on('warp:engaged', end),
+      bus.on('target:changed', (e) => {
+        this.targetId = e.id;
+      }),
     );
   }
 
@@ -182,6 +220,10 @@ export class AutoPilot implements GameModule {
    * each slice. Writes the command; a completed leg is handed back here.
    */
   sliceStep(h: number): void {
+    if (this.approach.active) {
+      this.approachSlice(h);
+      return;
+    }
     if (!this.core.active) return;
     if (this.releaseIfStarved()) return;
     // review-v3b: Universe re-parents after each slice; at 10× the rest of
@@ -213,8 +255,27 @@ export class AutoPilot implements GameModule {
 
     if (this._queued) {
       this.updateQueue(input, flight);
-    } else if (this.core.active && this.releaseIfStarved()) {
+    } else if (this.active && this.releaseIfStarved()) {
       // v4 fuel: the tank ran dry — handed back, nothing else to judge.
+    } else if (this.approach.active) {
+      // [v4-mining] The approach flies THROUGH FA: FA turned off is a takeover.
+      const k = this.keys;
+      k.throttleKeys = input.isDown('KeyW') || input.isDown('KeyS');
+      k.brake = input.held('brake');
+      k.boost = input.held('boost');
+      k.zeroThrottle = input.pressed('zeroThrottle');
+      if (
+        input.pressed('land') ||
+        pilotIntervened(input.axes, this.prev, k) ||
+        !flight.flightAssist ||
+        !this.preset().autopilot ||
+        this.warp.phase !== 'idle' ||
+        flight.cruising ||
+        this.universe.shipParent !== this.parent ||
+        this.targetId !== this.approachId
+      ) {
+        this.disengage(true);
+      }
     } else if (this.core.active) {
       const k = this.keys;
       k.throttleKeys = input.isDown('KeyW') || input.isDown('KeyS');
@@ -275,6 +336,11 @@ export class AutoPilot implements GameModule {
   private tryEngage(input: ControlInput, flight: FlightModel, fromQueue = false): void {
     const parent = this.universe.shipParent;
     const preset = this.preset();
+    // [v4-mining] An asteroid targeted, in flight and out of cruise: park at it.
+    if (!flight.grounded && !this.cruiseBusy(flight) && this.isRock(this.targetId)) {
+      this.tryApproach(input, flight, this.targetId!);
+      return;
+    }
     // v3: in cruise the landing waits for the drive instead of refusing.
     if (!fromQueue && preset.autopilot && this.cruiseBusy(flight) && this.warp.phase === 'idle') {
       this._queued = true;
@@ -323,6 +389,87 @@ export class AutoPilot implements GameModule {
     if (marginal) bus.emit('log', { text: AUTOPILOT_PROPELLANT_MARGINAL, tone: 'warn' });
   }
 
+  /** [v4-mining] A rock the Belt knows. */
+  private isRock(id: string | null): boolean {
+    return id !== null && id.startsWith('ast:') && !!this.belt && this.belt.asteroidSpec(id) !== null;
+  }
+
+  /**
+   * [v4-mining] The rock's centre and its velocity, parent-relative. `backS`:
+   * Universe advances the orbit clock BEFORE each slice's guidance, so the
+   * rock is read one slice ahead of the ship; it is moved back to the ship's
+   * time (at a field's ~18 km/s one slice is ~0.3 km — the whole standoff).
+   */
+  private readRock(id: string, backS = 0): boolean {
+    const belt = this.belt;
+    if (!belt || !belt.asteroidWorld(id, this.rockWorld) || !belt.asteroidVelocity(id, this.rockVel)) return false;
+    if (backS > 0) this.rockWorld.addScaledVector(this.rockVel, -backS);
+    const pv = this.universe.shipParent?.worldVelocity;
+    if (pv) this.rockVel.set(this.rockVel.x - pv.x, this.rockVel.y - pv.y, this.rockVel.z - pv.z);
+    return true;
+  }
+
+  /** [v4-mining] L with a rock targeted: the refusals, the tank check, engage. */
+  private tryApproach(input: ControlInput, flight: FlightModel, id: string): void {
+    const preset = this.preset();
+    const refusal = autopilotRefusal({
+      presetAllows: preset.autopilot,
+      cruising: flight.cruising,
+      warpIdle: this.warp.phase === 'idle',
+      hasWorld: true,
+      distanceRadii: 0,
+    });
+    if (refusal !== null) {
+      bus.emit('log', { text: refusalText(refusal, preset), tone: 'warn' });
+      return;
+    }
+    const spec = this.belt!.asteroidSpec(id);
+    if (!spec || !this.readRock(id)) return;
+    // The computer flies through FA, whose reference must be the rock's
+    // velocity: the field frame (or formation on it). Outside it, refuse.
+    const ref = flight.assistReferenceVelocity;
+    if (!ref || ref.distanceTo(this.rockVel) > 1e-3) {
+      bus.emit('log', { text: APPROACH_DENIED_FIELD, tone: 'warn' });
+      return;
+    }
+    let marginal = false;
+    const tank = flight.propellant;
+    if (tank !== null) {
+      const surfaceKm = this.rockWorld.distanceTo(flight.worldPosition) - spec.radiusKm;
+      const relKmS = this.rockVel.distanceTo(flight.velocity);
+      const verdict = autoLandVerdict(tank.massKg, approachEstimateKg(flight, surfaceKm, relKmS));
+      if (verdict === 'refuse') {
+        bus.emit('log', { text: AUTOPILOT_PROPELLANT_LOW, tone: 'warn' });
+        return;
+      }
+      marginal = verdict === 'marginal';
+    }
+    this.parent = this.universe.shipParent;
+    this.approachId = id;
+    this.approach.engage(flight, this.rockWorld, spec.radiusKm);
+    this.lastPhase = this.phase;
+    input.setThrottle(0);
+    bus.emit('log', { text: approachLog(beltTargetName(id) ?? id), tone: 'good' });
+    if (marginal) bus.emit('log', { text: AUTOPILOT_PROPELLANT_MARGINAL, tone: 'warn' });
+  }
+
+  /** [v4-mining] One slice of the approach; parks and hands back on arrival. */
+  private approachSlice(h: number): void {
+    if (this.releaseIfStarved()) return;
+    const flight = this.universe.flight;
+    const id = this.approachId;
+    if (this.universe.shipParent !== this.parent || id === null || !this.readRock(id, this.orbitLead ? h : 0)) {
+      this.disengage(true);
+      return;
+    }
+    // rockVel becomes the ship's velocity relative to the rock.
+    this.rockVel.set(flight.velocity.x - this.rockVel.x, flight.velocity.y - this.rockVel.y, flight.velocity.z - this.rockVel.z);
+    if (this.approach.step(flight, this.rockWorld, this.rockVel) === 'parked') {
+      this.disengage(false);
+      bus.emit('log', { text: APPROACH_PARKED, tone: 'good' });
+    }
+  }
+
   /**
    * v4 fuel: the tank ran dry (thrust was wanted and the engine starved), so
    * the computer lets go with its own log. It never re-engages by itself.
@@ -335,6 +482,7 @@ export class AutoPilot implements GameModule {
   }
 
   private announcePhase(): void {
+    if (this.approach.active) return;
     const phase = this.core.phase;
     if (phase !== this.lastPhase) {
       this.lastPhase = phase;
@@ -354,8 +502,13 @@ export class AutoPilot implements GameModule {
 
   /** Hand back. `announce` = the pilot (or the world) took it, not completion. */
   private disengage(announce: boolean): void {
-    if (!this.core.active) return;
-    this.core.disengage(this.universe.flight);
+    if (!this.active) return;
+    if (this.approach.active) {
+      this.approach.disengage(this.universe.flight);
+      this.approachId = null;
+    } else {
+      this.core.disengage(this.universe.flight);
+    }
     this.parent = null;
     this.lastPhase = 'idle';
     if (announce) bus.emit('log', { text: AUTOPILOT_DISENGAGED, tone: 'warn' });

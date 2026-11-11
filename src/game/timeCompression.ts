@@ -163,7 +163,7 @@ export interface AutopilotRateInputs {
  * AUTOPILOT_FAST_ALT_KM and outside thick air, else 1×. NaN fails to 1×.
  */
 export function autopilotTimeRate(s: AutopilotRateInputs): TimeRate {
-  if (s.hands || s.phase === 'idle' || s.phase === 'final') return 1;
+  if (s.hands || s.phase === 'idle' || s.phase === 'final' || s.phase === 'approach-final') return 1;
   if (!(s.altKm > AUTOPILOT_FAST_ALT_KM)) return 1;
   if (!(s.rho < THICK_AIR_RHO)) return 1;
   return 10;

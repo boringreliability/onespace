@@ -24,6 +24,15 @@ export function mayHoldFormation(s: {
   readonly targetIsAsteroid?: boolean;
   readonly distanceKm: number;
   readonly cruise: boolean;
+  /**
+   * [v4-mining] The ship is in a belt field's frame (game/fieldFrame.ts): an
+   * asteroid then holds formation at any distance (the rocks share the
+   * field's velocity). Vessels keep FORMATION_RANGE_KM.
+   */
+  readonly inFieldFrame?: boolean;
 }): boolean {
-  return s.fa && (s.targetIsVessel || s.targetIsAsteroid === true) && !s.cruise && Number.isFinite(s.distanceKm) && s.distanceKm <= FORMATION_RANGE_KM;
+  if (!s.fa || s.cruise || !Number.isFinite(s.distanceKm)) return false;
+  if (s.targetIsVessel) return s.distanceKm <= FORMATION_RANGE_KM;
+  if (s.targetIsAsteroid === true) return s.inFieldFrame === true || s.distanceKm <= FORMATION_RANGE_KM;
+  return false;
 }

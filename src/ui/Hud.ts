@@ -116,6 +116,11 @@ export interface HudInstruments {
   location: string;
   /** v3: VEL's frame, named only when it is not the ALT body. */
   velFrame?: string | null;
+  /**
+   * [v4-mining] Overrides the vitals speed (VEL): in a belt field's frame VEL
+   * is measured against the field. Null / absent = the vitals speed (v3).
+   */
+  speedKmS?: number | null;
   /** v3: a different body whose surface is nearer than the ALT body's. */
   proxBody?: string | null;
   proxAltKm?: number | null;
@@ -817,6 +822,9 @@ export class Hud implements GameModule {
     }
     this.altBody = i.altBody ?? '';
     this.velFrame = i.velFrame ?? '';
+    if (i.speedKmS !== null && i.speedKmS !== undefined && Number.isFinite(i.speedKmS)) {
+      this.speedTarget = Math.max(0, i.speedKmS);
+    }
     this.hasProx = i.proxBody != null && i.proxAltKm != null;
     this.proxBody = i.proxBody ?? '';
     this.proxAlt = i.proxAltKm ?? 0;

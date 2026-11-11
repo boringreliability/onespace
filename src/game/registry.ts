@@ -345,7 +345,7 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   // [v2-p4] L: auto-land / auto-orbit. After Pilot (it overwrites the command
   // Pilot copied from the stick) and after Cruise (which also reads L).
   // Time compression after both: it judges this frame's command and autopilot.
-  const autopilot = new AutoPilot({ universe, warp, cruise }); // [v3-t3] cruise: the L queue
+  const autopilot = new AutoPilot({ universe, warp, cruise, belt, orbitClockLeadsSlice: true }); // [v3-t3] cruise: the L queue; [v4-mining] belt: L parks at a rock
   await engine.add(autopilot);
   universe.beforeSlice = (h) => autopilot.sliceStep(h); // [v3-t3] flies per sim slice
   await engine.add(new TimeControl({ universe, warp, autopilot, hud }));
@@ -363,10 +363,12 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   const targeting = new Targeting({ universe, traffic, hud, belt });
   await engine.add(targeting);
   // -- v3 T4: drive field → sky, silent events → audio, K formation ----------
-  await engine.add(new FlightSense({ universe, cruise, traffic, targeting, audio, sky, belt }));
+  const flightSense = new FlightSense({ universe, cruise, traffic, targeting, audio, sky, belt });
+  await engine.add(flightSense);
   // ---------------------------------------------------------------------------
   // [v3-t5] cruise + targeting: the throttle block's cruise readout and ETA.
-  await engine.add(new Instruments({ universe, hud, cruise, targeting }));
+  // [v4-mining] fieldFrame + belt: VEL and the markers relative to a belt field.
+  await engine.add(new Instruments({ universe, hud, cruise, targeting, fieldFrame: flightSense, belt }));
   await engine.add(new Scanner({ universe, traffic, targeting, belt }));
   const codex = new Codex({ log: shipLog });
   await engine.add(codex);

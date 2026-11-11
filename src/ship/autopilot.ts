@@ -178,7 +178,8 @@ export function spinMatchWeight(altKm: number): number {
 // Types
 // ---------------------------------------------------------------------------
 
-export type AutopilotGoal = 'land' | 'orbit';
+/** [v4-mining] 'approach': L with an asteroid targeted (ship/approach.ts). */
+export type AutopilotGoal = 'land' | 'orbit' | 'approach';
 export type AutopilotPhase =
   | 'idle'
   | 'deorbit'
@@ -186,7 +187,11 @@ export type AutopilotPhase =
   | 'final'
   | 'liftoff'
   | 'ascent'
-  | 'circularise';
+  | 'circularise'
+  // [v4-mining] L on a rock (game/AutoPilot + ship/approach): cruising in,
+  // then the last APPROACH_FINAL_KM.
+  | 'approach'
+  | 'approach-final';
 export type AutopilotResult = 'flying' | 'landed' | 'orbit';
 
 /** The world the leg is flown against. Plain numbers; no Universe here. */
