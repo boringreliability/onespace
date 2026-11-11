@@ -328,8 +328,11 @@ export class Input {
     this.stick.update(dt);
 
     // Signs as before the stick: mouse-up (screen -y) is nose-up and
-    // mouse-right is a NEGATIVE yaw axis, matching ArrowRight; FlightModel's
-    // yawAxisSign turns that into a right turn.
+    // mouse-right is a NEGATIVE yaw axis, matching ArrowRight (and E is a
+    // negative roll axis). That is the opposite of the sign documented on
+    // `InputAxes`, but it is also what the body frame wants: negative ω.y is a
+    // right turn, so FlightModel's yawAxisSign (+1) passes it through. CameraRig
+    // reads these axes raw too, so do not flip them here alone.
     const sx = this.stick.axis.x;
     const sy = this.stick.axis.y;
     const mousePitch = this.settings.invertY ? sy : -sy;

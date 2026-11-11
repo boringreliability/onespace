@@ -251,13 +251,19 @@ export interface ShipConfig {
   /** Tangential velocity decay on the ground, per second. */
   readonly groundFriction: number;
   /**
-   * Sign applied to the yaw axis. `Input.update()` currently maps mouse-right
-   * to a *negative* yaw axis (and ArrowLeft to a positive one), which is the
-   * opposite of the sign documented on `InputAxes`. -1 makes mouse-right yaw
-   * right today; set to +1 if Input is ever corrected.
+   * Sign applied between the yaw command and body ω.y. ω is in body axes and
+   * right-multiplied, with the nose on −Z, so a POSITIVE ω.y swings the nose
+   * to −X: a LEFT turn. `Input.update()` maps ArrowRight / mouse-right to a
+   * NEGATIVE yaw axis, so +1 passes that straight through as a right turn.
+   * (-1 here was a double negation that turned right into left; pinned by
+   * src/core/controlSense.test.ts.)
    */
   readonly yawAxisSign: number;
-  /** Same story for roll: `KeyQ` produces +1 and pilots expect Q to roll left. */
+  /**
+   * Same for roll: positive ω.z rolls the roof to −X (left, anticlockwise seen
+   * from behind). Input maps E (roll right) to −1, so +1 makes E roll right
+   * and Q roll left.
+   */
   readonly rollAxisSign: number;
 }
 
@@ -303,8 +309,8 @@ export const DEFAULT_SHIP_CONFIG: ShipConfig = {
   crashSpeed: 0.12, // 120 m/s
   restitution: 0.25,
   groundFriction: 1.8,
-  yawAxisSign: -1,
-  rollAxisSign: -1,
+  yawAxisSign: 1,
+  rollAxisSign: 1,
 };
 
 // ---------------------------------------------------------------------------
@@ -1291,7 +1297,7 @@ export class FlightModel {
 
     // Pilot torque, body axes — only with attitude hold off. With it on the
     // stick is a rate demand flown by `rateCommand` below. See `yawAxisSign` /
-    // `rollAxisSign` for why the last two are negated by default.
+    // `rollAxisSign` for how the last two map to body ω.
     if (hold) this.sTorque.set(0, 0, 0);
     else {
       this.sTorque.set(
