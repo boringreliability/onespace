@@ -11,6 +11,16 @@
  * happens (P5); the action log is append-only and its payload is checked
  * against its source (P3). Quaternions are normalised after parsing, so a save
  * that drifted off unit length loads as the same rotation.
+ *
+ * FORMAT RULE (R4): format 1 is frozen. ANY change to this shape — a renamed
+ * or removed field, a new enum value, a new action source, even an added
+ * OPTIONAL field — needs a new format number (CURRENT_FORMAT + 1) and an
+ * explicit step in migrate.ts `UPGRADES`. That is what lets `migrate` call a
+ * format-1 save with unknown keys `newer-build` instead of `invalid`: under
+ * this rule only a newer build can have written them.
+ *
+ * The "Mirrors X" schemas are held to their runtime types by
+ * schemaDrift.test.ts (type level in `tsc`, and real outputs at runtime).
  */
 
 // A namespace import, not `import { z }`: the `z` object drags in every Zod
@@ -66,7 +76,8 @@ export const LogEntrySchema = z.strictObject({
   at: amount,
   system: z.string(),
   title: z.string(),
-  body: z.array(z.string()),
+  /** `LogEntry.body` is `readonly string[]`; the schema must accept it as-is (schemaDrift.test.ts). */
+  body: z.array(z.string()).readonly(),
   visits: z.number().int().min(1),
 });
 

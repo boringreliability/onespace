@@ -10,6 +10,14 @@
  * Every format older than CURRENT_FORMAT gets an explicit step function in
  * `UPGRADES` that lifts it one version. v1 is the first format, so there are
  * no steps yet.
+ *
+ * FORMAT RULE (R4, see schema.ts): ANY change to the v1 shape, an added
+ * optional field included, requires a new format number and an `UPGRADES`
+ * step. So a save that claims the current format and fails ONLY because of
+ * keys this build does not know was written by a newer build: `newer-build`,
+ * not `invalid`, so the game can say why it fell back instead of guessing.
+ * Anything else wrong with it (a bad value, an unknown enum member) is
+ * `invalid`.
  */
 
 import type { z } from 'zod';
@@ -18,7 +26,7 @@ import { CURRENT_FORMAT, LogSchema, SaveV1Schema, type SaveV1 } from './schema';
 
 export type MigrateResult =
   | { ok: true; save: SaveV1; migratedFrom: number }
-  | { ok: false; reason: 'unknown-format' | 'invalid'; issues: string[] };
+  | { ok: false; reason: 'unknown-format' | 'newer-build' | 'invalid'; issues: string[] };
 
 /** `UPGRADES[n]` lifts a format-n save to format n + 1. */
 const UPGRADES: Readonly<Record<number, (raw: Record<string, unknown>) => Record<string, unknown>>> = {};
@@ -56,7 +64,11 @@ export function migrate(raw: unknown): MigrateResult {
 
     // Zod builds a new object; `raw` is never written to.
     const parsed = SaveV1Schema.safeParse(data);
-    if (!parsed.success) return { ok: false, reason: 'invalid', issues: describeIssues(parsed.error) };
+    if (!parsed.success) {
+      const onlyExtraKeys =
+        format === CURRENT_FORMAT && parsed.error.issues.every((i) => i.code === 'unrecognized_keys');
+      return { ok: false, reason: onlyExtraKeys ? 'newer-build' : 'invalid', issues: describeIssues(parsed.error) };
+    }
     return { ok: true, save: parsed.data, migratedFrom: format };
   } catch (e) {
     return { ok: false, reason: 'invalid', issues: [`(root): ${e instanceof Error ? e.message : String(e)}`] };
