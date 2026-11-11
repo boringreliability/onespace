@@ -77,6 +77,9 @@ function rockRig(opts: { distanceKm?: number; parentVel?: Vector3 | null; target
         id === AST_ID ? (out.copy(fm.worldPosition).add(new Vector3(0, 0, d)), true) : false,
       asteroidVelocity: (id: string, out: Vector3) => (id === AST_ID ? (out.copy(astVel), true) : false),
       fieldWorld: () => false,
+      // [v4-mining] No field near: the field frame (fieldFrame.test.ts) stays out of these.
+      nearestField: () => null,
+      fieldVelocity: () => false,
     },
     targeting: { targetId: opts.targetId ?? AST_ID },
     audio: { setCruise: noop, setRcs: noop, setVesselProximity: noop, setHullStress: noop },
