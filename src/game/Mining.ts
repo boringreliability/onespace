@@ -84,8 +84,6 @@ export type MiningKind = 'mine' | 'refine' | 'repair';
 
 /** Below this many seconds left an action is done (240 × 1/60 sums to 3.99999999999999). */
 const DONE_EPS_S = 1e-6;
-/** Below this many kg free the hold counts as full (as in cargo.ts). */
-const FULL_EPS_KG = 1e-6;
 
 const RESOURCES: readonly Resource[] = ['ice', 'metal', 'silicate', 'rare'];
 
@@ -303,7 +301,8 @@ export class Mining implements GameModule {
       // Once per completed mine, with what the hold actually took.
       this.opts.worldState.recordMined(id, r, res.kgIn, 'local');
       this.log(minedLog(res.kgIn, r), 'good');
-      if (cargo.freeKg < FULL_EPS_KG) this.log(REFUSAL_LOG['hold-full'], 'warn');
+      // The gate's own line (mayMine): less room than MINE_MIN_KG is full.
+      if (cargo.freeKg < MINE_MIN_KG) this.log(REFUSAL_LOG['hold-full'], 'warn');
       return;
     }
     const res = applyCargoAction(cargo, tank, { kind });

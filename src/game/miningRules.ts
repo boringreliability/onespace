@@ -8,7 +8,7 @@
  */
 
 import type { Resource } from '@/gen/belt';
-import { CARGO_EPS_KG, REPAIR_METAL_KG, REPAIR_SILICATE_KG, type CargoResult } from '@/ship/cargo';
+import { REPAIR_METAL_KG, REPAIR_SILICATE_KG, type CargoResult } from '@/ship/cargo';
 
 /** Mining reach, km from the asteroid's SURFACE. */
 export const MINE_RANGE_KM = 0.5;
@@ -69,8 +69,10 @@ export function mayMine(s: MineGate): MayMineResult {
   if (!s.targetIsAsteroid) return REFUSED['no-target'];
   if (!(s.surfaceRangeKm <= MINE_RANGE_KM)) return REFUSED.range;
   if (!(s.relSpeedKmS <= MINE_MAX_REL_KMS)) return REFUSED.speed;
-  // R18: the hold's own rule, so an accepted press never ends in HOLD FULL.
-  if (!(s.holdFreeKg >= CARGO_EPS_KG)) return REFUSED['hold-full'];
+  // R18 / final review (c): less room than MINE_MIN_KG is full — the same line
+  // that makes a rock depleted — so an accepted press never ends in HOLD FULL,
+  // "MINED · 0 KG" or a dust record. Mining's post-mine HOLD FULL uses it too.
+  if (!(s.holdFreeKg >= MINE_MIN_KG)) return REFUSED['hold-full'];
   if (!(s.remainingKg >= MINE_MIN_KG)) return REFUSED.depleted;
   return OK;
 }

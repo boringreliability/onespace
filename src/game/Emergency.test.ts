@@ -658,7 +658,8 @@ describe('Task 6 — cannibalize cargo (key 3)', () => {
     const h = cargoHarness({ hold: { metal: 500 } });
     h.press(EMERGENCY_KEYS.open);
     expect(h.em.offers).toEqual(['cannibalize', 'beacon']);
-    expect(h.em.line ?? '').not.toContain('CARGO');
+    // Final review I2: the beacon now names the hold it loses; 3 is still absent.
+    expect(h.em.line ?? '').not.toContain('CANNIBALIZE CARGO');
     h.press(KEY3);
     expect(h.cargo.totalKg).toBe(500);
     expect(h.tank.massKg).toBe(0);

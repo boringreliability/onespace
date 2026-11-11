@@ -1,11 +1,16 @@
 /**
  * v4 sub-plan 1 (propellant), Task 6 — the emergency exit, as rules.
  *
- * Pure. Two ways out of an empty tank, both paid for:
+ * Pure. Three ways out of an empty tank, all paid for:
+ * - cannibalize cargo ([v4-mining]): burn the whole hold (≥ 1 000 kg) for
+ *   +3 % of BASE capacity; the rule lives with the hold (ship/cargo.ts,
+ *   `cannibalize-cargo`), and the menu offers it first.
  * - cannibalize: strip part of the tank for a little propellant — +3 % of
  *   BASE capacity, for a permanent loss of 0.08 · 1.5^timesUsed of BASE
  *   capacity. Refused when the capacity left cannot carry the loss.
- * - beacon: recovered to a safe orbit with 5 % of the CURRENT capacity.
+ * - beacon: recovered to a safe orbit with 5 % of the CURRENT capacity;
+ *   `payBeacon` also jettisons the whole hold and writes a BEACON RECOVERY
+ *   logbook note (shared by the emergency menu and a paid RETURN TO ORBIT).
  *
  * The tank is changed only through capacityLossFrac / consume / add.
  */

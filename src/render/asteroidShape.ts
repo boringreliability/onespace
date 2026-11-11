@@ -7,8 +7,11 @@
  * seed. The shape is star-shaped by construction (one radius per direction),
  * so it is always closed, never self-intersecting, and its smooth normals
  * point outward as long as the slopes stay gentle — which is why every term
- * below is broad: a slight elongation, a handful of wide lobes and a few
- * shallow, wide craters. The radius is clamped to [0.62, 1.22] of nominal.
+ * below is broad: an elongation, a handful of wide lobes and craters.
+ * Final review I1 ("en rigtig form", DESIGN §5.5): the relief is pronounced
+ * enough to read at the terminator — a real potato with bowls, not a soft
+ * disc — and the radius is soft-clamped into [0.62, 1.22] of nominal (tanh
+ * past a knee), so a long tip is rounded rather than cut flat.
  *
  * Nominal radius 1: the renderer scales each instance by its radius in km.
  * Eight seeds become the eight shared variant geometries (render/Asteroids).
@@ -30,8 +33,8 @@ export const ASTEROID_SUBDIVISIONS = 3;
 export const ASTEROID_MIN_RADIUS = 0.62;
 export const ASTEROID_MAX_RADIUS = 1.22;
 
-const LOBES = 6;
-const CRATERS = 5;
+const LOBES = 7;
+const CRATERS = 9;
 
 /** The unit icosphere: shared vertices (float64) and triangles. Built once. */
 let sphere: { dirs: Float64Array; index: Uint16Array } | null = null;
@@ -86,6 +89,21 @@ function icosphere(): { dirs: Float64Array; index: Uint16Array } {
   return sphere;
 }
 
+/** Where the soft clamp starts bending: a tenth of nominal inside each bound. */
+const KNEE_HI = ASTEROID_MAX_RADIUS - 0.1;
+const KNEE_LO = ASTEROID_MIN_RADIUS + 0.1;
+
+/**
+ * Keep r inside (MIN, MAX) without flattening: past a knee the excess is
+ * compressed by tanh, so a long tip stays rounded instead of being cut flat.
+ * Smooth (C¹) at the knees, and the identity between them.
+ */
+function softClamp(r: number): number {
+  if (r > KNEE_HI) return KNEE_HI + (ASTEROID_MAX_RADIUS - KNEE_HI) * Math.tanh((r - KNEE_HI) / (ASTEROID_MAX_RADIUS - KNEE_HI));
+  if (r < KNEE_LO) return KNEE_LO - (KNEE_LO - ASTEROID_MIN_RADIUS) * Math.tanh((KNEE_LO - r) / (KNEE_LO - ASTEROID_MIN_RADIUS));
+  return r;
+}
+
 /** A uniformly random unit vector. */
 function randomDir(rng: Rng): [number, number, number] {
   const z = rng.range(-1, 1);
@@ -103,9 +121,9 @@ export function asteroidShape(seed: number): AsteroidShape {
   // Elongation along one axis, flattening across another: most small bodies
   // are potatoes, not spheres.
   const long = randomDir(rng);
-  const stretch = rng.range(0.08, 0.28);
+  const stretch = rng.range(0.26, 0.4);
   const flat = randomDir(rng);
-  const squash = rng.range(0.0, 0.12);
+  const squash = rng.range(0.04, 0.16);
 
   // Broad lobes: Gaussian bumps in angle, wide enough to keep slopes gentle.
   const lobeDir: number[] = [];
@@ -113,8 +131,8 @@ export function asteroidShape(seed: number): AsteroidShape {
   const lobeK: number[] = [];
   for (let i = 0; i < LOBES; i++) {
     lobeDir.push(...randomDir(rng));
-    lobeAmp.push(rng.range(-0.1, 0.12));
-    const width = rng.range(0.45, 0.8); // radians
+    lobeAmp.push(rng.range(-0.14, 0.13));
+    const width = rng.range(0.4, 0.75); // radians
     lobeK.push(1 / (width * width));
   }
   // Shallow craters: a bowl with a faint rim.
@@ -123,8 +141,8 @@ export function asteroidShape(seed: number): AsteroidShape {
   const craterK: number[] = [];
   for (let i = 0; i < CRATERS; i++) {
     craterDir.push(...randomDir(rng));
-    craterDepth.push(rng.range(0.025, 0.06));
-    const width = rng.range(0.25, 0.45);
+    craterDepth.push(rng.range(0.05, 0.1));
+    const width = rng.range(0.2, 0.38);
     craterK.push(1 / (width * width));
   }
 
@@ -147,7 +165,7 @@ export function asteroidShape(seed: number): AsteroidShape {
       // Mexican-hat profile: a bowl (s < 1) with a faint rim around it.
       r -= craterDepth[i]! * (1 - s) * Math.exp(-s);
     }
-    r = Math.min(ASTEROID_MAX_RADIUS, Math.max(ASTEROID_MIN_RADIUS, r));
+    r = softClamp(r);
     positions[v * 3] = x * r;
     positions[v * 3 + 1] = y * r;
     positions[v * 3 + 2] = z * r;

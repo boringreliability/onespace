@@ -2,8 +2,10 @@
  * v4 sub-plan 1 (propellant), Task 6 — the emergency exit, wired.
  *
  * Only an EMPTY tank offers it ("EMERGENCY · H" on the NAV ADVISORY line).
- * H opens the choice, 1 cannibalizes the tank, 2 fires the beacon; H again
- * closes it. Nothing is ever applied without the pilot's pick. The rules are
+ * H opens the choice; three ways out: 3 burns the cargo (from 1 000 kg),
+ * 1 cannibalizes the tank, 2 fires the beacon (which jettisons the hold and
+ * writes a logbook note); H again closes it. Nothing is ever applied without
+ * the pilot's pick. The rules are
  * pure (`ship/emergency.ts`); this module owns the keys, the line and the
  * bookkeeping. A hull without a tank is inert.
  *
@@ -18,12 +20,16 @@
  * 3 % of BASE tank capacity (`cannibalize-cargo`), offered FIRST when the hold
  * holds ≥ 1 000 kg: 3, 1, 2. The beacon pays through `payBeacon` — the tank
  * price, the hold jettisoned, a BEACON RECOVERY note — shared with RecoveryCut.
+ *
+ * Final review I2 (DESIGN §5.4, "tydelig prompt"): with cargo aboard the
+ * beacon says what it costs — `2 · BEACON · LOSE 6 099 KG CARGO`.
  */
 
 import type { EngineContext, GameModule } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
 import { EMERGENCY_KEYS } from '@/core/Input';
 import { CANNIBALIZE_CARGO_MIN_KG, applyCargoAction, type Cargo } from '@/ship/cargo';
+import { formatKg } from './miningRules';
 import { cannibalizeYield, emergencyMayAct, payBeacon, type BeaconLog } from '@/ship/emergency';
 import { applyAction } from '@/ship/travelCost';
 import type { Propellant } from '@/ship/propellant';
@@ -137,7 +143,14 @@ export class Emergency implements GameModule {
   get line(): string | null {
     if (!this.stranded) return null;
     if (!this.choosing) return EMERGENCY_PROMPT;
-    return this.offers.map((o) => OFFER_TEXT[o]).join('   ');
+    return this.offers.map((o) => this.offerText(o)).join('   ');
+  }
+
+  /** One menu entry. The beacon names the hold it will jettison (I2). */
+  private offerText(o: EmergencyChoice): string {
+    const kg = this.opts.universe.cargo?.totalKg ?? 0;
+    if (o === 'beacon' && kg > 0) return `${OFFER_TEXT.beacon} · LOSE ${formatKg(kg)} KG CARGO`;
+    return OFFER_TEXT[o];
   }
 
   init(): void {

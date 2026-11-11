@@ -13,7 +13,8 @@
  * the GPU composed `viewMatrix * modelMatrix * instanceMatrix` with render-
  * absolute translations, a 50 m spinning rock would shimmer by half a metre.
  * So each instance translation is `asteroidWorld − cameraWorld`, taken in
- * float64 on the CPU (|t| ≤ ~400 km, sub-millimetre in float32), and the
+ * float64 on the CPU (|t| ≤ ~400 km: float32 there steps by ~3 cm, so
+ * ≈ ±1.5 cm of rounding, invisible on a rock seen from that far), and the
  * root Group sits at the camera's render position as a pure translation:
  * three.js builds `modelViewMatrix` on the CPU in float64, where that
  * translation cancels the view's to within rounding of the camera itself.
@@ -27,9 +28,12 @@
  * DECISIONS): past 400 km an asteroid of ≤ 0.6 km is under a pixel anyway.
  *
  * Light: the one key light (render/keyLight.ts), Lambert plus a weak ambient
- * of the same light, and a Blinn specular whose strength the composition sets.
- * The composition also gives the tint: ice light blue-grey, metal darker with
- * a stronger highlight, silicate brown-grey. The sun direction is in world
+ * of the same light, and a Blinn specular. The composition sets the surface
+ * through `asteroidSurface` (final review I1): albedo, specular strength and
+ * metalness; the highlight is tinted by the albedo as metalness rises
+ * (F0 ≈ albedo) and never peaks above ~1.5× the diffuse, so a metal rock
+ * reads as grey stone with a terminator, not a clipped white disc. Ice is
+ * light blue-grey, metal a neutral grey, silicate brown-grey. The sun direction is in world
  * (= render) axes; the root is a pure translation, so instance-rotated
  * normals are in those axes too, and the view vector is the negated
  * camera-relative position.
@@ -57,6 +61,7 @@ import type { AsteroidSpec } from '@/gen/belt';
 import type { StarSystemSpec } from '@/gen/types';
 import { shotOwnsScene } from '@/game/Shots';
 import { asteroidShape } from './asteroidShape';
+import { ASTEROID_SPEC_EXPONENT, asteroidSurface } from './asteroidSurface';
 import { keyLightAt } from './keyLight';
 
 /** Shared variant geometries, one InstancedMesh (one draw call) each. */
@@ -80,10 +85,6 @@ const AMBIENT = 0.04;
 /** The star's light before the key-light level (same base as Traffic's hulls). */
 const SUN_BASE: readonly [number, number, number] = [1, 0.96, 0.9];
 
-/** Linear albedo and specular strength per resource. Rare ores read as metal. */
-const ICE = { r: 0.55, g: 0.62, b: 0.7, spec: 0.12 };
-const METAL = { r: 0.15, g: 0.15, b: 0.16, spec: 0.55 };
-const SILICATE = { r: 0.3, g: 0.26, b: 0.22, spec: 0.04 };
 
 /** What this renderer reads of the Belt. `Belt` satisfies it. */
 export interface AsteroidSource {
@@ -109,10 +110,12 @@ const VERT = /* glsl */ `
 #include <logdepthbuf_pars_vertex>
 
 attribute vec4 aSurface;   // rgb linear albedo, a specular strength
+attribute float aMetal;    // metalness: 0 white highlight … 1 tinted by the albedo
 
 varying vec3 vNormal;      // world (= render) axes
 varying vec3 vRel;         // camera-relative position, world axes, km
 varying vec4 vSurface;
+varying float vMetal;
 
 void main() {
   // The root is a pure translation to the camera, so the instance matrix
@@ -122,6 +125,7 @@ void main() {
   // Uniform scale: the rotation part is enough for the normal.
   vNormal = normalize(mat3(instanceMatrix) * normal);
   vSurface = aSurface;
+  vMetal = aMetal;
   gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position, 1.0);
   #include <logdepthbuf_vertex>
 }
@@ -138,6 +142,7 @@ uniform float uAmbient;
 varying vec3 vNormal;
 varying vec3 vRel;
 varying vec4 vSurface;
+varying float vMetal;
 
 void main() {
   #include <logdepthbuf_fragment>
@@ -145,8 +150,11 @@ void main() {
   vec3 v = normalize(-vRel);
   float ndl = max(dot(n, uSunDir), 0.0);
   vec3 h = normalize(uSunDir + v);
-  float spec = vSurface.a * pow(max(dot(n, h), 0.0), 24.0) * ndl;
-  vec3 c = uSunColor * (vSurface.rgb * (ndl + uAmbient) + spec);
+  float spec = vSurface.a * pow(max(dot(n, h), 0.0), ${ASTEROID_SPEC_EXPONENT.toFixed(1)}) * ndl;
+  // F0 ≈ albedo for metal: the highlight takes the rock's own colour.
+  vec3 albedo = vSurface.rgb;
+  vec3 specColor = mix(vec3(1.0), albedo / max(max(albedo.r, albedo.g), max(albedo.b, 1e-4)), vMetal);
+  vec3 c = uSunColor * (albedo * (ndl + uAmbient) + specColor * spec);
   gl_FragColor = vec4(c, 1.0);
 }
 `;
@@ -163,9 +171,11 @@ export class Asteroids implements GameModule {
   private readonly material: ShaderMaterial;
   private readonly geometries: BufferGeometry[] = [];
   private readonly surfaces: InstancedBufferAttribute[] = [];
+  private readonly metals: InstancedBufferAttribute[] = [];
   /** One reusable update range per mesh (three clears the list after upload). */
   private readonly matrixRanges: Array<{ start: number; count: number }> = [];
   private readonly surfaceRanges: Array<{ start: number; count: number }> = [];
+  private readonly metalRanges: Array<{ start: number; count: number }> = [];
   /** The asteroid id in each slot of each variant, so an unchanged slot is not re-uploaded. */
   private readonly slotIds: Array<Array<string | null>> = [];
 
@@ -219,6 +229,9 @@ export class Asteroids implements GameModule {
       const surface = new InstancedBufferAttribute(new Float32Array(MAX_ASTEROID_INSTANCES * 4), 4);
       surface.setUsage(DynamicDrawUsage);
       g.setAttribute('aSurface', surface);
+      const metal = new InstancedBufferAttribute(new Float32Array(MAX_ASTEROID_INSTANCES), 1);
+      metal.setUsage(DynamicDrawUsage);
+      g.setAttribute('aMetal', metal);
       // Each variant can hold every instance: a field may be all one shape.
       const mesh = new InstancedMesh(g, this.material, MAX_ASTEROID_INSTANCES);
       mesh.instanceMatrix.setUsage(DynamicDrawUsage);
@@ -228,8 +241,10 @@ export class Asteroids implements GameModule {
       mesh.frustumCulled = false;
       this.geometries.push(g);
       this.surfaces.push(surface);
+      this.metals.push(metal);
       this.matrixRanges.push({ start: 0, count: 0 });
       this.surfaceRanges.push({ start: 0, count: 0 });
+      this.metalRanges.push({ start: 0, count: 0 });
       this.slotIds.push(new Array<string | null>(MAX_ASTEROID_INSTANCES).fill(null));
       meshes.push(mesh);
       this.root.add(mesh);
@@ -249,6 +264,12 @@ export class Asteroids implements GameModule {
 
   /** Which rocks, and which slot each one takes. */
   update(_dt: number, _ctx: EngineContext): void {
+    // The ranges from the last frame were read by its render; this frame
+    // starts empty and gathers exactly the slots it changes (final review, a).
+    for (let v = 0; v < ASTEROID_VARIANTS; v++) {
+      this.surfaceRanges[v]!.count = 0;
+      this.metalRanges[v]!.count = 0;
+    }
     // A review shot owns the scene (same rule as Traffic).
     if (shotOwnsScene()) {
       this.kept = 0;
@@ -293,16 +314,9 @@ export class Asteroids implements GameModule {
       if (ids[slot] !== id) {
         // A new occupant: its tint goes up; an unchanged slot uploads nothing.
         ids[slot] = id;
-        writeSurface(spec, this.surfaces[v]!.array as Float32Array, slot * 4);
-        const r = this.surfaceRanges[v]!;
-        if (r.count === 0) {
-          r.start = slot * 4;
-          r.count = 4;
-        } else {
-          const end = Math.max(r.start + r.count, slot * 4 + 4);
-          r.start = Math.min(r.start, slot * 4);
-          r.count = end - r.start;
-        }
+        writeSurface(spec, this.surfaces[v]!.array as Float32Array, this.metals[v]!.array as Float32Array, slot);
+        grow(this.surfaceRanges[v]!, slot * 4, 4);
+        grow(this.metalRanges[v]!, slot, 1);
       }
       this.keptIndex[total] = i;
       this.keptVariant[total] = v;
@@ -323,6 +337,10 @@ export class Asteroids implements GameModule {
         surface.updateRanges.length = 0;
         surface.updateRanges.push(r);
         surface.needsUpdate = true;
+        const metal = this.metals[v]!;
+        metal.updateRanges.length = 0;
+        metal.updateRanges.push(this.metalRanges[v]!);
+        metal.needsUpdate = true;
       }
     }
     this.root.visible = total > 0;
@@ -338,8 +356,6 @@ export class Asteroids implements GameModule {
 
   /** After every camera writer: matrices relative to the camera, root at the camera. */
   lateUpdate(_dt: number, ctx: EngineContext): void {
-    // Upload ranges are consumed (and cleared) by the renderer; reset ours for next frame.
-    for (let v = 0; v < ASTEROID_VARIANTS; v++) this.surfaceRanges[v]!.count = 0;
     if (!this.root.visible || this.kept === 0) return;
 
     ctx.camera.getWorldPosition(this.cam);
@@ -406,18 +422,25 @@ function spinOf(seed: number, t: number, axis: Vector3, out: Quaternion): Quater
   return out.setFromAxisAngle(axis, angle);
 }
 
-/** Tint and specular from the composition, by mass fraction. */
-function writeSurface(spec: AsteroidSpec, out: Float32Array, at: number): void {
-  const c = spec.composition;
-  const ice = Math.max(0, c.ice);
-  const metal = Math.max(0, c.metal) + Math.max(0, c.rare);
-  const sil = Math.max(0, c.silicate);
-  const sum = ice + metal + sil;
-  const fi = sum > 0 ? ice / sum : 0;
-  const fm = sum > 0 ? metal / sum : 0;
-  const fs = sum > 0 ? sil / sum : 1;
-  out[at] = fi * ICE.r + fm * METAL.r + fs * SILICATE.r;
-  out[at + 1] = fi * ICE.g + fm * METAL.g + fs * SILICATE.g;
-  out[at + 2] = fi * ICE.b + fm * METAL.b + fs * SILICATE.b;
-  out[at + 3] = fi * ICE.spec + fm * METAL.spec + fs * SILICATE.spec;
+/** Widen a range to cover [at, at + n). */
+function grow(r: { start: number; count: number }, at: number, n: number): void {
+  if (r.count === 0) {
+    r.start = at;
+    r.count = n;
+    return;
+  }
+  const end = Math.max(r.start + r.count, at + n);
+  r.start = Math.min(r.start, at);
+  r.count = end - r.start;
+}
+
+/** Albedo, specular strength and metalness of one slot, from `asteroidSurface`. */
+function writeSurface(spec: AsteroidSpec, surface: Float32Array, metal: Float32Array, slot: number): void {
+  const s = asteroidSurface(spec.composition);
+  const at = slot * 4;
+  surface[at] = s.albedo[0];
+  surface[at + 1] = s.albedo[1];
+  surface[at + 2] = s.albedo[2];
+  surface[at + 3] = s.spec;
+  metal[slot] = s.metalness;
 }

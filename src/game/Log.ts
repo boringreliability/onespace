@@ -61,6 +61,9 @@ function stamp(seconds: number): string {
   return `${String(d).padStart(3, '0')}·${String(h).padStart(2, '0')}${String(m).padStart(2, '0')}`;
 }
 
+/** Keys whose body a revisit replaces (`upsert`): asteroid assays. */
+const ASSAY_PREFIX = 'scan:ast:';
+
 export class ShipLog implements GameModule {
   readonly name = 'log';
 
@@ -97,14 +100,18 @@ export class ShipLog implements GameModule {
       bus.on('scan:complete', (scan) => {
         // `kind` is optional on ScanResult because the showroom fixtures predate
         // the log. Absent means a world, which is what the field defaults to.
-        this.record({
+        // [v4-mining] An asteroid's assay goes stale as it is mined: a re-scan
+        // replaces its body (final review I3a). Everything else keeps its first.
+        const entry: Omit<LogEntry, 'at' | 'visits'> = {
           key: `scan:${scan.targetId}`,
           // [v4-mining] An asteroid assay is a note: neither a world nor a contact.
           kind: scan.kind === 'vessel' ? 'contact' : scan.kind === 'asteroid' ? 'note' : 'world',
           system: this.currentSystem,
           title: scan.name,
           body: scan.lines,
-        });
+        };
+        if (scan.kind === 'asteroid') this.upsert(entry);
+        else this.record(entry);
       }),
 
       bus.on('planet:landed', ({ planet }) => {
@@ -155,6 +162,25 @@ export class ShipLog implements GameModule {
     // Loading from storage does not come through here — it assigns the array
     // directly — so this announcement only ever fires for something new.
     bus.emit('log', { text: `LOGGED — ${entry.title.toUpperCase()}`, tone: 'good' });
+    this.save();
+  }
+
+  /**
+   * As `record`, but a revisit REPLACES the body — for an asteroid assay
+   * (keys `scan:ast:…`), whose numbers change as the rock is mined. The first
+   * `at` and the entry's place are kept, the visit is counted, and nothing is
+   * announced (it is not a new discovery). Any other key: plain `record`.
+   */
+  upsert(e: Omit<LogEntry, 'at' | 'visits'>): void {
+    const existing = this.index.get(e.key);
+    if (!existing || !e.key.startsWith(ASSAY_PREFIX)) {
+      this.record(e);
+      return;
+    }
+    const i = this.entries.indexOf(existing);
+    const entry: LogEntry = { ...existing, body: [...e.body], visits: existing.visits + 1 };
+    if (i >= 0) this.entries[i] = entry;
+    this.index.set(entry.key, entry);
     this.save();
   }
 

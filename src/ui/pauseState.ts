@@ -50,9 +50,12 @@ export function pauseContextFor(s: {
 /**
  * [v4-fuel] I1: with a tank, RETURN TO ORBIT costs what the beacon costs, and
  * the sheet says so before it is picked. A hull without a tank: v3, free.
+ * [v4-mining] Final review I2: the beacon jettisons the hold, so with cargo
+ * aboard the paid return says that too. The free return keeps the cargo.
  */
-export function returnToOrbitLabel(hasTank: boolean): string {
-  return hasTank ? 'RETURN TO ORBIT · COSTS AS BEACON' : 'RETURN TO ORBIT';
+export function returnToOrbitLabel(hasTank: boolean, cargoKg = 0): string {
+  if (!hasTank) return 'RETURN TO ORBIT';
+  return cargoKg > 0 ? 'RETURN TO ORBIT · COSTS AS BEACON · LOSES CARGO' : 'RETURN TO ORBIT · COSTS AS BEACON';
 }
 
 /** What the caller must do as a result. */

@@ -194,7 +194,10 @@ export function fieldSpec(belt: BeltSpec, systemSeed: number, k: number): FieldS
   const asteroids: AsteroidSpec[] = [];
   for (let n = 0; n < count; n++) {
     const radiusKm = rng.power(ASTEROID_RADIUS_KM[0], ASTEROID_RADIUS_KM[1], -1.5);
-    // Uniform in a ball, kept a kilometre inside the field edge.
+    // Inside a ball, kept a kilometre inside the field edge, but NOT uniform:
+    // the direction is a Gaussian with y halved before normalising, so rocks
+    // crowd towards the field's x–z plane; the distance is cube-root (uniform
+    // in volume along each direction).
     let dx = rng.gaussian();
     let dy = rng.gaussian() * 0.5;
     let dz = rng.gaussian();

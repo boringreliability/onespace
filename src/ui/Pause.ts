@@ -367,8 +367,11 @@ export class Pause implements GameModule {
   private syncSettings(): void {
     this.stick = loadStickSettings(storage());
     if (this.sensVal) this.sensVal.textContent = `${this.stick.sensitivity.toFixed(2)}×`;
-    // [v4-fuel] I1: the price of RETURN TO ORBIT follows the hull (tank or not).
-    if (this.returnBtn) this.returnBtn.textContent = returnToOrbitLabel(this.universe.flight.propellant !== null);
+    // [v4-fuel] I1: the price of RETURN TO ORBIT follows the hull (tank or not);
+    // [v4-mining] I2: and it says when the hold goes with it.
+    if (this.returnBtn) {
+      this.returnBtn.textContent = returnToOrbitLabel(this.universe.flight.propellant !== null, this.universe.cargo.totalKg);
+    }
     this.syncInputs();
   }
 
