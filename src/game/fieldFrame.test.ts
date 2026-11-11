@@ -44,6 +44,7 @@ import { beltRig, fieldCentre, fieldVelocity, fyssBelt, fyssField, startSystem }
 import { FlightSense, type FlightSenseOptions } from './FlightSense';
 import { Instruments, type InstrumentsOptions } from './Instruments';
 import type { HudInstruments } from '@/ui/Hud';
+import { projectToScreen, type ScreenPoint } from './flightAids';
 
 const H = 1 / 60;
 const FIELD_K = 398;
@@ -399,6 +400,56 @@ describe('field frame: the HUD VEL is relative to the field', () => {
     const speed = (p as HudInstruments & { speedKmS?: number | null }).speedKmS;
     expect(speed ?? null).toBeNull();
     expect(p.velFrame).toBe(startSystem().name);
+  });
+
+  // Ruling R-rocks (b): the prograde / retrograde markers say what VEL says.
+  // The camera sits at the origin looking down −Z (identity view), so a
+  // direction along −Z projects to the screen centre (800, 450).
+  describe('the prograde / retrograde markers follow the field (ruling R-rocks b)', () => {
+    const AHEAD = new Vector3(0, 0, -0.07); // 70 m/s straight down the camera axis
+
+    function projected(dir: Vector3): ScreenPoint {
+      const cam = new PerspectiveCamera(60, 16 / 9, 0.001, 1e9);
+      const d = dir.clone().normalize();
+      return projectToScreen(d.x, d.y, d.z, 0, cam, 1600, 900, { x: 0, y: 0, behind: false });
+    }
+
+    it('Given the ship in the field frame moving 0.07 km/s along −Z relative to the field, Then the prograde marker sits on the screen centre and retrograde is behind — not where the star-relative velocity points', () => {
+      const r = fieldRig({ relVel: AHEAD });
+      expect(frameOf(r)).toBe(r.field.id);
+      // Precondition: the parent-relative (star) velocity points well away from −Z.
+      expect(r.fm.velocity.angleTo(new Vector3(0, 0, -1))).toBeGreaterThan(10 * (Math.PI / 180));
+      const p = instrumentsFor(r).update();
+      expect(p.hasVelocity).toBe(true);
+      expect(p.proBehind).toBe(false);
+      expect(Math.abs(p.proX - 800)).toBeLessThan(1);
+      expect(Math.abs(p.proY - 450)).toBeLessThan(1);
+      expect(p.retroBehind).toBe(true);
+    });
+
+    it('Given the ship co-moving with the field inside the frame (relative speed ~0), Then there is no prograde marker (hasVelocity false), as VEL reads ~0', () => {
+      const r = fieldRig();
+      expect(frameOf(r)).toBe(r.field.id);
+      expect(r.relSpeed()).toBeLessThan(1e-9);
+      const p = instrumentsFor(r).update();
+      expect(p.hasVelocity).toBe(false);
+    });
+
+    it('Given the ship outside the frame (400 km) with the same 0.07 km/s along −Z relative to the field, Then the markers are v3: prograde follows the velocity relative to the parent (the star), not the screen centre', () => {
+      const r = fieldRig();
+      r.placeAt(400);
+      r.fm.teleport(r.fm.worldPosition.clone(), r.fieldVelNow().add(AHEAD));
+      r.frame();
+      expect(frameOf(r)).toBeNull();
+      const p = instrumentsFor(r).update();
+      const want = projected(r.fm.velocity);
+      expect(p.hasVelocity).toBe(true);
+      expect(p.proBehind).toBe(want.behind);
+      expect(Math.abs(p.proX - want.x)).toBeLessThan(1);
+      expect(Math.abs(p.proY - want.y)).toBeLessThan(1);
+      // …and that is not where the field-relative velocity would put it.
+      expect(Math.hypot(p.proX - 800, p.proY - 450) > 1 || p.proBehind).toBe(true);
+    });
   });
 });
 
