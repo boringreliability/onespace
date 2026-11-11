@@ -24,8 +24,8 @@ tank op, og det huskes efter genindlæsning.*
 | # | Delplan | Leverer | Afhænger af |
 |---|---|---|---|
 | 1 | [Brændstof](plan-1-fuel.md) ✅ | tank, forbrug, masse, cruise/hop-pris, HUD, nødudgang (dele + nødsignal) | v3 |
-| 2 | [Asteroider og mining](plan-2-mining.md) | bælter, asteroider, scanning, udvinding, last, raffinering, reparation, start-system med bælte og 60 % tank | 1 |
-| 3 | Gemt spil (lokalt) | versioneret format v1, snapshot plus handlingslog, IndexedDB, autosave, Continue, migrering af logbog | 1, 2 |
+| 2 | [Asteroider og mining](plan-2-mining.md) ✅ | bælter, asteroider, scanning, udvinding, last, raffinering, reparation, start-system med bælte og 60 % tank | 1 |
+| 3 | [Gemt spil (lokalt)](plan-3-save.md) | versioneret format v1, snapshot plus handlingslog, IndexedDB, autosave, Continue, migrering af logbog | 1, 2 |
 | 4 | Backend og sky | API, Postgres, OAuth (GitHub/Google), gæst → konto, sync med revisioner, én origin, Railway-klar | 3 |
 
 **Rækkefølge:** delplan 2-4 skrives først, når den forrige er landet. De skal bygge på den faktiske
