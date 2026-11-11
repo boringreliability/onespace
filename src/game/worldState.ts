@@ -58,8 +58,28 @@ export class WorldState {
     this.log.push({ id, by, resource: r, kg, orbitSeconds: this.clocks.orbitSeconds(), wallMs: this.clocks.wallMs() });
   }
 
-  /** Every mine, oldest first. */
+  /** Every mine, oldest first. A copy: callers cannot write the world through it. */
   entries(): readonly MinedEntry[] {
-    return this.log;
+    return [...this.log];
+  }
+
+  /**
+   * [v4-save] Replace the world with saved entries. The map and the log are
+   * rebuilt from them as they are — each keeps its own clocks; nothing is
+   * stamped now. Non-finite or negative kg is skipped, as recordMined does.
+   */
+  restore(entries: readonly MinedEntry[]): void {
+    this.mined.clear();
+    this.log.length = 0;
+    for (const e of entries) {
+      if (!Number.isFinite(e.kg) || e.kg < 0) continue;
+      let d = this.mined.get(e.id);
+      if (!d) {
+        d = { ice: 0, metal: 0, silicate: 0, rare: 0 };
+        this.mined.set(e.id, d);
+      }
+      d[e.resource] += e.kg;
+      this.log.push({ ...e });
+    }
   }
 }

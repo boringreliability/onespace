@@ -19,6 +19,11 @@ function clean(x: number): number {
   return Number.isFinite(x) && x > 0 ? x : 0;
 }
 
+export interface PropellantSnapshot {
+  readonly massKg: number;
+  readonly capacityLossFrac: number;
+}
+
 export class Propellant {
   readonly baseCapacityKg: number;
   massKg: number;
@@ -38,6 +43,21 @@ export class Propellant {
   set capacityLossFrac(v: number) {
     this.lossFrac = Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0;
     this.massKg = Math.min(this.massKg, this.capacityKg);
+  }
+
+  /** [v4-save] What a save keeps of the tank. A plain copy. */
+  snapshot(): PropellantSnapshot {
+    return { massKg: this.massKg, capacityLossFrac: this.lossFrac };
+  }
+
+  /**
+   * [v4-save] Put a saved tank back. Loss FIRST, then mass: the mass is
+   * clamped to the restored capacity, never to whatever this tank had before.
+   * Sanitised by today's rules (non-finite / negative → 0, loss to [0,1]).
+   */
+  restore(s: PropellantSnapshot): void {
+    this.capacityLossFrac = s.capacityLossFrac;
+    this.massKg = Math.min(clean(s.massKg), this.capacityKg);
   }
 
   get capacityKg(): number {

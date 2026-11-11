@@ -40,6 +40,12 @@ export interface LogEntry {
   visits: number;
 }
 
+/** [v4-save] What a save keeps of the log. */
+export interface LogState {
+  readonly time: number;
+  readonly entries: readonly LogEntry[];
+}
+
 export interface LogSummary {
   readonly systems: number;
   readonly worlds: number;
@@ -221,7 +227,55 @@ export class ShipLog implements GameModule {
   // Persistence
   // -------------------------------------------------------------------------
 
+  /** [v4-save] The log as a save holds it. A copy: later records do not change it. */
+  exportState(): LogState {
+    return { time: this.time, entries: this.entries.map((e) => ({ ...e, body: [...e.body] })) };
+  }
+
+  /**
+   * [v4-save] Replace the log with a saved one. Silent: what was logged was
+   * announced when it happened, so nothing is emitted here. The state is
+   * written through (to the sink, if any) so storage and memory agree.
+   */
+  importState(s: LogState): void {
+    this.time = Number.isFinite(s.time) ? s.time : 0;
+    this.entries = s.entries.slice(-MAX_ENTRIES).map((e) => ({ ...e, body: [...e.body] }));
+    this.index.clear();
+    for (const e of this.entries) this.index.set(e.key, e);
+    this.save();
+  }
+
+  /**
+   * [v4-save] With a sink, every write goes to it instead of localStorage
+   * (the save game owns persistence then). `null` goes back to localStorage.
+   */
+  setSink(sink: ((state: LogState) => void) | null): void {
+    this.sink = sink;
+  }
+
+  /**
+   * [v4-save] The pre-save log under `onespace.log.v1`, for migration into
+   * the first save. Read only: the key is left in place.
+   */
+  legacyState(): LogState | null {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return null;
+      const data = JSON.parse(raw) as { version?: number; time?: number; entries?: LogEntry[] };
+      if (data.version !== LOG_VERSION || !Array.isArray(data.entries)) return null;
+      return { time: typeof data.time === 'number' ? data.time : 0, entries: data.entries };
+    } catch {
+      return null;
+    }
+  }
+
+  private sink: ((state: LogState) => void) | null = null;
+
   private save(): void {
+    if (this.sink) {
+      this.sink(this.exportState());
+      return;
+    }
     try {
       localStorage.setItem(
         STORAGE_KEY,

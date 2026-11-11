@@ -130,6 +130,31 @@ export interface UniverseOptions {
   readonly seed?: number;
   /** Skip generating a ship and flight model (used by isolated review shots). */
   readonly headless?: boolean;
+  /**
+   * [v4-save] Boot straight into a saved place: `init` enters this system
+   * instead of choosing a start, so the start system never flashes past. If
+   * the system cannot be found, `init` falls back to a new start and sets
+   * `restoreFailed`.
+   */
+  readonly restore?: UniverseRestore;
+}
+
+type Vec3Tuple = readonly [number, number, number];
+
+/** [v4-save] Where the player is, as a save holds it (SaveV1.player plus the orbit clock). */
+export interface UniverseRestore {
+  readonly system: { readonly id: string; readonly seed: number; readonly name: string; readonly positionLy: Vec3Tuple };
+  readonly orbitSeconds: number;
+  /** The body the ship's state is relative to; null = the star. */
+  readonly parentId: string | null;
+  readonly flight: {
+    readonly position: Vec3Tuple;
+    readonly velocity: Vec3Tuple;
+    /** [x, y, z, w] */
+    readonly orientation: readonly [number, number, number, number];
+    readonly grounded: boolean;
+  };
+  readonly flightAssist: boolean;
 }
 
 
@@ -264,13 +289,94 @@ export class Universe implements GameModule {
   init(ctx: EngineContext): void {
     ctx.scene.add(this.root);
 
+    this.ctx = ctx;
     this.galaxy = generateGalaxy(this.seed);
     bus.emit('galaxy:entered', { galaxy: this.galaxy });
+
+    // [v4-save] CONTINUE: straight into the saved system — no start system first.
+    const restore = this.options.restore;
+    if (restore) {
+      const spec = this.findRestoreSystem(restore);
+      if (spec) {
+        this.applyRestore(spec, restore, ctx);
+        return;
+      }
+      this.restoreFailed = true;
+    }
 
     // Start somewhere with something to look at: sample the arm at a third of
     // the disc radius, where star formation put the interesting neighbours.
     const start = this.pickStartSystem();
     this.enterSystem(start, ctx);
+  }
+
+  // -------------------------------------------------------------------------
+  // [v4-save] Restore
+  // -------------------------------------------------------------------------
+
+  /** Set by `init` when the `restore` option named a place that could not be found. */
+  restoreFailed = false;
+
+  private ctx: EngineContext | null = null;
+
+  /**
+   * Put the player back where a save says. The system is re-found from its
+   * position (its id is the match), then entered, the clock set, the ship
+   * parented and placed. Returns false — and changes nothing — when the
+   * system or the parent body cannot be found.
+   */
+  restoreState(r: UniverseRestore): boolean {
+    const ctx = this.ctx;
+    if (!ctx || !this.galaxy) return false;
+    const spec = this.findRestoreSystem(r);
+    if (!spec) return false;
+    this.applyRestore(spec, r, ctx);
+    return true;
+  }
+
+  /** Set the orbit clock and place every body for it. */
+  setOrbitSeconds(t: number): void {
+    this.orbitTime = Number.isFinite(t) && t >= 0 ? t : 0;
+    this.updateOrbits();
+  }
+
+  /**
+   * Parent the ship to body `id` (null = the star) WITHOUT converting its
+   * state — a restore is about to overwrite it. Unknown id: the star.
+   */
+  restoreParent(id: string | null): void {
+    this.setShipParent(id === null ? null : this.bodyById(id));
+    this.syncGroundSampler();
+  }
+
+  /** The saved system, generated — or null if it is not where the save says, or its parent body is missing. */
+  private findRestoreSystem(r: UniverseRestore): StarSystemSpec | null {
+    const p = r.system.positionLy;
+    if (!p.every((x) => Number.isFinite(x))) return null;
+    const stub = sampleSystemsNear(this.galaxy, [p[0], p[1], p[2]], 1, 8).find((s) => s.id === r.system.id);
+    if (!stub) return null;
+    const spec = generateSystem(this.galaxy, stub);
+    if (r.parentId !== null) {
+      const id = r.parentId;
+      const found = spec.planets.some((pl) => pl.id === id || pl.moons.some((m) => m.id === id));
+      if (!found) return null;
+    }
+    return spec;
+  }
+
+  private applyRestore(spec: StarSystemSpec, r: UniverseRestore, ctx: EngineContext): void {
+    this.enterSystem(spec, ctx);
+    this.setOrbitSeconds(r.orbitSeconds);
+    // Parent (and its ground sampler) first: clearing a sampler clears grounded.
+    this.restoreParent(r.parentId);
+    const f = r.flight;
+    this.flight.restoreState({
+      position: new Vector3(f.position[0], f.position[1], f.position[2]),
+      velocity: new Vector3(f.velocity[0], f.velocity[1], f.velocity[2]),
+      orientation: new Quaternion(f.orientation[0], f.orientation[1], f.orientation[2], f.orientation[3]),
+      grounded: f.grounded,
+    });
+    this.flight.flightAssist = r.flightAssist;
   }
 
   /**

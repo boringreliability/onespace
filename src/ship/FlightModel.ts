@@ -381,6 +381,14 @@ const NO_PARENT: ParentBody = {
 
 export type ImpactKind = 'landing' | 'hard' | 'crash';
 
+/** [v4-save] A saved ship state, parent-relative (see `FlightModel.restoreState`). */
+export interface FlightRestore {
+  readonly position: Vector3;
+  readonly velocity: Vector3;
+  readonly orientation: Quaternion;
+  readonly grounded: boolean;
+}
+
 // ---------------------------------------------------------------------------
 
 export class FlightModel {
@@ -918,6 +926,22 @@ export class FlightModel {
   }
 
   /**
+   * [v4-save] Put a saved ship back. As `teleport` (parent-relative state,
+   * zero spin, fresh carry), but `grounded` is taken as given and SILENTLY:
+   * a ship saved on the ground is still on it, so no touchdown and no
+   * landing is announced — the next ground contact is a continuation.
+   *
+   * Until the terrain is there to stand on (the planet renderer streams in
+   * after a restore, and the ground sampler with it) a grounded ship is held
+   * where it is; see `step`. Set the parent and the sampler first: clearing
+   * a sampler clears `grounded`.
+   */
+  restoreState(s: FlightRestore): void {
+    this.teleport(s.position, s.velocity, s.orientation);
+    this._grounded = s.grounded;
+  }
+
+  /**
    * Turn a GROUNDED ship with its world. `delta` is this frame's spin
    * increment (new spin × old spin⁻¹) in the parent frame. The parent frame
    * does not rotate but the planet mesh does, so without this the drawn
@@ -974,6 +998,18 @@ export class FlightModel {
   private step(h: number): void {
     const c = this.config;
     this.refreshBodyAxes();
+
+    // [v4-save] Grounded with no terrain: only a restored landed ship can be
+    // here (clearing a sampler, a teleport and leaving a system all clear
+    // `grounded`, so v3 never is). Hold it on its patch of ground — the
+    // world's spin still carries it (carryWithSurface) — until the sampler
+    // arrives; then stepGround takes over and, already grounded, announces
+    // nothing.
+    if (this._grounded && this.groundSampler === null) {
+      this.velocity.set(0, 0, 0);
+      this.angularVelocity.set(0, 0, 0);
+      return;
+    }
 
     // [v4-fuel] Per substep, and before the cruise return: under cruise no
     // thrust is drawn from the tank, so nothing can be starved.
