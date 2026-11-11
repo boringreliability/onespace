@@ -77,4 +77,59 @@ describe('ActionEntrySchema — the payload is checked against its source', () =
     const thrust = golden.actions.find((a) => a.source === 'thrust')!;
     expect(ActionEntrySchema.safeParse({ ...thrust, source: 'teleport' }).success).toBe(false);
   });
+
+  it('Given a mined entry without `by` (P2), Then it is invalid', () => {
+    const mined = structuredClone(golden.actions.find((a) => a.source === 'mined')!);
+    delete (mined.payload as { by?: string }).by;
+    expect(ActionEntrySchema.safeParse(mined).success).toBe(false);
+  });
+});
+
+describe('ActionEntrySchema — the checkpoint entry (compaction of the oldest actions)', () => {
+  function checkpoint() {
+    return {
+      seq: 5001,
+      source: 'checkpoint',
+      payload: {
+        upToSeq: 5000,
+        propellantKg: 4210.5,
+        cargoKg: { ice: 1200, metal: 340.25, silicate: 95, rare: 2.5 },
+        minedKg: { ice: 1800, metal: 410, silicate: 95, rare: 3 },
+        emergency: { cannibalize: 1, cannibalizeCargo: 0, beacon: 2 },
+      },
+      wallMs: 1762891200000,
+      orbitSeconds: 5412.25,
+    };
+  }
+
+  it('Given a valid checkpoint, Then it parses unchanged — and a save carrying one is valid', () => {
+    const r = ActionEntrySchema.safeParse(checkpoint());
+    expect(r.success).toBe(true);
+    if (r.success) expect(r.data).toEqual(checkpoint());
+
+    const s = goldenCopy();
+    s.actions = [checkpoint(), ...s.actions] as SaveV1['actions'];
+    expect(SaveV1Schema.safeParse(s).success).toBe(true);
+  });
+
+  const breaks: Array<{ what: string; mutate: (p: ReturnType<typeof checkpoint>['payload']) => void }> = [
+    { what: 'NaN propellantKg', mutate: (p) => (p.propellantKg = Number.NaN) },
+    { what: 'Infinity propellantKg', mutate: (p) => (p.propellantKg = Number.POSITIVE_INFINITY) },
+    { what: 'negative propellantKg', mutate: (p) => (p.propellantKg = -1) },
+    { what: 'negative cargoKg.metal', mutate: (p) => (p.cargoKg.metal = -0.5) },
+    { what: 'NaN minedKg.rare', mutate: (p) => (p.minedKg.rare = Number.NaN) },
+    { what: 'negative emergency.beacon', mutate: (p) => (p.emergency.beacon = -1) },
+    { what: 'fractional emergency.cannibalize', mutate: (p) => (p.emergency.cannibalize = 1.5) },
+    { what: 'fractional upToSeq', mutate: (p) => (p.upToSeq = 2.5) },
+    { what: 'negative upToSeq', mutate: (p) => (p.upToSeq = -1) },
+    { what: 'unknown resource in cargoKg', mutate: (p) => ((p.cargoKg as Record<string, number>).gold = 1) },
+  ];
+
+  for (const b of breaks) {
+    it(`Given a checkpoint with ${b.what}, Then it is rejected`, () => {
+      const c = checkpoint();
+      b.mutate(c.payload);
+      expect(ActionEntrySchema.safeParse(c).success).toBe(false);
+    });
+  }
 });

@@ -128,7 +128,7 @@
     {
       "seq": 4,
       "source": "mined",
-      "payload": { "id": "ast:gx-1mwhji--377.-3.266.1:398:12", "resource": "ice", "kg": 820 },
+      "payload": { "id": "ast:gx-1mwhji--377.-3.266.1:398:12", "by": "local", "resource": "ice", "kg": 820 },
       "wallMs": 1762890900000,
       "orbitSeconds": 3300.5
     },
@@ -145,7 +145,7 @@
     {
       "seq": 6,
       "source": "mined",
-      "payload": { "id": "ast:gx-1mwhji--377.-3.266.1:398:12", "resource": "metal", "kg": 310.5 },
+      "payload": { "id": "ast:gx-1mwhji--377.-3.266.1:398:12", "by": "local", "resource": "metal", "kg": 310.5 },
       "wallMs": 1762890960000,
       "orbitSeconds": 3410
     },
