@@ -242,6 +242,68 @@ describe('Universe restore — landed', () => {
     expect(visits()).toBe(1);
     expect(log.byKind('landing')).toHaveLength(1);
   });
+
+  it('Given a restored landed ship and NO terrain for the first 2 s (renderer not streamed in yet), Then every frame it stays grounded on the same surface point (± 1 m) without falling, and when the terrain arrives no touchdown/landing fires', () => {
+    // --- land for real in a first Universe (as above) -----------------------
+    const a = boot();
+    const remit = a.u.allBodies().find((b) => b.spec.name === LANDING_WORLD)!;
+    expect(remit).toBeDefined();
+    (a.u as unknown as { setShipParent(b: unknown): void }).setShipParent(remit);
+    sphereGround(a.u, remit.spec.id);
+    const up = new Vector3(-0.6, 0.2, 0.7).normalize();
+    a.u.flight.teleport(up.clone().multiplyScalar(remit.spec.radius + 0.002), new Vector3(), new Quaternion().setFromUnitVectors(new Vector3(0, 1, 0), up));
+    for (let i = 0; i < 1200 && !a.u.flight.grounded; i++) a.u.update(1 / 60, a.ctx);
+    frames(a.u, a.ctx, 3);
+    expect(a.u.flight.grounded).toBe(true);
+    const save = capture(a.u);
+    const pointBefore = surfacePoint(a.u);
+
+    const fired: string[] = [];
+    offs.push(bus.on('ship:touchdown', () => fired.push('ship:touchdown')));
+    offs.push(bus.on('planet:landed', () => fired.push('planet:landed')));
+
+    // --- restore with no terrain: the sampler has nothing to read -----------
+    const b = boot(save);
+    let worst = 0;
+    for (let i = 0; i < 120; i++) {
+      b.u.update(1 / 60, b.ctx);
+      expect(b.u.flight.grounded).toBe(true);
+      worst = Math.max(worst, surfacePoint(b.u).distanceTo(pointBefore));
+    }
+    expect(worst).toBeLessThan(1e-3); // km: 1 m — no fall, no drift
+    expect(b.u.flight.position.length()).toBeGreaterThan(remit.spec.radius - 1e-3);
+
+    // --- the terrain streams in ---------------------------------------------
+    sphereGround(b.u, remit.spec.id);
+    frames(b.u, b.ctx, 5);
+    expect(fired).toEqual([]);
+    expect(b.u.flight.grounded).toBe(true);
+    expect(surfacePoint(b.u).distanceTo(pointBefore)).toBeLessThan(1e-3);
+  });
+});
+
+describe('Universe restore — saved system missing at boot', () => {
+  it('Given the restore option names a system that can\'t be found, When init runs, Then it falls back to the normal start system (Fyss), emits system:entered for it, and exposes a restore failure flag (universe.restoreFailed === true) for boot to report', () => {
+    const { save } = fyssOrbitSave();
+    const fyssId = save.system.id;
+    const missing: UniverseRestore = { ...save, system: { ...save.system, id: 'sys-does-not-exist' } };
+    const entered = systemsEntered();
+
+    const { u } = boot(missing);
+
+    expect(u.restoreFailed).toBe(true);
+    expect(u.system.id).toBe(fyssId);
+    expect(u.system.name).toBe(START);
+    expect(entered).toEqual([fyssId]);
+    // A new start: the opening clock, not the save's.
+    expect(u.orbitSeconds).toBe(0);
+  });
+
+  it('Given the restore option names a system that IS found, Then restoreFailed is false; and a plain new game is false too', () => {
+    const { save } = fyssOrbitSave();
+    expect(boot(save).u.restoreFailed).toBe(false);
+    expect(boot().u.restoreFailed).toBe(false);
+  });
 });
 
 describe('Universe restore — another system', () => {
