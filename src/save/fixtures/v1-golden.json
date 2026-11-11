@@ -107,14 +107,14 @@
     {
       "seq": 1,
       "source": "propellant",
-      "payload": { "action": { "kind": "cruise-spool" }, "ok": true, "kg": 40 },
+      "payload": { "action": { "kind": "cruise-spool" }, "ok": true, "kg": 40, "tankDeltaKg": -40 },
       "wallMs": 1762887800000,
       "orbitSeconds": 12
     },
     {
       "seq": 2,
       "source": "propellant",
-      "payload": { "action": { "kind": "cruise-leg", "distanceKm": 58000000 }, "ok": true, "kg": 310.25 },
+      "payload": { "action": { "kind": "cruise-leg", "distanceKm": 58000000 }, "ok": true, "kg": 310.25, "tankDeltaKg": -310.25 },
       "wallMs": 1762887900000,
       "orbitSeconds": 112
     },
@@ -172,7 +172,7 @@
     {
       "seq": 9,
       "source": "propellant",
-      "payload": { "action": { "kind": "cannibalize", "part": "tank", "timesUsed": 0 }, "ok": true, "kg": 0 },
+      "payload": { "action": { "kind": "cannibalize", "part": "tank", "timesUsed": 0 }, "ok": true, "kg": 0, "tankDeltaKg": 600 },
       "wallMs": 1762891100000,
       "orbitSeconds": 4800
     },
@@ -186,7 +186,7 @@
     {
       "seq": 11,
       "source": "propellant",
-      "payload": { "action": { "kind": "spool-refund", "kg": 40 }, "ok": true, "kg": 40 },
+      "payload": { "action": { "kind": "spool-refund", "kg": 40 }, "ok": true, "kg": 40, "tankDeltaKg": 40 },
       "wallMs": 1762891150000,
       "orbitSeconds": 5100
     },

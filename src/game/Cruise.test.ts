@@ -681,7 +681,7 @@ describe('v4-fuel: cruise is paid for out of the tank', () => {
   // -------------------------------------------------------------------------
 
   describe('final review I4 — named actions from cruise', () => {
-    type Seen = { action: { kind: string; kg?: number }; ok: boolean; kg: number };
+    type Seen = { action: { kind: string; kg?: number }; ok: boolean; kg: number; tankDeltaKg: number };
     let actions: Seen[] = [];
     let offAction: (() => void) | null = null;
     beforeEach(() => {
@@ -753,6 +753,68 @@ describe('v4-fuel: cruise is paid for out of the tank', () => {
       expect(Math.abs(announced - billed) / billed).toBeLessThan(1e-6);
       // Nothing else touched the tank in that stretch.
       expect(actions.every((e) => e.action.kind === 'cruise-leg')).toBe(true);
+    });
+
+    // R7 (2): a save must see every kg the leg has billed as cruise, never as
+    // thrust — so the leg billed since the last announcement can be flushed on
+    // demand, once, without being announced again later.
+    describe('R7: flushLeg() — the pending leg, announced on demand', () => {
+      /** Into cruise, then 0.4 s into a fresh segment (less than the 1 s announce period). */
+      function midSegment(): { r: Rig; kgAtLastAnnounce: number } {
+        const r = fuelled(CAP);
+        r.press.add('cruise');
+        r.step(CRUISE_DEFAULTS.spoolTime + 0.5);
+        expect(r.cruise.drive.phase).toBe('cruise');
+        // Wait for an announcement, so a segment starts on a known frame.
+        actions = [];
+        for (let i = 0; i < 120 && of('cruise-leg').length === 0; i++) r.step(H);
+        expect(of('cruise-leg').length).toBe(1);
+        const kgAtLastAnnounce = r.flight.propellant!.massKg;
+        actions = [];
+        r.step(0.4);
+        expect(of('cruise-leg')).toHaveLength(0);
+        return { r, kgAtLastAnnounce };
+      }
+
+      it('Given 0.4 s of leg billed but not yet announced, When flushLeg(), Then one cruise-leg is announced with exactly the kg billed since the last announcement', () => {
+        const { r, kgAtLastAnnounce } = midSegment();
+        const billed = kgAtLastAnnounce - r.flight.propellant!.massKg;
+        expect(billed).toBeGreaterThan(0);
+        r.cruise.flushLeg();
+        const legs = of('cruise-leg');
+        expect(legs).toHaveLength(1);
+        expect(Math.abs(legs[0]!.kg - billed)).toBeLessThan(1e-9);
+        expect(Math.abs(legs[0]!.tankDeltaKg + billed)).toBeLessThan(1e-9);
+      });
+
+      it('Given a flushLeg(), When flushLeg() is called again at once, Then nothing more is announced', () => {
+        const { r } = midSegment();
+        r.cruise.flushLeg();
+        r.cruise.flushLeg();
+        expect(of('cruise-leg')).toHaveLength(1);
+      });
+
+      it('Given a flush mid-segment and the cruise flown on and dropped out of, Then all cruise-leg kg add up to the tank\'s drop — nothing counted twice, nothing lost', () => {
+        const { r, kgAtLastAnnounce } = midSegment();
+        r.cruise.flushLeg();
+        r.step(1.7);
+        r.cruise.flushLeg();
+        r.step(0.3);
+        r.press.add('cruise');
+        r.step(5);
+        expect(r.cruise.drive.phase).toBe('idle');
+        const billed = kgAtLastAnnounce - r.flight.propellant!.massKg;
+        const announced = of('cruise-leg').reduce((s, e) => s + e.kg, 0);
+        expect(Math.abs(announced - billed) / billed).toBeLessThan(1e-9);
+        const delta = of('cruise-leg').reduce((s, e) => s + e.tankDeltaKg, 0);
+        expect(Math.abs(delta + billed) / billed).toBeLessThan(1e-9);
+      });
+
+      it('Given no cruise at all, When flushLeg(), Then nothing is announced', () => {
+        const r = fuelled(CAP);
+        r.cruise.flushLeg();
+        expect(actions).toEqual([]);
+      });
     });
   });
 });

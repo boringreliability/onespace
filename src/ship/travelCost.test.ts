@@ -24,6 +24,7 @@ import type { FlightModel } from './FlightModel';
 import { EXHAUST_VELOCITY_KMS, PROBE_TANK_CAPACITY_KG, Propellant } from './propellant';
 import { REMIT, flyLeg, releaseLegListeners } from './testing/landingSim';
 import {
+  announceAction,
   applyAction,
   canAfford,
   cruiseLegKg,
@@ -365,7 +366,7 @@ describe('final review I3 — the chart shows the jump price as a share of the c
 // ---------------------------------------------------------------------------
 
 describe('final review I4 — named actions and the propellant:action event', () => {
-  type Seen = { action: PropellantAction; ok: boolean; kg: number };
+  type Seen = { action: PropellantAction; ok: boolean; kg: number; tankDeltaKg: number };
   const seen: Seen[] = [];
   let off: (() => void) | null = null;
   function listen(): void {
@@ -452,5 +453,68 @@ describe('final review I4 — named actions and the propellant:action event', ()
       'cannibalize',
       'beacon',
     ]);
+  });
+
+  // R7: the event says what the action did to the tank, signed, so a save's
+  // books can tell named changes from unannounced thrust.
+  describe('R7: propellant:action carries tankDeltaKg = mass after − mass before', () => {
+    function lossy(fill: number, loss: number): Propellant {
+      const p = new Propellant(CAP, fill);
+      p.capacityLossFrac = loss;
+      return p;
+    }
+    const cases: Array<[string, () => Propellant, PropellantAction]> = [
+      ['a spool (spend)', () => tank(1), { kind: 'cruise-spool' }],
+      ['a cruise leg (spend)', () => tank(1), { kind: 'cruise-leg', distanceKm: 0.7 * AU }],
+      ['a jump (spend)', () => tank(0.8), { kind: 'jump', distanceLy: 12 }],
+      ['a jump-refund (gain)', () => tank(0.5), { kind: 'jump-refund', kg: 1_200 }],
+      ['a spool-refund clamped at capacity (gain = what fit)', () => tank(0.999), { kind: 'spool-refund', kg: 5_000 }],
+      ['a cannibalize (kg 0, but the tank gains)', () => tank(0), { kind: 'cannibalize', part: 'tank', timesUsed: 1 }],
+      ['a cannibalize into a shrunk tank', () => lossy(0, 0.6), { kind: 'cannibalize', part: 'tank', timesUsed: 0 }],
+      ['a beacon from empty (gain to 5 %)', () => tank(0), { kind: 'beacon' }],
+      ['a beacon from 40 % (the tank is SET to 5 %: a loss)', () => tank(0.4), { kind: 'beacon' }],
+      ['a beacon into a damaged tank', () => lossy(0, 0.3), { kind: 'beacon' }],
+    ];
+    for (const [what, make, a] of cases) {
+      it(`Given ${what}, Then tankDeltaKg is the tank's actual change (1e-9)`, () => {
+        listen();
+        const p = make();
+        const before = p.massKg;
+        applyAction(p, a);
+        expect(seen).toHaveLength(1);
+        expect(Number.isFinite(seen[0]!.tankDeltaKg)).toBe(true);
+        expect(Math.abs(seen[0]!.tankDeltaKg - (p.massKg - before))).toBeLessThan(1e-9);
+      });
+    }
+
+    it('Given spends, Then tankDeltaKg is −kg; given refunds, +kg', () => {
+      listen();
+      applyAction(tank(1), { kind: 'jump', distanceLy: 3 });
+      applyAction(tank(0.5), { kind: 'jump-refund', kg: 250 });
+      expect(seen[0]!.tankDeltaKg).toBeCloseTo(-seen[0]!.kg, 9);
+      expect(seen[1]!.tankDeltaKg).toBeCloseTo(seen[1]!.kg, 9);
+    });
+
+    it('Given a refused action (5 % left, 6 % jump; a cannibalize of a tank that is not dry), Then tankDeltaKg is 0', () => {
+      listen();
+      applyAction(tank(0.05), { kind: 'jump', distanceLy: 5 });
+      applyAction(tank(0.5), { kind: 'cannibalize', part: 'tank' });
+      expect(seen.map((e) => [e.ok, e.tankDeltaKg])).toEqual([
+        [false, 0],
+        [false, 0],
+      ]);
+    });
+
+    it('Given a leg billed silently (announce:false) and announced later with announceAction, Then the announcement carries tankDeltaKg = −kg', () => {
+      listen();
+      const p = tank(1);
+      const before = p.massKg;
+      const r = applyAction(p, { kind: 'cruise-leg', distanceKm: 0.3 * AU }, { announce: false });
+      expect(seen).toHaveLength(0);
+      announceAction({ kind: 'cruise-leg', distanceKm: 0.3 * AU }, r);
+      expect(seen).toHaveLength(1);
+      expect(Math.abs(seen[0]!.tankDeltaKg - (p.massKg - before))).toBeLessThan(1e-9);
+      expect(seen[0]!.tankDeltaKg).toBeCloseTo(-seen[0]!.kg, 9);
+    });
   });
 });

@@ -73,6 +73,39 @@ describe('ActionEntrySchema — the payload is checked against its source', () =
     expect(ActionEntrySchema.safeParse({ ...cargo, source: 'propellant' }).success).toBe(false);
   });
 
+  describe('R7: a propellant payload carries tankDeltaKg — the signed change it made to the tank', () => {
+    function propellantEntry(): Record<string, unknown> & { payload: Record<string, unknown> } {
+      return structuredClone(golden.actions.find((a) => a.source === 'propellant')!) as never;
+    }
+
+    it('Given a spend (negative), a refund or a cannibalize gain (positive) and zero, Then each is accepted', () => {
+      for (const d of [-310.25, 40, 600, 0]) {
+        const e = propellantEntry();
+        e.payload.tankDeltaKg = d;
+        expect(ActionEntrySchema.safeParse(e).success, String(d)).toBe(true);
+      }
+    });
+
+    it('Given a propellant payload WITHOUT tankDeltaKg, Then it is rejected (the books need it)', () => {
+      const e = propellantEntry();
+      delete e.payload.tankDeltaKg;
+      expect(ActionEntrySchema.safeParse(e).success).toBe(false);
+    });
+
+    for (const [what, v] of [
+      ['NaN', Number.NaN],
+      ['Infinity', Number.POSITIVE_INFINITY],
+      ['-Infinity', Number.NEGATIVE_INFINITY],
+      ['a string', '-40'],
+    ] as const) {
+      it(`Given tankDeltaKg ${what}, Then it is rejected`, () => {
+        const e = propellantEntry();
+        e.payload.tankDeltaKg = v;
+        expect(ActionEntrySchema.safeParse(e).success).toBe(false);
+      });
+    }
+  });
+
   it('Given an unknown source, Then it is rejected', () => {
     const thrust = golden.actions.find((a) => a.source === 'thrust')!;
     expect(ActionEntrySchema.safeParse({ ...thrust, source: 'teleport' }).success).toBe(false);

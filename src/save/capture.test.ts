@@ -34,7 +34,8 @@ import { fyssField, nodeCtx } from '@/game/testing/beltFixture';
 import { WorldState, type MinedEntry } from '@/game/worldState';
 import { applyCargoAction } from '@/ship/cargo';
 import { EXHAUST_VELOCITY_KMS } from '@/ship/propellant';
-import { applyAction } from '@/ship/travelCost';
+import { payBeacon } from '@/ship/emergency';
+import { announceAction, applyAction, type ActionResult } from '@/ship/travelCost';
 import { ActionJournal, MAX_ACTIONS } from './actionJournal';
 import { applySave, buildSave, type SaveWorld } from './capture';
 import { migrate } from './migrate';
@@ -377,7 +378,7 @@ describe('buildSave — the action log', () => {
       actions: Array.from({ length: 4_999 }, (_, i): ActionEntry => ({
         seq: i + 1,
         source: 'propellant',
-        payload: { action: { kind: 'cruise-spool' }, ok: true, kg: 100 },
+        payload: { action: { kind: 'cruise-spool' }, ok: true, kg: 100, tankDeltaKg: -100 },
         wallMs: WALL + i,
         orbitSeconds: i,
       })),
@@ -392,6 +393,144 @@ describe('buildSave — the action log', () => {
     expect(s.actions.at(-1)!.seq).toBeGreaterThan(4_999);
     expect(s.actions.filter((e) => e.source === 'emergency')).toHaveLength(3);
     expect(SaveV1Schema.safeParse(s).success).toBe(true);
+  });
+});
+
+// --- R7: the books balance around emergencies and cruise ---------------------
+
+describe('R7: the books balance around emergencies and cruise', () => {
+  /** kg booked as unannounced thrust among `entries`. */
+  function thrustKg(entries: readonly ActionEntry[]): number {
+    return entries.filter((e) => e.source === 'thrust').reduce((a, e) => a + (e.payload as { kg: number }).kg, 0);
+  }
+  function since(prev: SaveV1, next: SaveV1): ActionEntry[] {
+    return next.actions.slice(prev.actions.length);
+  }
+
+  it('Given a world with no tank attached (Yard-like hull), When buildSave, Then it returns a valid save without throwing — a sane empty tank and no thrust entry', () => {
+    const g = live();
+    g.u.flight.attachPropellant(null, EXHAUST_VELOCITY_KMS);
+    let s: SaveV1 | null = null;
+    expect(() => {
+      s = buildSave(g.w, null);
+    }).not.toThrow();
+    const save = s as unknown as SaveV1;
+    expect(SaveV1Schema.safeParse(save).success).toBe(true);
+    const { massKg, capacityLossFrac } = save.ship.propellant;
+    expect(Number.isFinite(massKg) && massKg >= 0).toBe(true);
+    expect(Number.isFinite(capacityLossFrac) && capacityLossFrac >= 0 && capacityLossFrac <= 1).toBe(true);
+    expect(save.actions.some((e) => e.source === 'thrust')).toBe(false);
+  });
+
+  it('Given unannounced thrust before the very first save, Then that first save books it (the baseline is the tank when the journal started)', () => {
+    const g = live();
+    const tank = g.u.flight.propellant!;
+    const start = tank.massKg;
+    tank.consume(321.25);
+    const s = buildSave(g.w, null);
+    expect(Math.abs(thrustKg(s.actions) - 321.25)).toBeLessThan(1e-9);
+    expect(s.ship.propellant.massKg).toBeCloseTo(start - 321.25, 9);
+  });
+
+  it('Given a first save after only named actions (a jump), Then it books no thrust', () => {
+    const g = live();
+    expect(applyAction(g.u.flight.propellant!, { kind: 'jump', distanceLy: 4 }).ok).toBe(true);
+    const s = buildSave(g.w, null);
+    expect(thrustKg(s.actions)).toBeLessThan(1e-9);
+  });
+
+  it('Given an interval with a cannibalize and a beacon (both announce kg 0 but change the tank), Then that interval books zero thrust', () => {
+    const g = live();
+    const tank = g.u.flight.propellant!;
+    tank.consume(tank.massKg); // dry, unannounced: booked by s1
+    const s1 = buildSave(g.w, null);
+    g.press('emergency');
+    g.press('emergencyCannibalize'); // +3 % of base into a smaller tank
+    expect(g.emergency.timesUsed).toBe(1);
+    expect(tank.massKg).toBeGreaterThan(0);
+    payBeacon(tank, g.u.cargo, g.shipLog, g.u.system.name); // the tank is SET to 5 % of capacity
+    const s2 = buildSave(g.w, s1);
+    expect(thrustKg(since(s1, s2))).toBeLessThan(1e-9);
+    expect(s2.ship.propellant.massKg).toBe(tank.massKg);
+  });
+
+  it('Given an interval with a cannibalize-cargo (the gain arrives as cargo fuelKg), Then that interval books zero thrust', () => {
+    const g = live();
+    const tank = g.u.flight.propellant!;
+    mine(g, ASTEROID(), 'metal', 1_500);
+    tank.consume(tank.massKg);
+    const s1 = buildSave(g.w, null);
+    g.press('emergency');
+    g.press('emergencyCannibalizeCargo');
+    expect(tank.massKg).toBeGreaterThan(0);
+    const s2 = buildSave(g.w, s1);
+    expect(thrustKg(since(s1, s2))).toBeLessThan(1e-9);
+  });
+
+  it('Given an interval where a beacon fired on a 40 % tank (a LOSS, announced kg 0), Then zero thrust is booked — the loss is the beacon\'s', () => {
+    const g = live();
+    const tank = g.u.flight.propellant!;
+    const s1 = buildSave(g.w, null);
+    payBeacon(tank, g.u.cargo, g.shipLog, g.u.system.name);
+    const s2 = buildSave(g.w, s1);
+    expect(thrustKg(since(s1, s2))).toBeLessThan(1e-9);
+  });
+
+  /**
+   * Cruise's contract (R7 (2)): the tank is billed every frame silently and
+   * the leg announced later; `flushLeg()` announces what is pending. This
+   * stand-in bills the real tank exactly as Cruise does.
+   */
+  function cruiseStandIn(g: Live) {
+    let pending: { km: number; r: ActionResult } | null = null;
+    const bill = (km: number): void => {
+      const r = applyAction(g.u.flight.propellant!, { kind: 'cruise-leg', distanceKm: km }, { announce: false });
+      pending = pending ? { km: pending.km + km, r: { ok: pending.r.ok && r.ok, kg: pending.r.kg + r.kg } } : { km, r };
+    };
+    const flushLeg = (): void => {
+      if (pending) announceAction({ kind: 'cruise-leg', distanceKm: pending.km }, pending.r);
+      pending = null;
+    };
+    return { bill, flushLeg };
+  }
+
+  it('Given an interval of cruise billed but not yet announced, When buildSave (with the cruise in the world), Then the leg is flushed and booked as cruise-leg kg — not thrust', () => {
+    const g = live();
+    const tank = g.u.flight.propellant!;
+    const cruise = cruiseStandIn(g);
+    const w: SaveWorld = { ...g.w, cruise };
+    const s1 = buildSave(w, null);
+    const before = tank.massKg;
+    cruise.bill(2.0e7);
+    cruise.bill(3.5e7);
+    const billed = before - tank.massKg;
+    expect(billed).toBeGreaterThan(0);
+    const s2 = buildSave(w, s1);
+    const fresh = since(s1, s2);
+    expect(thrustKg(fresh)).toBeLessThan(1e-9);
+    const legs = fresh.filter((e) => e.source === 'propellant' && (e.payload as { action: { kind: string } }).action.kind === 'cruise-leg');
+    expect(legs).toHaveLength(1);
+    expect(Math.abs((legs[0]!.payload as { kg: number }).kg - billed)).toBeLessThan(1e-9);
+  });
+
+  it('Given a leg flushed by a save, When the cruise later flushes again, Then the next save does not count it twice (and still books no thrust)', () => {
+    const g = live();
+    const tank = g.u.flight.propellant!;
+    const cruise = cruiseStandIn(g);
+    const w: SaveWorld = { ...g.w, cruise };
+    const s1 = buildSave(w, null);
+    const before = tank.massKg;
+    cruise.bill(2.0e7);
+    const s2 = buildSave(w, s1);
+    cruise.flushLeg(); // nothing pending: announces nothing
+    cruise.bill(1.0e7);
+    const s3 = buildSave(w, s2);
+    const fresh = since(s1, s3);
+    const legKg = fresh
+      .filter((e) => e.source === 'propellant')
+      .reduce((a, e) => a + (e.payload as { kg: number }).kg, 0);
+    expect(Math.abs(legKg - (before - tank.massKg))).toBeLessThan(1e-9);
+    expect(thrustKg(fresh)).toBeLessThan(1e-9);
   });
 });
 

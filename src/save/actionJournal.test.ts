@@ -57,8 +57,9 @@ function journal(wall?: number, orbit?: number) {
 
 // --- event helpers ------------------------------------------------------------
 
-function propellant(action: PropellantAction, kg: number, ok = true): void {
-  bus.emit('propellant:action', { action, ok, kg });
+/** R7: the event carries the signed tank change; a spend by default (−kg). */
+function propellant(action: PropellantAction, kg: number, ok = true, tankDeltaKg = ok ? -kg : 0): void {
+  bus.emit('propellant:action', { action, ok, kg, tankDeltaKg });
 }
 
 function okResult(p: Partial<CargoResult> = {}): CargoResult {
@@ -119,10 +120,16 @@ describe('one event, one entry, both clocks', () => {
     });
   }
 
-  it('Given a propellant:action, Then its payload is the event as announced ({action, ok, kg})', () => {
+  it('Given a propellant:action, Then its payload is the event as announced ({action, ok, kg, tankDeltaKg})', () => {
     const { j } = journal();
     propellant({ kind: 'cruise-leg', distanceKm: 5e6 }, 66.84);
-    expect(j.drain()[0]!.payload).toEqual({ action: { kind: 'cruise-leg', distanceKm: 5e6 }, ok: true, kg: 66.84 });
+    expect(j.drain()[0]!.payload).toEqual({ action: { kind: 'cruise-leg', distanceKm: 5e6 }, ok: true, kg: 66.84, tankDeltaKg: -66.84 });
+  });
+
+  it('Given a cannibalize announced with kg 0 but a +600 kg tank change, Then the entry keeps tankDeltaKg +600 (R7)', () => {
+    const { j } = journal();
+    propellant({ kind: 'cannibalize', part: 'tank', timesUsed: 0 }, 0, true, 600);
+    expect(j.drain()[0]!.payload).toEqual({ action: { kind: 'cannibalize', part: 'tank', timesUsed: 0 }, ok: true, kg: 0, tankDeltaKg: 600 });
   });
 
   it('Given a REFUSED propellant:action, Then it is still logged once, with ok:false (the payload carries ok)', () => {
@@ -130,7 +137,7 @@ describe('one event, one entry, both clocks', () => {
     propellant({ kind: 'jump', distanceLy: 40 }, 0, false);
     const out = j.drain();
     expect(out).toHaveLength(1);
-    expect(out[0]!.payload).toEqual({ action: { kind: 'jump', distanceLy: 40 }, ok: false, kg: 0 });
+    expect(out[0]!.payload).toEqual({ action: { kind: 'jump', distanceLy: 40 }, ok: false, kg: 0, tankDeltaKg: 0 });
   });
 
   it('Given an ok cargo:action, Then its payload is {action, result} as announced', () => {
@@ -228,7 +235,7 @@ describe('drain and seq', () => {
     const saved: ActionEntry[] = [
       { seq: 40, source: 'thrust', payload: { kg: 1 }, wallMs: 1, orbitSeconds: 1 },
       { seq: 41, source: 'emergency', payload: { kind: 'beacon' }, wallMs: 2, orbitSeconds: 2 },
-      { seq: 42, source: 'propellant', payload: { action: { kind: 'cruise-spool' }, ok: true, kg: 100 }, wallMs: 3, orbitSeconds: 3 },
+      { seq: 42, source: 'propellant', payload: { action: { kind: 'cruise-spool' }, ok: true, kg: 100, tankDeltaKg: -100 }, wallMs: 3, orbitSeconds: 3 },
     ];
     j.restore(saved);
     propellant({ kind: 'cruise-spool' }, 100);
