@@ -333,3 +333,119 @@ describe('re-scanning an asteroid updates its assay (final review I3a)', () => {
     expect(log.byKind('contact')[0]!.body).toEqual(['hauler']);
   });
 });
+
+describe('v4 save — export / import, sink and the legacy key', () => {
+  const KEY = 'onespace.log.v1';
+
+  /** A log with an arrival, a world and a landing (visited twice), and some mission time. */
+  function played(): ShipLog {
+    const log = open();
+    bus.emit('system:entered', { system: system('s1', 'Fyss') });
+    log.update(1234.5);
+    bus.emit('scan:complete', scan('p1', 'Remit 31'));
+    bus.emit('planet:landed', { planet: planet('p1', 'Remit 31') });
+    bus.emit('planet:landed', { planet: planet('p1', 'Remit 31') });
+    return log;
+  }
+
+  it('Given a played log, When exportState → importState into a fresh log, Then the state is identical', () => {
+    const a = played();
+    const s = a.exportState();
+    expect(s.time).toBeCloseTo(1234.5, 9);
+    expect(s.entries).toHaveLength(3);
+    a.dispose();
+
+    store.map.clear();
+    const b = open();
+    b.importState(s);
+    expect(b.exportState()).toEqual(s);
+    expect(b.all()).toEqual(a.all());
+    expect(b.summary()).toEqual(a.summary());
+  });
+
+  it('Given an import, Then no log event is sent (no LOGGED line for what was already logged)', () => {
+    const s = played().exportState();
+    bus.clear();
+    store.map.clear();
+    const lines: string[] = [];
+    bus.on('log', ({ text }) => lines.push(text));
+    const b = open();
+    b.importState(s);
+    expect(lines).toEqual([]);
+  });
+
+  it('Given an imported log, When the same world is landed on again, Then it is a revisit (visits++), not a new entry', () => {
+    const s = played().exportState();
+    bus.clear();
+    store.map.clear();
+    const b = open();
+    b.importState(s);
+    bus.emit('planet:landed', { planet: planet('p1', 'Remit 31') });
+    const landings = b.byKind('landing');
+    expect(landings).toHaveLength(1);
+    expect(landings[0]!.visits).toBe(3);
+  });
+
+  it('Given an export, Then it is a copy: recording afterwards does not change it', () => {
+    const log = played();
+    const s = log.exportState();
+    bus.emit('system:entered', { system: system('s2', 'Ost') });
+    expect(s.entries).toHaveLength(3);
+  });
+
+  it('Given a sink, When the log records, upserts or clears, Then every write goes to the sink and localStorage is untouched', () => {
+    const log = open();
+    const writes: Array<{ time: number; entries: readonly unknown[] }> = [];
+    log.setSink((state) => writes.push(state));
+    bus.emit('system:entered', { system: system('s1', 'Fyss') });
+    bus.emit('scan:complete', { targetId: 'ast:x', name: 'rock', lines: ['ice 3 t'], kind: 'asteroid' });
+    bus.emit('scan:complete', { targetId: 'ast:x', name: 'rock', lines: ['ice 1 t'], kind: 'asteroid' });
+    log.clear();
+    expect(store.map.has(KEY)).toBe(false);
+    expect(writes.length).toBeGreaterThanOrEqual(4);
+    expect(writes[0]!.entries).toHaveLength(1);
+    expect(writes.at(-1)!.entries).toHaveLength(0);
+  });
+
+  it('Given a sink, When an import happens, Then localStorage is still untouched', () => {
+    const s = played().exportState();
+    store.map.clear();
+    const b = open();
+    b.setSink(() => undefined);
+    b.importState(s);
+    bus.emit('system:entered', { system: system('s9', 'Nine') });
+    expect(store.map.has(KEY)).toBe(false);
+  });
+
+  it('Given the sink is removed (null), When the log records, Then it writes to localStorage again', () => {
+    const log = open();
+    log.setSink(() => undefined);
+    log.setSink(null);
+    bus.emit('system:entered', { system: system('s1', 'Fyss') });
+    expect(store.map.has(KEY)).toBe(true);
+  });
+
+  it('Given an old onespace.log.v1, When legacyState() is read, Then it returns its time and entries and leaves the key in place', () => {
+    const a = played();
+    const expected = a.exportState();
+    a.dispose();
+    const raw = store.map.get(KEY);
+    expect(raw).toBeDefined();
+
+    bus.clear();
+    const b = new ShipLog();
+    const legacy = b.legacyState();
+    expect(legacy).not.toBeNull();
+    expect(legacy!.time).toBeCloseTo(expected.time, 9);
+    expect(legacy!.entries).toEqual(expected.entries);
+    expect(store.map.get(KEY)).toBe(raw);
+  });
+
+  it('Given no (or a corrupt, or a wrong-version) onespace.log.v1, Then legacyState() is null', () => {
+    expect(new ShipLog().legacyState()).toBeNull();
+    store.map.set(KEY, '{not json');
+    expect(new ShipLog().legacyState()).toBeNull();
+    store.map.set(KEY, JSON.stringify({ version: 99, time: 1, entries: [] }));
+    expect(new ShipLog().legacyState()).toBeNull();
+  });
+});

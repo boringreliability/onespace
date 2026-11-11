@@ -10,7 +10,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { WorldState } from './worldState';
+import { WorldState, type MinedEntry } from './worldState';
 
 const AST = 'ast:sys-fyss:398:4';
 
@@ -92,5 +92,68 @@ describe('WorldState — the shared empty record and the by field (hardening)', 
     const { ws } = rig();
     ws.recordMined(AST, 'metal', 2, 'someone-else' as never);
     expect(ws.entries()[0]!.by).toBe('someone-else');
+  });
+});
+
+describe('v4 save — WorldState.restore', () => {
+  function played() {
+    const { ws, clock } = rig(10, 1_000);
+    ws.recordMined(AST, 'ice', 3, 'local');
+    clock.orbit = 500;
+    clock.wall = 90_000;
+    ws.recordMined(AST, 'metal', 2.5, 'local');
+    ws.recordMined('ast:sys-fyss:398:5', 'rare', 0.25, 'local');
+    return ws;
+  }
+
+  it('Given a played world, When its entries are restored into a fresh one, Then remainingKg (depletion) is the same for every rock', () => {
+    const before = played();
+    const after = rig(9_999, 9_999_999).ws;
+    after.restore(before.entries());
+    for (const id of [AST, 'ast:sys-fyss:398:5', 'ast:sys-fyss:398:6']) {
+      expect(after.depleted(id)).toEqual(before.depleted(id));
+    }
+  });
+
+  it('Given a restore, Then the entries keep their own clocks — no new clocks are stamped', () => {
+    const before = played();
+    const after = rig(9_999, 9_999_999).ws;
+    after.restore(before.entries());
+    expect(after.entries()).toEqual(before.entries());
+    expect(after.entries()[0]).toMatchObject({ orbitSeconds: 10, wallMs: 1_000 });
+    expect(after.entries()[1]).toMatchObject({ orbitSeconds: 500, wallMs: 90_000 });
+  });
+
+  it('Given a world that already has mines, When restored, Then it is replaced, not added to', () => {
+    const before = played();
+    const after = rig().ws;
+    after.recordMined(AST, 'ice', 100, 'local');
+    after.recordMined('ast:other', 'silicate', 7, 'local');
+    after.restore(before.entries());
+    expect(after.depleted(AST)).toEqual(before.depleted(AST));
+    expect(after.depleted('ast:other')).toEqual({ ice: 0, metal: 0, silicate: 0, rare: 0 });
+    expect(after.entries()).toHaveLength(3);
+  });
+
+  it('Given a restore and then a new mine, Then it adds to the restored depletion and carries the current clocks', () => {
+    const before = played();
+    const after = rig(700, 123_000).ws;
+    after.restore(before.entries());
+    after.recordMined(AST, 'ice', 1, 'local');
+    expect(after.depleted(AST).ice).toBeCloseTo(4, 12);
+    expect(after.entries()[3]).toMatchObject({ orbitSeconds: 700, wallMs: 123_000 });
+  });
+
+  it('Given entries(), Then it returns a copy: changing it (or the array restored from) does not change the world', () => {
+    const before = played();
+    const source = [...before.entries()];
+    const after = rig().ws;
+    after.restore(source);
+    source.length = 0;
+    expect(after.entries()).toHaveLength(3);
+    const got = after.entries() as MinedEntry[];
+    got.length = 0;
+    expect(after.entries()).toHaveLength(3);
+    expect(after.entries()).not.toBe(after.entries());
   });
 });

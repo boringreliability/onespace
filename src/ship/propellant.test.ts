@@ -168,3 +168,58 @@ describe('propellant — mutation hardening', () => {
     expect(massScale(1000, 500, 500)).toBe(0.5);
   });
 });
+
+describe('v4 save — Propellant snapshot / restore', () => {
+  it('Given a full tank at 50 % capacity loss, When snapshot → restore into a fresh tank, Then mass = capacity (loss restored first)', () => {
+    const saved = new Propellant(20_000, 1);
+    saved.capacityLossFrac = 0.5;
+    expect(saved.massKg).toBe(10_000);
+    const s = saved.snapshot();
+    expect(s).toEqual({ massKg: 10_000, capacityLossFrac: 0.5 });
+
+    const tank = new Propellant(20_000, 0.6);
+    tank.restore(s);
+    expect(tank.capacityLossFrac).toBe(0.5);
+    expect(tank.massKg).toBe(tank.capacityKg);
+    expect(tank.massKg).toBe(10_000);
+  });
+
+  it('Given a tank that has lost 90 % of its capacity, When a save with 50 % loss and 10 000 kg is restored, Then mass is 10 000 (not clamped to the old capacity)', () => {
+    const tank = new Propellant(20_000, 0.1);
+    tank.capacityLossFrac = 0.9;
+    tank.restore({ massKg: 10_000, capacityLossFrac: 0.5 });
+    expect(tank.capacityLossFrac).toBe(0.5);
+    expect(tank.massKg).toBe(10_000);
+  });
+
+  it('Given a snapshot, Then it is a plain copy: changing the tank afterwards does not change it', () => {
+    const tank = new Propellant(20_000, 0.6);
+    const s = tank.snapshot();
+    tank.consume(1_000);
+    expect(s.massKg).toBeCloseTo(12_000, 6);
+  });
+
+  it('Given NaN (or another non-finite / negative value) in a save, When restored, Then it is refused by today’s rule: 0, never NaN', () => {
+    for (const bad of BAD_NUMBERS) {
+      const tank = new Propellant(20_000, 0.6);
+      tank.restore({ massKg: bad, capacityLossFrac: bad });
+      expect(tank.massKg).toBe(0);
+      expect(tank.capacityLossFrac).toBe(0);
+      expect(Number.isFinite(tank.fraction)).toBe(true);
+    }
+  });
+
+  it('Given a mass above the restored capacity, When restored, Then it is clamped to capacity (as the setter does)', () => {
+    const tank = new Propellant(20_000, 0.6);
+    tank.restore({ massKg: 30_000, capacityLossFrac: 0.25 });
+    expect(tank.capacityLossFrac).toBe(0.25);
+    expect(tank.massKg).toBe(15_000);
+  });
+
+  it('Given a loss above 1, When restored, Then it is clamped to 1 and the tank is empty', () => {
+    const tank = new Propellant(20_000, 0.6);
+    tank.restore({ massKg: 5_000, capacityLossFrac: 7 });
+    expect(tank.capacityLossFrac).toBe(1);
+    expect(tank.massKg).toBe(0);
+  });
+});
