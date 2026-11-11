@@ -409,6 +409,7 @@ describe('v4 save — export / import, sink and the legacy key', () => {
 
   it('Given a sink, When an import happens, Then localStorage is still untouched', () => {
     const s = played().exportState();
+    bus.clear();
     store.map.clear();
     const b = open();
     b.setSink(() => undefined);
