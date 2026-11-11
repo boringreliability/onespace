@@ -113,6 +113,95 @@ describe('migrate — an unknown format is never silently discarded', () => {
   });
 });
 
+describe('migrate — a v1 save from a newer build is named, not just "invalid" (R4)', () => {
+  // Policy: ANY change to the v1 shape — an added optional field included —
+  // needs a new format number and an UPGRADES step. So a format-1 save whose
+  // only fault is fields this build does not know was written by a newer build.
+  const extras: Array<{ what: string; key: string; mutate: (s: Record<string, unknown> & SaveV1) => void }> = [
+    { what: 'an extra top-level field', key: 'pets', mutate: (s) => (s.pets = []) },
+    {
+      what: 'an extra field inside ship',
+      key: 'shields',
+      mutate: (s) => ((s.ship as Record<string, unknown>).shields = 100),
+    },
+    {
+      what: 'an extra field inside an action payload',
+      key: 'note',
+      mutate: (s) => ((s.actions[2]!.payload as Record<string, unknown>).note = 'x'),
+    },
+  ];
+
+  for (const e of extras) {
+    it(`Given a format-1 save with only ${e.what}, Then newer-build, the issues name the key, and the raw save is untouched`, () => {
+      const s = goldenCopy() as Record<string, unknown> & SaveV1;
+      e.mutate(s);
+      const before = structuredClone(s);
+      let r: ReturnType<typeof migrate> | undefined;
+      expect(() => (r = migrate(s))).not.toThrow();
+      expect(r!.ok).toBe(false);
+      if (r!.ok) return;
+      expect(r!.reason).toBe('newer-build');
+      expect(r!.issues.some((i) => i.includes(e.key))).toBe(true);
+      expect(s).toEqual(before);
+    });
+  }
+
+  it('Given a format-1 save with an extra field AND a broken value (revision 0), Then invalid — not newer-build', () => {
+    const s = goldenCopy() as Record<string, unknown> & SaveV1;
+    s.pets = [];
+    s.revision = 0;
+    const r = migrate(s);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toBe('invalid');
+    expect(hasPath(r.issues, 'revision')).toBe(true);
+  });
+
+  it('Given a format-1 save with an unknown enum value (not an extra key), Then invalid — not newer-build', () => {
+    const s = goldenCopy();
+    (s.world.entries[0] as { resource: string }).resource = 'gold';
+    const r = migrate(s);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toBe('invalid');
+  });
+});
+
+describe('migrate — the ids (P4)', () => {
+  const ids: Array<{ what: string; path: string; mutate: (s: SaveV1) => void }> = [
+    { what: 'a non-UUID saveId ("save-1")', path: 'saveId', mutate: (s) => (s.saveId = 'save-1') },
+    { what: 'an empty saveId', path: 'saveId', mutate: (s) => (s.saveId = '') },
+    { what: 'universeId gx-1:v2 (wrong version suffix)', path: 'universeId', mutate: (s) => (s.universeId = 'gx-1:v2') },
+    {
+      what: 'an upper-case universeId GX-1MWHJI:v1',
+      path: 'universeId',
+      mutate: (s) => (s.universeId = 'GX-1MWHJI:v1'),
+    },
+    {
+      what: 'a universeId without the :v1 suffix',
+      path: 'universeId',
+      mutate: (s) => (s.universeId = 'gx-1mwhji'),
+    },
+    {
+      what: 'a world from another universe (gx-2:v1 ≠ gx-1mwhji:v1)',
+      path: 'world.universeId',
+      mutate: (s) => (s.world.universeId = 'gx-2:v1'),
+    },
+  ];
+
+  for (const b of ids) {
+    it(`Given ${b.what}, Then invalid with the path ${b.path}`, () => {
+      const s = goldenCopy();
+      b.mutate(s);
+      const r = migrate(s);
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.reason).toBe('invalid');
+      expect(hasPath(r.issues, b.path)).toBe(true);
+    });
+  }
+});
+
 describe('legacyLogToV1 — the old localStorage logbook', () => {
   it('Given the legacy {version:1,time,entries} log, Then legacyLogToV1 yields the same entries and time', () => {
     const log = legacyLogToV1(structuredClone(legacy), ctx);
