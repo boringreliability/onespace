@@ -579,14 +579,20 @@ export class Universe implements GameModule {
     this.simulatedSeconds = this.slices.count * this.slices.slice;
     for (let i = 0; i < this.slices.count; i++) {
       const h = this.slices.slice;
-      this.orbitTime += h * ORBIT_TIME_SCALE;
-      this.updateOrbits();
+      // [v4-mining] Guidance runs at the START of its slice: the world (orbit
+      // clock, every body and belt rock) as the ship's state has it, then
+      // both advance by h. Advancing the clock first showed the guidance a
+      // world one slice ahead of the ship (~0.5 km at a belt field's speed).
       if (!this.options.headless) {
         // [v3-t3] per-slice air and guidance: at 10× a frame is several
         // slices, and both used to be one frame stale for all of them.
         if (this.slices.count > 1) this.refreshAtmosphere();
         this.beforeSlice?.(h);
         // [/v3-t3]
+      }
+      this.orbitTime += h * ORBIT_TIME_SCALE;
+      this.updateOrbits();
+      if (!this.options.headless) {
         this.flight.update(h);
         // Transitions are checked AFTER integration, so a substep is never
         // taken with the state vector and the frame disagreeing.

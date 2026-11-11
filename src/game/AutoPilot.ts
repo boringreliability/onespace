@@ -90,11 +90,6 @@ export interface AutoPilotOptions {
    * instead of landing. The target comes from `target:changed`. Absent: v3.
    */
   readonly belt?: Pick<Belt, 'asteroidWorld' | 'asteroidVelocity' | 'asteroidSpec'> | null;
-  /**
-   * [v4-mining] True when the orbit clock has already been advanced for the
-   * slice `sliceStep` is called before (Universe does that). Default false.
-   */
-  readonly orbitClockLeadsSlice?: boolean;
 }
 
 export const AUTOPILOT_DISENGAGED = 'AUTOPILOT DISENGAGED';
@@ -151,8 +146,6 @@ export class AutoPilot implements GameModule {
   private approachId: string | null = null;
   private readonly rockWorld = new Vector3();
   private readonly rockVel = new Vector3();
-  /** The orbit clock runs one slice ahead of `sliceStep` (Universe's slice loop). */
-  private readonly orbitLead: boolean;
   /** v3: L was pressed during cruise; engage when cruise is idle. */
   private _queued = false;
   /** Set by `sliceStep` when the leg completed inside a slice. */
@@ -173,7 +166,6 @@ export class AutoPilot implements GameModule {
     this.preset = opts.preset ?? activeFlightPreset;
     this.cruise = opts.cruise ?? null;
     this.belt = opts.belt ?? null;
-    this.orbitLead = opts.orbitClockLeadsSlice ?? false;
   }
 
   /** True while the computer has the controls — time compression reads it. */
@@ -221,7 +213,7 @@ export class AutoPilot implements GameModule {
    */
   sliceStep(h: number): void {
     if (this.approach.active) {
-      this.approachSlice(h);
+      this.approachSlice();
       return;
     }
     if (!this.core.active) return;
@@ -247,7 +239,7 @@ export class AutoPilot implements GameModule {
   }
 
   update(_dt: number, ctx: EngineContext): void {
-    flightActivity.autopilot = this.core.active; // [v3-T1] governor holds rises while flying
+    flightActivity.autopilot = this.active; // [v3-T1] governor holds rises while flying ([v4-mining] the approach too)
     if (shotOwnsScene() || this.universe.paused || this.universe.frozen) return;
     const input: ControlInput = ctx.input;
     const flight = this.universe.flight;
@@ -395,15 +387,16 @@ export class AutoPilot implements GameModule {
   }
 
   /**
-   * [v4-mining] The rock's centre and its velocity, parent-relative. `backS`:
-   * Universe advances the orbit clock BEFORE each slice's guidance, so the
-   * rock is read one slice ahead of the ship; it is moved back to the ship's
-   * time (at a field's ~18 km/s one slice is ~0.3 km — the whole standoff).
+   * [v4-mining] The rock's centre and its velocity, parent-relative, at the
+   * SHIP's time: the Belt places it on the orbit clock, which the integrated
+   * state trails by `flight.timeBehindS` (the substep carry — up to ~0.25 km
+   * at a field's speed), so it is moved back by that much.
    */
-  private readRock(id: string, backS = 0): boolean {
+  private readRock(id: string): boolean {
     const belt = this.belt;
     if (!belt || !belt.asteroidWorld(id, this.rockWorld) || !belt.asteroidVelocity(id, this.rockVel)) return false;
-    if (backS > 0) this.rockWorld.addScaledVector(this.rockVel, -backS);
+    const behind = this.universe.flight.timeBehindS;
+    if (behind > 0) this.rockWorld.addScaledVector(this.rockVel, -behind);
     const pv = this.universe.shipParent?.worldVelocity;
     if (pv) this.rockVel.set(this.rockVel.x - pv.x, this.rockVel.y - pv.y, this.rockVel.z - pv.z);
     return true;
@@ -454,11 +447,11 @@ export class AutoPilot implements GameModule {
   }
 
   /** [v4-mining] One slice of the approach; parks and hands back on arrival. */
-  private approachSlice(h: number): void {
+  private approachSlice(): void {
     if (this.releaseIfStarved()) return;
     const flight = this.universe.flight;
     const id = this.approachId;
-    if (this.universe.shipParent !== this.parent || id === null || !this.readRock(id, this.orbitLead ? h : 0)) {
+    if (this.universe.shipParent !== this.parent || id === null || !this.readRock(id)) {
       this.disengage(true);
       return;
     }

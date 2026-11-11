@@ -180,7 +180,10 @@ export class Targeting implements GameModule {
     this.dots.object3d.visible = true;
 
     const flight = this.universe.flight;
-    this.shipWorld.copy(flight.worldPosition);
+    // [v4-mining] The ship on the orbit clock (state + velocity × substep
+    // carry): bodies and belt rocks are placed on that clock, and at a
+    // field's ~30 km/s the carry alone is up to ~0.25 km of range.
+    this.shipWorld.copy(flight.renderWorldPosition);
     // The ship's world velocity: its parent-relative velocity plus the frame's.
     this.shipVel.copy(flight.velocity);
     const parent = this.universe.shipParent;

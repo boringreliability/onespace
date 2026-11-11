@@ -65,6 +65,12 @@ export interface MiningWorld {
   readonly flight: {
     readonly propellant: Propellant | null;
     readonly worldPosition: Vec3;
+    /**
+     * [v4-mining] The ship at the ORBIT clock's time (state + velocity ×
+     * substep carry) — what a rock's position is compared with. Absent: the
+     * state's worldPosition.
+     */
+    readonly renderWorldPosition?: Vec3;
     /** Relative to `shipParent` (the star when null). */
     readonly velocity: Vec3;
   };
@@ -222,7 +228,8 @@ export class Mining implements GameModule {
     }
     this.targetAsteroid = id;
     g.targetIsAsteroid = true;
-    const p = u.flight.worldPosition;
+    // The ship on the rocks' clock, not up to a substep behind it.
+    const p = u.flight.renderWorldPosition ?? u.flight.worldPosition;
     const a = this.astPos;
     g.surfaceRangeKm = Math.hypot(a.x - p.x, a.y - p.y, a.z - p.z) - spec.radiusKm;
     // The ship's world velocity: parent-relative plus the parent's own.

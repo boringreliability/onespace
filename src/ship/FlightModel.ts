@@ -564,6 +564,17 @@ export class FlightModel {
     return this._propellant !== null ? massScale(this.config.mass, this._propellant.massKg, this.extraMassKg) : 1;
   }
 
+  /**
+   * [v4-mining] Seconds the integrated state is behind the clock it was last
+   * advanced to: the fixed-substep carry (< FIXED_H). Anything compared with
+   * a position that is a function of that clock (orbits, belt rocks) wants
+   * the ship at clock time: `worldPosition + worldVelocity × timeBehindS`,
+   * which is `renderWorldPosition`.
+   */
+  get timeBehindS(): number {
+    return this.accumulator;
+  }
+
   /** True when, in the last substep, thrust was wanted but the tank could not supply it. */
   get thrustStarved(): boolean {
     return this._thrustStarved;
