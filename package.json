@@ -14,12 +14,14 @@
     "verify": "npm run typecheck && npm test && node scripts/gen-smoke.mjs && node scripts/ship-smoke.mjs"
   },
   "dependencies": {
-    "three": "^0.180.0"
+    "three": "^0.180.0",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^26.1.2",
     "@types/three": "^0.180.0",
     "esbuild": "^0.28.1",
+    "fake-indexeddb": "^6.2.8",
     "playwright": "^1.62.1",
     "typescript": "^5.7.0",
     "vite": "^6.0.0",

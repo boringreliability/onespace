@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "time": 1834.5,
+  "entries": [
+    {
+      "key": "sys:gx-1mwhji--377.-3.266.1",
+      "kind": "arrival",
+      "at": 0,
+      "system": "Fyss",
+      "title": "Fyss",
+      "body": ["K · 8 worlds", "a quiet orange star with a working belt."],
+      "visits": 2
+    },
+    {
+      "key": "scan:gx-1mwhji--377.-3.266.1:p2",
+      "kind": "world",
+      "at": 38.25,
+      "system": "Fyss",
+      "title": "Remit 31 / Fyss",
+      "body": ["terrestrial · 0.097 AU", "a mining charter's world; the lights never go out."],
+      "visits": 1
+    },
+    {
+      "key": "land:gx-1mwhji--377.-3.266.1:p2",
+      "kind": "landing",
+      "at": 702,
+      "system": "Fyss",
+      "title": "Remit 31 / Fyss — surface",
+      "body": ["touchdown at 0.6 m/s."],
+      "visits": 1
+    },
+    {
+      "key": "scan:vessel-77",
+      "kind": "contact",
+      "at": 1210.5,
+      "system": "Fyss",
+      "title": "Hauler KESTREL",
+      "body": ["a charter ore hauler, outbound."],
+      "visits": 1
+    },
+    {
+      "key": "scan:ast:gx-1mwhji--377.-3.266.1:398:12",
+      "kind": "note",
+      "at": 1800,
+      "system": "Fyss",
+      "title": "Rock 398-12",
+      "body": ["ice 61% · metal 22% · silicate 16% · rare 1%"],
+      "visits": 1
+    }
+  ]
+}

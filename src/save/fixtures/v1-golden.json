@@ -1,0 +1,201 @@
+{
+  "format": 1,
+  "saveId": "3f9c2b1e-7a4d-4e8b-9c61-2d5f0a8e7b14",
+  "universeId": "gx-1mwhji:v1",
+  "revision": 7,
+  "savedAt": { "wallMs": 1762891200000, "orbitSeconds": 5412.25 },
+  "player": {
+    "system": {
+      "id": "gx-1mwhji--377.-3.266.1",
+      "seed": 785987357,
+      "name": "Fyss",
+      "positionLy": [-5267.702264680527, -31.999891466926783, 3734.344962382689]
+    },
+    "parentId": "gx-1mwhji--377.-3.266.1:p2",
+    "flight": {
+      "position": [10344.5, -212.75, 4120.125],
+      "velocity": [-1.25, 0.03125, 7.5],
+      "orientation": [0.5, -0.5, 0.5, 0.5],
+      "grounded": false,
+      "flightAssist": true
+    }
+  },
+  "ship": {
+    "propellant": { "massKg": 14250.5, "capacityLossFrac": 0.1 },
+    "cargo": { "ice": 820, "metal": 310.5, "silicate": 95, "rare": 2.25 },
+    "emergencyTimesUsed": 1
+  },
+  "log": {
+    "time": 5412.25,
+    "entries": [
+      {
+        "key": "sys:gx-1mwhji--377.-3.266.1",
+        "kind": "arrival",
+        "at": 0,
+        "system": "Fyss",
+        "title": "Fyss",
+        "body": ["K · 8 worlds", "a quiet orange star with a working belt."],
+        "visits": 1
+      },
+      {
+        "key": "scan:gx-1mwhji--377.-3.266.1:p2",
+        "kind": "world",
+        "at": 42.5,
+        "system": "Fyss",
+        "title": "Remit 31 / Fyss",
+        "body": ["terrestrial · 0.097 AU", "a mining charter's world; the lights never go out."],
+        "visits": 2
+      },
+      {
+        "key": "land:gx-1mwhji--377.-3.266.1:p2",
+        "kind": "landing",
+        "at": 610,
+        "system": "Fyss",
+        "title": "Remit 31 / Fyss — surface",
+        "body": ["touchdown at 0.4 m/s."],
+        "visits": 1
+      },
+      {
+        "key": "scan:ast:gx-1mwhji--377.-3.266.1:398:12",
+        "kind": "note",
+        "at": 3120.75,
+        "system": "Fyss",
+        "title": "Rock 398-12",
+        "body": ["ice 61% · metal 22% · silicate 16% · rare 1%", "taken: 1 200 kg"],
+        "visits": 3
+      }
+    ]
+  },
+  "world": {
+    "universeId": "gx-1mwhji:v1",
+    "entries": [
+      {
+        "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+        "by": "local",
+        "resource": "ice",
+        "kg": 820,
+        "orbitSeconds": 3300.5,
+        "wallMs": 1762890900000
+      },
+      {
+        "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+        "by": "local",
+        "resource": "metal",
+        "kg": 310.5,
+        "orbitSeconds": 3410,
+        "wallMs": 1762890960000
+      },
+      {
+        "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+        "by": "local",
+        "resource": "silicate",
+        "kg": 95,
+        "orbitSeconds": 3600.25,
+        "wallMs": 1762891010000
+      },
+      {
+        "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+        "by": "local",
+        "resource": "rare",
+        "kg": 2.25,
+        "orbitSeconds": 3650,
+        "wallMs": 1762891040000
+      }
+    ]
+  },
+  "actions": [
+    {
+      "seq": 1,
+      "source": "propellant",
+      "payload": { "action": { "kind": "cruise-spool" }, "ok": true, "kg": 40 },
+      "wallMs": 1762887800000,
+      "orbitSeconds": 12
+    },
+    {
+      "seq": 2,
+      "source": "propellant",
+      "payload": { "action": { "kind": "cruise-leg", "distanceKm": 58000000 }, "ok": true, "kg": 310.25 },
+      "wallMs": 1762887900000,
+      "orbitSeconds": 112
+    },
+    {
+      "seq": 3,
+      "source": "thrust",
+      "payload": { "kg": 120.5 },
+      "wallMs": 1762888400000,
+      "orbitSeconds": 612
+    },
+    {
+      "seq": 4,
+      "source": "mined",
+      "payload": { "id": "ast:gx-1mwhji--377.-3.266.1:398:12", "resource": "ice", "kg": 820 },
+      "wallMs": 1762890900000,
+      "orbitSeconds": 3300.5
+    },
+    {
+      "seq": 5,
+      "source": "cargo",
+      "payload": {
+        "action": { "kind": "mine", "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12", "resource": "ice", "kg": 820 },
+        "result": { "ok": true, "kgIn": 820, "kgOut": 0, "fuelKg": 0, "restoredFrac": 0 }
+      },
+      "wallMs": 1762890900000,
+      "orbitSeconds": 3300.5
+    },
+    {
+      "seq": 6,
+      "source": "mined",
+      "payload": { "id": "ast:gx-1mwhji--377.-3.266.1:398:12", "resource": "metal", "kg": 310.5 },
+      "wallMs": 1762890960000,
+      "orbitSeconds": 3410
+    },
+    {
+      "seq": 7,
+      "source": "cargo",
+      "payload": {
+        "action": { "kind": "mine", "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12", "resource": "metal", "kg": 310.5 },
+        "result": { "ok": true, "kgIn": 310.5, "kgOut": 0, "fuelKg": 0, "restoredFrac": 0 }
+      },
+      "wallMs": 1762890960000,
+      "orbitSeconds": 3410
+    },
+    {
+      "seq": 8,
+      "source": "cargo",
+      "payload": {
+        "action": { "kind": "repair" },
+        "result": { "ok": true, "kgIn": 0, "kgOut": 40, "fuelKg": 0, "restoredFrac": 0.05 }
+      },
+      "wallMs": 1762891000000,
+      "orbitSeconds": 3590
+    },
+    {
+      "seq": 9,
+      "source": "propellant",
+      "payload": { "action": { "kind": "cannibalize", "part": "tank", "timesUsed": 0 }, "ok": true, "kg": 0 },
+      "wallMs": 1762891100000,
+      "orbitSeconds": 4800
+    },
+    {
+      "seq": 10,
+      "source": "emergency",
+      "payload": { "kind": "cannibalize", "timesUsed": 1 },
+      "wallMs": 1762891100000,
+      "orbitSeconds": 4800
+    },
+    {
+      "seq": 11,
+      "source": "propellant",
+      "payload": { "action": { "kind": "spool-refund", "kg": 40 }, "ok": true, "kg": 40 },
+      "wallMs": 1762891150000,
+      "orbitSeconds": 5100
+    },
+    {
+      "seq": 12,
+      "source": "emergency",
+      "payload": { "kind": "beacon" },
+      "wallMs": 1762891190000,
+      "orbitSeconds": 5400
+    }
+  ]
+}
