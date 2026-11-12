@@ -53,3 +53,16 @@ describe('module gating table', () => {
     expect(mods[1]!.activeIn).toBeUndefined();
   });
 });
+
+// v4 sub-plan 3, Task 5: the save module ticks (interval, triggers) only in
+// the piloting modes. Never over the title — the opening world drifting behind
+// the menu is not the pilot's game and must not overwrite their save — nor in
+// the Yard or a review shot.
+describe('v4-save — the save module is gated to piloting', () => {
+  it('Given the save module, Then it ticks in flight and map and in nothing else', () => {
+    expect(MODULE_MODES.save).toBeDefined();
+    expect(ticks('save', 'flight')).toBe(true);
+    expect(ticks('save', 'map')).toBe(true);
+    for (const b of ['title', 'boot', 'yard', 'review'] as const) expect(ticks('save', b), b).toBe(false);
+  });
+});

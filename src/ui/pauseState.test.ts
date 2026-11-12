@@ -172,3 +172,29 @@ describe('final review I2 — the RETURN TO ORBIT label says it loses the cargo'
     expect(calls.some((c) => /cargo/.test(c)), calls.join(' | ')).toBe(true);
   });
 });
+
+// v4 sub-plan 3 (local save), Task 5: SAVE in the pause sheet. The sheet stays
+// open (the pilot reads SAVED in the log behind it); the caller saves.
+describe('v4-save — the SAVE button', () => {
+  it('Given the pause is open, When SAVE is clicked, Then the effect is save and the sheet stays open (same state)', () => {
+    const s = openAt(1_000);
+    const r = pauseStep(s, { type: 'save' }, flying);
+    expect(r.effect).toBe('save');
+    expect(r.state).toEqual(s);
+  });
+
+  it('Given the pause is closed, When a stray SAVE arrives, Then nothing happens', () => {
+    expect(pauseStep(PAUSE_CLOSED, { type: 'save' }, flying)).toEqual({ state: PAUSE_CLOSED, effect: 'none' });
+  });
+
+  it('Given the pause is open while busy (a recovery started behind it), When SAVE is clicked, Then it still asks for a save (busy only blocks opening)', () => {
+    expect(pauseStep(openAt(0), { type: 'save' }, warping).effect).toBe('save');
+  });
+
+  it("Given Pause.ts, Then it has a SAVE button that dispatches { type: 'save' } and acts on the save effect", () => {
+    const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'Pause.ts'), 'utf8');
+    expect(/this\.button\([^,]+,\s*'SAVE'/.test(src), 'a SAVE button').toBe(true);
+    expect(/type:\s*'save'/.test(src), "dispatch({ type: 'save' })").toBe(true);
+    expect(/effect\s*===\s*'save'/.test(src), "acts on effect 'save'").toBe(true);
+  });
+});
