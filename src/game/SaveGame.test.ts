@@ -981,3 +981,148 @@ describe('registry.ts wires the save (obligations 2, 5, 6)', () => {
     expect(call('new Pause(')).toMatch(/save/);
   });
 });
+
+// =============================================================================
+// Fix round 1 (ruling R14)
+// =============================================================================
+
+/** Enter the Yard as the engine does: the mode changes, then every module is told. */
+function enterYard(r: Rig): void {
+  const from = modes.base;
+  toMode('yard');
+  r.sg.onModeChange?.(from, 'yard', r.g.ctx);
+}
+
+describe('R14 I1 — the Yard is no escape from the books (the tank stays attached in the Yard)', () => {
+  it('Given a landing save a moment ago and a mine after it, When the pilot enters the Yard, Then a save is written at once (no gap) and it holds the mine', async () => {
+    const r = rig();
+    landed(r.g);
+    r.tick(0);
+    await flush();
+    mine(r.g, ASTEROID(), 'ice', 2_000);
+    enterYard(r);
+    await flush();
+    expect(r.s.saved).toHaveLength(2);
+    expect(r.s.saved[1]!.actions.filter(isMined)).toHaveLength(1);
+  });
+
+  it('Given a mine, When the pilot enters the Yard and the tab is closed (pagehide), Then the WAL snapshot holds the mine — synchronously', () => {
+    const r = rig();
+    mine(r.g, ASTEROID(), 'ice', 2_000);
+    enterYard(r);
+    r.pagehide();
+    const snap = walSnapshot();
+    expect(snap).not.toBeNull();
+    expect(snap!.actions.filter(isMined)).toHaveLength(1);
+    expect(snap!.ship.cargo.ice).toBe(2_000);
+  });
+
+  it('Given the Yard with the tank attached, When the tank changes and the tab is closed, Then the WAL snapshot holds the tank as it is now', async () => {
+    const r = rig();
+    enterYard(r);
+    await flush();
+    const tank = r.g.u.flight.propellant!;
+    tank.consume(250);
+    r.pagehide();
+    const snap = walSnapshot()!;
+    expect(snap).not.toBeNull();
+    expect(snap.ship.propellant.massKg).toBe(tank.massKg);
+    expect(snap.revision).toBeGreaterThan(r.s.attempts.at(-1) ?? 0);
+  });
+
+  it('Given the Yard with the tank attached, When the tab is hidden, Then an IndexedDB save is written', async () => {
+    const r = rig();
+    enterYard(r);
+    await flush();
+    const before = r.s.saved.length;
+    r.hide();
+    await flush();
+    expect(r.s.saved.length).toBe(before + 1);
+  });
+
+  it('Given the Yard with the tank attached, When SAVE is asked for, Then it saves and logs SAVED', async () => {
+    const r = rig();
+    enterYard(r);
+    await flush();
+    await expect(r.sg.saveNow('manual')).resolves.toBe(true);
+    expect(r.logs.some((l) => l.text === 'SAVED')).toBe(true);
+  });
+
+  it('Given the title screen, When SAVE is asked for, Then nothing is written (the title is still excluded)', async () => {
+    const r = rig();
+    toMode('title');
+    await expect(r.sg.saveNow('manual')).resolves.toBe(false);
+    r.hide();
+    r.pagehide();
+    await flush();
+    expect(r.s.attempts).toHaveLength(0);
+    expect(storage.getItem(WAL_SNAPSHOT_KEY)).toBeNull();
+  });
+});
+
+describe('R14 M2 — a capture syncs the books with the tank first', () => {
+  it('Given a save, When the tank is swapped for one at 30 % and the tab is closed before any tick, Then the snapshot books no thrust and no unexplained gain for the swap', async () => {
+    const r = rig();
+    await r.sg.saveNow('manual');
+    const n = r.s.saved[0]!.actions.length;
+    r.g.u.flight.attachPropellant(new Propellant(PROBE_TANK_CAPACITY_KG, 0.3), EXHAUST_VELOCITY_KMS);
+    r.pagehide();
+    const snap = walSnapshot()!;
+    expect(snap).not.toBeNull();
+    expect(thrustKg(snap.actions.slice(n))).toBeLessThan(1e-9);
+    expect(r.g.journal.unexplainedGainKg).toBeLessThan(1e-9);
+  });
+});
+
+describe('R14 M3 — a manual SAVE that cannot write says so', () => {
+  it('Given a reader tab, When SAVE is asked for, Then it resolves false and the disabled text is logged again (warn)', async () => {
+    const r = rig({ writer: false });
+    r.logs.length = 0;
+    await expect(r.sg.saveNow('manual')).resolves.toBe(false);
+    expect(r.logs).toContainEqual({ text: DISABLED_TEXT, tone: 'warn' });
+  });
+
+  it('Given no tank attached, When SAVE is asked for, Then it resolves false and SAVE FAILED is logged (warn)', async () => {
+    const r = rig();
+    r.g.u.flight.attachPropellant(null, EXHAUST_VELOCITY_KMS);
+    await expect(r.sg.saveNow('manual')).resolves.toBe(false);
+    expect(r.logs).toContainEqual({ text: 'SAVE FAILED', tone: 'warn' });
+  });
+
+  it("Given no tank attached, When an autosave trigger fires, Then the log stays quiet (only the pilot's own SAVE is answered)", async () => {
+    const r = rig();
+    r.g.u.flight.attachPropellant(null, EXHAUST_VELOCITY_KMS);
+    landed(r.g);
+    r.tick();
+    r.play(121);
+    await flush();
+    expect(r.logs.some((l) => l.text === 'SAVE FAILED')).toBe(false);
+  });
+});
+
+describe('R14 M4 — a WAL append that fails is not silent', () => {
+  it('Given a WAL that refuses the append, When the beacon fires, Then SAVE FAILED is logged (warn) before ship:recovered', () => {
+    const base = createWal(storage as unknown as Storage);
+    const r = rig({ wal: { ...base, appendCritical: () => false } });
+    const tank = r.g.u.flight.propellant!;
+    tank.consume(tank.massKg);
+    let failedBeforeRecovered: boolean | null = null;
+    offs.push(
+      bus.on('ship:recovered', () => {
+        failedBeforeRecovered ??= r.logs.some((l) => l.text === 'SAVE FAILED' && l.tone === 'warn');
+      }),
+    );
+    r.g.press('emergency');
+    r.g.press('emergencyBeacon');
+    expect(failedBeforeRecovered).toBe(true);
+  });
+
+  it('Given a working WAL, When the beacon fires, Then nothing about a failure is logged', () => {
+    const r = rig();
+    const tank = r.g.u.flight.propellant!;
+    tank.consume(tank.massKg);
+    r.g.press('emergency');
+    r.g.press('emergencyBeacon');
+    expect(r.logs.some((l) => l.text === 'SAVE FAILED')).toBe(false);
+  });
+});

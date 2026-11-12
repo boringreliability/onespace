@@ -599,3 +599,27 @@ describe('ordering: a completed mine is in the journal whole', () => {
     expect(r.j.drain().filter((e) => e.source === 'cargo' || e.source === 'mined')).toEqual([]);
   });
 });
+
+// v4-save Task 5, R13/R14 M1 — noteEmergency is the one source of an exit's
+// entry; the emergency:used that follows is not logged again. A claim never
+// outlives a drain: a hook whose emit never came must not swallow a later,
+// unrelated emergency:used.
+describe('R13/R14 — noteEmergency and its claim', () => {
+  it('Given noteEmergency(beacon), When its emergency:used follows, Then the drain holds exactly one beacon entry — the noted one, same seq', () => {
+    const { j } = journal();
+    const noted = j.noteEmergency({ kind: 'beacon' });
+    expect(noted).not.toBeNull();
+    bus.emit('emergency:used', { kind: 'beacon' });
+    const out = j.drain().filter((e) => e.source === 'emergency');
+    expect(out).toHaveLength(1);
+    expect(out[0]!.seq).toBe(noted!.seq);
+  });
+
+  it('M1: Given noteEmergency(beacon) whose emit never came, When the journal is drained and a beacon is then announced on the bus, Then that beacon IS logged', () => {
+    const { j } = journal();
+    j.noteEmergency({ kind: 'beacon' });
+    j.drain();
+    bus.emit('emergency:used', { kind: 'beacon' });
+    expect(j.drain().filter((e) => e.source === 'emergency')).toHaveLength(1);
+  });
+});
