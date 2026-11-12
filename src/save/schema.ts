@@ -165,15 +165,26 @@ export const ActionEntrySchema = z.discriminatedUnion('source', [
   ),
   /** Unannounced burns, aggregated once per save so the tank's books balance. */
   entry('thrust', z.strictObject({ kg: amount })),
-  /** The oldest entries, compacted to sums (MAX_ACTIONS). */
+  /**
+   * The oldest entries, compacted (MAX_ACTIONS). R8: it carries the NET effect
+   * of everything it absorbed, so replaying [checkpoint, …rest] recomputes the
+   * same ship as replaying the full log (src/save/replay.ts).
+   */
   entry(
     'checkpoint',
     z.strictObject({
       upToSeq: count,
-      propellantKg: amount,
-      cargoKg: perResource(amount),
-      minedKg: perResource(amount),
+      /** Signed change to the tank's mass. */
+      tankNetKg: num,
+      /** Signed change to the capacity loss (cannibalizations up, repairs down). */
+      capacityLossNetFrac: num,
+      /** Signed change to the hold, per resource. */
+      cargoNetKg: perResource(num),
+      /** Depletion added, per asteroid id. */
+      minedByAsteroid: z.record(z.string().min(1), perResource(amount)),
       emergency: z.strictObject({ cannibalize: count, cannibalizeCargo: count, beacon: count }),
+      /** The latest cannibalization's timesUsed in what was folded (carried over). */
+      lastCannibalizeTimesUsed: count,
     }),
   ),
 ]);

@@ -272,6 +272,11 @@ export class Universe implements GameModule {
   /** The star does not move in its own system's frame. Never written. */
   private readonly starVelocity = new Vector3();
   private starFrame: ParentBody = { position: this.starWorld, velocity: this.starVelocity, mu: 0 };
+
+  /** [v4-save] The primary's µ, km³/s² — a save outside every SOI orbits the star. */
+  get starMu(): number {
+    return this.starFrame.mu;
+  }
   private readonly orbitScratch = { x: 0, y: 0, z: 0 };
   private readonly velScratch = { x: 0, y: 0, z: 0 };
 
@@ -716,6 +721,10 @@ export class Universe implements GameModule {
     // Rebase before computing render positions so everything shifts together.
     ctx.origin.rebaseIfNeeded(ctx.origin.toRender(this.camWorld, this.tmpA), this.tmpB);
 
+    // [v4-save] Distances first, in their own step: streaming, the altimeter,
+    // `nearest` and a save all read them, so they must not depend on the
+    // renderer steps having run (node tests stub those).
+    this.measureBodies();
     this.streamRenderers(ctx);
     this.updateBodies(dt, ctx);
     this.updateStar(dt, ctx);
@@ -853,10 +862,14 @@ export class Universe implements GameModule {
    * full geometry; the rest are released. This is what keeps a system with
    * eleven planets and twenty moons inside the draw-call budget.
    */
-  private streamRenderers(ctx: EngineContext): void {
+  /** Each body's squared distance from the camera (the ship's eye), km². */
+  private measureBodies(): void {
     for (const b of this.bodies) {
       b.distanceSq = this.camWorld.distanceToSquared(b.world);
     }
+  }
+
+  private streamRenderers(ctx: EngineContext): void {
 
     // Acquire at 60 radii, release at 75 — see game/streaming.ts for why the
     // two thresholds differ. The candidate array is reused across frames.

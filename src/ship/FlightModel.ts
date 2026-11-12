@@ -942,6 +942,16 @@ export class FlightModel {
   }
 
   /**
+   * [v4-save] R9: the engine off at once — the commanded lever AND the spooled
+   * output. Zeroing only the command leaves the spool decaying over several
+   * frames, still burning (a load over a live cruise burned ~1.6 kg unannounced).
+   */
+  cutThrottle(): void {
+    this.command.throttle = 0;
+    this._throttle = 0;
+  }
+
+  /**
    * Turn a GROUNDED ship with its world. `delta` is this frame's spin
    * increment (new spin × old spin⁻¹) in the parent frame. The parent frame
    * does not rotate but the planet mesh does, so without this the drawn

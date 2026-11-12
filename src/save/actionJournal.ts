@@ -12,23 +12,26 @@
  *
  * The books (R7): over an interval the tank obeys
  *     after = before + Σ propellant tankDeltaKg + Σ cargo fuelKg − thrust,
- * so thrust = (before − after) + Σ tankDeltaKg + Σ fuelKg, never negative.
- * `settleThrust` books it and starts the next interval at the tank as it is.
+ * so thrust = (before − after) + Σ tankDeltaKg + Σ fuelKg. A negative
+ * remainder — the tank rose with nothing to say why — is never logged as
+ * thrust; it is counted on `unexplainedGainKg` (M-2).
  *
  * `drain()` hands over what was noted since the last drain (a save appends it
  * to the previous save's log). `seq` rises strictly and never repeats, even
- * after `restore`. Past MAX_ACTIONS the oldest fold into one checkpoint.
+ * after `restore`. Past MAX_ACTIONS the oldest fold into one checkpoint that
+ * carries their NET effect (R8), so `replay` of the compacted log recomputes
+ * the same ship as the full one.
  */
 
 import { bus } from '@/core/EventBus';
 import type { MinedEntry } from '@/game/worldState';
-import type { Resource } from '@/gen/belt';
+import { applyEntry, zeroState } from './replay';
 import type { ActionEntry } from './schema';
 
 export const MAX_ACTIONS = 5_000;
 
-/** Below this a thrust remainder is float dust, not a burn, kg. */
-const THRUST_EPS_KG = 1e-9;
+/** Below this a books remainder is float dust, not a burn or a gain, kg. */
+const BOOKS_EPS_KG = 1e-9;
 
 export interface JournalClock {
   wallMs(): number;
@@ -36,13 +39,6 @@ export interface JournalClock {
 }
 
 type Payload<S extends ActionEntry['source']> = Extract<ActionEntry, { source: S }>['payload'];
-type Checkpoint = Payload<'checkpoint'>;
-
-const RESOURCES: readonly Resource[] = ['ice', 'metal', 'silicate', 'rare'];
-
-function perResource(): Record<Resource, number> {
-  return { ice: 0, metal: 0, silicate: 0, rare: 0 };
-}
 
 export class ActionJournal {
   private pending: ActionEntry[] = [];
@@ -52,6 +48,8 @@ export class ActionJournal {
   /** Σ tankDeltaKg + Σ fuelKg since the interval began. */
   private namedDeltaKg = 0;
   private offs: Array<() => void> = [];
+  private disposed = false;
+  private _unexplainedGainKg = 0;
 
   constructor(private readonly clock: JournalClock) {
     this.offs.push(
@@ -70,13 +68,21 @@ export class ActionJournal {
     );
   }
 
+  /** Off the bus, and deaf to the WorldState hook (M-3). */
   dispose(): void {
+    this.disposed = true;
     for (const off of this.offs) off();
     this.offs = [];
   }
 
+  /** kg the tank rose by with no named action to explain it, since the journal started (M-2). */
+  get unexplainedGainKg(): number {
+    return this._unexplainedGainKg;
+  }
+
   /** A mine as WorldState recorded it; the entry keeps the mine's own clocks. */
   noteMined(m: MinedEntry): void {
+    if (this.disposed) return;
     this.pending.push({
       seq: ++this.lastSeq,
       source: 'mined',
@@ -88,12 +94,14 @@ export class ActionJournal {
 
   /**
    * Book the unannounced burn of an interval: the tank went `tankBefore` →
-   * `tankAfter` while named actions took `namedKg` (net). Never negative.
+   * `tankAfter` while named actions took `namedKg` (net). A negative remainder
+   * is an unexplained gain: counted, never logged as thrust.
    */
   noteThrust(tankBefore: number, tankAfter: number, namedKg: number): void {
     const kg = tankBefore - tankAfter - namedKg;
-    if (!Number.isFinite(kg) || !(kg > THRUST_EPS_KG)) return;
-    this.push('thrust', { kg });
+    if (!Number.isFinite(kg)) return;
+    if (kg > BOOKS_EPS_KG) this.push('thrust', { kg });
+    else if (kg < -BOOKS_EPS_KG) this._unexplainedGainKg -= kg;
   }
 
   /** Where the books' interval starts. A save or a load sets it; null = unknown. */
@@ -140,6 +148,7 @@ export class ActionJournal {
   }
 
   private push<S extends Exclude<ActionEntry['source'], 'mined' | 'checkpoint'>>(source: S, payload: Payload<S>): void {
+    if (this.disposed) return;
     this.pending.push({
       seq: ++this.lastSeq,
       source,
@@ -160,63 +169,46 @@ function maxSeq(entries: readonly ActionEntry[]): number {
 }
 
 /**
- * At most `max` entries: the oldest fold into ONE checkpoint at the front
- * (an existing leading checkpoint folds in too). The checkpoint takes the seq
- * and clocks of the last entry it absorbed, so seqs stay unique and rising.
+ * At most `max` entries: the oldest fold into ONE checkpoint at the front (an
+ * existing leading checkpoint folds in too). The checkpoint holds the NET
+ * effect of what it absorbed — the prefix replayed from nothing — so replay
+ * of the result equals replay of the input. (A jettison inside the prefix is
+ * netted against the hold the prefix itself filled: the log starts at a new
+ * game, with an empty hold.) It takes the seq and clocks of the last entry it
+ * absorbed, so seqs stay unique and rising.
  */
 export function compactEntries(entries: readonly ActionEntry[], max: number = MAX_ACTIONS): ActionEntry[] {
-  if (entries.length <= max) return [...entries];
-  const fold = entries.length - max + 1;
+  const keep = Math.max(1, Math.floor(max));
+  if (entries.length <= keep) return [...entries];
+  const fold = entries.length - keep + 1;
   const old = entries.slice(0, fold);
   const last = old[old.length - 1]!;
-  const cp: Checkpoint = {
-    upToSeq: maxSeq(old),
-    propellantKg: 0,
-    cargoKg: perResource(),
-    minedKg: perResource(),
-    emergency: { cannibalize: 0, cannibalizeCargo: 0, beacon: 0 },
-  };
-  for (const e of old) addTo(cp, e);
-  return [
-    { seq: cp.upToSeq, source: 'checkpoint', payload: cp, wallMs: last.wallMs, orbitSeconds: last.orbitSeconds },
-    ...entries.slice(fold),
-  ];
-}
 
-/**
- * Fold one entry into a checkpoint's sums. Propellant is every kg that left
- * the tank: named spends (refunds put kg back and are not spends) plus thrust.
- */
-function addTo(cp: Checkpoint, e: ActionEntry): void {
-  switch (e.source) {
-    case 'propellant': {
-      const k = e.payload.action.kind;
-      if (k !== 'jump-refund' && k !== 'spool-refund') cp.propellantKg += e.payload.kg;
-      break;
+  const net = zeroState();
+  let lastCannibalizeTimesUsed = 0;
+  for (const e of old) {
+    applyEntry(net, e);
+    if (e.source === 'checkpoint') lastCannibalizeTimesUsed = e.payload.lastCannibalizeTimesUsed;
+    else if (e.source === 'emergency' && e.payload.kind === 'cannibalize' && e.payload.timesUsed !== undefined) {
+      lastCannibalizeTimesUsed = e.payload.timesUsed;
     }
-    case 'thrust':
-      cp.propellantKg += e.payload.kg;
-      break;
-    case 'cargo':
-      if (e.payload.action.kind === 'mine') cp.cargoKg[e.payload.action.resource] += e.payload.result.kgIn;
-      break;
-    case 'mined':
-      cp.minedKg[e.payload.resource] += e.payload.kg;
-      break;
-    case 'emergency':
-      if (e.payload.kind === 'cannibalize') cp.emergency.cannibalize++;
-      else if (e.payload.kind === 'cannibalize-cargo') cp.emergency.cannibalizeCargo++;
-      else cp.emergency.beacon++;
-      break;
-    case 'checkpoint':
-      cp.propellantKg += e.payload.propellantKg;
-      for (const r of RESOURCES) {
-        cp.cargoKg[r] += e.payload.cargoKg[r];
-        cp.minedKg[r] += e.payload.minedKg[r];
-      }
-      cp.emergency.cannibalize += e.payload.emergency.cannibalize;
-      cp.emergency.cannibalizeCargo += e.payload.emergency.cannibalizeCargo;
-      cp.emergency.beacon += e.payload.emergency.beacon;
-      break;
   }
+
+  const upToSeq = maxSeq(old);
+  const checkpoint: ActionEntry = {
+    seq: upToSeq,
+    source: 'checkpoint',
+    payload: {
+      upToSeq,
+      tankNetKg: net.tank.massKg,
+      capacityLossNetFrac: net.tank.capacityLossFrac,
+      cargoNetKg: net.cargo,
+      minedByAsteroid: net.depletion,
+      emergency: net.emergency,
+      lastCannibalizeTimesUsed,
+    },
+    wallMs: last.wallMs,
+    orbitSeconds: last.orbitSeconds,
+  };
+  return [checkpoint, ...entries.slice(fold)];
 }

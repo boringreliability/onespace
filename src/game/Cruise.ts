@@ -750,6 +750,20 @@ export class Cruise implements GameModule {
   }
 
   /** Stop wanting it, and let go this frame rather than easing out. */
+  /**
+   * [v4-save] R9: a save was loaded — drop everything, silently. The pending
+   * leg and a paid spool belong to the timeline that was replaced: neither is
+   * announced nor refunded into the restored tank.
+   */
+  reset(): void {
+    this.legKm = 0;
+    this.legKg = 0;
+    this.legOk = true;
+    this.legAge = 0;
+    this.spoolPaidKg = 0;
+    this.cancel();
+  }
+
   private cancel(): void {
     this.wanted = false;
     this.heldLever = null;

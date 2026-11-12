@@ -23,7 +23,7 @@ import { Vector3 } from 'three';
 import type { ShipLog } from '@/game/Log';
 import type { Universe } from '@/game/Universe';
 import type { WorldState } from '@/game/worldState';
-import { circularOrbitState } from '@/game/recovery';
+import { circularOrbitState, starRadiusKm } from '@/game/recovery';
 import { START_FILL } from '@/ship/propellant';
 import { compactEntries, MAX_ACTIONS, type ActionJournal } from './actionJournal';
 import { CURRENT_FORMAT, type SaveV1 } from './schema';
@@ -35,8 +35,13 @@ export interface SaveWorld {
   readonly shipLog: ShipLog;
   readonly emergency: { timesUsed: number };
   readonly journal: ActionJournal;
-  /** Cruise: its pending leg is announced before the tank is counted (R7). */
-  readonly cruise?: { flushLeg(): void };
+  /**
+   * Cruise: its pending leg is announced before the tank is counted (R7);
+   * a load resets it (R9).
+   */
+  readonly cruise?: { flushLeg(): void; reset?(): void };
+  /** The pilot's lever: a load sets it to 0 (R9). */
+  readonly input?: { setThrottle(v: number): void };
 }
 
 type Vec3 = [number, number, number];
@@ -44,26 +49,44 @@ type Flight = SaveV1['player']['flight'];
 
 const tuple = (v: Vector3): Vec3 => [v.x, v.y, v.z];
 
-/** Where the player is: parent-relative, or a circular orbit if cruising. */
+/** A circular orbit at the ship's current radius about a centre (§5.2). */
+function circularAt(
+  fm: Universe['flight'],
+  centre: Vector3,
+  radiusKm: number,
+  mu: number,
+  parentId: string | null,
+): { parentId: string | null; flight: Flight } {
+  const radial = new Vector3().subVectors(fm.worldPosition, centre);
+  const r = radial.length();
+  const state = circularOrbitState(radial, radiusKm, mu, radiusKm > 0 && r > 0 ? r / radiusKm - 1 : undefined);
+  const q = state.orientation;
+  return {
+    parentId,
+    flight: {
+      position: tuple(state.position),
+      velocity: tuple(state.velocity),
+      orientation: [q.x, q.y, q.z, q.w],
+      grounded: false,
+      flightAssist: fm.flightAssist,
+    },
+  };
+}
+
+const ORIGIN = new Vector3();
+
+/** Where the player is: parent-relative, or — cruising — a circular orbit. */
 function playerPlace(u: Universe): { parentId: string | null; flight: Flight } {
   const fm = u.flight;
-  const body = fm.cruising ? (u.nearest ?? u.shipParent) : null;
-  if (body) {
-    const radial = new Vector3().subVectors(fm.worldPosition, body.world);
-    const r = radial.length();
-    const R = body.spec.radius;
-    const state = circularOrbitState(radial, R, body.frame.mu, R > 0 && r > 0 ? r / R - 1 : undefined);
-    const q = state.orientation;
-    return {
-      parentId: body.spec.id,
-      flight: {
-        position: tuple(state.position),
-        velocity: tuple(state.velocity),
-        orientation: [q.x, q.y, q.z, q.w],
-        grounded: false,
-        flightAssist: fm.flightAssist,
-      },
-    };
+  if (fm.cruising) {
+    // About the nearest body only inside its sphere of influence (M-4): an
+    // orbit outside it would not be that body's to keep. Else about the star.
+    const body = u.nearest ?? u.shipParent;
+    if (body && fm.worldPosition.distanceTo(body.world) < body.soiRadius) {
+      return circularAt(fm, body.world, body.spec.radius, body.frame.mu, body.spec.id);
+    }
+    const star = u.system.stars[0];
+    return circularAt(fm, ORIGIN, star ? starRadiusKm(star) : 0, u.starMu, null);
   }
   const parentId = u.shipParent ? u.shipParent.spec.id : null;
   const q = fm.orientation;
@@ -136,6 +159,13 @@ export function applySave(w: SaveWorld, s: SaveV1): boolean {
     flightAssist: p.flight.flightAssist,
   });
   if (!ok) return false;
+
+  // R9: whatever the replaced timeline had running stops, silently — the
+  // drive (no leg announced, no spool refunded) and the engine (lever and
+  // spool), so the loaded ship burns nothing it does not log.
+  w.cruise?.reset?.();
+  u.flight.cutThrottle();
+  w.input?.setThrottle(0);
 
   const tank = u.flight.propellant;
   if (tank) tank.restore(s.ship.propellant);
