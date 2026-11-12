@@ -4,7 +4,9 @@
  * Sources:
  *  - `propellant:action` — every one, refused too (the payload carries `ok`);
  *  - `cargo:action` — only `result.ok`;
- *  - `emergency:used`;
+ *  - an emergency exit: `noteEmergency` on the paying code path (R13: the one
+ *    source in the game; the `emergency:used` that follows is not logged
+ *    twice). An `emergency:used` nobody noted is still logged from the bus;
  *  - a mine, through `noteMined`, which `WorldState.recordMined` calls via its
  *    `onMined` hook. Mining announces `cargo:action` BEFORE it records the
  *    mine; a hook (not the bus) is what makes both halves arrive together;
@@ -23,7 +25,7 @@
  * the same ship as the full one.
  */
 
-import { bus } from '@/core/EventBus';
+import { bus, type GameEvents } from '@/core/EventBus';
 import type { MinedEntry } from '@/game/worldState';
 import { applyEntry, zeroState } from './replay';
 import type { ActionEntry } from './schema';
@@ -50,6 +52,8 @@ export class ActionJournal {
   private offs: Array<() => void> = [];
   private disposed = false;
   private _unexplainedGainKg = 0;
+  /** Emergencies noted by `noteEmergency` whose `emergency:used` has not arrived yet. */
+  private claims: Array<{ kind: EmergencyUse['kind']; timesUsed: number | undefined }> = [];
 
   constructor(private readonly clock: JournalClock) {
     this.offs.push(
@@ -63,7 +67,13 @@ export class ActionJournal {
         this.push('cargo', { action: e.action, result: e.result });
       }),
       bus.on('emergency:used', (e) => {
-        this.push('emergency', e.timesUsed === undefined ? { kind: e.kind } : { kind: e.kind, timesUsed: e.timesUsed });
+        // R13: the paying code path noted it already (noteEmergency) — one entry, one seq.
+        const i = this.claims.findIndex((c) => c.kind === e.kind && c.timesUsed === e.timesUsed);
+        if (i >= 0) {
+          this.claims.splice(i, 1);
+          return;
+        }
+        this.push('emergency', emergencyPayload(e));
       }),
     );
   }
@@ -78,6 +88,19 @@ export class ActionJournal {
   /** kg the tank rose by with no named action to explain it, since the journal started (M-2). */
   get unexplainedGainKg(): number {
     return this._unexplainedGainKg;
+  }
+
+  /**
+   * [v4-save] R2/R13: an emergency exit, noted SYNCHRONOUSLY on the paying
+   * code path (SaveGame's `critical` hook), so the same entry — same seq — can
+   * go to the WAL before the effect shows. The `emergency:used` that follows
+   * is then not logged a second time. Null once disposed.
+   */
+  noteEmergency(used: EmergencyUse): ActionEntry | null {
+    if (this.disposed) return null;
+    const entry = this.push('emergency', emergencyPayload(used));
+    this.claims.push({ kind: used.kind, timesUsed: used.timesUsed });
+    return entry;
   }
 
   /** A mine as WorldState recorded it; the entry keeps the mine's own clocks. */
@@ -139,6 +162,7 @@ export class ActionJournal {
   restore(entries: readonly ActionEntry[]): void {
     this.lastSeq = Math.max(this.lastSeq, maxSeq(entries));
     this.pending = [];
+    this.claims = [];
     this.namedDeltaKg = 0;
   }
 
@@ -147,16 +171,27 @@ export class ActionJournal {
     this.pending = compactEntries(this.pending, MAX_ACTIONS);
   }
 
-  private push<S extends Exclude<ActionEntry['source'], 'mined' | 'checkpoint'>>(source: S, payload: Payload<S>): void {
-    if (this.disposed) return;
-    this.pending.push({
+  private push<S extends Exclude<ActionEntry['source'], 'mined' | 'checkpoint'>>(
+    source: S,
+    payload: Payload<S>,
+  ): ActionEntry | null {
+    if (this.disposed) return null;
+    const entry = {
       seq: ++this.lastSeq,
       source,
       payload,
       wallMs: this.clock.wallMs(),
       orbitSeconds: this.clock.orbitSeconds(),
-    } as ActionEntry);
+    } as ActionEntry;
+    this.pending.push(entry);
+    return entry;
   }
+}
+
+type EmergencyUse = GameEvents['emergency:used'];
+
+function emergencyPayload(e: EmergencyUse): Payload<'emergency'> {
+  return e.timesUsed === undefined ? { kind: e.kind } : { kind: e.kind, timesUsed: e.timesUsed };
 }
 
 function maxSeq(entries: readonly ActionEntry[]): number {

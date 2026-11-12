@@ -15,7 +15,7 @@ import { bus } from '@/core/EventBus';
 import { shotOwnsScene } from '@/game/Shots';
 import type { Universe } from '@/game/Universe';
 import { RecoveryTimeline } from '@/game/recovery';
-import { payBeacon, type BeaconLog } from '@/ship/emergency';
+import { payBeacon, type BeaconLog, type CriticalHook } from '@/ship/emergency';
 
 export type RecoveryCause = 'crash' | 'star' | 'requested';
 
@@ -28,10 +28,14 @@ export class RecoveryCut implements GameModule {
   private cause: RecoveryCause = 'requested';
   private disposers: Array<() => void> = [];
 
-  /** `log`: the ship's log; the paid RETURN TO ORBIT writes its BEACON RECOVERY note there. */
+  /**
+   * `log`: the ship's log; the paid RETURN TO ORBIT writes its BEACON RECOVERY note there.
+   * `critical` ([v4-save] R2): told of the paid return before it is announced (SaveGame's WAL).
+   */
   constructor(
     private readonly universe: Universe,
     private readonly log: BeaconLog | null = null,
+    private readonly critical: CriticalHook | null = null,
   ) {}
 
   /** True from the first frame of the fade until the screen is clear again. */
@@ -83,6 +87,7 @@ export class RecoveryCut implements GameModule {
       const tank = this.universe.flight.propellant;
       if (this.cause === 'requested' && tank) {
         payBeacon(tank, this.universe.cargo ?? null, this.log, this.universe.system?.name ?? '—');
+        this.critical?.({ kind: 'beacon' });
         bus.emit('emergency:used', { kind: 'beacon' });
       }
       // review-p1: the cruise drive kept running through the cut and flew the

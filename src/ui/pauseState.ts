@@ -22,7 +22,9 @@ export type PauseEvent =
   | { readonly type: 'lockLost'; readonly t: number }
   | { readonly type: 'escKey'; readonly t: number }
   | { readonly type: 'resume' }
-  | { readonly type: 'returnToOrbit' };
+  | { readonly type: 'returnToOrbit' }
+  /** [v4-save] SAVE: the sheet stays open; the caller saves. */
+  | { readonly type: 'save' };
 
 export interface PauseContext {
   /** A chart or the codex is up. They own Esc and release the pointer on purpose. */
@@ -59,7 +61,7 @@ export function returnToOrbitLabel(hasTank: boolean, cargoKg = 0): string {
 }
 
 /** What the caller must do as a result. */
-export type PauseEffect = 'none' | 'requestLock' | 'respawn';
+export type PauseEffect = 'none' | 'requestLock' | 'respawn' | 'save';
 
 export interface PauseResult {
   readonly state: PauseState;
@@ -91,5 +93,10 @@ export function pauseStep(state: PauseState, event: PauseEvent, ctx: PauseContex
     case 'returnToOrbit':
       if (!state.open) return same;
       return { state: PAUSE_CLOSED, effect: 'respawn' };
+
+    case 'save':
+      // Busy only blocks opening: a sheet that is up may still save.
+      if (!state.open) return same;
+      return { state, effect: 'save' };
   }
 }

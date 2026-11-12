@@ -18,6 +18,15 @@
 import { applyCargoAction, type Cargo } from './cargo';
 import type { Propellant } from './propellant';
 import { applyAction, type ActionResult } from './travelCost';
+import type { GameEvents } from '@/core/EventBus';
+
+/**
+ * [v4-save] R2: the paying code path's synchronous hook. Emergency and the
+ * paid RETURN TO ORBIT call it once the price is paid and BEFORE any event or
+ * log line of that action, so the exit is on disk before its effect shows
+ * (DESIGN §5.2). SaveGame supplies it; never a bus listener.
+ */
+export type CriticalHook = (used: GameEvents['emergency:used']) => void;
 
 /** Propellant gained by cannibalizing, fraction of BASE capacity. */
 export const CANNIBALIZE_GAIN_FRAC = 0.03;

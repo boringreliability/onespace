@@ -30,7 +30,7 @@ import { bus } from '@/core/EventBus';
 import { EMERGENCY_KEYS } from '@/core/Input';
 import { CANNIBALIZE_CARGO_MIN_KG, applyCargoAction, type Cargo } from '@/ship/cargo';
 import { formatKg } from './miningRules';
-import { cannibalizeYield, emergencyMayAct, payBeacon, type BeaconLog } from '@/ship/emergency';
+import { cannibalizeYield, emergencyMayAct, payBeacon, type BeaconLog, type CriticalHook } from '@/ship/emergency';
 import { applyAction } from '@/ship/travelCost';
 import type { Propellant } from '@/ship/propellant';
 
@@ -59,6 +59,11 @@ export interface EmergencyOptions {
   readonly warp: { readonly phase: string };
   /** [v4-mining] The ship's log: the beacon writes its note here (registry passes it). */
   readonly log?: BeaconLog;
+  /**
+   * [v4-save] R2: called once the exit is paid for, before any of its events
+   * or log lines, so the WAL holds it before the effect shows (SaveGame).
+   */
+  readonly critical?: CriticalHook;
 }
 
 /** 'KeyH' → 'H', 'Digit1' → '1'. */
@@ -182,6 +187,7 @@ export class Emergency implements GameModule {
       const r = applyCargoAction(this.opts.universe.cargo, tank, { kind: 'cannibalize-cargo' });
       if (!r.ok) return;
       this.choosing = false;
+      this.opts.critical?.({ kind: 'cannibalize-cargo' });
       bus.emit('log', { text: 'CARGO CANNIBALIZED', tone: 'warn' });
       bus.emit('emergency:used', { kind: 'cannibalize-cargo' });
     } else if (input.pressed('emergencyCannibalize')) {
@@ -189,6 +195,7 @@ export class Emergency implements GameModule {
       if (!r.ok) return; // refused: the beacon still answers
       this.uses++;
       this.choosing = false;
+      this.opts.critical?.({ kind: 'cannibalize', timesUsed: this.uses });
       bus.emit('log', { text: 'TANK CANNIBALIZED', tone: 'warn' });
       bus.emit('emergency:used', { kind: 'cannibalize', timesUsed: this.uses });
     } else if (input.pressed('emergencyBeacon')) {
@@ -198,6 +205,8 @@ export class Emergency implements GameModule {
       // The tank price, the hold, the note — before ship:recovered (Mining
       // aborts on it, applying nothing, and must find the hold settled).
       payBeacon(tank, universe.cargo ?? null, log ?? null, universe.system?.name ?? '—');
+      // R2: on disk before anything announces it.
+      this.opts.critical?.({ kind: 'beacon' });
       // Arrive coasting (RecoveryCut does the same).
       input.setThrottle(0);
       const cmd = this.opts.universe.flight.command;

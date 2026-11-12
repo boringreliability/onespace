@@ -65,6 +65,15 @@ import { Pause } from '@/ui/Pause';
 import { Hints } from '@/ui/Hints';
 import { Emergency } from '@/game/Emergency'; // [v4-fuel]
 import { Mining } from '@/game/Mining'; // [v4-mining]
+// -- v4 sub-plan 3: the save -----------------------------------------------------
+import { SaveGame } from '@/game/SaveGame';
+import { ActionJournal } from '@/save/actionJournal';
+import { idbStore } from '@/save/idbStore';
+import { memoryStore } from '@/save/memoryStore';
+import { wal } from '@/save/wal';
+import { acquireWriterLock } from '@/save/writerLock';
+import type { GameEvents } from '@/core/EventBus';
+// -----------------------------------------------------------------------------
 import { Warp, registerWarpShots } from '@/ship/Warp';
 import { registerCameraShots } from '@/ship/CameraRig';
 import { registerShipShots } from '@/ship/Ship';
@@ -337,7 +346,15 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   // [v4-mining] The belt as game state: depletion (P2, in memory) and the
   // field/asteroid queries. Before Cruise (R21: it flies to `field:` targets)
   // and before Targeting, which resolves its targets.
-  const worldState = new WorldState({ orbitSeconds: () => universe.orbitSeconds, wallMs: () => Date.now() });
+  // [v4-save] The action log (P3): every named action from here on. A mine
+  // reaches it through WorldState's onMined hook (both halves together), an
+  // emergency exit through SaveGame's critical hook (R2).
+  const journal = new ActionJournal({ wallMs: () => Date.now(), orbitSeconds: () => universe.orbitSeconds });
+  const worldState = new WorldState({
+    orbitSeconds: () => universe.orbitSeconds,
+    wallMs: () => Date.now(),
+    onMined: (e) => journal.noteMined(e),
+  });
   const belt = new Belt({ universe, worldState });
   await engine.add(belt);
   const cruise = new Cruise({ universe, belt });
@@ -389,17 +406,39 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   // J reads the galaxy chart's selection; the chart only exists from here on.
   pilot.attachJump(map.ui, warp);
   progress(0.865, 'arming the recovery beacon');
-  const recovery = new RecoveryCut(universe, shipLog);
+  // [v4-save] The one writer, made below once Emergency and Mining exist; the
+  // paying code paths reach it through this late-bound hook (R2).
+  let saveGame: SaveGame | null = null;
+  const critical = (used: GameEvents['emergency:used']): void => saveGame?.critical(used);
+  const recovery = new RecoveryCut(universe, shipLog, critical);
   await engine.add(recovery);
-  const pause = new Pause({ universe, recovery, warp, input: engine.input });
+  const pause = new Pause({
+    universe,
+    recovery,
+    warp,
+    input: engine.input,
+    save: { saveNow: (reason) => saveGame?.saveNow(reason) ?? Promise.resolve(false) },
+  });
   await engine.add(pause);
   // [v4-fuel] the emergency exit on an empty tank; its line rides NAV ADVISORY.
-  const emergency = new Emergency({ universe, recovery, warp, log: shipLog });
+  const emergency = new Emergency({ universe, recovery, warp, log: shipLog, critical });
   await engine.add(emergency);
   // [v4-mining] B/U/N. After Belt and Targeting (this frame's target and rock),
   // Cruise and the emergency exit; its in-range flag drives the 'mine' hint.
   const mining = new Mining({ universe, belt, worldState, targeting, cruise, warp });
   await engine.add(mining);
+  // [v4-save] After Emergency and Mining: one writing tab (navigator.locks),
+  // IndexedDB (memory where it is missing), the WAL on localStorage.
+  progress(0.87, 'opening the logbook vault');
+  const lock = await acquireWriterLock();
+  saveGame = new SaveGame({
+    world: { universe, worldState, shipLog, emergency, journal, cruise, input: engine.input },
+    store: typeof indexedDB === 'undefined' ? memoryStore() : idbStore(),
+    wal,
+    lock,
+    page: { document, window },
+  });
+  await engine.add(saveGame);
   await engine.add(new Hints({ universe, pause, recovery, warp, emergency, mining }));
   // --- end track D -------------------------------------------------------------
 

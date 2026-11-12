@@ -463,6 +463,25 @@ describe('SaveGame — autosave (memoryStore)', () => {
     expect(r.s.saved).toHaveLength(2);
   });
 
+  it('R13: Given a mine 2 s after a landing save (inside the gap), When the gap has passed, Then the deferred mine IS saved — once, holding the mined entry', async () => {
+    const r = rig();
+    landed(r.g);
+    r.tick(0);
+    await flush();
+    r.play(2);
+    mine(r.g, ASTEROID(), 'metal', 500);
+    r.tick(0);
+    await flush();
+    expect(r.s.saved).toHaveLength(1);
+    r.play(3);
+    await flush();
+    expect(r.s.saved).toHaveLength(2);
+    expect(r.s.saved[1]!.actions.filter(isMined)).toHaveLength(1);
+    r.play(10);
+    await flush();
+    expect(r.s.saved).toHaveLength(2);
+  });
+
   it('Given autosaves, Then the log says nothing about them (SAVED is for the manual save only)', async () => {
     const r = rig();
     landed(r.g);

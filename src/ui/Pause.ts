@@ -54,6 +54,8 @@ export interface PauseOptions {
    * storage once, at construction — ignored them until a reload (review-p1).
    */
   readonly input?: { setStickSettings(s: StickSettings): void } | null;
+  /** [v4-save] SAVE: the game's one writer (SaveGame). Absent: the button does nothing. */
+  readonly save?: { saveNow(reason: 'manual'): Promise<boolean> } | null;
 }
 
 const CONTROLS: ReadonlyArray<readonly [string, string]> = [
@@ -106,12 +108,19 @@ export class Pause implements GameModule {
   private readonly recovery: RecoveryCut;
   private readonly warp: { readonly phase: string };
   private readonly input: { setStickSettings(s: StickSettings): void } | null;
+  private readonly save: { saveNow(reason: 'manual'): Promise<boolean> } | null;
 
   constructor(opts: PauseOptions) {
     this.universe = opts.universe;
     this.recovery = opts.recovery;
     this.warp = opts.warp;
     this.input = opts.input ?? null;
+    this.save = opts.save ?? null;
+  }
+
+  /** [v4-save] The SAVE button: saves when the sheet is up (SaveGame logs SAVED / SAVE FAILED). */
+  requestSave(): void {
+    this.dispatch({ type: 'save' });
   }
 
   /** Apply mouse settings for this session and persist them. */
@@ -188,6 +197,7 @@ export class Pause implements GameModule {
     this.state = r.state;
     if (r.effect === 'requestLock') this.requestLock();
     if (r.effect === 'respawn') this.recovery.request('requested');
+    if (r.effect === 'save') void this.save?.saveNow('manual');
     if (this.state.open !== was) {
       bus.emit('log', { text: this.state.open ? 'PAUSED' : 'RESUMED', tone: 'normal' });
       if (this.state.open) this.syncSettings();
@@ -342,6 +352,7 @@ export class Pause implements GameModule {
     sheet.appendChild(actions);
     const resume = this.button(actions, 'RESUME', () => this.dispatch({ type: 'resume' }));
     resume.classList.add('is-primary');
+    this.button(actions, 'SAVE', () => this.requestSave());
     this.returnBtn = this.button(actions, returnToOrbitLabel(false), () => this.dispatch({ type: 'returnToOrbit' }));
 
     const foot = document.createElement('footer');
