@@ -393,7 +393,7 @@ describe('wal — appendCritical validates (R11/M4)', () => {
 });
 
 describe('wal — a single bad entry (R10)', () => {
-  it('Given a malformed entry among good ones (append does not validate), When read, Then only the bad one is dropped', () => {
+  it('Given a malformed entry offered among good ones, When read, Then only the good ones come back', () => {
     const w = createWal(new FakeStorage());
     w.appendCritical(emergency(1));
     w.appendCritical({ seq: 0, source: 'thrust', payload: { kg: -5 } } as unknown as ActionEntry);
