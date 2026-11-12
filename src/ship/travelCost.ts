@@ -83,14 +83,30 @@ export function applyAction(
   a: PropellantAction,
   opts: { announce?: boolean } = {},
 ): ActionResult {
+  const before = p.massKg;
   const r = apply(p, a);
-  if (opts.announce !== false) announceAction(a, r);
+  if (opts.announce !== false) announceAction(a, r, p.massKg - before);
   return r;
 }
 
-/** The single `propellant:action` emit. */
-export function announceAction(a: PropellantAction, r: ActionResult): void {
-  bus.emit('propellant:action', { action: a, ok: r.ok, kg: r.kg });
+/**
+ * [v4-save] R7: what a named action did to the tank, signed, from its kg. A
+ * refund puts `kg` back; every other kind's `kg` is what it took. Cannibalize
+ * and the beacon report kg 0 but change the tank: `applyAction` measures those.
+ */
+function namedDeltaKg(a: PropellantAction, r: ActionResult): number {
+  if (!(r.kg > 0)) return 0;
+  return a.kind === 'jump-refund' || a.kind === 'spool-refund' ? r.kg : -r.kg;
+}
+
+/**
+ * The single `propellant:action` emit. `tankDeltaKg` is the tank's measured
+ * change; a caller announcing a leg it billed silently (Cruise) omits it, and
+ * the change is then the named kg (−kg spent).
+ */
+export function announceAction(a: PropellantAction, r: ActionResult, tankDeltaKg?: number): void {
+  const d = tankDeltaKg !== undefined && Number.isFinite(tankDeltaKg) ? tankDeltaKg : namedDeltaKg(a, r);
+  bus.emit('propellant:action', { action: a, ok: r.ok, kg: r.kg, tankDeltaKg: d });
 }
 
 /** A refund puts back up to `kg` (clamped to the free space); `kg` reports what fit. */

@@ -237,8 +237,12 @@ export class Cruise implements GameModule {
     this.spoolPaidKg = 0;
   }
 
-  /** Announce the leg billed so far as one named action, and start a new segment. */
-  private flushLeg(): void {
+  /**
+   * Announce the leg billed so far as one named action, and start a new
+   * segment. [v4-save] R7: public so a save can book every kg the leg billed
+   * as cruise before it reads the tank — never as thrust, never twice.
+   */
+  flushLeg(): void {
     if (this.legKm > 0 || this.legKg > 0) {
       announceAction({ kind: 'cruise-leg', distanceKm: this.legKm }, { ok: this.legOk, kg: this.legKg });
     }

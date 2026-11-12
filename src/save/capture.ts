@@ -1,0 +1,150 @@
+/**
+ * A save from the running game, and back (v4 sub-plan 3, Task 3).
+ *
+ * `buildSave` reads the live world into a SaveV1 and changes nothing in it
+ * but the journal (drained into the save). `applySave` puts one back.
+ *
+ *  - Player and world are separate (P2); both clocks ride on everything (P5).
+ *  - Cruise is saved as having dropped out at the nearest stable point
+ *    (§5.2): a circular orbit about the nearest body at the ship's current
+ *    radius. The live ship keeps cruising — a save reads, it does not act.
+ *  - The books (R7): Cruise's pending leg is announced first, then the
+ *    interval's unannounced thrust is booked, so the tank always balances.
+ *  - The log is read with `exportState()` NOW (the sink's last write can be
+ *    stale: mission time moves without writing).
+ *  - applySave restores the Universe FIRST and imports the log AFTER (R6):
+ *    the restore's `system:entered` logs an extra ARRIVED visit, which the
+ *    import then overwrites. `grounded` is honoured only with a parent; a hull
+ *    without a tank skips the tank.
+ */
+
+import { Vector3 } from 'three';
+
+import type { ShipLog } from '@/game/Log';
+import type { Universe } from '@/game/Universe';
+import type { WorldState } from '@/game/worldState';
+import { circularOrbitState } from '@/game/recovery';
+import { START_FILL } from '@/ship/propellant';
+import { compactEntries, MAX_ACTIONS, type ActionJournal } from './actionJournal';
+import { CURRENT_FORMAT, type SaveV1 } from './schema';
+
+/** The minimal surface a save needs of the running game. */
+export interface SaveWorld {
+  readonly universe: Universe;
+  readonly worldState: WorldState;
+  readonly shipLog: ShipLog;
+  readonly emergency: { timesUsed: number };
+  readonly journal: ActionJournal;
+  /** Cruise: its pending leg is announced before the tank is counted (R7). */
+  readonly cruise?: { flushLeg(): void };
+}
+
+type Vec3 = [number, number, number];
+type Flight = SaveV1['player']['flight'];
+
+const tuple = (v: Vector3): Vec3 => [v.x, v.y, v.z];
+
+/** Where the player is: parent-relative, or a circular orbit if cruising. */
+function playerPlace(u: Universe): { parentId: string | null; flight: Flight } {
+  const fm = u.flight;
+  const body = fm.cruising ? (u.nearest ?? u.shipParent) : null;
+  if (body) {
+    const radial = new Vector3().subVectors(fm.worldPosition, body.world);
+    const r = radial.length();
+    const R = body.spec.radius;
+    const state = circularOrbitState(radial, R, body.frame.mu, R > 0 && r > 0 ? r / R - 1 : undefined);
+    const q = state.orientation;
+    return {
+      parentId: body.spec.id,
+      flight: {
+        position: tuple(state.position),
+        velocity: tuple(state.velocity),
+        orientation: [q.x, q.y, q.z, q.w],
+        grounded: false,
+        flightAssist: fm.flightAssist,
+      },
+    };
+  }
+  const parentId = u.shipParent ? u.shipParent.spec.id : null;
+  const q = fm.orientation;
+  return {
+    parentId,
+    flight: {
+      position: tuple(fm.position),
+      velocity: tuple(fm.velocity),
+      orientation: [q.x, q.y, q.z, q.w],
+      grounded: parentId !== null && fm.grounded,
+      flightAssist: fm.flightAssist,
+    },
+  };
+}
+
+export function buildSave(w: SaveWorld, prev: SaveV1 | null): SaveV1 {
+  const u = w.universe;
+  const tank = u.flight.propellant;
+
+  // The books: announce cruise's pending leg, then book what is left as thrust.
+  w.cruise?.flushLeg();
+  w.journal.settleThrust(tank ? tank.massKg : null, tank ? tank.baseCapacityKg * START_FILL : 0);
+  const actions = compactEntries([...(prev?.actions ?? []), ...w.journal.drain()], MAX_ACTIONS);
+
+  const universeId = `${u.galaxy.id}:v1`;
+  const sys = u.system;
+  const { parentId, flight } = playerPlace(u);
+  const log = w.shipLog.exportState();
+
+  return {
+    format: CURRENT_FORMAT,
+    saveId: prev?.saveId ?? crypto.randomUUID(),
+    universeId,
+    revision: (prev?.revision ?? 0) + 1,
+    savedAt: { wallMs: Date.now(), orbitSeconds: u.orbitSeconds },
+    player: {
+      system: { id: sys.id, seed: sys.seed, name: sys.name, positionLy: [sys.position[0], sys.position[1], sys.position[2]] },
+      parentId,
+      flight,
+    },
+    ship: {
+      propellant: tank ? tank.snapshot() : { massKg: 0, capacityLossFrac: 0 },
+      cargo: { ...u.cargo.snapshot() },
+      emergencyTimesUsed: w.emergency.timesUsed,
+    },
+    log: { time: log.time, entries: log.entries.map((e) => ({ ...e, body: [...e.body] })) },
+    world: { universeId, entries: w.worldState.entries().map((e) => ({ ...e })) },
+    actions,
+  };
+}
+
+/**
+ * Put a save back into the running game. False — and nothing changed — when
+ * its system (or parent body) cannot be found.
+ */
+export function applySave(w: SaveWorld, s: SaveV1): boolean {
+  const u = w.universe;
+  const p = s.player;
+  const ok = u.restoreState({
+    system: p.system,
+    orbitSeconds: s.savedAt.orbitSeconds,
+    parentId: p.parentId,
+    flight: {
+      position: p.flight.position,
+      velocity: p.flight.velocity,
+      orientation: p.flight.orientation,
+      // A grounded ship needs ground: without a parent it would hang frozen.
+      grounded: p.parentId !== null && p.flight.grounded,
+    },
+    flightAssist: p.flight.flightAssist,
+  });
+  if (!ok) return false;
+
+  const tank = u.flight.propellant;
+  if (tank) tank.restore(s.ship.propellant);
+  u.cargo.restore(s.ship.cargo);
+  w.emergency.timesUsed = s.ship.emergencyTimesUsed;
+  w.worldState.restore(s.world.entries);
+  // R6: after the Universe restore, so its ARRIVED visit is overwritten.
+  w.shipLog.importState(s.log);
+  w.journal.restore(s.actions);
+  w.journal.setBaseline(tank ? tank.massKg : null);
+  return true;
+}

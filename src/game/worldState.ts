@@ -27,6 +27,12 @@ export interface MinedEntry {
 export interface WorldStateClocks {
   readonly orbitSeconds: () => number;
   readonly wallMs: () => number;
+  /**
+   * [v4-save] Told of every mine as it is recorded (the action journal).
+   * Mining announces `cargo:action` before it records the mine, so a journal
+   * listening to the bus alone would hold half a mine. `restore` never calls it.
+   */
+  readonly onMined?: (e: MinedEntry) => void;
 }
 
 /** Shared answer for anything never mined. Frozen: callers cannot write it. */
@@ -55,7 +61,9 @@ export class WorldState {
       this.mined.set(id, d);
     }
     d[r] += kg;
-    this.log.push({ id, by, resource: r, kg, orbitSeconds: this.clocks.orbitSeconds(), wallMs: this.clocks.wallMs() });
+    const e: MinedEntry = { id, by, resource: r, kg, orbitSeconds: this.clocks.orbitSeconds(), wallMs: this.clocks.wallMs() };
+    this.log.push(e);
+    this.clocks.onMined?.({ ...e });
   }
 
   /** Every mine, oldest first. A copy: callers cannot write the world through it. */

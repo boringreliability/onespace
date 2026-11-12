@@ -146,7 +146,8 @@ function entry<S extends string, P extends z.ZodType>(source: S, payload: P) {
 
 export const ActionEntrySchema = z.discriminatedUnion('source', [
   /** `propellant:action`. */
-  entry('propellant', z.strictObject({ action: PropellantActionSchema, ok: z.boolean(), kg: amount })),
+  /** R7: `tankDeltaKg` is signed — negative for a spend, positive for a refund or a gain. */
+  entry('propellant', z.strictObject({ action: PropellantActionSchema, ok: z.boolean(), kg: amount, tankDeltaKg: num })),
   /** `cargo:action` (only `result.ok` is logged). */
   entry('cargo', z.strictObject({ action: CargoActionSchema, result: CargoResultSchema })),
   /** `emergency:used`. */

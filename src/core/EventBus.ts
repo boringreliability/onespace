@@ -88,7 +88,8 @@ export interface GameEvents {
    * [v4-fuel] A named tank action was applied (P3). `kg`: taken from the tank,
    * or put back for a refund. Cruise legs are announced per leg segment.
    */
-  'propellant:action': { action: PropellantAction; ok: boolean; kg: number };
+  /** [v4-save] R7: `tankDeltaKg` is the signed change the action made to the tank's mass. */
+  'propellant:action': { action: PropellantAction; ok: boolean; kg: number; tankDeltaKg: number };
 
   /** [v4-mining] A named hold action was applied; refusals are announced too. */
   'cargo:action': { action: CargoAction; result: CargoResult };
