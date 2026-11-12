@@ -291,6 +291,107 @@ describe('wal — the default instance', () => {
   });
 });
 
+/** A save whose action log is exactly `actions` (the golden's are seq 1..12). */
+function saveWith(revision: number, actions: ActionEntry[]): SaveV1 {
+  const s = saveAt(revision);
+  s.actions = actions;
+  return s;
+}
+
+function checkpoint(seq: number, upToSeq: number): ActionEntry {
+  return {
+    seq,
+    source: 'checkpoint',
+    payload: {
+      upToSeq,
+      tankNetKg: 0,
+      capacityLossNetFrac: 0,
+      cargoNetKg: { ice: 0, metal: 0, silicate: 0, rare: 0 },
+      minedByAsteroid: {},
+      emergency: { cannibalize: 0, cannibalizeCargo: 0, beacon: 0 },
+      lastCannibalizeTimesUsed: 0,
+    },
+    wallMs: 1762891200000 + seq,
+    orbitSeconds: seq,
+  };
+}
+
+describe('wal — coverage follows the save, not the call order (R11/I1)', () => {
+  it('Given a save captured with actions up to seq 2, When e3 is appended BEFORE writeSnapshot, Then clear(rev) keeps e3', () => {
+    const w = createWal(new FakeStorage());
+    w.appendCritical(emergency(1));
+    w.appendCritical(thrust(2));
+    const captured = saveWith(8, [emergency(1), thrust(2)]); // buildSave ran here
+    w.appendCritical(thrust(3)); // paid after the capture, before the WAL write
+    expect(w.writeSnapshot(captured)).toBe(true);
+    w.clear(8);
+    expect(w.read()).toEqual({ snapshot: null, critical: [thrust(3)] });
+  });
+
+  it('Given a snapshot written, When the SAME save is written again after e3 was appended (a retry), Then e3 is still not covered', () => {
+    const w = createWal(new FakeStorage());
+    w.appendCritical(emergency(1));
+    const captured = saveWith(8, [emergency(1)]);
+    expect(w.writeSnapshot(captured)).toBe(true);
+    w.appendCritical(thrust(2));
+    expect(w.writeSnapshot(captured)).toBe(true); // equal revision: allowed
+    w.clear(8);
+    expect(w.read().critical).toEqual([thrust(2)]);
+  });
+
+  it('Given a save with an empty action log, When written, Then it covers no entry', () => {
+    const w = createWal(new FakeStorage());
+    w.appendCritical(emergency(1));
+    w.writeSnapshot(saveWith(8, []));
+    w.clear(8);
+    expect(w.read()).toEqual({ snapshot: null, critical: [emergency(1)] });
+  });
+
+  it('Given a save whose log starts with a checkpoint (seq 3, upToSeq 20), When written, Then entries up to seq 20 are covered and 21 is not', () => {
+    const w = createWal(new FakeStorage());
+    w.appendCritical(thrust(19));
+    w.appendCritical(emergency(20));
+    w.appendCritical(thrust(21));
+    w.writeSnapshot(saveWith(8, [checkpoint(3, 20)]));
+    w.clear(8);
+    expect(w.read().critical).toEqual([thrust(21)]);
+  });
+
+  it('Given a stored snapshot r8, When an OLDER save r7 is written, Then it returns false and the snapshot and coverage are unchanged', () => {
+    const w = createWal(new FakeStorage());
+    w.appendCritical(emergency(1));
+    w.writeSnapshot(saveWith(8, [emergency(1)]));
+    w.appendCritical(thrust(2));
+    // r7 claims to cover seq 2 — it must not be allowed to tag it.
+    expect(w.writeSnapshot(saveWith(7, [emergency(1), thrust(2)]))).toBe(false);
+    expect((w.read().snapshot as SaveV1).revision).toBe(8);
+    w.clear(7);
+    expect(w.read().critical).toEqual([emergency(1), thrust(2)]);
+    w.clear(8);
+    expect(w.read()).toEqual({ snapshot: null, critical: [thrust(2)] });
+  });
+});
+
+describe('wal — appendCritical validates (R11/M4)', () => {
+  it('Given an entry with a NaN field, When appended to an empty WAL, Then it returns false and nothing is stored', () => {
+    const storage = new FakeStorage();
+    const w = createWal(storage);
+    expect(w.appendCritical(thrust(1, Number.NaN))).toBe(false);
+    expect(storage.getItem(KEY)).toBeNull();
+    expect(w.read().critical).toEqual([]);
+  });
+
+  it('Given good entries, When an invalid one (seq 0) is appended, Then it returns false and the stored bytes are unchanged', () => {
+    const storage = new FakeStorage();
+    const w = createWal(storage);
+    w.appendCritical(emergency(1));
+    const before = storage.getItem(KEY);
+    expect(w.appendCritical({ ...thrust(2), seq: 0 })).toBe(false);
+    expect(storage.getItem(KEY)).toBe(before);
+    expect(w.read().critical).toEqual([emergency(1)]);
+  });
+});
+
 describe('wal — a single bad entry (R10)', () => {
   it('Given a malformed entry among good ones (append does not validate), When read, Then only the bad one is dropped', () => {
     const w = createWal(new FakeStorage());

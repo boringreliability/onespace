@@ -214,24 +214,29 @@ describe('idbStore — layout and foreign bytes', () => {
 });
 
 describe('idbStore — a failed write', () => {
-  it('Given revisions 7 then 8 saved, When saving 9 aborts mid-transaction, Then save rejects and 8/7 are intact', async () => {
+  it('Given revisions 7 then 8 saved, When the SECOND put of saving 9 throws, Then save rejects and 8/7 are intact (one transaction, not two)', async () => {
     const name = freshDbName();
     const store = idbStore(name);
     await store.save(saveAt(7));
     await store.save(saveAt(8));
 
+    // R11/M1: the first write of the rotation lands; the second fails. An
+    // implementation that rotates in two transactions would keep the first
+    // (previous = 8) — only one transaction rolls it back.
     const realPut = IDBObjectStore.prototype.put;
+    let puts = 0;
     vi.spyOn(IDBObjectStore.prototype, 'put').mockImplementation(function (
       this: IDBObjectStore,
       ...args: Parameters<IDBObjectStore['put']>
     ) {
-      const r = realPut.apply(this, args);
-      this.transaction.abort(); // the first write lands, then the transaction dies
-      return r;
+      puts += 1;
+      if (puts === 2) throw new DOMException('the disk is full', 'QuotaExceededError');
+      return realPut.apply(this, args);
     });
 
     await expect(store.save(saveAt(9))).rejects.toBeDefined();
     vi.restoreAllMocks();
+    expect(puts).toBe(2);
 
     const { current, previous } = await store.load();
     expect((current as SaveV1).revision).toBe(8);
