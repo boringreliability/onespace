@@ -290,3 +290,14 @@ describe('wal — the default instance', () => {
     expect(wal.read()).toEqual({ snapshot: null, critical: [] });
   });
 });
+
+describe('wal — a single bad entry (R10)', () => {
+  it('Given a malformed entry among good ones (append does not validate), When read, Then only the bad one is dropped', () => {
+    const w = createWal(new FakeStorage());
+    w.appendCritical(emergency(1));
+    w.appendCritical({ seq: 0, source: 'thrust', payload: { kg: -5 } } as unknown as ActionEntry);
+    w.appendCritical(thrust(3));
+    expect(() => w.read()).not.toThrow();
+    expect(w.read().critical).toEqual([emergency(1), thrust(3)]);
+  });
+});
