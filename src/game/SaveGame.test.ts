@@ -1048,6 +1048,19 @@ describe('R14 I1 — the Yard is no escape from the books (the tank stays attach
     expect(r.logs.some((l) => l.text === 'SAVED')).toBe(true);
   });
 
+  it('R15: Given a landing save a moment ago and a mine after it, When the pilot quits flight to the title, Then a save is flushed at once (no gap) holding the mine', async () => {
+    const r = rig();
+    landed(r.g);
+    r.tick(0);
+    await flush();
+    mine(r.g, ASTEROID(), 'ice', 2_000);
+    toMode('title');
+    r.sg.onModeChange?.('flight', 'title', r.g.ctx);
+    await flush();
+    expect(r.s.saved).toHaveLength(2);
+    expect(r.s.saved[1]!.actions.filter(isMined)).toHaveLength(1);
+  });
+
   it('Given the title screen, When SAVE is asked for, Then nothing is written (the title is still excluded)', async () => {
     const r = rig();
     toMode('title');

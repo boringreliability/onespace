@@ -151,6 +151,9 @@ export class ActionJournal {
   drain(): ActionEntry[] {
     const out = this.pending;
     this.pending = [];
+    // R14 M1: a claim lives at most until the next save; one whose emit never
+    // came must not swallow a later, unrelated emergency:used.
+    this.claims = [];
     return out;
   }
 

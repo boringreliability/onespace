@@ -30,14 +30,18 @@
  *
  * One writing tab: without the writer lock SaveGame is inert — it logs
  * SAVING_DISABLED_TEXT once, never touches the journal, the WAL or the store.
- * Nothing is written without a tank (Yard / showroom hull) or outside the
- * piloting modes (never over the title's opening world).
+ * Nothing is written without a tank (showroom hull) or over the title (its
+ * opening world is not the pilot's game). The Yard keeps the tank, so it
+ * saves (R14): leaving flight/map for the Yard or the title flushes a save
+ * ('leave', always); hidden, pagehide and SAVE still write in the Yard. A
+ * manual SAVE that cannot write says why; a WAL append that fails warns.
  *
  * The books: the journal's baseline is set to the tank at init and whenever
  * the tank is swapped.
  */
 
 import type { EngineContext, GameModule } from '@/core/Engine';
+import type { Mode } from '@/core/Modes';
 import { bus, type GameEvents } from '@/core/EventBus';
 import { modes } from '@/core/Modes';
 import { buildSave, type SaveWorld } from '@/save/capture';
@@ -181,14 +185,34 @@ export class SaveGame implements GameModule {
   critical(used: GameEvents['emergency:used']): void {
     if (!this.lock.writer || this.disposed) return;
     const entry = this.world.journal.noteEmergency(used);
-    if (entry) this.wal.appendCritical(entry);
+    // R14 M4: not on disk is not silent (the autosave on the next tick still tries).
+    if (entry && !this.wal.appendCritical(entry)) bus.emit('log', { text: SAVE_FAILED_TEXT, tone: 'warn' });
     this.wanted.add('emergency');
   }
 
   /** Save now. True once the store holds it. */
-  async saveNow(reason: SaveReason): Promise<boolean> {
-    const save = this.capture();
-    if (!save) return false;
+  saveNow(reason: SaveReason): Promise<boolean> {
+    return this.write(reason, false);
+  }
+
+  /**
+   * R14/R15: leaving the piloting modes for the Yard or the title flushes a
+   * save (always): the tank stays attached in the Yard, and nothing ticks there.
+   */
+  onModeChange(from: Mode, to: Mode, _ctx?: EngineContext): void {
+    const piloting = from === 'flight' || from === 'map';
+    if (piloting && (to === 'yard' || to === 'title')) void this.write('leave', true);
+  }
+
+  private async write(reason: SaveReason, leaving: boolean): Promise<boolean> {
+    const save = this.capture(leaving);
+    if (!save) {
+      // R14 M3: the pilot's own SAVE is answered; autosaves stay quiet.
+      if (reason === 'manual') {
+        bus.emit('log', { text: this.lock.writer ? SAVE_FAILED_TEXT : SAVING_DISABLED_TEXT, tone: 'warn' });
+      }
+      return false;
+    }
 
     // Synchronously first: a false here is no cover — the store write goes on.
     this.wal.writeSnapshot(save);
@@ -220,16 +244,22 @@ export class SaveGame implements GameModule {
 
   // ---------------------------------------------------------------------------
 
-  /** May this tab write the game now? */
-  private get mayWrite(): boolean {
+  /**
+   * May this tab write the game now? R14: a writer with a tank attached, not
+   * over the title — the Yard keeps the tank, so it saves too. `leaving`: the
+   * flush on the way out of flight, which may already find the title up.
+   */
+  private mayWrite(leaving: boolean): boolean {
     if (!this.lock.writer || this.disposed) return false;
     if (this.world.universe.flight.propellant === null) return false;
-    return modes.base === 'flight' || modes.base === 'map';
+    return leaving || modes.base !== 'title';
   }
 
   /** Build the next save and keep it as prev (the journal was drained into it). */
-  private capture(): SaveV1 | null {
-    if (!this.mayWrite) return null;
+  private capture(leaving = false): SaveV1 | null {
+    if (!this.mayWrite(leaving)) return null;
+    // R14 M2: a tank swapped since the last tick starts the books now, not as thrust.
+    this.syncBaseline(false);
     const save = buildSave(this.world, this.prev);
     this.prev = save;
     this.tank = this.world.universe.flight.propellant;

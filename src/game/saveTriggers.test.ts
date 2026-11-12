@@ -16,7 +16,7 @@ import { describe, expect, it } from 'vitest';
 
 import { AUTOSAVE_INTERVAL_S, AUTOSAVE_MIN_GAP_S, shouldAutosave, type SaveReason } from './saveTriggers';
 
-const ALWAYS: readonly SaveReason[] = ['emergency', 'hidden', 'manual'];
+const ALWAYS: readonly SaveReason[] = ['emergency', 'hidden', 'manual', 'leave'];
 const GAPPED: readonly SaveReason[] = ['landed', 'mined', 'system'];
 
 describe('saveTriggers — the constants are the Global Constraints', () => {
@@ -26,7 +26,7 @@ describe('saveTriggers — the constants are the Global Constraints', () => {
   });
 });
 
-describe('shouldAutosave — emergency, hidden and manual always save', () => {
+describe('shouldAutosave — emergency, hidden, manual and leave (R15) always save', () => {
   for (const reason of ALWAYS) {
     it(`Given a save 0 s ago, When the reason is '${reason}', Then it saves (no gap applies)`, () => {
       expect(shouldAutosave({ sinceLastS: 0, reason })).toBe(true);
