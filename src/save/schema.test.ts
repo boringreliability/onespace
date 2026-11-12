@@ -125,10 +125,16 @@ describe('ActionEntrySchema — the checkpoint entry (compaction of the oldest a
       source: 'checkpoint',
       payload: {
         upToSeq: 5000,
-        propellantKg: 4210.5,
-        cargoKg: { ice: 1200, metal: 340.25, silicate: 95, rare: 2.5 },
-        minedKg: { ice: 1800, metal: 410, silicate: 95, rare: 3 },
+        // R8: the NET effect of everything folded — signed where it can fall.
+        tankNetKg: -4210.5,
+        capacityLossNetFrac: 0.04,
+        cargoNetKg: { ice: -600, metal: 340.25, silicate: 95, rare: 2.5 },
+        minedByAsteroid: {
+          'ast:gx-1mwhji--377.-3.266.1:398:12': { ice: 1800, metal: 410, silicate: 0, rare: 0 },
+          'ast:gx-1mwhji--377.-3.266.1:398:13': { ice: 0, metal: 0, silicate: 95, rare: 3 },
+        },
         emergency: { cannibalize: 1, cannibalizeCargo: 0, beacon: 2 },
+        lastCannibalizeTimesUsed: 1,
       },
       wallMs: 1762891200000,
       orbitSeconds: 5412.25,
@@ -145,18 +151,44 @@ describe('ActionEntrySchema — the checkpoint entry (compaction of the oldest a
     expect(SaveV1Schema.safeParse(s).success).toBe(true);
   });
 
-  const breaks: Array<{ what: string; mutate: (p: ReturnType<typeof checkpoint>['payload']) => void }> = [
-    { what: 'NaN propellantKg', mutate: (p) => (p.propellantKg = Number.NaN) },
-    { what: 'Infinity propellantKg', mutate: (p) => (p.propellantKg = Number.POSITIVE_INFINITY) },
-    { what: 'negative propellantKg', mutate: (p) => (p.propellantKg = -1) },
-    { what: 'negative cargoKg.metal', mutate: (p) => (p.cargoKg.metal = -0.5) },
-    { what: 'NaN minedKg.rare', mutate: (p) => (p.minedKg.rare = Number.NaN) },
+  type CP = ReturnType<typeof checkpoint>['payload'];
+  type Loose = Record<string, unknown>;
+  const breaks: Array<{ what: string; mutate: (p: CP) => void }> = [
+    { what: 'NaN tankNetKg', mutate: (p) => (p.tankNetKg = Number.NaN) },
+    { what: 'Infinity tankNetKg', mutate: (p) => (p.tankNetKg = Number.POSITIVE_INFINITY) },
+    { what: 'NaN capacityLossNetFrac', mutate: (p) => (p.capacityLossNetFrac = Number.NaN) },
+    { what: '-Infinity cargoNetKg.metal', mutate: (p) => (p.cargoNetKg.metal = Number.NEGATIVE_INFINITY) },
+    { what: 'unknown resource in cargoNetKg', mutate: (p) => ((p.cargoNetKg as Loose).gold = 1) },
+    { what: 'negative mined kg for an asteroid', mutate: (p) => (Object.values(p.minedByAsteroid)[0]!.ice = -1) },
+    { what: 'NaN mined kg for an asteroid', mutate: (p) => (Object.values(p.minedByAsteroid)[0]!.rare = Number.NaN) },
+    { what: 'an unknown resource for an asteroid', mutate: (p) => ((Object.values(p.minedByAsteroid)[0] as Loose).gold = 1) },
+    { what: 'an asteroid missing a resource', mutate: (p) => delete (Object.values(p.minedByAsteroid)[0] as Loose).rare },
+    { what: 'an empty asteroid id', mutate: (p) => ((p.minedByAsteroid as Loose)[''] = { ice: 1, metal: 0, silicate: 0, rare: 0 }) },
     { what: 'negative emergency.beacon', mutate: (p) => (p.emergency.beacon = -1) },
     { what: 'fractional emergency.cannibalize', mutate: (p) => (p.emergency.cannibalize = 1.5) },
+    { what: 'negative lastCannibalizeTimesUsed', mutate: (p) => (p.lastCannibalizeTimesUsed = -1) },
+    { what: 'fractional lastCannibalizeTimesUsed', mutate: (p) => (p.lastCannibalizeTimesUsed = 0.5) },
     { what: 'fractional upToSeq', mutate: (p) => (p.upToSeq = 2.5) },
     { what: 'negative upToSeq', mutate: (p) => (p.upToSeq = -1) },
-    { what: 'unknown resource in cargoKg', mutate: (p) => ((p.cargoKg as Record<string, number>).gold = 1) },
+    { what: 'no tankNetKg', mutate: (p) => delete (p as Loose).tankNetKg },
+    { what: 'no minedByAsteroid', mutate: (p) => delete (p as Loose).minedByAsteroid },
+    { what: 'the old gross field propellantKg', mutate: (p) => ((p as Loose).propellantKg = 10) },
+    { what: 'the old gross field cargoKg', mutate: (p) => ((p as Loose).cargoKg = { ice: 0, metal: 0, silicate: 0, rare: 0 }) },
   ];
+
+  it('Given a checkpoint whose net values fall (negative tank, cargo and loss), Then it is accepted — net effects are signed', () => {
+    const c = checkpoint();
+    c.payload.tankNetKg = -1;
+    c.payload.capacityLossNetFrac = -0.04;
+    c.payload.cargoNetKg.ice = -2_000;
+    expect(ActionEntrySchema.safeParse(c).success).toBe(true);
+  });
+
+  it('Given a checkpoint with no asteroids mined (an empty minedByAsteroid), Then it is accepted', () => {
+    const c = checkpoint();
+    (c.payload as Loose).minedByAsteroid = {};
+    expect(ActionEntrySchema.safeParse(c).success).toBe(true);
+  });
 
   for (const b of breaks) {
     it(`Given a checkpoint with ${b.what}, Then it is rejected`, () => {

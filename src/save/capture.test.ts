@@ -36,9 +36,12 @@ import { applyCargoAction } from '@/ship/cargo';
 import { EXHAUST_VELOCITY_KMS } from '@/ship/propellant';
 import { payBeacon } from '@/ship/emergency';
 import { announceAction, applyAction, type ActionResult } from '@/ship/travelCost';
-import { ActionJournal, MAX_ACTIONS } from './actionJournal';
+import { Cruise } from '@/game/Cruise';
+import { CRUISE_DEFAULTS } from '@/ship/CruiseDrive';
+import { ActionJournal, MAX_ACTIONS, compactEntries } from './actionJournal';
 import { applySave, buildSave, type SaveWorld } from './capture';
 import { migrate } from './migrate';
+import { replay, type ReplayState } from './replay';
 import { SaveV1Schema, type ActionEntry, type SaveV1 } from './schema';
 
 /** Universe steps that need a GPU; everything else in update() runs for real. */
@@ -149,7 +152,7 @@ function throughStorage(s: SaveV1): SaveV1 {
 }
 
 /** Mine `kg` of `resource` the way Mining completes one: the hold first, then the world. */
-function mine(g: Live, asteroidId: string, resource: 'ice' | 'metal', kg: number): void {
+function mine(g: Live, asteroidId: string, resource: 'ice' | 'metal' | 'silicate' | 'rare', kg: number): void {
   const r = applyCargoAction(g.u.cargo, g.u.flight.propellant, { kind: 'mine', asteroidId, resource, kg });
   expect(r.ok).toBe(true);
   g.worldState.recordMined(asteroidId, resource, r.kgIn, 'local');
@@ -725,4 +728,272 @@ describe('carried rulings', () => {
     expect(fresh.filter((e) => e.source === 'mined' || e.source === 'cargo')).toEqual([]);
   });
 
+});
+
+// --- R8: the log can recompute the ship ------------------------------------------
+
+describe('R8: replay(start, log) recomputes the live ship', () => {
+  /** Two rocks in Fyss field 0: A with ice and metal, B with silicate. */
+  function rocks(): { a: string; b: string } {
+    const all = fyssField(0).asteroids;
+    const a = all.find((x) => x.composition.ice >= 2_000 && x.composition.metal >= 1_500);
+    const b = all.find((x) => x !== a && x.composition.silicate >= 1_200);
+    if (!a || !b) throw new Error('fixture: Fyss field 0 lacks the rocks this session needs');
+    return { a: a.id, b: b.id };
+  }
+
+  /**
+   * A played session through the real code paths: moves with thrust, a jump
+   * and its refund, a cruise leg and a dry partial leg, three mines across two
+   * asteroids, a refine, a tank cannibalization, a repair, a cargo
+   * cannibalization and a beacon — saved twice.
+   */
+  function played() {
+    const g = live();
+    const tank = g.u.flight.propellant!;
+    const startState: ReplayState = {
+      tank: { ...tank.snapshot() },
+      cargo: { ...g.u.cargo.snapshot() },
+      depletion: {},
+      emergency: { cannibalize: 0, cannibalizeCargo: 0, beacon: 0 },
+    };
+    const { a, b } = rocks();
+
+    g.frames(1);
+    tank.consume(500); // thrust
+    expect(applyAction(tank, { kind: 'jump', distanceLy: 10 }).ok).toBe(true);
+    expect(applyAction(tank, { kind: 'jump-refund', kg: 1_600 }).ok).toBe(true);
+    mine(g, a, 'ice', 2_000);
+    mine(g, a, 'metal', 1_500);
+    mine(g, b, 'silicate', 1_200);
+    expect(applyCargoAction(g.u.cargo, tank, { kind: 'refine' }).ok).toBe(true);
+    expect(applyAction(tank, { kind: 'cruise-leg', distanceKm: 7.5e7 }).ok).toBe(true);
+    const s1 = buildSave(g.w, null);
+
+    tank.consume(tank.massKg - 30); // thrust
+    const dry = applyAction(tank, { kind: 'cruise-leg', distanceKm: 1.5e8 });
+    expect(dry.ok).toBe(false);
+    expect(dry.kg).toBeCloseTo(30, 9);
+    g.press('emergency');
+    g.press('emergencyCannibalize');
+    expect(g.emergency.timesUsed).toBe(1);
+    expect(applyCargoAction(g.u.cargo, tank, { kind: 'repair' }).ok).toBe(true);
+    tank.consume(tank.massKg); // thrust
+    g.press('emergency');
+    g.press('emergencyCannibalizeCargo');
+    expect(g.u.cargo.totalKg).toBe(0);
+    tank.consume(tank.massKg); // thrust
+    g.press('emergency');
+    g.press('emergencyBeacon');
+    expect(tank.massKg).toBeGreaterThan(0);
+    g.frames(1);
+    const s2 = buildSave(g.w, s1);
+
+    const depletion: ReplayState['depletion'] = {};
+    for (const e of g.worldState.entries()) depletion[e.id] = { ...g.worldState.depleted(e.id) };
+    const now: ReplayState = {
+      tank: { ...tank.snapshot() },
+      cargo: { ...g.u.cargo.snapshot() },
+      depletion,
+      emergency: { cannibalize: g.emergency.timesUsed, cannibalizeCargo: 1, beacon: 1 },
+    };
+    return { g, s2, startState, now };
+  }
+
+  function expectState(got: ReplayState, want: ReplayState): void {
+    expect(Math.abs(got.tank.massKg - want.tank.massKg)).toBeLessThan(1e-6);
+    expect(Math.abs(got.tank.capacityLossFrac - want.tank.capacityLossFrac)).toBeLessThan(1e-9);
+    for (const r of ['ice', 'metal', 'silicate', 'rare'] as const) expect(Math.abs(got.cargo[r] - want.cargo[r])).toBeLessThan(1e-6);
+    const ids = new Set([...Object.keys(got.depletion), ...Object.keys(want.depletion)]);
+    expect(ids.size).toBe(2);
+    for (const id of ids) {
+      for (const r of ['ice', 'metal', 'silicate', 'rare'] as const) {
+        expect(Math.abs((got.depletion[id]?.[r] ?? 0) - (want.depletion[id]?.[r] ?? 0)), `${id} ${r}`).toBeLessThan(1e-6);
+      }
+    }
+    expect(got.emergency).toEqual(want.emergency);
+  }
+
+  it('Given a played session, When its whole log is replayed from the start state, Then tank (1e-6 kg), capacity loss (1e-9), hold, depletion (1e-6) and emergency counts equal the live ship', () => {
+    const { s2, startState, now } = played();
+    expectState(replay(startState, s2.actions), now);
+  });
+
+  it('Given the same log compacted to 5 entries, Then replay still equals the live ship, and the save is valid', () => {
+    const { s2, startState, now } = played();
+    const c = compactEntries(s2.actions, 5);
+    expect(c).toHaveLength(5);
+    expectState(replay(startState, c), now);
+    expect(SaveV1Schema.safeParse({ ...s2, actions: c }).success).toBe(true);
+  });
+
+  it('Given the log compacted twice (to 12, then to 5), Then replay still equals the live ship', () => {
+    const { s2, startState, now } = played();
+    expectState(replay(startState, compactEntries(compactEntries(s2.actions, 12), 5)), now);
+  });
+
+  it('Given the compacted save through JSON and migrate, Then replay of the loaded log still equals the live ship', () => {
+    const { s2, startState, now } = played();
+    const loaded = throughStorage({ ...s2, actions: compactEntries(s2.actions, 5) });
+    expectState(replay(startState, loaded.actions), now);
+  });
+});
+
+// --- M-2: an unexplained gain is counted, not swallowed -----------------------------
+
+describe('M-2: a tank that rose without a named action is counted', () => {
+  it('Given the tank gained 250 kg with no announcement, When saved, Then no thrust is booked and the journal counts 250 kg unexplained', () => {
+    const g = live();
+    const s1 = buildSave(g.w, null);
+    g.u.flight.propellant!.add(250);
+    const s2 = buildSave(g.w, s1);
+    expect(s2.actions.slice(s1.actions.length).some((e) => e.source === 'thrust')).toBe(false);
+    expect(g.journal.unexplainedGainKg).toBeCloseTo(250, 9);
+  });
+});
+
+// --- M-4: cruise outside every SOI goes round the star ---------------------------------
+
+describe('M-4: a cruise save orbits the nearest body only inside its SOI', () => {
+  /** The star's µ (private on Universe; read for the check only). */
+  const starMu = (u: Universe): number => (u as unknown as { starFrame: { mu: number } }).starFrame.mu;
+
+  /**
+   * `nearest` is set by hand: the harness stubs the GPU-bound `updateBodies`,
+   * which is what keeps each body's distance (and so `nearest`) current.
+   */
+  type AnyBody = NonNullable<Universe['nearest']>;
+  const setNearest = (u: Universe, b: AnyBody | null): void => {
+    (u as unknown as { nearest: AnyBody | null }).nearest = b;
+  };
+
+  function farOut() {
+    const g = live();
+    g.frames(1);
+    const home = g.u.shipParent!;
+    g.u.restoreParent(null); // star-relative from here
+    g.u.flight.teleport(new Vector3(0, 7.5e8, 0), new Vector3(30, 0, 5)); // ~5 AU above the plane
+    g.frames(1 / 60);
+    g.u.flight.setCruise(2_000);
+    expect(g.u.flight.cruising).toBe(true);
+    setNearest(g.u, home);
+    return { g, home };
+  }
+
+  it('Given a cruising ship outside the nearest body\'s SOI, When saved, Then it is parented to the star in a circular orbit: |v| = √(µ★/r) (1e-6), velocity ⊥ radius', () => {
+    const { g, home } = farOut();
+    expect(g.u.shipParent).toBeNull();
+    expect(g.u.flight.worldPosition.distanceTo(home.world)).toBeGreaterThan(home.soiRadius);
+    const r = g.u.flight.worldPosition.length();
+    const s = buildSave(g.w, null);
+    const p = new Vector3(...s.player.flight.position);
+    const v = new Vector3(...s.player.flight.velocity);
+    expect(s.player.parentId).toBeNull();
+    expect(Math.abs(p.length() - r)).toBeLessThan(1e-6);
+    expect(Math.abs(v.length() - Math.sqrt(starMu(g.u) / p.length()))).toBeLessThan(1e-6);
+    expect(Math.abs(p.dot(v)) / (p.length() * v.length())).toBeLessThan(1e-9);
+    expect(s.player.flight.grounded).toBe(false);
+  });
+
+  it('Given a cruising ship inside the nearest body\'s SOI, Then it is still saved around that body', () => {
+    const g = live();
+    g.frames(1);
+    const body = g.u.shipParent!;
+    g.u.flight.teleport(new Vector3(body.spec.radius * 3.2, 0, 0), new Vector3(0, 0, 9));
+    g.frames(1 / 60);
+    g.u.flight.setCruise(2_000);
+    setNearest(g.u, body);
+    expect(g.u.flight.worldPosition.distanceTo(body.world)).toBeLessThan(body.soiRadius);
+    const s = buildSave(g.w, null);
+    expect(s.player.parentId).toBe(body.spec.id);
+    expect(Math.abs(new Vector3(...s.player.flight.position).length() - g.u.flight.worldPosition.distanceTo(body.world))).toBeLessThan(1e-6);
+  });
+
+  it('Given a cruising ship with no nearest body and no parent, When saved, Then it is saved in a circular orbit about the star — never with the raw cruise velocity', () => {
+    const { g } = farOut();
+    setNearest(g.u, null);
+    expect(g.u.shipParent).toBeNull();
+    const raw = g.u.flight.velocity.clone();
+    const s = buildSave(g.w, null);
+    const p = new Vector3(...s.player.flight.position);
+    const v = new Vector3(...s.player.flight.velocity);
+    expect(s.player.parentId).toBeNull();
+    expect(Math.abs(v.length() - Math.sqrt(starMu(g.u) / p.length()))).toBeLessThan(1e-6);
+    expect(v.distanceTo(raw)).toBeGreaterThan(1e-3);
+  });
+});
+
+// --- M-5: loading over a live cruise or spool ---------------------------------------------
+
+describe('M-5: applySave while the cruise drive is spooling or cruising', () => {
+  function withCruise() {
+    const g = live();
+    const cruise = new Cruise({ universe: g.u });
+    cruise.init();
+    offs.push(() => cruise.dispose());
+    const axes = { pitch: 0, yaw: 0, roll: 0, throttle: 0, strafeX: 0, strafeY: 0, strafeZ: 0 };
+    const pressed = new Set<ActionName>();
+    let elapsed = 0;
+    const cctx = {
+      input: { axes, pressed: (a: ActionName) => pressed.has(a), held: () => false },
+      get elapsed() {
+        return elapsed;
+      },
+    } as unknown as EngineContext;
+    const step = (seconds: number): void => {
+      const n = Math.max(1, Math.round(seconds * 60));
+      for (let i = 0; i < n; i++) {
+        g.u.update(1 / 60, g.ctx);
+        // The harness stubs `updateBodies`, which keeps `nearest` and the
+        // clearance current; give Cruise the parent's, as Cruise.test's world stub does.
+        const parent = g.u.shipParent;
+        if (parent) {
+          const raw = g.u as unknown as { nearest: unknown; nearestGapKm: number };
+          raw.nearest = parent;
+          raw.nearestGapKm = g.u.flight.position.length() - parent.spec.radius;
+        }
+        cruise.update(1 / 60, cctx);
+        pressed.clear();
+        elapsed += 1 / 60;
+      }
+    };
+    const w: SaveWorld = { ...g.w, cruise };
+    g.u.flight.flightAssist = false; // nothing of its own draws on the tank
+    const saved = throughStorage(buildSave(w, null));
+    const seen: string[] = [];
+    return { g, cruise, w, saved, step, press: (a: ActionName) => pressed.add(a), seen };
+  }
+
+  function expectCleanLoad(r: ReturnType<typeof withCruise>): void {
+    const tank = r.g.u.flight.propellant!;
+    expect(applySave(r.w, r.saved)).toBe(true);
+    expect(r.cruise.drive.phase).toBe('idle');
+    expect(r.g.u.flight.cruising).toBe(false);
+    expect(tank.snapshot()).toEqual(r.saved.ship.propellant);
+    offs.push(bus.on('propellant:action', (e) => r.seen.push(e.action.kind)));
+    r.step(2);
+    // No spool refund and no leg reaches the restored tank or the log.
+    expect(r.seen).toEqual([]);
+    expect(tank.massKg).toBe(r.saved.ship.propellant.massKg);
+    const fresh = buildSave(r.w, r.saved).actions.slice(r.saved.actions.length);
+    expect(fresh.filter((e) => e.source === 'propellant' || e.source === 'thrust')).toEqual([]);
+  }
+
+  it('Given the drive spooling (its price paid), When a save is loaded, Then Cruise is reset — no spool refund reaches the restored tank, no phantom leg', () => {
+    const r = withCruise();
+    r.press('cruise');
+    r.step(0.5);
+    expect(r.cruise.drive.phase).toBe('spooling');
+    expect(r.g.u.flight.propellant!.massKg).toBeLessThan(r.saved.ship.propellant.massKg);
+    expectCleanLoad(r);
+  });
+
+  it('Given the ship cruising with a leg pending, When a save is loaded, Then Cruise is reset — not cruising, no phantom leg, the restored tank untouched', () => {
+    const r = withCruise();
+    r.press('cruise');
+    r.step(CRUISE_DEFAULTS.spoolTime + 0.5);
+    expect(r.cruise.drive.phase).toBe('cruise');
+    r.step(0.4);
+    expectCleanLoad(r);
+  });
 });

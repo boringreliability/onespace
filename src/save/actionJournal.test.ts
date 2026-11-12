@@ -32,6 +32,7 @@ import { CARGO_CAPACITY_KG, Cargo, type CargoAction, type CargoResult } from '@/
 import { PROBE_TANK_CAPACITY_KG, Propellant } from '@/ship/propellant';
 import type { PropellantAction } from '@/ship/travelCost';
 import { ActionJournal, MAX_ACTIONS } from './actionJournal';
+import { replay, type ReplayState } from './replay';
 import { ActionEntrySchema, type ActionEntry } from './schema';
 
 const RESOURCES: readonly Resource[] = ['ice', 'metal', 'silicate', 'rare'];
@@ -255,10 +256,12 @@ describe('drain and seq', () => {
         source: 'checkpoint',
         payload: {
           upToSeq: 2_999,
-          propellantKg: 10,
-          cargoKg: { ice: 0, metal: 0, silicate: 0, rare: 0 },
-          minedKg: { ice: 0, metal: 0, silicate: 0, rare: 0 },
+          tankNetKg: -10,
+          capacityLossNetFrac: 0,
+          cargoNetKg: { ice: 0, metal: 0, silicate: 0, rare: 0 },
+          minedByAsteroid: {},
           emergency: { cannibalize: 0, cannibalizeCargo: 0, beacon: 0 },
+          lastCannibalizeTimesUsed: 0,
         },
         wallMs: 1,
         orbitSeconds: 1,
@@ -286,6 +289,17 @@ describe('drain and seq', () => {
     propellant({ kind: 'cruise-spool' }, 100);
     mineAction('ice', 1);
     bus.emit('emergency:used', { kind: 'beacon' });
+    expect(j.drain()).toEqual([]);
+  });
+
+  it('M-3: Given dispose, Then a WorldState hooked to the journal no longer feeds it (onMined is unhooked)', () => {
+    const { j } = journal();
+    const ws = new WorldState({ orbitSeconds: () => 0, wallMs: () => 0, onMined: (e: MinedEntry) => j.noteMined(e) });
+    ws.recordMined('gx-test:f0:a1', 'ice', 10, 'local');
+    expect(j.drain()).toHaveLength(1);
+    j.dispose();
+    ws.recordMined('gx-test:f0:a1', 'ice', 10, 'local');
+    j.noteMined(mined());
     expect(j.drain()).toEqual([]);
   });
 });
@@ -323,67 +337,46 @@ describe('noteThrust balances the books', () => {
     expect(out.reduce((s, e) => s + (e.payload as { kg: number }).kg, 0)).toBeLessThan(1e-9);
     expectValid(out);
   });
+
+  it('M-2: Given the tank rose more than the named actions explain, Then no thrust is logged and the gain is counted on unexplainedGainKg', () => {
+    const { j } = journal();
+    expect(j.unexplainedGainKg).toBe(0);
+    j.noteThrust(5_000, 5_100, 0); // +100 kg from nowhere
+    j.noteThrust(5_000, 4_000, 1_025); // named took 1 025, the tank fell only 1 000: +25
+    expect(j.drain().some((e) => e.source === 'thrust')).toBe(false);
+    expect(j.unexplainedGainKg).toBeCloseTo(125, 9);
+  });
+
+  it('M-2: Given float dust below zero (1e-10 kg), Then it is not counted as an unexplained gain worth reporting', () => {
+    const { j } = journal();
+    j.noteThrust(5_000, 4_000.000_000_000_1, 1_000);
+    expect(j.unexplainedGainKg).toBeLessThan(1e-9);
+  });
 });
 
 // --- compaction -----------------------------------------------------------------
 
-interface Sums {
-  propellantKg: number;
-  cargoKg: Record<Resource, number>;
-  minedKg: Record<Resource, number>;
-  emergency: { cannibalize: number; cannibalizeCargo: number; beacon: number };
-}
-
-function zero(): Record<Resource, number> {
-  return { ice: 0, metal: 0, silicate: 0, rare: 0 };
-}
-
 /**
- * What a log adds up to. A checkpoint counts as its sums. Propellant is every
- * kg that left the tank: named (ok) propellant actions plus unannounced thrust.
- * Cargo is what mines put in the hold, per resource.
+ * I-2 / R8: the oracle is `replay` itself. A compacted log must recompute the
+ * same ship as the full one (tank, loss, hold, depletion, emergency counts).
  */
-function sums(entries: readonly ActionEntry[]): Sums {
-  const s: Sums = { propellantKg: 0, cargoKg: zero(), minedKg: zero(), emergency: { cannibalize: 0, cannibalizeCargo: 0, beacon: 0 } };
-  for (const e of entries) {
-    switch (e.source) {
-      case 'propellant':
-        if (e.payload.ok) s.propellantKg += e.payload.kg;
-        break;
-      case 'thrust':
-        s.propellantKg += e.payload.kg;
-        break;
-      case 'cargo':
-        if (e.payload.action.kind === 'mine') s.cargoKg[e.payload.action.resource] += e.payload.result.kgIn;
-        break;
-      case 'mined':
-        s.minedKg[e.payload.resource] += e.payload.kg;
-        break;
-      case 'emergency':
-        if (e.payload.kind === 'cannibalize') s.emergency.cannibalize++;
-        else if (e.payload.kind === 'cannibalize-cargo') s.emergency.cannibalizeCargo++;
-        else s.emergency.beacon++;
-        break;
-      case 'checkpoint':
-        s.propellantKg += e.payload.propellantKg;
-        for (const r of RESOURCES) {
-          s.cargoKg[r] += e.payload.cargoKg[r];
-          s.minedKg[r] += e.payload.minedKg[r];
-        }
-        s.emergency.cannibalize += e.payload.emergency.cannibalize;
-        s.emergency.cannibalizeCargo += e.payload.emergency.cannibalizeCargo;
-        s.emergency.beacon += e.payload.emergency.beacon;
-        break;
-    }
-  }
-  return s;
-}
+const START: ReplayState = {
+  tank: { massKg: 1e9, capacityLossFrac: 0 },
+  cargo: { ice: 0, metal: 0, silicate: 0, rare: 0 },
+  depletion: {},
+  emergency: { cannibalize: 0, cannibalizeCargo: 0, beacon: 0 },
+};
 
-function expectSameSums(a: Sums, b: Sums): void {
-  expect(Math.abs(a.propellantKg - b.propellantKg)).toBeLessThan(1e-6);
-  for (const r of RESOURCES) {
-    expect(Math.abs(a.cargoKg[r] - b.cargoKg[r])).toBeLessThan(1e-6);
-    expect(Math.abs(a.minedKg[r] - b.minedKg[r])).toBeLessThan(1e-6);
+function expectSameReplay(compacted: readonly ActionEntry[], full: readonly ActionEntry[]): void {
+  const a = replay(START, compacted);
+  const b = replay(START, full);
+  expect(Math.abs(a.tank.massKg - b.tank.massKg)).toBeLessThan(1e-6);
+  expect(Math.abs(a.tank.capacityLossFrac - b.tank.capacityLossFrac)).toBeLessThan(1e-9);
+  for (const r of RESOURCES) expect(Math.abs(a.cargo[r] - b.cargo[r])).toBeLessThan(1e-6);
+  const ids = new Set([...Object.keys(a.depletion), ...Object.keys(b.depletion)]);
+  expect(ids.size).toBeGreaterThan(0);
+  for (const id of ids) {
+    for (const r of RESOURCES) expect(Math.abs((a.depletion[id]?.[r] ?? 0) - (b.depletion[id]?.[r] ?? 0))).toBeLessThan(1e-6);
   }
   expect(a.emergency).toEqual(b.emergency);
 }
@@ -433,7 +426,7 @@ describe('compaction (MAX_ACTIONS)', () => {
     // Rebuild the uncompacted history independently and compare its sums.
     const plain = journal();
     play(plain.j, 5_001);
-    expectSameSums(sums(out), sums(plain.j.drain()));
+    expectSameReplay(out, plain.j.drain());
   });
 
   it('Given a compacted log, Then the checkpoint names the last seq it absorbed, and every later entry keeps its own, higher seq', () => {
@@ -471,7 +464,7 @@ describe('compaction (MAX_ACTIONS)', () => {
     expect(out.filter((e) => e.source === 'checkpoint')).toHaveLength(1);
     const plain = journal();
     play(plain.j, 5_038);
-    expectSameSums(sums(out), sums(plain.j.drain()));
+    expectSameReplay(out, plain.j.drain());
     expectValid(out);
   });
 });
