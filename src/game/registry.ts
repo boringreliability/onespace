@@ -51,7 +51,7 @@ import { Audio } from '@/audio/Audio';
 import { Photo } from '@/game/Photo';
 import { DevOverlay } from '@/ui/DevOverlay';
 import { Title } from '@/ui/Title';
-import { companionShip, parseRoute } from '@/core/Route';
+import { bootPlan, companionShip, parseRoute, type BootPlan, type Route } from '@/core/Route';
 // -- v3 T4: dust, drive field, audio feed, formation, SEE IN FLIGHT -----------
 import { Dust } from '@/render/Dust';
 import { FlightSense } from '@/game/FlightSense';
@@ -71,7 +71,10 @@ import { ActionJournal } from '@/save/actionJournal';
 import { idbStore } from '@/save/idbStore';
 import { memoryStore } from '@/save/memoryStore';
 import { wal } from '@/save/wal';
-import { acquireWriterLock } from '@/save/writerLock';
+import { acquireWriterLock, type WriterLock } from '@/save/writerLock';
+import { applySave } from '@/save/capture';
+import { loadForBoot, openingLog, prepareNewGame, universeOptionsFor, type BootLoad } from '@/save/bootLoad';
+import type { SaveStore } from '@/save/store';
 import type { GameEvents } from '@/core/EventBus';
 // -----------------------------------------------------------------------------
 import { Warp, registerWarpShots } from '@/ship/Warp';
@@ -289,19 +292,59 @@ class ReviewGuard implements GameModule {
   }
 }
 
-export async function registerModules(engine: Engine, progress: ProgressFn): Promise<void> {
+/** [v4-save] Task 6: what the boot found, decided before any module exists. */
+export interface BootState {
+  readonly route: Route;
+  readonly plan: BootPlan;
+  readonly load: BootLoad;
+  readonly store: SaveStore;
+  readonly lock: WriterLock;
+  /** NEW GAME over a save: the new game's first save goes above this revision. */
+  readonly afterRevision: number;
+}
+
+/**
+ * [v4-save] Task 6: load the latest save before the world is built — IndexedDB
+ * and the WAL, newest valid, WAL entries merged (bootLoad). `?new=1` over a
+ * save writes the old game back (merged) and starts above it: nothing is
+ * destroyed before the new game's first save. Only the writer tab writes.
+ */
+export async function loadBoot(search: string): Promise<BootState> {
+  const route = parseRoute(search);
+  const store = typeof indexedDB === 'undefined' ? memoryStore() : idbStore();
+  const lock = await acquireWriterLock();
+  const load = await loadForBoot(store, wal);
+  const plan = bootPlan(route, load.save !== null);
+  let afterRevision = 0;
+  if (plan.start === 'new' && load.save) {
+    afterRevision = lock.writer
+      ? (await prepareNewGame(store, wal, load)).afterRevision
+      : load.save.revision + 1;
+  }
+  return { route, plan, load, store, lock, afterRevision };
+}
+
+export async function registerModules(engine: Engine, progress: ProgressFn, boot: BootState): Promise<void> {
   progress(0.03, 'opening the log');
   // First, ahead of Universe. `Universe.init()` calls `enterSystem`, which
   // emits `system:entered` — so a log registered after it would miss the
   // opening system every single session, silently, forever. The log depends on
   // nothing but the bus, so putting it first costs nothing and closes the seam.
   const shipLog = new ShipLog();
+  // [v4-save] The save owns the log from here: no more writes to the legacy
+  // key (it stays as a backup), and the log starts as the boot decided — the
+  // save's, the legacy one imported once, or empty for NEW GAME over a save.
+  shipLog.setSink(() => undefined);
+  const continued = boot.plan.start === 'continue' ? boot.load.save : null;
+  shipLog.importState(openingLog(boot.load, boot.plan.start));
   await engine.add(shipLog);
 
   progress(0.05, 'seeding universe');
   // `?seed=` picks the universe (whitelisted hex, core/Route.ts).
-  const route = parseRoute(window.location.search);
-  const universe = new Universe(route.universeSeed !== undefined ? { seed: route.universeSeed } : {});
+  // [v4-save] A save boots straight into its own universe and place, so the
+  // start system never flashes past.
+  const route = boot.route;
+  const universe = new Universe(universeOptionsFor(route, continued));
   await engine.add(universe);
 
   progress(0.35, 'mapping the sky');
@@ -430,15 +473,40 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   // [v4-save] After Emergency and Mining: one writing tab (navigator.locks),
   // IndexedDB (memory where it is missing), the WAL on localStorage.
   progress(0.87, 'opening the logbook vault');
-  const lock = await acquireWriterLock();
   saveGame = new SaveGame({
     world: { universe, worldState, shipLog, emergency, journal, cruise, input: engine.input },
-    store: typeof indexedDB === 'undefined' ? memoryStore() : idbStore(),
+    store: boot.store,
     wal,
-    lock,
+    lock: boot.lock,
     page: { document, window },
   });
   await engine.add(saveGame);
+  // The same world, for applySave: what the save holds goes back into these.
+  const saveWorld = { universe, worldState, shipLog, emergency, journal, cruise, input: engine.input };
+  // [v4-save] Task 6: put the save back and continue it — before flight starts,
+  // so revisions go on and nothing the boot queued saves the opening world.
+  const notices: string[] = boot.load.notice ? [boot.load.notice] : [];
+  let hasSave = false;
+  if (continued && !universe.restoreFailed && applySave(saveWorld, continued)) {
+    saveGame.continueFrom(continued);
+    hasSave = true;
+  } else if (continued) {
+    // The saved place cannot be found: a new start, above the kept old game.
+    notices.push('SAVED SYSTEM NOT FOUND — NEW START');
+    shipLog.importState(openingLog(boot.load, 'new'));
+    const after = boot.lock.writer
+      ? (await prepareNewGame(boot.store, wal, boot.load)).afterRevision
+      : continued.revision + 1;
+    saveGame.startNew(after);
+  } else {
+    saveGame.startNew(boot.afterRevision);
+  }
+  // CONTINUE from the title: drop whatever the title time queued. Only while
+  // nothing has been saved since the boot (a Yard visit may have saved already,
+  // and its drained actions must not be dropped).
+  const continueGame = (): void => {
+    if (hasSave && continued && saveGame?.revision === continued.revision) saveGame.continueFrom(continued);
+  };
   await engine.add(new Hints({ universe, pause, recovery, warp, emergency, mining }));
   // --- end track D -------------------------------------------------------------
 
@@ -505,7 +573,7 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   // writers: its lateUpdate overrides the flight rig (see game/Photo.ts).
   await engine.add(new Photo(engine, postfx));
   await engine.add(new DevOverlay(engine, parseRoute(window.location.search).dev === true));
-  await engine.add(new Title(universe.seed));
+  await engine.add(new Title({ universeSeed: universe.seed, hasSave, onContinue: continueGame }));
 
   registerShot({
     name: 'game-opening',
@@ -534,5 +602,6 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   // ---------------------------------------------------------------------------
 
   bus.emit('log', { text: 'ALL SYSTEMS NOMINAL', tone: 'good' });
+  for (const text of notices) bus.emit('log', { text, tone: 'warn' });
   progress(1, 'systems nominal');
 }

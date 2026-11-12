@@ -68,6 +68,8 @@ export interface Route {
   readonly staleGeneration?: boolean;
   readonly shot?: string;
   readonly dev?: boolean;
+  /** [v4-save] `?new=1`: start a new game even when a save exists. */
+  readonly newGame?: true;
   /** Human-readable notes about dropped fields, for the log. */
   readonly warnings: readonly string[];
 }
@@ -128,7 +130,30 @@ export function parseRoute(search: string): Route {
   if (shot !== null && SHOT.test(shot)) out.shot = shot;
 
   if (q.has('dev')) out.dev = true;
+
+  // [v4-save] Whitelisted like the rest: exactly `1`, nothing else.
+  const fresh = q.get('new');
+  if (fresh !== null) {
+    if (fresh === '1') out.newGame = true;
+    else warnings.push(`unknown new "${fresh.slice(0, 24)}" ignored`);
+  }
   return out;
+}
+
+/** [v4-save] Task 6: what a boot starts. */
+export interface BootPlan {
+  readonly mode: 'title' | 'flight' | 'yard';
+  readonly start: 'continue' | 'new';
+}
+
+/**
+ * Boot into the title unless a link names flight or the Yard (`map` and
+ * `review` are entered from flight, not booted into). A save is continued
+ * unless `?new=1` asks for a new game.
+ */
+export function bootPlan(route: Route, hasSave: boolean): BootPlan {
+  const mode = route.mode === 'flight' || route.mode === 'yard' ? route.mode : 'title';
+  return { mode, start: hasSave && route.newGame !== true ? 'continue' : 'new' };
 }
 
 /** Inverse of parseRoute for the fields a link carries. Pins the generation. */
@@ -184,3 +209,17 @@ export function seeInFlightSearch(search: string, ship: RouteShip): string {
   return out ? `?${out}` : '';
 }
 // --- end v3 T4 ---------------------------------------------------------------
+
+/** [v4-save] Where a confirmed NEW GAME goes: a new game in flight, keeping only the developer overrides. */
+export function newGameSearch(search: string): string {
+  const from = new URLSearchParams(search);
+  const q = new URLSearchParams();
+  for (const k of CARRIED_KEYS) {
+    const v = from.get(k);
+    if (v !== null) q.set(k, v);
+  }
+  q.set('new', '1');
+  q.set('mode', 'flight');
+  const out = q.toString().replace(/(^|&)dev=(?=&|$)/, '$1dev');
+  return `?${out}`;
+}

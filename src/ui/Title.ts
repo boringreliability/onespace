@@ -12,18 +12,22 @@ import type { EngineContext, GameModule } from '@/core/Engine';
 import { modes } from '@/core/Modes';
 import { config } from '@/core/Config';
 import { activeShotName } from '@/game/Shots';
-import { TITLE_ITEMS, initialTitle, titleKey, titleStep, type TitleEffect, type TitleEvent, type TitleState } from './titleMenu';
+import { newGameSearch } from '@/core/Route';
+import { initialTitle, titleKey, titleLabel, titleStep, type TitleEffect, type TitleEvent, type TitleState } from './titleMenu';
 
-const LABELS: Record<(typeof TITLE_ITEMS)[number], string> = {
-  undock: 'UNDOCK',
-  yard: 'THE YARD',
-  settings: 'SETTINGS',
-};
+/** [v4-save] Task 6: what the title knows of the save, and what CONTINUE does. */
+export interface TitleOptions {
+  readonly universeSeed: number;
+  /** A save is loaded behind the title: CONTINUE / NEW GAME instead of UNDOCK. */
+  readonly hasSave?: boolean;
+  /** Called on CONTINUE before flight starts (SaveGame.continueFrom). */
+  readonly onContinue?: () => void;
+}
 
 export class Title implements GameModule {
   readonly name = 'title';
 
-  private state: TitleState = initialTitle();
+  private state: TitleState;
   private root: HTMLDivElement | null = null;
   private items: HTMLButtonElement[] = [];
   private settings: HTMLDivElement | null = null;
@@ -32,7 +36,12 @@ export class Title implements GameModule {
   private canvas: HTMLCanvasElement | null = null;
   private shown = false;
 
-  constructor(private readonly universeSeed: number) {}
+  private readonly universeSeed: number;
+
+  constructor(private readonly opts: TitleOptions) {
+    this.universeSeed = opts.universeSeed;
+    this.state = initialTitle({ hasSave: opts.hasSave === true });
+  }
 
   init(ctx: EngineContext): void {
     this.canvas = ctx.renderer.domElement;
@@ -56,12 +65,13 @@ export class Title implements GameModule {
     root.appendChild(style);
 
     const menu = root.querySelector('.os-title-menu') as HTMLDivElement;
-    TITLE_ITEMS.forEach((item, i) => {
+    this.state.items.forEach((item, i) => {
       const b = document.createElement('button');
-      b.textContent = LABELS[item];
+      b.textContent = titleLabel(this.state, item);
       b.addEventListener('click', () => this.dispatch({ kind: 'click', index: i }));
       b.addEventListener('mouseenter', () => {
-        this.state = { ...this.state, index: i };
+        // Moving to another item disarms NEW GAME, as the keys do.
+        if (this.state.index !== i) this.state = { ...this.state, index: i, armed: false };
         this.render();
       });
       menu.appendChild(b);
@@ -117,20 +127,18 @@ export class Title implements GameModule {
   private apply(effect: TitleEffect): void {
     switch (effect.kind) {
       case 'go':
-        if (!modes.can(effect.mode)) return;
-        modes.go(effect.mode);
-        // A click is a user gesture, so pointer lock may be taken here — the
-        // player lands in flight already holding the controls.
-        if (effect.mode === 'flight') {
-          try {
-            // Chrome returns a promise; a refusal (no gesture, headless) is
-            // harmless — the hint line asks for a click instead.
-            const p = this.canvas?.requestPointerLock?.() as unknown as Promise<void> | undefined;
-            p?.catch?.(() => undefined);
-          } catch {
-            /* older browsers throw synchronously */
-          }
-        }
+        this.go(effect.mode);
+        return;
+      case 'continue':
+        if (!modes.can('flight')) return;
+        // Before flight starts: the next save continues the loaded one.
+        this.opts.onContinue?.();
+        this.go('flight');
+        return;
+      case 'newgame':
+        // The first press only arms (render shows the confirmation label).
+        // Confirmed: reload into a new game; the old save is kept (bootLoad.prepareNewGame).
+        if (effect.confirmed) window.location.search = newGameSearch(window.location.search);
         return;
       case 'settings':
         if (this.settings) this.settings.hidden = !this.settings.hidden;
@@ -146,8 +154,28 @@ export class Title implements GameModule {
     }
   }
 
+  private go(mode: 'flight' | 'yard'): void {
+    if (!modes.can(mode)) return;
+    modes.go(mode);
+    // A click is a user gesture, so pointer lock may be taken here — the
+    // player lands in flight already holding the controls.
+    if (mode === 'flight') {
+      try {
+        // Chrome returns a promise; a refusal (no gesture, headless) is
+        // harmless — the hint line asks for a click instead.
+        const p = this.canvas?.requestPointerLock?.() as unknown as Promise<void> | undefined;
+        p?.catch?.(() => undefined);
+      } catch {
+        /* older browsers throw synchronously */
+      }
+    }
+  }
+
   private render(): void {
-    this.items.forEach((b, i) => b.classList.toggle('on', i === this.state.index));
+    this.items.forEach((b, i) => {
+      b.classList.toggle('on', i === this.state.index);
+      b.textContent = titleLabel(this.state, this.state.items[i]!);
+    });
     if (this.seedError) this.seedError.textContent = this.state.seedError ?? '';
   }
 

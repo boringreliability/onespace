@@ -49,7 +49,7 @@ import type { SaveV1 } from '@/save/schema';
 import type { SaveStore } from '@/save/store';
 import type { Wal } from '@/save/wal';
 import type { WriterLock } from '@/save/writerLock';
-import type { Propellant } from '@/ship/propellant';
+import { START_FILL, type Propellant } from '@/ship/propellant';
 import { AUTOSAVE_INTERVAL_S, shouldAutosave, type SaveReason } from './saveTriggers';
 
 export const SAVED_TEXT = 'SAVED';
@@ -88,6 +88,10 @@ export class SaveGame implements GameModule {
 
   /** The last save built — durable or not; the next one continues it. */
   private prev: SaveV1 | null = null;
+  /** NEW GAME (Task 6): a first save goes above this revision, so it outranks the old game. */
+  private revisionFloor = 0;
+  /** R16: the highest seq already copied to the WAL by `critical`. */
+  private walSeq = 0;
   /** Seconds since the last save (the gap); +Infinity before the first. */
   private sinceSaveS = Number.POSITIVE_INFINITY;
   /** Seconds since init or the last save (the interval). */
@@ -120,14 +124,25 @@ export class SaveGame implements GameModule {
    */
   continueFrom(save: SaveV1 | null): void {
     this.prev = save;
+    this.revisionFloor = 0;
     this.sinceSaveS = save ? 0 : Number.POSITIVE_INFINITY;
     this.sinceIntervalS = 0;
     this.wanted.clear();
   }
 
-  /** The revision of the last save built (0 before any). */
+  /**
+   * Task 6: NEW GAME over a save. The next save starts a new game — a fresh
+   * saveId, no log from before — at revision `afterRevision + 1`, so it
+   * outranks the old game (kept as `previous` by the store).
+   */
+  startNew(afterRevision: number): void {
+    this.continueFrom(null);
+    this.revisionFloor = Number.isInteger(afterRevision) && afterRevision > 0 ? afterRevision : 0;
+  }
+
+  /** The revision of the last save built (the floor before any). */
   get revision(): number {
-    return this.prev?.revision ?? 0;
+    return this.prev?.revision ?? this.revisionFloor;
   }
 
   init(): void {
@@ -184,9 +199,25 @@ export class SaveGame implements GameModule {
    */
   critical(used: GameEvents['emergency:used']): void {
     if (!this.lock.writer || this.disposed) return;
-    const entry = this.world.journal.noteEmergency(used);
+    const journal = this.world.journal;
+    // R16: the whole payment goes to the WAL — the burn to here booked as
+    // thrust first, then what the payment announced (propellant / cargo) and
+    // the exit itself — under the seqs the next save will carry. A reload
+    // applies them over the last durable save (bootLoad, dedup by seq).
+    const tank = this.world.universe.flight.propellant;
+    if (tank) {
+      this.syncBaseline(false);
+      journal.settleThrust(tank.massKg, tank.baseCapacityKg * START_FILL);
+    }
+    const entry = journal.noteEmergency(used);
+    let ok = entry !== null;
+    for (const e of journal.peek()) {
+      if (e.seq <= this.walSeq) continue;
+      if (!this.wal.appendCritical(e)) ok = false;
+      this.walSeq = Math.max(this.walSeq, e.seq);
+    }
     // R14 M4: not on disk is not silent (the autosave on the next tick still tries).
-    if (entry && !this.wal.appendCritical(entry)) bus.emit('log', { text: SAVE_FAILED_TEXT, tone: 'warn' });
+    if (entry && !ok) bus.emit('log', { text: SAVE_FAILED_TEXT, tone: 'warn' });
     this.wanted.add('emergency');
   }
 
@@ -260,8 +291,10 @@ export class SaveGame implements GameModule {
     if (!this.mayWrite(leaving)) return null;
     // R14 M2: a tank swapped since the last tick starts the books now, not as thrust.
     this.syncBaseline(false);
-    const save = buildSave(this.world, this.prev);
+    let save = buildSave(this.world, this.prev);
+    if (!this.prev && this.revisionFloor > 0) save = { ...save, revision: this.revisionFloor + 1 };
     this.prev = save;
+    this.revisionFloor = 0;
     this.tank = this.world.universe.flight.propellant;
     this.sinceSaveS = 0;
     this.sinceIntervalS = 0;

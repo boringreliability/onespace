@@ -147,6 +147,14 @@ export class ActionJournal {
     this.setBaseline(tankKg);
   }
 
+  /**
+   * [v4-save] R16: what is noted and not yet drained, oldest first, without
+   * draining it — the critical hook copies the paid entries to the WAL.
+   */
+  peek(): readonly ActionEntry[] {
+    return this.pending.slice();
+  }
+
   /** Everything noted since the last drain, oldest first. */
   drain(): ActionEntry[] {
     const out = this.pending;
