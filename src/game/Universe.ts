@@ -857,11 +857,6 @@ export class Universe implements GameModule {
     });
   }
 
-  /**
-   * Decide which bodies get renderers. Sorted by distance, the closest few get
-   * full geometry; the rest are released. This is what keeps a system with
-   * eleven planets and twenty moons inside the draw-call budget.
-   */
   /** Each body's squared distance from the camera (the ship's eye), km². */
   private measureBodies(): void {
     for (const b of this.bodies) {
@@ -869,8 +864,12 @@ export class Universe implements GameModule {
     }
   }
 
+  /**
+   * Decide which bodies get renderers. Sorted by distance, the closest few get
+   * full geometry; the rest are released. This is what keeps a system with
+   * eleven planets and twenty moons inside the draw-call budget.
+   */
   private streamRenderers(ctx: EngineContext): void {
-
     // Acquire at 60 radii, release at 75 — see game/streaming.ts for why the
     // two thresholds differ. The candidate array is reused across frames.
     const cands = this.streamCandidates;

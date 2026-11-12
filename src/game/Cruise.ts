@@ -749,7 +749,6 @@ export class Cruise implements GameModule {
     return lineBlockedBy(this.universe.flight.worldPosition, target.world, b.world, safe) ? b : null;
   }
 
-  /** Stop wanting it, and let go this frame rather than easing out. */
   /**
    * [v4-save] R9: a save was loaded — drop everything, silently. The pending
    * leg and a paid spool belong to the timeline that was replaced: neither is
@@ -764,6 +763,7 @@ export class Cruise implements GameModule {
     this.cancel();
   }
 
+  /** Stop wanting it, and let go this frame rather than easing out. */
   private cancel(): void {
     this.wanted = false;
     this.heldLever = null;
