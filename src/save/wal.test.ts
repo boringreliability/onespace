@@ -402,3 +402,46 @@ describe('wal — a single bad entry (R10)', () => {
     expect(w.read().critical).toEqual([emergency(1), thrust(3)]);
   });
 });
+
+// =============================================================================
+// Task 6 fix round 1 (I1): each critical entry carries the saveId of the game
+// that wrote it; `readTagged()` shows `{ e, by, saveId }` so the loader can
+// keep one game's entries out of another. `read()` is unchanged.
+// =============================================================================
+
+const SAVE_A = '3f9c2b1e-7a4d-4e8b-9c61-2d5f0a8e7b14';
+
+describe('wal — entries know their game (Task 6 fix round 1, I1)', () => {
+  it('Given appends with a saveId, Then readTagged shows it, untagged (by null); read() still gives the bare entries', () => {
+    const w = createWal(new FakeStorage());
+    expect(w.appendCritical(emergency(13), SAVE_A)).toBe(true);
+    expect(w.readTagged().critical).toEqual([{ e: emergency(13), by: null, saveId: SAVE_A }]);
+    expect(w.read().critical).toEqual([emergency(13)]);
+  });
+
+  it('Given an append without a saveId, Then readTagged shows saveId null', () => {
+    const w = createWal(new FakeStorage());
+    w.appendCritical(thrust(2));
+    expect(w.readTagged().critical).toEqual([{ e: thrust(2), by: null, saveId: null }]);
+  });
+
+  it('Given a snapshot that covers the entry, Then readTagged shows by = its revision and keeps the saveId', () => {
+    const w = createWal(new FakeStorage());
+    w.appendCritical(emergency(12), SAVE_A);
+    w.writeSnapshot(saveAt(7));
+    expect(w.readTagged().critical).toEqual([{ e: emergency(12), by: 7, saveId: SAVE_A }]);
+  });
+
+  it('Given a saveId that is not a string, Then the append is refused (whitelist)', () => {
+    const w = createWal(new FakeStorage());
+    expect(w.appendCritical(emergency(1), 42 as unknown as string)).toBe(false);
+    expect(w.read().critical).toEqual([]);
+  });
+
+  it('Given the same snapshot in readTagged and read, Then both agree', () => {
+    const storage = new FakeStorage();
+    const w = createWal(storage);
+    w.writeSnapshot(saveAt(7));
+    expect(w.readTagged().snapshot).toEqual(w.read().snapshot);
+  });
+});

@@ -528,3 +528,134 @@ describe('universeOptionsFor — the Universe a boot builds', () => {
     expect(universeOptionsFor(parseRoute(''), s).restore?.flight.grounded).toBe(false);
   });
 });
+
+// =============================================================================
+// Fix round 1 (rulings R17/R18)
+//
+// I1: WAL critical entries carry the saveId of the game that wrote them
+// (`appendCritical(entry, saveId)`; `readTagged()` exposes `{ e, by, saveId }`).
+// `mergeCritical` applies an entry only when
+//   - its saveId is the chosen save's (an entry without a saveId: seq rule only),
+//   - it is not tagged as covered by a revision ≤ the chosen save's (`by`),
+//   - and its seq is above what the save covers.
+// So an old game's entries can never leak into a new game, even when IndexedDB
+// is unavailable and the WAL is all there is.
+//
+// Minors: keepCorrupt only in writer tabs (`loadForBoot(store, wal, { writer })`,
+// writer by default), and never twice for an identical raw.
+// I2: prepareNewGame keeps a copy of the replaced game on the kept shelf.
+// =============================================================================
+
+function appendAs(saveId: string, entries: readonly ActionEntry[]): void {
+  for (const e of entries) expect(wal.appendCritical(e, saveId)).toBe(true);
+}
+
+describe('fix round 1 — I1: an old game\'s WAL entries never reach a new game', () => {
+  it('Given IndexedDB unavailable, NEW GAME over save 7 with its beacon still in the WAL, and the new game\'s first save only in the WAL, When the game reloads, Then the new game comes back untouched', async () => {
+    const store = brokenStore();
+    walSnapshot(save(7));
+    appendAs(G.saveId, beaconAfterGolden());
+    const old = await loadForBoot(store, wal);
+    expect(beaconNotes(old.save!)).toHaveLength(1);
+    const { afterRevision } = await prepareNewGame(store, wal, old);
+    const fresh = save(afterRevision + 1, { saveId: OTHER_UUID, actions: [] });
+    expect(wal.writeSnapshot(fresh)).toBe(true);
+
+    const r = await loadForBoot(store, wal);
+    expect(r.save).toEqual(fresh);
+  });
+
+  it('Given entries WITHOUT a saveId tagged as covered by the old game (by 8), When the new game (revision 10, no actions) is loaded, Then they are not applied (the by rule)', async () => {
+    const store = brokenStore();
+    walSnapshot(save(7));
+    append(beaconAfterGolden());
+    const old = await loadForBoot(store, wal);
+    await prepareNewGame(store, wal, old);
+    const fresh = save(10, { saveId: OTHER_UUID, actions: [] });
+    wal.writeSnapshot(fresh);
+    expect((await loadForBoot(store, wal)).save).toEqual(fresh);
+  });
+
+  it('Given untagged entries written by the OLD game (saveId mismatch), When a different game is chosen, Then they are not applied (the saveId rule)', async () => {
+    walSnapshot(save(3, { saveId: OTHER_UUID, actions: [] }));
+    appendAs(G.saveId, beaconAfterGolden(1));
+    const r = await loadForBoot(brokenStore(), wal);
+    expect(r.save).toEqual(save(3, { saveId: OTHER_UUID, actions: [] }));
+  });
+
+  it("Given untagged entries written by THIS game (its saveId), Then they are applied (the reverse)", async () => {
+    appendAs(G.saveId, beaconAfterGolden());
+    const s = (await loadForBoot(await storeWith(save(7)), wal)).save!;
+    expect(s.actions.at(-1)!.seq).toBe(16);
+    expect(beaconNotes(s)).toHaveLength(1);
+  });
+
+  it("Given the new game's own entries in the WAL after its WAL snapshot, Then they are applied to it and the old game's are not", async () => {
+    const fresh = save(10, { saveId: OTHER_UUID, actions: [] });
+    walSnapshot(fresh);
+    appendAs(G.saveId, beaconAfterGolden());
+    appendAs(OTHER_UUID, [
+      { seq: 1, source: 'thrust', payload: { kg: 100 }, ...at },
+    ]);
+    const s = (await loadForBoot(brokenStore(), wal)).save!;
+    expect(s.actions.map((e) => e.seq)).toEqual([1]);
+    expect(s.ship.propellant.massKg).toBeCloseTo(fresh.ship.propellant.massKg - 100, 9);
+    expect(beaconNotes(s)).toHaveLength(0);
+  });
+
+  it('Given readTagged, Then each entry shows its saveId and whether a snapshot covers it (by)', () => {
+    appendAs(G.saveId, beaconAfterGolden());
+    expect(wal.readTagged().critical.map((c) => [c.e.seq, c.by, c.saveId])).toEqual([
+      [13, null, G.saveId],
+      [14, null, G.saveId],
+      [15, null, G.saveId],
+      [16, null, G.saveId],
+    ]);
+  });
+});
+
+describe('fix round 1 — keepCorrupt only by a writer, and once per identical raw', () => {
+  it('Given a reader tab (writer: false), Then an unreadable slot is reported but not copied', async () => {
+    const store = await storeWith(save(6), { format: 99 });
+    const r = await loadForBoot(store, wal, { writer: false });
+    expect(r.save?.revision).toBe(6);
+    expect(store.corrupt).toHaveLength(0);
+  });
+
+  it('Given the same unreadable current slot over two boots, Then it is kept once', async () => {
+    const store = await storeWith(save(6), { format: 99 });
+    await loadForBoot(store, wal);
+    await loadForBoot(store, wal);
+    expect(store.corrupt).toHaveLength(1);
+  });
+
+  it('Given two DIFFERENT unreadable saves, Then both are kept', async () => {
+    const store = await storeWith({ format: 98 }, { format: 99 });
+    await loadForBoot(store, wal);
+    expect(store.corrupt).toHaveLength(2);
+  });
+});
+
+describe('fix round 1 — I2: NEW GAME keeps a copy of the replaced game', () => {
+  it('Given a save (7) and its beacon in the WAL, When prepareNewGame runs, Then the merged old game is also on the kept shelf', async () => {
+    appendAs(G.saveId, beaconAfterGolden());
+    const store = await storeWith(save(7));
+    await prepareNewGame(store, wal, await loadForBoot(store, wal));
+    expect(store.corrupt).toHaveLength(1);
+    const copy = store.corrupt[0]!.raw as SaveV1;
+    expect(copy.saveId).toBe(G.saveId);
+    expect(copy.revision).toBe(8);
+    expect(beaconNotes(copy)).toHaveLength(1);
+    expect(store.corrupt[0]!.wallMs).toBe(WALL);
+  });
+
+  it("Given the new game then saves twice (the old game leaves `previous`), Then the copy is still there", async () => {
+    const store = await storeWith(save(7));
+    const { afterRevision } = await prepareNewGame(store, wal, await loadForBoot(store, wal));
+    await store.save(save(afterRevision + 1, { saveId: OTHER_UUID, actions: [] }));
+    await store.save(save(afterRevision + 2, { saveId: OTHER_UUID, actions: [] }));
+    const { current, previous } = await store.load();
+    expect([(current as SaveV1).saveId, (previous as SaveV1).saveId]).toEqual([OTHER_UUID, OTHER_UUID]);
+    expect(store.corrupt.map((c) => (c.raw as SaveV1).saveId)).toEqual([G.saveId]);
+  });
+});

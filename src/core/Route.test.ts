@@ -142,17 +142,50 @@ describe('bootPlan (v4 Task 6)', () => {
 });
 
 describe('newGameSearch (v4 Task 6)', () => {
-  it('Given a plain URL, Then a confirmed NEW GAME reloads into ?new=1&mode=flight', () => {
-    const r = parseRoute(newGameSearch(''));
+  // Fix round 1 (R17): the confirmed press carries its one-time nonce.
+  const NONCE = '0123456789abcdef0123456789abcdef';
+
+  it('Given a plain URL, Then a confirmed NEW GAME reloads into ?new=1&nonce=<it>&mode=flight', () => {
+    const r = parseRoute(newGameSearch('', NONCE));
     expect(r.newGame).toBe(true);
+    expect(r.newGameNonce).toBe(NONCE);
     expect(r.mode).toBe('flight');
   });
 
   it('Given developer overrides and a ship link, Then only tier, dpr, seed and dev are kept', () => {
     const out = new URLSearchParams(
-      newGameSearch('?tier=low&dpr=1&seed=1a2b&dev&mode=yard&ship=5a17&faction=kessler&foo=bar'),
+      newGameSearch('?tier=low&dpr=1&seed=1a2b&dev&mode=yard&ship=5a17&faction=kessler&foo=bar&nonce=x', NONCE),
     );
-    expect(Object.fromEntries(out)).toEqual({ tier: 'low', dpr: '1', seed: '1a2b', dev: '', new: '1', mode: 'flight' });
+    expect(Object.fromEntries(out)).toEqual({
+      tier: 'low',
+      dpr: '1',
+      seed: '1a2b',
+      dev: '',
+      new: '1',
+      nonce: NONCE,
+      mode: 'flight',
+    });
+  });
+});
+
+describe('parseRoute — ?nonce (fix round 1, R17)', () => {
+  it('Given a nonce of exactly 32 lowercase hex digits, Then it is taken', () => {
+    const n = 'a'.repeat(32);
+    const r = parseRoute(`?new=1&nonce=${n}`);
+    expect(r.newGameNonce).toBe(n);
+    expect(r.warnings).toEqual([]);
+  });
+
+  it('Given any other nonce, Then it is dropped with a warning', () => {
+    for (const bad of ['', 'a'.repeat(31), 'a'.repeat(33), 'A'.repeat(32), 'g'.repeat(32), '%3Cscript%3E']) {
+      const r = parseRoute(`?nonce=${bad}`);
+      expect(r.newGameNonce, bad).toBeUndefined();
+      expect(r.warnings.length, bad).toBe(1);
+    }
+  });
+
+  it('Given SEE IN FLIGHT from a URL with a nonce, Then the nonce is not carried', () => {
+    expect(new URLSearchParams(seeInFlightSearch(`?nonce=${'a'.repeat(32)}`, { seed: 1 })).has('nonce')).toBe(false);
   });
 });
 

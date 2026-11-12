@@ -3,9 +3,12 @@
  *
  * Real Universe (GPU steps stubbed, as SaveGame.test.ts), real ShipLog,
  * WorldState, Belt, Emergency, ActionJournal and SaveGame, a memory store and
- * a real WAL on an in-memory localStorage. A "boot" is what main.ts and the
- * registry will do: `loadForBoot` → `universeOptionsFor` → a new Universe →
- * `applySave` → `saveGame.continueFrom(save)` before flight.
+ * a real WAL on an in-memory localStorage. A "boot" here is the part of
+ * registry.ts (`loadBoot` → `registerModules`) a node test can run:
+ * `loadForBoot` → `universeOptionsFor` → a new Universe → `applySave` →
+ * `saveGame.continueFrom(save)` before flight. It skips the decisions
+ * (decideBoot, boot.test.ts) and the log imported before the world
+ * (`logBeforeWorld`, pinned below on its own).
  *
  * Promises (Task 6 brief + carried obligations):
  *  - a Universe built from a save enters the SAVED system on init: no
@@ -16,8 +19,9 @@
  *  - startNew(afterRevision) (NEW GAME) → the next save is afterRevision + 1
  *    under a fresh saveId, with none of the old game's actions;
  *  - a beacon paid after the last IndexedDB save survives a crash exactly
- *    once: tank at the beacon's fill, hold empty, one BEACON RECOVERY note,
- *    and the books still balance;
+ *    once: tank at the beacon's fill, hold empty, one BEACON RECOVERY note;
+ *    the books-balance test beside it is a guard (it also held before the
+ *    merge existed, since an unmerged save balances trivially);
  *  - depletion after Continue: a mined rock is still mined.
  */
 
@@ -175,7 +179,7 @@ function live(store: ReturnType<typeof memoryStore>, options: UniverseOptions = 
   };
 }
 
-/** A boot from storage, as main.ts will do it: load, build the Universe in the save, apply, continue. */
+/** A boot from storage, as registry.ts does it: load, build the Universe in the save, apply, continue. */
 async function boot(store: ReturnType<typeof memoryStore>): Promise<{ g: Live; save: SaveV1 }> {
   const load = await loadForBoot(store, wal);
   expect(load.save).not.toBeNull();

@@ -276,3 +276,24 @@ describe('idbStore — a failed write', () => {
     expect((previous as SaveV1).revision).toBe(7);
   });
 });
+
+// Task 6 fix round 1 (minor): the same unreadable save, found again on the
+// next boot, is not kept twice. A different one still is.
+describe('idbStore — keepCorrupt keeps an identical raw once (Task 6 fix round 1)', () => {
+  it('Given the same raw kept twice (two boots), Then the corrupt store holds it once', async () => {
+    const name = freshDbName();
+    const store = idbStore(name);
+    const raw = { format: 99, revision: 12, nested: { a: [1, 2] } };
+    await store.keepCorrupt(raw, 1762891300000);
+    await store.keepCorrupt(structuredClone(raw), 1762891400000);
+    expect(await rawGetAll(name, 'corrupt')).toEqual([{ wallMs: 1762891300000, raw }]);
+  });
+
+  it('Given two different raws, Then both are kept', async () => {
+    const name = freshDbName();
+    const store = idbStore(name);
+    await store.keepCorrupt({ format: 98 }, 1);
+    await store.keepCorrupt({ format: 99 }, 2);
+    expect(await rawGetAll(name, 'corrupt')).toHaveLength(2);
+  });
+});
