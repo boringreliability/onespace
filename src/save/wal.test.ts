@@ -607,3 +607,100 @@ describe('wal — Task 7: coverage by the highest seq (W7, W8)', () => {
     expect(w.readTagged().critical[0]!.by).toBe(3);
   });
 });
+
+// =============================================================================
+// Final review, ruling R25 I4a — a regular autosave tags coverage WITHOUT
+// writing the whole snapshot (1.4 MB at the cap). `markCovered(save)` follows
+// writeSnapshot's rules — an untagged entry is tagged by save.revision when
+// its seq ≤ the highest seq in save.actions (a checkpoint counting with its
+// upToSeq); a save strictly older than the stored snapshot tags nothing — and
+// never writes, rewrites or removes the snapshot. Entries stay until
+// clear(rev) after a durable IndexedDB save, so a crash in between loses
+// nothing (SaveGame.test.ts proves the round trip).
+// =============================================================================
+
+describe('R25 I4a — markCovered: coverage without the snapshot', () => {
+  type Marking = { markCovered(s: SaveV1): boolean };
+  const marking = (w: ReturnType<typeof createWal>): Marking => w as unknown as Marking;
+
+  it('Given e1, e2, e3 and a save holding seq 1–2, When markCovered, Then e1/e2 are tagged by its revision, e3 stays untagged, and it returns true', () => {
+    const w = createWal(new FakeStorage());
+    w.appendCritical(emergency(1));
+    w.appendCritical(thrust(2));
+    w.appendCritical(thrust(3));
+    expect(marking(w).markCovered(saveWith(8, [emergency(1), thrust(2)]))).toBe(true);
+    expect(w.readTagged().critical.map((c) => [c.e.seq, c.by])).toEqual([
+      [1, 8],
+      [2, 8],
+      [3, null],
+    ]);
+  });
+
+  it('Given a stored snapshot r5, When markCovered(r8), Then the snapshot bytes are untouched — not rewritten, not removed', () => {
+    const storage = new FakeStorage();
+    const w = createWal(storage);
+    w.writeSnapshot(saveWith(5, []));
+    const before = storage.getItem(SNAP_KEY);
+    w.appendCritical(emergency(1));
+    marking(w).markCovered(saveWith(8, [emergency(1)]));
+    expect(storage.getItem(SNAP_KEY)).toBe(before);
+  });
+
+  it('Given no snapshot, When markCovered, Then still no snapshot is written', () => {
+    const storage = new FakeStorage();
+    const w = createWal(storage);
+    w.appendCritical(emergency(1));
+    marking(w).markCovered(saveWith(8, [emergency(1)]));
+    expect(storage.getItem(SNAP_KEY)).toBeNull();
+  });
+
+  it('Given entries tagged by markCovered(r8), When clear(7), Then nothing goes; When clear(8), Then the tagged go and the untagged stay', () => {
+    const w = createWal(new FakeStorage());
+    w.appendCritical(emergency(1));
+    w.appendCritical(thrust(2));
+    marking(w).markCovered(saveWith(8, [emergency(1)]));
+    w.clear(7);
+    expect(w.read().critical).toEqual([emergency(1), thrust(2)]);
+    w.clear(8);
+    expect(w.read().critical).toEqual([thrust(2)]);
+  });
+
+  it('Given a save whose log starts with a checkpoint (seq 3, upToSeq 20), When markCovered, Then entries up to seq 20 are covered and 21 is not', () => {
+    const w = createWal(new FakeStorage());
+    w.appendCritical(emergency(20));
+    w.appendCritical(thrust(21));
+    marking(w).markCovered(saveWith(8, [checkpoint(3, 20)]));
+    expect(w.readTagged().critical.map((c) => c.by)).toEqual([8, null]);
+  });
+
+  it('Given an entry already tagged by r6, When markCovered(r8), Then it keeps by 6', () => {
+    const w = createWal(new FakeStorage());
+    w.appendCritical(emergency(1));
+    w.writeSnapshot(saveWith(6, [emergency(1)]));
+    marking(w).markCovered(saveWith(8, [emergency(1)]));
+    expect(w.readTagged().critical[0]!.by).toBe(6);
+  });
+
+  it('Given a stored snapshot r8, When an OLDER save r7 is marked, Then it returns false and tags nothing (as writeSnapshot, R11)', () => {
+    const w = createWal(new FakeStorage());
+    w.writeSnapshot(saveWith(8, []));
+    w.appendCritical(thrust(2));
+    expect(marking(w).markCovered(saveWith(7, [thrust(2)]))).toBe(false);
+    expect(w.readTagged().critical[0]!.by).toBeNull();
+  });
+
+  it('Given full storage, When markCovered must tag, Then it returns false, does not throw, and the entries stay untagged (kept, never lost)', () => {
+    const storage = new FakeStorage();
+    const w = createWal(storage);
+    w.appendCritical(emergency(1));
+    storage.full = true;
+    expect(() => marking(w).markCovered(saveWith(8, [emergency(1)]))).not.toThrow();
+    expect(marking(w).markCovered(saveWith(8, [emergency(1)]))).toBe(false);
+    expect(w.readTagged().critical.map((c) => c.by)).toEqual([null]);
+  });
+
+  it('Given no storage at all, When markCovered, Then false and no throw; the exported wal has it too', () => {
+    expect(marking(createWal(null)).markCovered(saveWith(8, []))).toBe(false);
+    expect(typeof (wal as unknown as Marking).markCovered).toBe('function');
+  });
+});

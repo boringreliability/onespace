@@ -450,3 +450,9 @@ describe('v4 save — export / import, sink and the legacy key', () => {
     expect(new ShipLog().legacyState()).toBeNull();
   });
 });
+
+describe('R25 M2 — dead code', () => {
+  it('Given ShipLog, Then legacyState is gone: the boot reads the legacy key itself (bootLoad readLegacyLog)', () => {
+    expect('legacyState' in ShipLog.prototype).toBe(false);
+  });
+});

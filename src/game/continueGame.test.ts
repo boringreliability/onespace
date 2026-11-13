@@ -231,6 +231,28 @@ describe('Universe from a save — the saved system, from the first frame', () =
     expect(u.system.id).toBe(n.id);
     expect(u.restoreFailed).toBe(false);
   });
+
+  it('R25 M1: Given the boot built the Universe in the save, When applySave runs with { universeRestored: true }, Then system:entered fired ONCE in the whole boot — and the ship is where the save has it, the rest put back', async () => {
+    const store = memoryStore();
+    const g0 = live(store);
+    mine(g0, ASTEROID(), 'ice', 700);
+    await g0.sg.saveNow('manual');
+    const load = await loadForBoot(store, wal);
+    const save = load.save!;
+
+    const entered: string[] = [];
+    offs.push(bus.on('system:entered', ({ system }) => entered.push(system.id)));
+    const g = live(store, universeOptionsFor(parseRoute(''), save));
+    const apply = applySave as (w: SaveWorld, s: SaveV1, o?: { universeRestored?: boolean }) => boolean;
+    expect(apply(g.w, save, { universeRestored: true })).toBe(true);
+
+    expect(entered).toEqual([save.player.system.id]);
+    const p = g.u.flight.position;
+    const [x, y, z] = save.player.flight.position;
+    expect(Math.hypot(p.x - x, p.y - y, p.z - z)).toBeLessThan(1e-6);
+    expect(g.u.cargo.snapshot()).toEqual(save.ship.cargo);
+    expect(g.worldState.entries()).toEqual(save.world.entries);
+  });
 });
 
 describe('continueFrom / startNew — revisions go on (carried obligation 4)', () => {

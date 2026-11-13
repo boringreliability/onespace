@@ -58,7 +58,9 @@ import { WorldState, type MinedEntry } from '@/game/worldState';
 import type { AsteroidSpec } from '@/gen/belt';
 import { applyCargoAction } from '@/ship/cargo';
 import { EXHAUST_VELOCITY_KMS, PROBE_TANK_CAPACITY_KG, Propellant } from '@/ship/propellant';
-import { ActionJournal } from '@/save/actionJournal';
+import { ActionJournal, MAX_ACTIONS } from '@/save/actionJournal';
+import { decideBoot } from '@/save/boot';
+import { loadForBoot } from '@/save/bootLoad';
 import type { SaveWorld } from '@/save/capture';
 import { memoryStore } from '@/save/memoryStore';
 import { SaveV1Schema, type ActionEntry, type SaveV1 } from '@/save/schema';
@@ -280,7 +282,12 @@ function recordingWal(events: string[], over: Partial<Wal> = {}): Wal {
       events.push(`clear:${n}`);
       base.clear(n);
     },
-  };
+    // R25 I4a: interface-forced passthrough (as readTagged in R19); records `cover:N`.
+    markCovered: (s: SaveV1) => {
+      events.push(`cover:${s.revision}`);
+      return (base as unknown as { markCovered(s: SaveV1): boolean }).markCovered(s);
+    },
+  } as Wal;
 }
 
 class FakeDocument extends EventTarget {
@@ -302,7 +309,9 @@ interface Rig {
   pagehide(): void;
 }
 
-function rig(o: { g?: Live; writer?: boolean; store?: SpyStore; wal?: Wal; init?: boolean } = {}): Rig {
+function rig(
+  o: { g?: Live; writer?: boolean; store?: SpyStore; wal?: Wal; init?: boolean; extra?: Record<string, unknown> } = {},
+): Rig {
   const g = o.g ?? live();
   const s = o.store ?? spyStore();
   const wal = o.wal ?? createWal(storage as unknown as Storage);
@@ -321,6 +330,7 @@ function rig(o: { g?: Live; writer?: boolean; store?: SpyStore; wal?: Wal; init?
     wal,
     lock,
     page: { document: doc, window: win },
+    ...o.extra,
   } as unknown as ConstructorParameters<typeof SaveGame>[0]);
   if (!o.g) g.hook.fn = (used) => sg.critical(used);
   const logs: LogLine[] = [];
@@ -1138,5 +1148,358 @@ describe('R14 M4 — a WAL append that fails is not silent', () => {
     r.g.press('emergency');
     r.g.press('emergencyBeacon');
     expect(r.logs.some((l) => l.text === 'SAVE FAILED')).toBe(false);
+  });
+});
+
+// =============================================================================
+// Final review, ruling R25
+//  I2 — a store that failed at boot is store-inert for the session: SaveGame
+//       ({ storeAvailable: false }) writes the WAL only — never store.save,
+//       never wal.clear — and keeps the notice.
+//  I3 — a store write gets 3 s: then SAVE FAILED (warn), the queue moves on,
+//       the WAL is not cleared.
+//  I4 — a regular autosave (interval, landing, mine, system) tags WAL coverage
+//       (wal.markCovered) instead of writing the whole snapshot; hidden,
+//       pagehide, emergency, leave — and the pilot's SAVE — still write it.
+//       world.entries are aggregated per (asteroid, resource). The
+//       synchronous part of an interval autosave at the cap stays small.
+//  M4 — a reader tab's journal does not grow without bound.
+// =============================================================================
+
+const UNAVAILABLE_TEXT = 'SAVE STORAGE UNAVAILABLE — RELOAD THE TAB';
+/** AUTOSAVE_INTERVAL_S and a little: one tick that crosses the interval. */
+const AUTOSAVE_INTERVAL = 121;
+
+/** A beacon on an empty tank, paid as the pilot pays it (keys 0 then 2). */
+function payBeacon(r: Rig): void {
+  const tank = r.g.u.flight.propellant!;
+  tank.consume(tank.massKg);
+  r.g.press('emergency');
+  r.g.press('emergencyBeacon');
+}
+
+describe('R25 I2 — a store unavailable at boot is never written this session', () => {
+  it('Given storeAvailable: false, When every kind of save happens (SAVE, landing, mine, interval, hidden, pagehide, emergency, leave), Then store.save is never called and the WAL is never cleared; the WAL snapshot holds the newest save', async () => {
+    const events: string[] = [];
+    const r = rig({ store: spyStore(events), wal: recordingWal(events), extra: { storeAvailable: false } });
+    await r.sg.saveNow('manual');
+    landed(r.g);
+    r.tick();
+    r.play(6);
+    mine(r.g, ASTEROID(), 'ice', 500);
+    r.tick();
+    r.play(121);
+    r.hide();
+    r.show();
+    r.pagehide();
+    r.play(6);
+    payBeacon(r);
+    r.tick();
+    enterYard(r);
+    await flush();
+    expect(r.s.attempts).toEqual([]);
+    expect(events.filter((e) => e.startsWith('clear:'))).toEqual([]);
+    expect(r.sg.revision).toBeGreaterThanOrEqual(6);
+    expect(walSnapshot()?.revision).toBe(r.sg.revision);
+    expect(emergencyEntries(walSnapshot()!.actions, 'beacon')).toHaveLength(1);
+  });
+
+  it('Given storeAvailable: false, When SAVE is asked for, Then it resolves false and the unavailable notice is logged again (warn) — never SAVED', async () => {
+    const r = rig({ extra: { storeAvailable: false } });
+    await expect(r.sg.saveNow('manual')).resolves.toBe(false);
+    expect(r.logs).toContainEqual({ text: UNAVAILABLE_TEXT, tone: 'warn' });
+    expect(r.logs.some((l) => l.text === 'SAVED')).toBe(false);
+  });
+
+  it('Given store.load rejected at boot (an old save 7 in it) and the store then recovers, When the new game saves in every way, Then no store.save happens this session — and the next boot still finds the old save, current in the store', async () => {
+    // The old game, as a store holds it.
+    const r0 = rig({ store: spyStore() });
+    await r0.sg.saveNow('manual');
+    const old: SaveV1 = { ...structuredClone(r0.s.saved[0]!), revision: 7 };
+    r0.sg.dispose();
+    storage.map.clear();
+
+    const s = spyStore();
+    await s.store.save(old);
+    const attemptsBefore = s.attempts.length;
+    const healthyLoad = s.store.load.bind(s.store);
+    let loads = 0;
+    s.store.load = () => (loads++ === 0 ? Promise.reject(new DOMException('blocked', 'VersionError')) : healthyLoad());
+
+    const wal = createWal(storage as unknown as Storage);
+    const d = await decideBoot({
+      search: '',
+      store: s.store,
+      wal,
+      lock: { writer: true, release: () => undefined },
+      session: null,
+      replaceSearch: () => undefined,
+    });
+    expect(d.load.save).toBeNull();
+    expect(d.notices).toContain(UNAVAILABLE_TEXT);
+
+    const r = rig({ store: s, wal, extra: { storeAvailable: (d as { storeAvailable?: unknown }).storeAvailable } });
+    r.sg.startNew(d.afterRevision);
+    await r.sg.saveNow('manual');
+    landed(r.g);
+    r.tick();
+    r.play(121);
+    r.hide();
+    await flush();
+    expect(s.attempts.length).toBe(attemptsBefore);
+
+    const next = await loadForBoot(s.store, wal);
+    expect(next.save?.saveId).toBe(old.saveId);
+    expect(next.save?.revision).toBe(7);
+    expect(((await s.store.load()).current as SaveV1).saveId).toBe(old.saveId);
+  });
+});
+
+describe('R25 I3 — a store write gets 3 s', () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    vi.setSystemTime(WALL);
+  });
+
+  it('Given store.save never settles, When SAVE and 3 s pass, Then it resolves false, SAVE FAILED is logged (warn), the status is idle and the WAL is not cleared — and not before 3 s', async () => {
+    const events: string[] = [];
+    const r = rig({ store: spyStore(events), wal: recordingWal(events) });
+    r.s.hold(); // never released: a hung IndexedDB transaction
+    let done: boolean | null = null;
+    void r.sg.saveNow('manual').then((x) => (done = x));
+    await vi.advanceTimersByTimeAsync(2_999);
+    expect(done).toBeNull();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(done).toBe(false);
+    expect(r.logs).toContainEqual({ text: 'SAVE FAILED', tone: 'warn' });
+    expect(r.sg.status).toBe('idle');
+    expect(events.filter((e) => e.startsWith('clear:'))).toEqual([]);
+    expect(walSnapshot()?.revision).toBe(1);
+  });
+
+  it('Given the first store write hung past 3 s, When the next save is asked for, Then it reaches the store (the queue moved on) and resolves true', async () => {
+    const r = rig();
+    const write = r.s.store.save.bind(r.s.store);
+    let n = 0;
+    r.s.store.save = (s) => (n++ === 0 ? new Promise<void>(() => undefined) : write(s));
+    void r.sg.saveNow('manual');
+    await vi.advanceTimersByTimeAsync(3_000);
+    let second: boolean | null = null;
+    void r.sg.saveNow('manual').then((x) => (second = x));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(second).toBe(true);
+    expect(r.s.saved.map((s) => s.revision)).toEqual([2]);
+  });
+});
+
+describe('R25 I4a — a regular autosave tags coverage; the whole snapshot only where it is needed', () => {
+  /** Rig, trigger, settle: the WAL/store events of that one save. */
+  async function eventsOf(trigger: (r: Rig) => void | Promise<unknown>): Promise<string[]> {
+    const events: string[] = [];
+    const r = rig({ store: spyStore(events), wal: recordingWal(events) });
+    await trigger(r);
+    await flush();
+    return events;
+  }
+
+  const REGULAR: Array<[string, (r: Rig) => void]> = [
+    ['landing', (r) => (landed(r.g), r.tick())],
+    ['mine', (r) => (mine(r.g, ASTEROID(), 'ice', 500), r.tick())],
+    ['system entry', (r) => (bus.emit('system:entered', { system: r.g.u.system }), r.tick())],
+    ['interval', (r) => r.play(120)],
+  ];
+
+  for (const [what, trigger] of REGULAR) {
+    it(`Given a ${what} autosave, Then no WAL snapshot is written for it: coverage is tagged (markCovered) before the store write, and the WAL cleared after`, async () => {
+      expect(await eventsOf(trigger)).toEqual(['cover:1', 'store:1', 'clear:1']);
+    });
+  }
+
+  const WHOLE: Array<[string, (r: Rig) => void | Promise<unknown>]> = [
+    ['hidden', (r) => r.hide()],
+    ['emergency', (r) => (payBeacon(r), r.tick())],
+    ['leave (the Yard)', (r) => enterYard(r)],
+    ['SAVE (manual)', (r) => r.sg.saveNow('manual')],
+  ];
+
+  for (const [what, trigger] of WHOLE) {
+    it(`Given a ${what} save, Then the whole snapshot goes to the WAL first, as before`, async () => {
+      const events = await eventsOf(trigger);
+      expect(events.filter((e) => !e.startsWith('append:'))).toEqual(['snapshot:1', 'store:1', 'clear:1']);
+    });
+  }
+
+  it('Given a running game, When pagehide fires, Then the whole snapshot is written (and nothing else)', async () => {
+    expect(await eventsOf((r) => r.pagehide())).toEqual(['snapshot:1']);
+  });
+
+  it('Given an interval autosave, When the store is asked to write it, Then the WAL holds NO snapshot and the paid entries are tagged by its revision', async () => {
+    const r = rig();
+    await r.sg.saveNow('manual'); // revision 1, durable: the WAL is empty again
+    payBeacon(r); // the paid entries go to the WAL (R2), untagged
+    let seen: { snapshot: string | null; by: Array<number | null> } | null = null;
+    const write = r.s.store.save.bind(r.s.store);
+    r.s.store.save = async (s) => {
+      seen ??= {
+        snapshot: storage.getItem(WAL_SNAPSHOT_KEY),
+        by: createWal(storage as unknown as Storage).readTagged().critical.map((c) => c.by),
+      };
+      return write(s);
+    };
+    await r.sg.saveNow('interval');
+    expect(seen).not.toBeNull();
+    expect(seen!.snapshot).toBeNull();
+    expect(seen!.by.length).toBeGreaterThan(0);
+    expect(new Set(seen!.by)).toEqual(new Set([2]));
+  });
+
+  it('Given a durable save, a beacon paid after it, and an interval autosave the tab dies under (IndexedDB never commits), When the game boots again, Then the beacon is there — once — and the tank is as paid (a paid action is never lost)', async () => {
+    const r = rig();
+    await r.sg.saveNow('manual'); // revision 1, durable
+    payBeacon(r);
+    const paidTankKg = r.g.u.flight.propellant!.massKg;
+    r.s.hold(); // never released: the tab dies before IndexedDB commits
+    void r.sg.saveNow('interval');
+    const boot = await loadForBoot(r.s.store, createWal(storage as unknown as Storage));
+    expect(boot.save).not.toBeNull();
+    expect(emergencyEntries(boot.save!.actions, 'beacon')).toHaveLength(1);
+    expect(boot.save!.ship.propellant.massKg).toBeCloseTo(paidTankKg, 6);
+  });
+
+  it('Choice: Given a regular autosave the store refuses, Then its whole snapshot goes to the WAL after all (the fallback), so the next boot continues it', async () => {
+    const r = rig();
+    mine(r.g, ASTEROID(), 'ice', 500);
+    r.s.failOnce();
+    r.tick();
+    await flush();
+    expect(r.s.saved).toHaveLength(0);
+    expect(walSnapshot()?.revision).toBe(1);
+    expect(walSnapshot()!.actions.some(isMined)).toBe(true);
+    const boot = await loadForBoot(r.s.store, createWal(storage as unknown as Storage));
+    expect(boot.save?.revision).toBe(1);
+  });
+});
+
+describe('R25 I4b — world entries are aggregated per (asteroid, resource) in a save', () => {
+  it('Given three ice mines and one metal mine on one rock and one ice mine on another, When saved, Then world.entries holds three — kg summed, the newest clocks, first-seen order — the action log keeps every mine, and a load gives the same depletion', async () => {
+    const r = rig();
+    const [a, b] = [fyssField(0).asteroids[0]!.id, fyssField(0).asteroids[1]!.id];
+    const steps: Array<[string, 'ice' | 'metal', number]> = [
+      [a, 'ice', 300],
+      [a, 'metal', 200],
+      [a, 'ice', 300],
+      [b, 'ice', 100],
+      [a, 'ice', 300],
+    ];
+    steps.forEach(([id, res, kg], i) => {
+      vi.setSystemTime(WALL + (i + 1) * 1_000);
+      mine(r.g, id, res, kg);
+    });
+    await r.sg.saveNow('manual');
+    const s = r.s.saved[0]!;
+    expect(s.world.entries.map((e) => [e.id, e.resource, e.kg, e.wallMs])).toEqual([
+      [a, 'ice', 900, WALL + 5_000],
+      [a, 'metal', 200, WALL + 2_000],
+      [b, 'ice', 100, WALL + 4_000],
+    ]);
+    expect(s.actions.filter(isMined)).toHaveLength(5);
+    expect(SaveV1Schema.safeParse(s).success).toBe(true);
+    const loaded = new WorldState({ orbitSeconds: () => 0, wallMs: () => 0 });
+    loaded.restore(s.world.entries);
+    expect(loaded.depleted(a)).toEqual(r.g.worldState.depleted(a));
+    expect(loaded.depleted(b)).toEqual(r.g.worldState.depleted(b));
+  });
+});
+
+describe('R25 I4c — the synchronous part of an interval autosave at the cap', () => {
+  /**
+   * The bound: 2 ms (the fastest of 5 interval autosaves). Measured on the
+   * owner's machine (node, vitest) before the fix: 3.1–3.8 ms with no WAL
+   * snapshot stored, 7–8 ms with one (writeSnapshot parses the stored 1.4 MB
+   * snapshot for its revision, then serialises the new one). With the
+   * snapshot write skipped (the prototype of I4a), 0.13–0.18 ms. The frame
+   * budget is 16.7 ms and the e2e autosave frame already peaks at 9.4 ms, so
+   * the save's synchronous slice must stay a small share of the headroom;
+   * 2 ms leaves >10× margin over the fixed cost on a slower CI box.
+   */
+  it('Given MAX_ACTIONS in the log, 5 000 world entries and a WAL snapshot already stored, When interval autosaves run, Then the fastest synchronous part is under 2 ms', async () => {
+    const r = rig();
+    await r.sg.saveNow('manual');
+    const base = r.s.saved[0]!;
+    const ids = Array.from({ length: 4 }, (_, k) => fyssField(k).asteroids.map((x) => x.id)).flat();
+    const RES = ['ice', 'metal', 'silicate', 'rare'] as const;
+    const actions: ActionEntry[] = [];
+    for (let i = 1; i <= MAX_ACTIONS; i++) {
+      const id = ids[i % ids.length]!;
+      actions.push(
+        i % 2
+          ? {
+              seq: i,
+              source: 'cargo',
+              payload: {
+                action: { kind: 'mine', asteroidId: id, resource: 'ice', kg: 100 },
+                result: { ok: true, kgIn: 100, kgOut: 0, fuelKg: 0, restoredFrac: 0 },
+              },
+              wallMs: WALL + i,
+              orbitSeconds: 12_345.678 + i,
+            }
+          : { seq: i, source: 'mined', payload: { id, by: 'local', resource: 'ice', kg: 100 }, wallMs: WALL + i, orbitSeconds: 12_345.678 + i },
+      );
+    }
+    const world = Array.from({ length: 5_000 }, (_, i) => ({
+      id: ids[i % ids.length]!,
+      by: 'local' as const,
+      resource: RES[i % 4]!,
+      kg: 100,
+      wallMs: WALL + i,
+      orbitSeconds: 1 + i,
+    }));
+    r.g.worldState.restore(world);
+    const big: SaveV1 = { ...base, revision: 2, actions, world: { ...base.world, entries: world } };
+    r.sg.continueFrom(big);
+    r.g.journal.restore(actions);
+
+    const wal = createWal(storage as unknown as Storage);
+    const times: number[] = [];
+    for (let k = 0; k < 5; k++) {
+      // As a pagehide or a failed store write would have left it.
+      expect(wal.writeSnapshot({ ...big, revision: r.sg.revision })).toBe(true);
+      for (let i = 0; i < 20; i++) {
+        bus.emit('propellant:action', { action: { kind: 'jump', distanceLy: 1 }, ok: true, kg: 0, tankDeltaKg: 0 });
+      }
+      const attempts = r.s.attempts.length;
+      const t0 = performance.now();
+      r.tick(AUTOSAVE_INTERVAL);
+      times.push(performance.now() - t0);
+      await flush();
+      expect(r.s.attempts.length).toBe(attempts + 1); // it did save
+    }
+    const fastest = Math.min(...times);
+    expect(fastest, `interval autosave sync ms: ${times.map((t) => t.toFixed(2)).join(' ')}`).toBeLessThan(2);
+  });
+});
+
+describe('R25 M4 — a reader tab\'s journal does not grow without bound', () => {
+  it('Given a reader tab, When MAX_ACTIONS + 1 000 named actions are announced and it ticks, Then its journal holds at most MAX_ACTIONS entries', () => {
+    const r = rig({ writer: false });
+    for (let i = 0; i < MAX_ACTIONS + 1_000; i++) {
+      bus.emit('propellant:action', { action: { kind: 'jump', distanceLy: 1 }, ok: true, kg: 1, tankDeltaKg: -1 });
+    }
+    r.tick();
+    expect(r.g.journal.peek().length).toBeLessThanOrEqual(MAX_ACTIONS);
+  });
+});
+
+describe('R25 — registry.ts wires the fixes', () => {
+  const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'registry.ts'), 'utf8');
+
+  it('Given the registry, Then SaveGame is told whether the boot found the store usable (I2)', () => {
+    const i = src.indexOf('new SaveGame(');
+    expect(src.slice(i, src.indexOf(';', i))).toMatch(/storeAvailable:\s*boot\.storeAvailable/);
+  });
+
+  it('Given the registry, Then applySave does not place the ship again — the Universe was built in the save (M1)', () => {
+    expect(src).toMatch(/applySave\(saveWorld, continued, \{ universeRestored: true \}\)/);
   });
 });

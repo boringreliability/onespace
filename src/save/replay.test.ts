@@ -11,7 +11,7 @@
  * checkpoint's net fields; capture.test.ts pins replay against a live game.
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import type { Resource } from '@/gen/belt';
 import { REPAIR_METAL_KG, REPAIR_SILICATE_KG, type CargoAction, type CargoResult } from '@/ship/cargo';
@@ -90,9 +90,9 @@ function session() {
     .thrust(500)
     .propellant({ kind: 'jump', distanceLy: 10 }, 1_600, -1_600)
     .propellant({ kind: 'jump-refund', kg: 1_600 }, 1_600, 1_600)
-    .mine('ast:a', 'ice', 2_000)
-    .mine('ast:a', 'metal', 1_500)
-    .mine('ast:b', 'silicate', 1_200)
+    .mine('ast:gx-a:0:0', 'ice', 2_000)
+    .mine('ast:gx-a:0:0', 'metal', 1_500)
+    .mine('ast:gx-b:0:1', 'silicate', 1_200)
     .cargo({ kind: 'refine' }, { kgOut: 2_000, fuelKg: 1_600 })
     .propellant({ kind: 'cruise-leg', distanceKm: 7.5e7 }, 100, -100)
     .thrust(12_970)
@@ -107,7 +107,7 @@ function session() {
     .propellant({ kind: 'beacon' }, 0, 960)
     .cargo({ kind: 'jettison-all' }, { kgOut: 0 }) // (refused jettisons are never logged; an ok one with 0 is harmless)
     .emergency('beacon')
-    .mine('ast:a', 'rare', 12.5)
+    .mine('ast:gx-a:0:0', 'rare', 12.5)
     .thrust(960)
     .propellant({ kind: 'cannibalize', part: 'tank', timesUsed: 1 }, 0, 576)
     .emergency('cannibalize', 2);
@@ -117,13 +117,13 @@ function session() {
 
 describe('replay — entry by entry', () => {
   it('Given an empty log, Then the state is the initial one — a copy; the input is not mutated', () => {
-    const s0 = start({ cargo: { ice: 5, metal: 0, silicate: 0, rare: 0 }, depletion: { 'ast:a': { ice: 1, metal: 0, silicate: 0, rare: 0 } } });
+    const s0 = start({ cargo: { ice: 5, metal: 0, silicate: 0, rare: 0 }, depletion: { 'ast:gx-a:0:0': { ice: 1, metal: 0, silicate: 0, rare: 0 } } });
     const frozen = JSON.stringify(s0);
     const out = replay(s0, []);
     expect(out).toEqual(s0);
     expect(out).not.toBe(s0);
     out.cargo.ice = 999;
-    out.depletion['ast:a']!.ice = 999;
+    out.depletion['ast:gx-a:0:0']!.ice = 999;
     expect(JSON.stringify(s0)).toBe(frozen);
   });
 
@@ -155,16 +155,16 @@ describe('replay — entry by entry', () => {
   });
 
   it('Given mines, Then the hold gains kgIn per resource and the depletion is kept per asteroid', () => {
-    const out = replay(start(), logOf().mine('ast:a', 'ice', 2_000).mine('ast:a', 'ice', 500).mine('ast:b', 'metal', 300).entries);
+    const out = replay(start(), logOf().mine('ast:gx-a:0:0', 'ice', 2_000).mine('ast:gx-a:0:0', 'ice', 500).mine('ast:gx-b:0:1', 'metal', 300).entries);
     expect(out.cargo).toEqual({ ice: 2_500, metal: 300, silicate: 0, rare: 0 });
     expect(out.depletion).toEqual({
-      'ast:a': { ice: 2_500, metal: 0, silicate: 0, rare: 0 },
-      'ast:b': { ice: 0, metal: 300, silicate: 0, rare: 0 },
+      'ast:gx-a:0:0': { ice: 2_500, metal: 0, silicate: 0, rare: 0 },
+      'ast:gx-b:0:1': { ice: 0, metal: 300, silicate: 0, rare: 0 },
     });
   });
 
   it('Given a refine, Then the ice falls by kgOut and the tank rises by fuelKg', () => {
-    const out = replay(start(), logOf().mine('ast:a', 'ice', 2_000).cargo({ kind: 'refine' }, { kgOut: 1_250, fuelKg: 1_000 }).entries);
+    const out = replay(start(), logOf().mine('ast:gx-a:0:0', 'ice', 2_000).cargo({ kind: 'refine' }, { kgOut: 1_250, fuelKg: 1_000 }).entries);
     expect(out.cargo.ice).toBeCloseTo(750, 9);
     expect(out.tank.massKg).toBeCloseTo(13_000, 9);
   });
@@ -200,8 +200,8 @@ describe('replay — entry by entry', () => {
     expect(out.tank.capacityLossFrac).toBeCloseTo(cannibalizeLossFrac(0) - 0.04 + cannibalizeLossFrac(1), 12);
     expect(out.cargo).toEqual({ ice: 0, metal: 0, silicate: 0, rare: 12.5 });
     expect(out.depletion).toEqual({
-      'ast:a': { ice: 2_000, metal: 1_500, silicate: 0, rare: 12.5 },
-      'ast:b': { ice: 0, metal: 0, silicate: 1_200, rare: 0 },
+      'ast:gx-a:0:0': { ice: 2_000, metal: 1_500, silicate: 0, rare: 12.5 },
+      'ast:gx-b:0:1': { ice: 0, metal: 0, silicate: 1_200, rare: 0 },
     });
     expect(out.emergency).toEqual({ cannibalize: 2, cannibalizeCargo: 1, beacon: 1 });
   });
@@ -233,8 +233,8 @@ describe('the checkpoint carries the net effect (R8)', () => {
       .propellant({ kind: 'jump', distanceLy: 10 }, 1_600, -1_600)
       .propellant({ kind: 'jump-refund', kg: 400 }, 400, 400)
       .propellant({ kind: 'cruise-leg', distanceKm: 1e9 }, 30, -30, false)
-      .mine('ast:a', 'ice', 2_000)
-      .mine('ast:b', 'metal', 1_500)
+      .mine('ast:gx-a:0:0', 'ice', 2_000)
+      .mine('ast:gx-b:0:1', 'metal', 1_500)
       .cargo({ kind: 'refine' }, { kgOut: 1_250, fuelKg: 1_000 })
       .propellant({ kind: 'cannibalize', part: 'tank', timesUsed: 0 }, 0, 600)
       .emergency('cannibalize', 1)
@@ -253,8 +253,8 @@ describe('the checkpoint carries the net effect (R8)', () => {
     expect(cp.payload.cargoNetKg.silicate).toBeCloseTo(-REPAIR_SILICATE_KG, 9);
     expect(cp.payload.cargoNetKg.rare).toBe(0);
     expect(cp.payload.minedByAsteroid).toEqual({
-      'ast:a': { ice: 2_000, metal: 0, silicate: 0, rare: 0 },
-      'ast:b': { ice: 0, metal: 1_500, silicate: 0, rare: 0 },
+      'ast:gx-a:0:0': { ice: 2_000, metal: 0, silicate: 0, rare: 0 },
+      'ast:gx-b:0:1': { ice: 0, metal: 1_500, silicate: 0, rare: 0 },
     });
     expect(cp.payload.emergency).toEqual({ cannibalize: 1, cannibalizeCargo: 0, beacon: 1 });
     expect(cp.payload.lastCannibalizeTimesUsed).toBe(1);
@@ -271,9 +271,71 @@ describe('the checkpoint carries the net effect (R8)', () => {
   });
 
   it('Given a jettison inside the folded prefix (the log starts at a new game: an empty hold), Then the net cargo empties the hold it had filled', () => {
-    const log = logOf().mine('ast:a', 'ice', 700).mine('ast:a', 'metal', 300).cargo({ kind: 'jettison-all' }, { kgOut: 1_000 }).mine('ast:b', 'rare', 5).thrust(1);
+    const log = logOf().mine('ast:gx-a:0:0', 'ice', 700).mine('ast:gx-a:0:0', 'metal', 300).cargo({ kind: 'jettison-all' }, { kgOut: 1_000 }).mine('ast:gx-b:0:1', 'rare', 5).thrust(1);
     const c = compactEntries(log.entries, 2);
     expectSameState(replay(start(), c), replay(start(), log.entries));
     expect(replay(start(), c).cargo).toEqual({ ice: 0, metal: 0, silicate: 0, rare: 5 });
+  });
+});
+
+// =============================================================================
+// Final review, ruling R25 I1 — defence in depth. The schema keeps a hostile
+// id out; if anything ever bypasses it, the depletion map still must not be a
+// door to Object.prototype ("__proto__" read off a plain {} IS the prototype).
+// =============================================================================
+
+describe('R25 I1 — a hostile asteroid key never reaches Object.prototype (schema bypassed)', () => {
+  /** What the RED state writes: Object.prototype.ice = NaN etc. Scrubbed so it cannot leak into other tests. */
+  function polluted(): string[] {
+    const hit = RESOURCES.filter((r) => Object.prototype.hasOwnProperty.call(Object.prototype, r));
+    for (const r of hit) delete (Object.prototype as Record<string, unknown>)[r];
+    return hit;
+  }
+  afterEach(() => {
+    polluted();
+  });
+
+  const at = { wallMs: 1_800_000_000_000, orbitSeconds: 10 };
+  /** Cast past the schema on purpose: this is what a bypass would hand replay. */
+  const hostileMined = (id: string, seq = 1) =>
+    ({ seq, source: 'mined', payload: { id, by: 'local', resource: 'ice', kg: 5 }, ...at }) as ActionEntry;
+  const hostileCheckpoint = (): ActionEntry =>
+    JSON.parse(
+      '{"seq":1,"source":"checkpoint","payload":{"upToSeq":1,"tankNetKg":0,"capacityLossNetFrac":0,' +
+        '"cargoNetKg":{"ice":0,"metal":0,"silicate":0,"rare":0},' +
+        '"minedByAsteroid":{"__proto__":{"ice":5,"metal":0,"silicate":0,"rare":0}},' +
+        '"emergency":{"cannibalize":0,"cannibalizeCargo":0,"beacon":0},"lastCannibalizeTimesUsed":0},' +
+        '"wallMs":1800000000000,"orbitSeconds":10}',
+    ) as ActionEntry;
+
+  it('Given a mined entry with id "__proto__", When replayed, Then Object.prototype gains no resource key and ({}).ice stays undefined', () => {
+    replay(start(), [hostileMined('__proto__')]);
+    const seen = ({} as Record<string, unknown>).ice;
+    expect(polluted()).toEqual([]);
+    expect(seen).toBeUndefined();
+  });
+
+  it('Given a checkpoint whose minedByAsteroid holds an own "__proto__" key, When replayed, Then Object.prototype is untouched', () => {
+    replay(start(), [hostileCheckpoint()]);
+    expect(polluted()).toEqual([]);
+  });
+
+  it('Given hostile ids ("__proto__", "constructor", "toString"), When compacted into a checkpoint, Then Object.prototype is untouched and the other asteroids keep their sums', () => {
+    const log = [
+      hostileMined('__proto__', 1),
+      hostileMined('constructor', 2),
+      hostileMined('toString', 3),
+      ...logOf()
+        .mine('ast:gx-a:0:0', 'ice', 700)
+        .thrust(1)
+        .entries.map((e, i) => ({ ...e, seq: 10 + i })),
+    ];
+    const c = compactEntries(log, 2);
+    expect(polluted()).toEqual([]);
+    const cp = c[0]!;
+    if (cp.source !== 'checkpoint') throw new Error('expected a checkpoint first');
+    expect(cp.payload.minedByAsteroid['ast:gx-a:0:0']).toEqual({ ice: 700, metal: 0, silicate: 0, rare: 0 });
+    expect(typeof Object.prototype.toString).toBe('function');
+    expect(typeof Object.prototype.constructor).toBe('function');
   });
 });

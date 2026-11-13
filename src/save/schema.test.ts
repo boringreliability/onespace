@@ -10,8 +10,10 @@
 
 import { describe, expect, it } from 'vitest';
 
+import { fyssBelt, fyssField } from '@/game/testing/beltFixture';
+
 import golden from './fixtures/v1-golden.json';
-import { ActionEntrySchema, CURRENT_FORMAT, SaveV1Schema, type SaveV1 } from './schema';
+import { ActionEntrySchema, CURRENT_FORMAT, MinedEntrySchema, SaveV1Schema, type SaveV1 } from './schema';
 
 /** A fresh, mutable copy of the golden save for each test. */
 function goldenCopy(): SaveV1 {
@@ -300,5 +302,75 @@ describe('SaveV1Schema — constraints pinned by mutation testing (Task 7)', () 
     const b = looseCopy();
     b.world.extra = 1;
     expect(rejects(b)).toBe(true);
+  });
+});
+
+// =============================================================================
+// Final review, ruling R25 I1 — asteroid ids are whitelisted. A stored id is a
+// key into the depletion map; "__proto__" (or any name Object.prototype owns)
+// must never get that far. The real ids are `ast:<systemId>:<field>:<n>`
+// (src/gen/belt.ts fieldSpec).
+// =============================================================================
+
+describe('R25 I1 — asteroid ids are whitelisted (ast:<system>:<field>:<n>)', () => {
+  const HOSTILE = ['__proto__', 'constructor', 'prototype', 'toString', 'hasOwnProperty', 'ast:', 'x:ast:gx-a:0:0'];
+  const at = { wallMs: 1762891200000, orbitSeconds: 5412.25 };
+  const mined = (id: string) => ({ seq: 99, source: 'mined', payload: { id, by: 'local', resource: 'ice', kg: 5 }, ...at });
+  const mine = (asteroidId: string) => ({
+    seq: 99,
+    source: 'cargo',
+    payload: {
+      action: { kind: 'mine', asteroidId, resource: 'ice', kg: 5 },
+      result: { ok: true, kgIn: 5, kgOut: 0, fuelKg: 0, restoredFrac: 0 },
+    },
+    ...at,
+  });
+  /** A checkpoint parsed from JSON text, so "__proto__" is an OWN key, as storage would hand it back. */
+  const checkpointWithKey = (key: string) =>
+    JSON.parse(
+      `{"seq":99,"source":"checkpoint","payload":{"upToSeq":99,"tankNetKg":0,"capacityLossNetFrac":0,` +
+        `"cargoNetKg":{"ice":0,"metal":0,"silicate":0,"rare":0},` +
+        `"minedByAsteroid":{${JSON.stringify(key)}:{"ice":5,"metal":0,"silicate":0,"rare":0}},` +
+        `"emergency":{"cannibalize":0,"cannibalizeCargo":0,"beacon":0},"lastCannibalizeTimesUsed":0},` +
+        `"wallMs":1762891200000,"orbitSeconds":5412.25}`,
+    );
+
+  it('Given a mined entry whose id is "__proto__" (or another non-asteroid name), Then ActionEntrySchema rejects it', () => {
+    for (const id of HOSTILE) expect(ActionEntrySchema.safeParse(mined(id)).success, id).toBe(false);
+  });
+
+  it('Given a cargo mine whose asteroidId is "__proto__" (or another non-asteroid name), Then ActionEntrySchema rejects it', () => {
+    for (const id of HOSTILE) expect(ActionEntrySchema.safeParse(mine(id)).success, id).toBe(false);
+  });
+
+  it('Given a checkpoint whose minedByAsteroid has an own "__proto__" key (as JSON.parse makes it), Then ActionEntrySchema rejects it', () => {
+    const cp = checkpointWithKey('__proto__');
+    expect(Object.prototype.hasOwnProperty.call(cp.payload.minedByAsteroid, '__proto__')).toBe(true);
+    expect(ActionEntrySchema.safeParse(cp).success).toBe(false);
+    expect(ActionEntrySchema.safeParse(checkpointWithKey('constructor')).success).toBe(false);
+  });
+
+  it('Given a world entry whose id is "__proto__", Then MinedEntrySchema and the whole save reject it', () => {
+    for (const id of HOSTILE) {
+      expect(MinedEntrySchema.safeParse({ id, by: 'local', resource: 'ice', kg: 5, ...at }).success, id).toBe(false);
+    }
+    const s = goldenCopy();
+    s.world.entries = [{ ...s.world.entries[0]!, id: '__proto__' }];
+    expect(SaveV1Schema.safeParse(s).success).toBe(false);
+  });
+
+  it('Given every asteroid the generator makes in the Fyss belt, Then each id passes all four places an id is checked', () => {
+    const belt = fyssBelt();
+    let n = 0;
+    for (let k = 0; k < belt.fieldCount; k++) {
+      for (const a of fyssField(k).asteroids) {
+        n++;
+        expect(ActionEntrySchema.safeParse(mined(a.id)).success, a.id).toBe(true);
+        expect(ActionEntrySchema.safeParse(mine(a.id)).success, a.id).toBe(true);
+        expect(ActionEntrySchema.safeParse(checkpointWithKey(a.id)).success, a.id).toBe(true);
+        expect(MinedEntrySchema.safeParse({ id: a.id, by: 'local', resource: 'ice', kg: 5, ...at }).success, a.id).toBe(true);
+      }
+    }
+    expect(n).toBeGreaterThan(0);
   });
 });

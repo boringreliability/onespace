@@ -337,3 +337,69 @@ describe('logBeforeWorld — the log imported before the Universe exists', () =>
     expect(logBeforeWorld({ save: null, notice: null, legacyLog })).toEqual(legacyLog);
   });
 });
+
+// =============================================================================
+// Final review, ruling R25 I2/I3 — a store that failed at boot (rejected, or
+// gave no answer in 3 s) is unavailable for the WHOLE session: the boot says
+// so (`storeAvailable: false`, beside the notice) and writes nothing to it, so
+// a store that recovers later never has a real save rotated out by this
+// session. registry.ts hands the flag to SaveGame (SaveGame.test.ts).
+// =============================================================================
+
+const UNAVAILABLE = 'SAVE STORAGE UNAVAILABLE — RELOAD THE TAB';
+
+/** A store whose load rejects (a VersionError) while its writes would succeed — it "recovers" after the boot. */
+function failsAtBoot() {
+  const st = spyStore();
+  const store: SaveStore = {
+    ...st.store,
+    load: () => Promise.reject(new DOMException('The requested version is less than the existing version', 'VersionError')),
+  };
+  return { ...st, store };
+}
+
+type WithStore = { storeAvailable?: unknown };
+
+describe('R25 I2 — the boot says whether the store is usable, and an unusable one is never written', () => {
+  it('Given a healthy store, Then decideBoot says storeAvailable: true', async () => {
+    const st = await withSave();
+    const r = await decideBoot(deps({ search: '', store: st.store }).d);
+    expect((r as WithStore).storeAvailable).toBe(true);
+  });
+
+  it('Given store.load rejects at boot, Then decideBoot says storeAvailable: false, with the unavailable notice', async () => {
+    const r = await decideBoot(deps({ search: '', store: failsAtBoot().store }).d);
+    expect((r as WithStore).storeAvailable).toBe(false);
+    expect(r.notices).toContain(UNAVAILABLE);
+  });
+
+  it('Given store.load rejects, a WAL snapshot of save 7 and a confirmed NEW GAME link, Then nothing is written to the store (no save, no copy) and the new game still starts above the old game', async () => {
+    const st = failsAtBoot();
+    local.setItem(WAL_SNAPSHOT_KEY, JSON.stringify(save(7)));
+    const n = issueNewGameNonce(session)!;
+    const r = await decideBoot(deps({ search: `?new=1&nonce=${n}&mode=flight`, store: st.store }).d);
+    expect(r.plan.start).toBe('new');
+    expect(st.calls).toEqual({ save: 0, keepCorrupt: 0 });
+    expect(r.afterRevision).toBeGreaterThanOrEqual(8);
+  });
+});
+
+describe('R25 I3 — decideBoot does not wait for a hung store', () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    vi.setSystemTime(WALL);
+  });
+
+  it('Given store.load never settles, When 3 s pass, Then decideBoot resolves: storeAvailable false, the unavailable notice', async () => {
+    const st = spyStore();
+    const store: SaveStore = { ...st.store, load: () => new Promise(() => undefined) };
+    let r: Awaited<ReturnType<typeof decideBoot>> | null = null;
+    void decideBoot(deps({ search: '', store }).d).then((x) => (r = x));
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(r).not.toBeNull();
+    expect((r! as WithStore).storeAvailable).toBe(false);
+    expect(r!.notices).toContain(UNAVAILABLE);
+    expect(st.calls).toEqual({ save: 0, keepCorrupt: 0 });
+  });
+});

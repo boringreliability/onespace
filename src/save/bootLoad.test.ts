@@ -45,7 +45,7 @@ import { parseRoute } from '@/core/Route';
 import { PROBE_TANK_CAPACITY_KG } from '@/ship/propellant';
 import { BEACON_FILL_FRAC, BEACON_NOTE_TITLE, cannibalizeLossFrac } from '@/ship/emergency';
 import { compactEntries } from './actionJournal';
-import { loadForBoot, openingLog, prepareNewGame, universeOptionsFor } from './bootLoad';
+import { loadForBoot, mergeCritical, openingLog, prepareNewGame, replaceGame, universeOptionsFor } from './bootLoad';
 import golden from './fixtures/v1-golden.json';
 import legacy from './fixtures/v0-legacy-log.json';
 import { idbStore } from './idbStore';
@@ -657,5 +657,137 @@ describe('fix round 1 — I2: NEW GAME keeps a copy of the replaced game', () =>
     const { current, previous } = await store.load();
     expect([(current as SaveV1).saveId, (previous as SaveV1).saveId]).toEqual([OTHER_UUID, OTHER_UUID]);
     expect(store.corrupt.map((c) => (c.raw as SaveV1).saveId)).toEqual([G.saveId]);
+  });
+});
+
+// =============================================================================
+// Final review, ruling R25.
+//  I1 — a stored asteroid id "__proto__" reached replay's depletion map
+//       through the WAL merge and made `({}).ice` NaN app-wide.
+//  I3 — the store gets 3 s at boot (open/load, and the copies the boot makes);
+//       past that it is unavailable — the I2 path — and the boot goes on.
+//  M2 — dead code: prepareNewGame.
+// =============================================================================
+
+const RESOURCE_KEYS = ['ice', 'metal', 'silicate', 'rare'] as const;
+
+/** Resource keys Object.prototype gained (the RED state), scrubbed so they cannot leak into other tests. */
+function polluted(): string[] {
+  const hit = RESOURCE_KEYS.filter((r) => Object.prototype.hasOwnProperty.call(Object.prototype, r));
+  for (const r of hit) delete (Object.prototype as Record<string, unknown>)[r];
+  return hit;
+}
+
+describe('R25 I1 — a hostile asteroid id in stored bytes never pollutes the app', () => {
+  afterEach(() => {
+    polluted();
+  });
+
+  const hostile = { seq: 13, source: 'mined', payload: { id: '__proto__', by: 'local', resource: 'ice', kg: 5 }, ...at };
+
+  it('Given the WAL holds (written raw, past appendCritical) a mined entry of THIS game for "__proto__", When the game boots, Then it is not applied and ({}).ice stays undefined', async () => {
+    storage.setItem('onespace.wal.v1', JSON.stringify({ v: 1, critical: [{ e: hostile, by: null, saveId: G.saveId }] }));
+    const r = await loadForBoot(await storeWith(save(7)), wal);
+    const seen = ({} as Record<string, unknown>).ice;
+    expect(polluted()).toEqual([]);
+    expect(seen).toBeUndefined();
+    expect(r.save!.actions.some((e) => e.seq === 13)).toBe(false);
+    expect(r.save!.world.entries.some((e) => e.id === '__proto__')).toBe(false);
+  });
+
+  it('Given a mined entry for "__proto__", When appended to the WAL, Then it is refused (false) and nothing is stored', () => {
+    expect(wal.appendCritical(hostile as ActionEntry, G.saveId)).toBe(false);
+    expect(storage.getItem('onespace.wal.v1')).toBeNull();
+  });
+
+  it('Given mergeCritical handed a hostile entry directly (the schema bypassed), Then Object.prototype is untouched', () => {
+    mergeCritical(save(7), [hostile as ActionEntry]);
+    expect(polluted()).toEqual([]);
+  });
+});
+
+describe('R25 I3 — the store gets 3 s at boot', () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    vi.setSystemTime(WALL);
+  });
+
+  const never = <T>(): Promise<T> => new Promise<T>(() => undefined);
+
+  /** A store whose calls never settle (a hung IndexedDB open or transaction), unless overridden. */
+  function hungStore(over: Partial<SaveStore> = {}): SaveStore & { calls: { save: number; keepCorrupt: number } } {
+    const calls = { save: 0, keepCorrupt: 0 };
+    return {
+      calls,
+      load: over.load ?? (() => never()),
+      save: (s) => {
+        calls.save++;
+        return over.save ? over.save(s) : never();
+      },
+      keepCorrupt: (raw, wallMs) => {
+        calls.keepCorrupt++;
+        return over.keepCorrupt ? over.keepCorrupt(raw, wallMs) : never();
+      },
+    };
+  }
+
+  it('Given store.load never settles and a WAL snapshot of revision 8, When 3 s pass, Then loadForBoot resolves with the WAL snapshot and the unavailable notice — and not before', async () => {
+    walSnapshot(save(8));
+    let r: Awaited<ReturnType<typeof loadForBoot>> | null = null;
+    void loadForBoot(hungStore(), wal).then((x) => (r = x));
+    await vi.advanceTimersByTimeAsync(2_999);
+    expect(r).toBeNull();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(r).not.toBeNull();
+    expect(r!.save?.revision).toBe(8);
+    expect(r!.notice).toBe(UNAVAILABLE);
+  });
+
+  it('Given store.load never settles and no WAL snapshot, When 3 s pass, Then a new game with the unavailable notice', async () => {
+    let r: Awaited<ReturnType<typeof loadForBoot>> | null = null;
+    void loadForBoot(hungStore(), wal).then((x) => (r = x));
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(r).toEqual({ save: null, notice: UNAVAILABLE, legacyLog: null });
+  });
+
+  it('Given store.load answers after 2.9 s, Then its save is used as normal (no notice)', async () => {
+    const inner = await storeWith(save(7));
+    const slow = hungStore({ load: () => new Promise((res) => setTimeout(() => res(inner.load()), 2_900)) });
+    let r: Awaited<ReturnType<typeof loadForBoot>> | null = null;
+    void loadForBoot(slow, wal).then((x) => (r = x));
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(r).not.toBeNull();
+    expect(r!.save?.revision).toBe(7);
+    expect(r!.notice).toBeNull();
+  });
+
+  it('Given an unreadable slot and a keepCorrupt that never settles, When 3 s pass, Then the boot still resolves (the other slot continued, the notice given)', async () => {
+    const inner = await storeWith(save(6), { format: 99 });
+    let r: Awaited<ReturnType<typeof loadForBoot>> | null = null;
+    void loadForBoot(hungStore({ load: () => inner.load() }), wal).then((x) => (r = x));
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(r).not.toBeNull();
+    expect(r!.save?.revision).toBe(6);
+    expect(r!.notice).toBe(UNREADABLE);
+  });
+
+  it('Given NEW GAME over save 7 and a store whose writes never settle, When replaceGame runs, Then it resolves within 3 s per write, above the old game', async () => {
+    const inner = await storeWith(save(7));
+    const st = hungStore({ load: () => inner.load() });
+    const load = await loadForBoot(st, wal);
+    let r: Awaited<ReturnType<typeof replaceGame>> | null = null;
+    void replaceGame(st, wal, load).then((x) => (r = x));
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(r).not.toBeNull();
+    expect(r!.afterRevision).toBe(8);
+  });
+});
+
+describe('R25 M2 — dead code', () => {
+  it('Given the bootLoad module, Then prepareNewGame is gone: replaceGame is the one way to replace a game', async () => {
+    const m: Record<string, unknown> = await import('./bootLoad');
+    expect(m.prepareNewGame).toBeUndefined();
+    expect(typeof m.replaceGame).toBe('function');
   });
 });

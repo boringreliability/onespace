@@ -71,12 +71,12 @@ function cargo(action: CargoAction, result: CargoResult): void {
   bus.emit('cargo:action', { action, result });
 }
 
-function mineAction(resource: Resource, kg: number, asteroidId = 'gx-test:f0:a1'): void {
+function mineAction(resource: Resource, kg: number, asteroidId = 'ast:gx-test:0:1'): void {
   cargo({ kind: 'mine', asteroidId, resource, kg }, okResult({ kgIn: kg }));
 }
 
 function mined(over: Partial<MinedEntry> = {}): MinedEntry {
-  return { id: 'gx-test:f0:a1', by: 'local', resource: 'ice', kg: 2_000, orbitSeconds: 40, wallMs: 1_800_000_000_500, ...over };
+  return { id: 'ast:gx-test:0:1', by: 'local', resource: 'ice', kg: 2_000, orbitSeconds: 40, wallMs: 1_800_000_000_500, ...over };
 }
 
 /** Every entry is a valid v1 action entry (the schema is the contract with the save). */
@@ -161,9 +161,9 @@ describe('one event, one entry, both clocks', () => {
 
   it('Given noteMined, Then the entry is {id, by, resource, kg} and keeps the moment it was MINED (the MinedEntry clocks)', () => {
     const { j } = journal(1_900_000_000_000, 99_999);
-    j.noteMined(mined({ id: 'gx-x:f2:a9', resource: 'metal', kg: 512.5, wallMs: 1_800_000_000_777, orbitSeconds: 12.5 }));
+    j.noteMined(mined({ id: 'ast:gx-x:2:9', resource: 'metal', kg: 512.5, wallMs: 1_800_000_000_777, orbitSeconds: 12.5 }));
     const e = j.drain()[0]!;
-    expect(e.payload).toEqual({ id: 'gx-x:f2:a9', by: 'local', resource: 'metal', kg: 512.5 });
+    expect(e.payload).toEqual({ id: 'ast:gx-x:2:9', by: 'local', resource: 'metal', kg: 512.5 });
     expect(e.wallMs).toBe(1_800_000_000_777);
     expect(e.orbitSeconds).toBe(12.5);
   });
@@ -184,7 +184,7 @@ describe('one event, one entry, both clocks', () => {
 
 describe('refused cargo actions give no entry', () => {
   const refusals: Array<[CargoAction, NonNullable<CargoResult['reason']>]> = [
-    [{ kind: 'mine', asteroidId: 'gx-test:f0:a1', resource: 'ice', kg: 2_000 }, 'hold-full'],
+    [{ kind: 'mine', asteroidId: 'ast:gx-test:0:1', resource: 'ice', kg: 2_000 }, 'hold-full'],
     [{ kind: 'refine' }, 'tank-full'],
     [{ kind: 'repair' }, 'nothing-to-repair'],
     [{ kind: 'jettison-all' }, 'empty'],
@@ -295,10 +295,10 @@ describe('drain and seq', () => {
   it('M-3: Given dispose, Then a WorldState hooked to the journal no longer feeds it (onMined is unhooked)', () => {
     const { j } = journal();
     const ws = new WorldState({ orbitSeconds: () => 0, wallMs: () => 0, onMined: (e: MinedEntry) => j.noteMined(e) });
-    ws.recordMined('gx-test:f0:a1', 'ice', 10, 'local');
+    ws.recordMined('ast:gx-test:0:1', 'ice', 10, 'local');
     expect(j.drain()).toHaveLength(1);
     j.dispose();
-    ws.recordMined('gx-test:f0:a1', 'ice', 10, 'local');
+    ws.recordMined('ast:gx-test:0:1', 'ice', 10, 'local');
     j.noteMined(mined());
     expect(j.drain()).toEqual([]);
   });
@@ -393,7 +393,7 @@ function play(j: ActionJournal, n: number, from = 0): void {
         mineAction(r, 10 + (i % 3) * 0.25);
         break;
       case 2:
-        j.noteMined(mined({ id: `gx-test:f0:a${i % 50}`, resource: r, kg: 10 + (i % 3) * 0.25 }));
+        j.noteMined(mined({ id: `ast:gx-test:0:${i % 50}`, resource: r, kg: 10 + (i % 3) * 0.25 }));
         break;
       case 3:
         if (i % 3 === 0) bus.emit('emergency:used', { kind: 'cannibalize', timesUsed: 1 + (i % 4) });
@@ -475,8 +475,8 @@ describe('WorldState feeds the journal through a hook (onMined)', () => {
   it('Given a WorldState with onMined, When recordMined, Then the hook gets the stamped entry once', () => {
     const seen: MinedEntry[] = [];
     const ws = new WorldState({ orbitSeconds: () => 7, wallMs: () => 1_800_000_000_000, onMined: (e: MinedEntry) => seen.push(e) });
-    ws.recordMined('gx-test:f0:a1', 'ice', 2_000, 'local');
-    expect(seen).toEqual([{ id: 'gx-test:f0:a1', by: 'local', resource: 'ice', kg: 2_000, orbitSeconds: 7, wallMs: 1_800_000_000_000 }]);
+    ws.recordMined('ast:gx-test:0:1', 'ice', 2_000, 'local');
+    expect(seen).toEqual([{ id: 'ast:gx-test:0:1', by: 'local', resource: 'ice', kg: 2_000, orbitSeconds: 7, wallMs: 1_800_000_000_000 }]);
   });
 
   it('Given a refused recordMined (NaN or negative kg), Then the hook is not called', () => {
@@ -490,7 +490,7 @@ describe('WorldState feeds the journal through a hook (onMined)', () => {
   it('Given a WorldState.restore (loading a save), Then the hook is NOT called — what was mined is already in the saved log', () => {
     const seen: MinedEntry[] = [];
     const ws = new WorldState({ orbitSeconds: () => 0, wallMs: () => 0, onMined: (e: MinedEntry) => seen.push(e) });
-    ws.restore([mined(), mined({ id: 'gx-test:f0:a2' })]);
+    ws.restore([mined(), mined({ id: 'ast:gx-test:0:2' })]);
     expect(seen).toEqual([]);
   });
 });
@@ -743,7 +743,7 @@ describe('Task 7 — peek is a copy (J8)', () => {
     j.noteMined(mined());
     const p = j.peek();
     expect(p).toHaveLength(1);
-    j.noteMined(mined({ id: 'gx-test:f0:a2' }));
+    j.noteMined(mined({ id: 'ast:gx-test:0:2' }));
     expect(p).toHaveLength(1);
     expect(j.peek()).toHaveLength(2);
   });
