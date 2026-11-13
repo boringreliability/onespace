@@ -332,6 +332,196 @@ describe('buildSave — cruise is saved as a circular orbit about the nearest bo
   });
 });
 
+// --- R23: a cruise save keeps its place ---------------------------------------
+//
+// A cruise save orbits the DEEPEST body whose SOI holds the ship (moon → its
+// planet → the star), expressed relative to that body, so the restore and
+// its first SOI evaluation leave the ship where it was. See
+// .superpowers/sdd/plan-3-save/task-7-cruise-report.md.
+
+/**
+ * The e2e place (task-7-e2e-report, "Re-run after 2fb91ac", s9): cruising at
+ * 567 km/s, 22 990 km from Remit 31 (p2), inside its SOI (141 626 km); its moon
+ * Fyss I is the nearest body (2 836 km) but its SOI (1 608 km) does not hold
+ * the ship. Parent-relative to p2, at that orbit clock.
+ */
+const S9 = {
+  orbitSeconds: 44.50483333333209,
+  pos: new Vector3(-22457.471944580917, 1829.934640010822, 4569.503102827364),
+  vel: new Vector3(-452.2630014151265, 19.631811934068264, 342.089641865195),
+};
+/** One frame at 60 Hz: 5 s of sim. */
+const FIVE_S = 300;
+
+const bodyEnding = (u: Universe, suffix: string) => {
+  const p = u.system.planets.find((pl) => pl.id.endsWith(suffix)) ?? u.system.planets.flatMap((pl) => pl.moons).find((m) => m.id.endsWith(suffix));
+  const b = p ? u.bodyById(p.id) : null;
+  if (!b) throw new Error(`no body *${suffix} in ${u.system.name}`);
+  return b;
+};
+/** Every body of the system (planets and moons). */
+const allBodies = (u: Universe) =>
+  u.system.planets.flatMap((p) => [p.id, ...p.moons.map((m) => m.id)]).map((id) => u.bodyById(id)!);
+/** The ship at clock time to a body's centre, km. */
+const gapTo = (u: Universe, b: { world: Vector3 }) => u.flight.renderWorldPosition.distanceTo(b.world);
+
+/** Put the ship at a parent-relative state, cruising, and run one frame (SOI, nearest, clock). */
+function cruiseAt(g: Live, parentId: string | null, pos: Vector3, vel: Vector3, orbitSeconds?: number): void {
+  if (orbitSeconds !== undefined) g.u.setOrbitSeconds(orbitSeconds);
+  g.u.restoreParent(parentId);
+  g.u.flight.teleport(pos, vel);
+  g.u.flight.setCruise(2_000);
+  g.frames(1 / 60);
+  expect(g.u.flight.cruising).toBe(true);
+}
+
+/** The e2e s9 place: inside Remit 31's SOI, its moon nearest, outside the moon's SOI. */
+function cruisingAtS9(g: Live) {
+  const planet = bodyEnding(g.u, ':p2');
+  const moon = bodyEnding(g.u, ':p2:m0');
+  cruiseAt(g, planet.spec.id, S9.pos, S9.vel, S9.orbitSeconds);
+  // The situation the e2e found, held as preconditions.
+  expect(g.u.shipParent).toBe(planet);
+  expect(g.u.nearest).toBe(moon);
+  expect(gapTo(g.u, moon)).toBeGreaterThan(moon.soiRadius);
+  expect(gapTo(g.u, planet)).toBeLessThan(planet.soiRadius);
+  return { planet, moon };
+}
+
+describe('R23: a cruise save orbits the deepest body whose SOI holds the ship', () => {
+  it('Given cruising inside Remit 31\'s SOI with its moon nearest but outside the moon\'s SOI (e2e s9), When saved, Then the parent is Remit 31 — not the star — at the current radius with |v| = √(µ/r) (1e-6)', () => {
+    const g = live();
+    const { planet } = cruisingAtS9(g);
+    const radius = gapTo(g.u, planet);
+    const s = buildSave(g.w, null);
+    const p = new Vector3(...s.player.flight.position);
+    const v = new Vector3(...s.player.flight.velocity);
+    expect(s.player.parentId).toBe(planet.spec.id);
+    expect(Math.abs(p.length() - radius)).toBeLessThan(1e-6);
+    expect(Math.abs(v.length() - Math.sqrt(planet.frame.mu / p.length()))).toBeLessThan(1e-6);
+    expect(Math.abs(p.dot(v)) / (p.length() * v.length())).toBeLessThan(1e-9);
+  });
+
+  it('Given cruising inside a moon\'s SOI (inside its planet\'s too), When saved, Then the parent is the moon — the deepest — at the current radius', () => {
+    const g = live();
+    g.u.setOrbitSeconds(S9.orbitSeconds);
+    const planet = bodyEnding(g.u, ':p2');
+    const moon = bodyEnding(g.u, ':p2:m0');
+    // Between the moon's surface and its SOI (1.6 radii here), along the planet→moon line.
+    const out = (moon.spec.radius + moon.soiRadius) / 2;
+    expect(out).toBeGreaterThan(moon.spec.radius * 1.05);
+    expect(out).toBeLessThan(moon.soiRadius * 0.95);
+    // The moon's own velocity plus a bit.
+    const fromPlanet = moon.local.clone().add(moon.local.clone().normalize().multiplyScalar(out));
+    const vel = moon.worldVelocity.clone().sub(planet.worldVelocity).add(new Vector3(0.4, 0, -0.3));
+    cruiseAt(g, planet.spec.id, fromPlanet, vel);
+    expect(gapTo(g.u, moon)).toBeLessThan(moon.soiRadius);
+    const radius = gapTo(g.u, moon);
+    const s = buildSave(g.w, null);
+    expect(s.player.parentId).toBe(moon.spec.id);
+    expect(Math.abs(new Vector3(...s.player.flight.position).length() - radius)).toBeLessThan(1e-6);
+  });
+
+  it('Given cruising outside every SOI, When saved, Then the parent is the star (null): star-relative at the current radius with |v| = √(µ★/r) (1e-6)', () => {
+    const g = live();
+    g.u.setOrbitSeconds(S9.orbitSeconds);
+    const planet = bodyEnding(g.u, ':p2');
+    // Between the orbits: the planet's direction, at 1.5× its distance — checked below.
+    const at = planet.world.clone().multiplyScalar(1.5);
+    cruiseAt(g, null, at, new Vector3(30, 0, -20));
+    for (const b of allBodies(g.u)) expect(gapTo(g.u, b)).toBeGreaterThan(b.soiRadius);
+    expect(g.u.shipParent).toBeNull();
+    const radius = g.u.flight.renderWorldPosition.length();
+    const s = buildSave(g.w, null);
+    const p = new Vector3(...s.player.flight.position);
+    const v = new Vector3(...s.player.flight.velocity);
+    expect(s.player.parentId).toBeNull();
+    expect(p.distanceTo(g.u.flight.renderWorldPosition)).toBeLessThan(1e-6);
+    expect(Math.abs(p.length() - radius)).toBeLessThan(1e-6);
+    expect(Math.abs(v.length() - Math.sqrt(g.u.starMu / p.length()))).toBeLessThan(1e-6);
+  });
+
+  it('Given a system with no bodies, When a cruise is saved, Then it orbits the star (null), finite, without throwing', () => {
+    const g = live();
+    (g.u as unknown as { bodies: unknown[] }).bodies = [];
+    cruiseAt(g, null, new Vector3(1.2e8, 0, 3e7), new Vector3(30, 0, -20));
+    expect(g.u.nearest).toBeNull();
+    const s = buildSave(g.w, null);
+    expect(s.player.parentId).toBeNull();
+    expect([...s.player.flight.position, ...s.player.flight.velocity].every(Number.isFinite)).toBe(true);
+    expect(SaveV1Schema.safeParse(s).success).toBe(true);
+  });
+});
+
+describe('R23: a cruise save keeps its place through a load', () => {
+  it('Given the e2e s9 cruise save, When JSON → migrate → applySave into a fresh Universe, Then the ship is within 1 m of the saved place at once and, for 5 s, flies a circular orbit about Remit 31: its distance from Remit 31 within 1 m of the saved radius, its speed relative to it √(µ/r) (1e-6 rel), Remit 31 its parent throughout', () => {
+    const a = live();
+    cruisingAtS9(a);
+    const place = a.u.flight.renderWorldPosition.clone();
+    const r0 = gapTo(a.u, bodyEnding(a.u, ':p2'));
+    const loaded = throughStorage(buildSave(a.w, null));
+    a.dispose();
+    vi.stubGlobal('localStorage', new MemoryStorage());
+
+    const b = live();
+    expect(applySave(b.w, loaded)).toBe(true);
+    expect(b.u.flight.renderWorldPosition.distanceTo(place)).toBeLessThan(1e-3);
+
+    const planet = bodyEnding(b.u, ':p2');
+    const circular = Math.sqrt(planet.frame.mu / r0);
+    let worstRadiusKm = 0;
+    let worstSpeedRel = 0;
+    for (let i = 0; i < FIVE_S; i++) {
+      b.u.update(1 / 60, b.ctx);
+      expect(b.u.shipParent).toBe(planet);
+      const fm = b.u.flight;
+      worstRadiusKm = Math.max(worstRadiusKm, Math.abs(gapTo(b.u, planet) - r0));
+      const relSpeed = fm.velocity.length(); // parent-relative: the parent is Remit 31
+      worstSpeedRel = Math.max(worstSpeedRel, Math.abs(relSpeed - circular) / circular);
+    }
+    expect(worstSpeedRel).toBeLessThan(1e-6);
+    expect(worstRadiusKm).toBeLessThan(1e-3);
+  });
+
+  /**
+   * The restore itself, whatever the save's parent (the root-cause check of
+   * the e2e's "growing" error): the loaded ship against its TWIN — the same
+   * save's state put into the ORIGINAL world (same Universe, same clock, no
+   * JSON, no new boot), cruise off, engine cut — both run the same 300
+   * frames. Holds for a star-frame (parentId null) save inside a planet SOI.
+   */
+  it('Given a cruise save in either frame (as built today: the star; per R23: Remit 31), When loaded and run 5 s beside its unrestored twin, Then the two never differ by 1 m', () => {
+    const a = live();
+    cruisingAtS9(a);
+    const s = buildSave(a.w, null);
+    const loaded = throughStorage(s);
+    // The twin: the save's state, set straight into the live world.
+    a.u.flight.setCruise(null);
+    a.u.flight.cutThrottle();
+    a.u.restoreParent(s.player.parentId);
+    const f = s.player.flight;
+    a.u.flight.restoreState({
+      position: new Vector3(...f.position),
+      velocity: new Vector3(...f.velocity),
+      orientation: new Quaternion(...f.orientation),
+      grounded: false,
+    });
+    a.u.flight.flightAssist = f.flightAssist;
+
+    const b = live();
+    expect(applySave(b.w, loaded)).toBe(true);
+    expect(b.u.orbitSeconds).toBe(a.u.orbitSeconds);
+    let worstKm = b.u.flight.renderWorldPosition.distanceTo(a.u.flight.renderWorldPosition);
+    for (let i = 0; i < FIVE_S; i++) {
+      a.u.update(1 / 60, a.ctx);
+      b.u.update(1 / 60, b.ctx);
+      expect(b.u.shipParent?.spec.id ?? null).toBe(a.u.shipParent?.spec.id ?? null);
+      worstKm = Math.max(worstKm, b.u.flight.renderWorldPosition.distanceTo(a.u.flight.renderWorldPosition));
+    }
+    expect(worstKm).toBeLessThan(1e-3);
+  });
+});
+
 describe('buildSave — the action log', () => {
   function newSince(prev: SaveV1, next: SaveV1): ActionEntry[] {
     return next.actions.slice(prev.actions.length);
