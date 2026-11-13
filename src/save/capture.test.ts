@@ -997,3 +997,45 @@ describe('M-5: applySave while the cruise drive is spooling or cruising', () => 
     expectCleanLoad(r);
   });
 });
+
+describe('R21: a save is where the clock says, not a frame behind', () => {
+  /** A ship at belt speed, left mid-substep so the integrated state lags the clock. */
+  function fastAndBehind() {
+    const g = live();
+    g.frames(1);
+    const body = g.u.shipParent!;
+    const r = body.spec.radius * 6;
+    g.u.flight.teleport(new Vector3(r, 0, 0), new Vector3(0, 0, 29.84)); // km, km/s
+    // Two substeps and a bit: the carry (timeBehindS) is what is left over.
+    g.u.update(2 / 120 + 0.007, g.ctx);
+    return g;
+  }
+
+  it('Given a ship moving at belt speed with timeBehindS > 0, When saved and restored, Then it is within 1 m of where the clock says it is', () => {
+    const a = fastAndBehind();
+    const behind = a.u.flight.timeBehindS;
+    expect(behind).toBeGreaterThan(0.005);
+    expect(a.u.flight.velocity.length()).toBeGreaterThan(29);
+    // The ship at the clock: the render position (parent-relative), km.
+    const atClock = a.u.flight.renderPosition.clone();
+    const s = buildSave(a.w, null);
+    a.dispose();
+    vi.stubGlobal('localStorage', new MemoryStorage());
+    const b = live();
+    expect(applySave(b.w, throughStorage(s))).toBe(true);
+    // 1 m = 0.001 km. Unfixed, this is |v| x timeBehindS, about 0.2 km.
+    expect(b.u.flight.position.distanceTo(atClock)).toBeLessThan(0.001);
+  });
+
+  it('Given timeBehindS = 0, When saved, Then the saved position and velocity are the integrated state, unchanged', () => {
+    const g = live();
+    g.frames(1);
+    const body = g.u.shipParent!;
+    g.u.flight.teleport(new Vector3(body.spec.radius * 6, 0, 0), new Vector3(0, 0, 29.84));
+    g.u.update(2 / 120, g.ctx); // whole substeps only: nothing carried
+    expect(g.u.flight.timeBehindS).toBeLessThan(1e-9);
+    const s = buildSave(g.w, null);
+    expect(new Vector3(...s.player.flight.position).distanceTo(g.u.flight.position)).toBeLessThan(1e-9);
+    expect(new Vector3(...s.player.flight.velocity).distanceTo(g.u.flight.velocity)).toBeLessThan(1e-9);
+  });
+});
