@@ -24,6 +24,40 @@ export interface SaveStore {
   keepCorrupt(raw: unknown, wallMs: number): Promise<void>;
 }
 
+/**
+ * R25 I3: how long a store call may take before it counts as failed. A hung
+ * IndexedDB open or transaction must not hang the boot or block the save queue.
+ */
+export const STORE_TIMEOUT_MS = 3_000;
+
+/**
+ * `p`, or a rejection after `ms`. A call that throws synchronously rejects too.
+ * The timer is cleared when `p` settles first.
+ */
+export function withTimeout<T>(call: () => Promise<T>, ms: number = STORE_TIMEOUT_MS): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`store call timed out after ${ms} ms`)), ms);
+    let p: Promise<T>;
+    try {
+      p = call();
+    } catch (e) {
+      clearTimeout(timer);
+      reject(e);
+      return;
+    }
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e: unknown) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
+
 /** A key-order-independent fingerprint of a raw value; null when it has none (not JSON). */
 export function rawKey(raw: unknown): string | null {
   const norm = (v: unknown): unknown => {

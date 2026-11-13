@@ -5,9 +5,14 @@
  *    previous and the WAL snapshot (`newestOf`). A false from writeSnapshot
  *    never meant "the old snapshot is intact", so all three are compared.
  *  - Nothing is discarded silently: an unreadable slot is kept
- *    (`store.keepCorrupt`) and the notice says so. A store that cannot be
- *    opened (a VersionError after another tab upgraded the database) never
- *    crashes the boot: the WAL snapshot is used if there is one.
+ *    (`store.keepCorrupt`) and the notice says so; so is a valid save of
+ *    ANOTHER game that loses the comparison (R26) — an older revision of the
+ *    same game is not.
+ *  - A store that cannot be opened (a VersionError after another tab
+ *    upgraded the database) or does not answer within STORE_TIMEOUT_MS (R25
+ *    I3) never stops the boot: the WAL snapshot is used if there is one, and
+ *    `loadForBootResult` says `storeAvailable: false` — the session then
+ *    never writes to that store (R25 I2), and neither does the boot.
  *  - WAL critical entries are merged only into THEIR game (fix round 1, I1):
  *    an entry is applied when its saveId is the chosen save's (an entry
  *    without one: by the rules below only), it is not tagged as covered by a
@@ -16,11 +21,13 @@
  *    upToSeq). It is appended and applied by the replay rules (R16): the
  *    ship's tank and hold, a `mined` entry into the world (P2), a
  *    cannibalization's timesUsed, and a beacon's logbook note.
- *  - Only a writer tab keeps a copy of an unreadable slot.
+ *  - Only a writer tab keeps a copy (of an unreadable slot or a losing game).
  *  - The legacy logbook is offered only when nothing at all is stored.
- *  - `prepareNewGame` destroys nothing: the old game (merged) is written back
- *    as revision + 1 AND kept as a copy on the kept shelf (I2), which no
- *    later save evicts; the new game saves from `afterRevision + 1`.
+ *  - `replaceGame` (NEW GAME, a failed restore) destroys nothing: the old
+ *    game (merged) is written back as revision + 1 AND kept as a copy on the
+ *    kept shelf (I2), which no later save evicts; the new game saves from
+ *    `afterRevision + 1`. With the store unavailable it goes to the WAL only.
+ *  - Every store call the boot makes gets STORE_TIMEOUT_MS (3 s).
  *
  * Never throws.
  */
@@ -31,7 +38,7 @@ import { BEACON_NOTE_TITLE } from '@/ship/emergency';
 import { legacyLogToV1, migrate } from './migrate';
 import { applyEntry, zeroState, type ReplayState } from './replay';
 import type { ActionEntry, SaveV1 } from './schema';
-import { newestOf, type SaveStore } from './store';
+import { newestOf, STORE_TIMEOUT_MS, withTimeout, type SaveStore } from './store';
 import type { TaggedEntry, Wal } from './wal';
 
 export const SAVE_UNREADABLE_TEXT = 'SAVE UNREADABLE — KEPT A COPY';
@@ -173,19 +180,45 @@ export interface LoadOptions {
   readonly writer?: boolean;
 }
 
+/** `loadForBoot`, and whether the store answered (R25 I2: false = store-inert for the session). */
+export interface BootLoadResult {
+  readonly load: BootLoad;
+  readonly storeAvailable: boolean;
+}
+
+/** A store call with the boot's time limit (R25 I3); never throws, false on failure. */
+async function tryStore(call: () => Promise<unknown>): Promise<boolean> {
+  try {
+    await withTimeout(call, STORE_TIMEOUT_MS);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function loadForBoot(store: SaveStore, wal: Wal, opts: LoadOptions = {}): Promise<BootLoad> {
+  return (await loadForBootResult(store, wal, opts)).load;
+}
+
+export async function loadForBootResult(store: SaveStore, wal: Wal, opts: LoadOptions = {}): Promise<BootLoadResult> {
   const writer = opts.writer !== false;
   const w = readWal(wal);
   const merged = (s: SaveV1 | null): SaveV1 | null => (s ? mergeCritical(s, w.critical) : null);
 
   let slots: { current: unknown | null; previous: unknown | null };
   try {
-    slots = await store.load();
+    // R25 I3: a hung open or load is an unavailable store after 3 s.
+    slots = await withTimeout(() => store.load(), STORE_TIMEOUT_MS);
   } catch {
-    return { save: merged(w.snapshot), notice: STORE_UNAVAILABLE_TEXT, legacyLog: null };
+    return {
+      load: { save: merged(w.snapshot), notice: STORE_UNAVAILABLE_TEXT, legacyLog: null },
+      storeAvailable: false,
+    };
   }
 
-  let best: SaveV1 | null = w.snapshot;
+  /** Every valid save found, with what to shelve if it loses (the raw slot value, or the WAL snapshot). */
+  const valid: Array<{ save: SaveV1; raw: unknown }> = [];
+  if (w.snapshot) valid.push({ save: w.snapshot, raw: w.snapshot });
   let anyStored = w.snapshot !== null;
   let notice: string | null = null;
   for (const raw of [slots.current, slots.previous]) {
@@ -193,57 +226,63 @@ export async function loadForBoot(store: SaveStore, wal: Wal, opts: LoadOptions 
     anyStored = true;
     const m = migrate(raw);
     if (m.ok) {
-      best = newestOf(best, m.save);
+      valid.push({ save: m.save, raw });
       continue;
     }
     notice = SAVE_UNREADABLE_TEXT;
     if (!writer) continue;
-    try {
-      await store.keepCorrupt(raw, Date.now());
-    } catch {
-      // Kept in its slot until a save overwrites it; the notice still says so.
+    // Kept in its slot until a save overwrites it if this fails; the notice still says so.
+    await tryStore(() => store.keepCorrupt(raw, Date.now()));
+  }
+
+  let best: SaveV1 | null = null;
+  for (const v of valid) best = newestOf(best, v.save);
+
+  // R26: a save of ANOTHER game that loses is kept on the shelf — a later save
+  // would rotate it out of the slots for good. An older revision of the same
+  // game is not (it is that game's past). The store dedups by raw value.
+  if (writer && best) {
+    for (const v of valid) {
+      if (v.save.saveId !== best.saveId) await tryStore(() => store.keepCorrupt(v.raw, Date.now()));
     }
   }
-  return { save: merged(best), notice, legacyLog: anyStored ? null : readLegacyLog() };
+  return { load: { save: merged(best), notice, legacyLog: anyStored ? null : readLegacyLog() }, storeAvailable: true };
+}
+
+export interface ReplaceOptions {
+  /**
+   * R25 I2/C4: false when the store was unavailable at boot — nothing is
+   * written to it (a store that recovers must not have a real save rotated
+   * out); the old game goes back to the WAL snapshot only. Default true.
+   */
+  readonly storeAvailable?: boolean;
 }
 
 /**
- * NEW GAME confirmed (writer tabs only): write the old game (WAL merged) back
- * as revision + 1, keep a copy of it on the kept shelf (I2: `previous` alone
- * is evicted by the new game's second save), and clear its WAL, so nothing of
- * it leaks into the new game. The new game's first save is `afterRevision + 1`.
+ * NEW GAME confirmed, or a restore that failed (writer tabs only): write the
+ * old game (WAL merged) back as revision + 1, keep a copy of it on the kept
+ * shelf (I2: `previous` alone is evicted by the new game's second save), and
+ * clear its WAL, so nothing of it leaks into the new game. The new game's
+ * first save is `afterRevision + 1`. Each store call gets 3 s (R25 I3).
  */
-export async function prepareNewGame(store: SaveStore, wal: Wal, load: BootLoad): Promise<{ afterRevision: number }> {
-  const { afterRevision } = await replaceGame(store, wal, load);
-  return { afterRevision };
-}
-
-/** prepareNewGame, also saying whether the copy of the old game was kept. */
 export async function replaceGame(
   store: SaveStore,
   wal: Wal,
   load: BootLoad,
+  opts: ReplaceOptions = {},
 ): Promise<{ afterRevision: number; kept: boolean }> {
   if (!load.save) return { afterRevision: 0, kept: false };
   const old: SaveV1 = { ...load.save, revision: load.save.revision + 1 };
-  let kept = false;
-  try {
-    await store.keepCorrupt(old, Date.now());
-    kept = true;
-  } catch {
-    // The copy failed; the old game is still written back below.
-  }
+  const useStore = opts.storeAvailable !== false;
+  // The copy first; if it fails the old game is still written back below.
+  const kept = useStore && (await tryStore(() => store.keepCorrupt(old, Date.now())));
   try {
     wal.writeSnapshot(old);
   } catch {
     // the WAL never throws; belt and braces
   }
-  try {
-    await store.save(old);
-    wal.clear(old.revision);
-  } catch {
-    // The WAL keeps the old game (tagged); the new game's first durable save clears it.
-  }
+  // The WAL keeps the old game (tagged) if this fails; the new game's first durable save clears it.
+  if (useStore && (await tryStore(() => store.save(old)))) wal.clear(old.revision);
   return { afterRevision: old.revision, kept };
 }
 

@@ -67,6 +67,29 @@ const universeId = z.string().regex(/^gx-[0-9a-z]+:v1$/, 'expected gx-<base36>:v
 
 const clocks = { wallMs: num, orbitSeconds: num };
 
+/**
+ * R25 I1: an asteroid id, exactly as the generator makes it (src/gen/belt.ts
+ * fieldSpec): `ast:<systemId>:<field>:<n>`. A whitelist: an id is a key into
+ * depletion maps, so "__proto__" and every other name must stay out.
+ */
+export const ASTEROID_ID = /^ast:[^:\s]+:\d+:\d+$/;
+const asteroidId = z.string().regex(ASTEROID_ID, 'expected ast:<system>:<field>:<n>');
+
+/**
+ * A record keyed by asteroid id. Zod's record silently DROPS an own
+ * "__proto__" key instead of failing it, so every raw key is checked first:
+ * a hostile key rejects the whole entry, it is not quietly ignored.
+ */
+function asteroidRecord<T extends z.ZodType>(value: T) {
+  return z
+    .unknown()
+    .refine(
+      (raw) => !!raw && typeof raw === 'object' && Object.keys(raw).every((k) => ASTEROID_ID.test(k)),
+      { message: 'expected asteroid ids as keys' },
+    )
+    .pipe(z.record(asteroidId, value));
+}
+
 // --- log and world -----------------------------------------------------------
 
 /** Mirrors `LogEntry` (src/game/Log.ts). */
@@ -88,7 +111,7 @@ export const LogSchema = z.strictObject({
 
 /** Mirrors `MinedEntry` (src/game/worldState.ts). */
 export const MinedEntrySchema = z.strictObject({
-  id: z.string().min(1),
+  id: asteroidId,
   by: z.literal('local'),
   resource: ResourceSchema,
   kg: amount,
@@ -110,7 +133,7 @@ const PropellantActionSchema = z.discriminatedUnion('kind', [
 
 /** Mirrors `CargoAction` (src/ship/cargo.ts). */
 const CargoActionSchema = z.discriminatedUnion('kind', [
-  z.strictObject({ kind: z.literal('mine'), asteroidId: z.string().min(1), resource: ResourceSchema, kg: amount }),
+  z.strictObject({ kind: z.literal('mine'), asteroidId, resource: ResourceSchema, kg: amount }),
   z.strictObject({ kind: z.literal('refine') }),
   z.strictObject({ kind: z.literal('repair') }),
   z.strictObject({ kind: z.literal('jettison-all') }),
@@ -161,7 +184,7 @@ export const ActionEntrySchema = z.discriminatedUnion('source', [
   /** `WorldState.recordMined` (P2: who mined it). */
   entry(
     'mined',
-    z.strictObject({ id: z.string().min(1), by: z.literal('local'), resource: ResourceSchema, kg: amount }),
+    z.strictObject({ id: asteroidId, by: z.literal('local'), resource: ResourceSchema, kg: amount }),
   ),
   /** Unannounced burns, aggregated once per save so the tank's books balance. */
   entry('thrust', z.strictObject({ kg: amount })),
@@ -181,7 +204,7 @@ export const ActionEntrySchema = z.discriminatedUnion('source', [
       /** Signed change to the hold, per resource. */
       cargoNetKg: perResource(num),
       /** Depletion added, per asteroid id. */
-      minedByAsteroid: z.record(z.string().min(1), perResource(amount)),
+      minedByAsteroid: asteroidRecord(perResource(amount)),
       emergency: z.strictObject({ cannibalize: count, cannibalizeCargo: count, beacon: count }),
       /** The latest cannibalization's timesUsed in what was folded (carried over). */
       lastCannibalizeTimesUsed: count,

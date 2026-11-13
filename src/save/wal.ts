@@ -21,6 +21,12 @@
  * FIRST and the tags second: if the second write fails the entries stay
  * untagged — kept, never lost — and it returns false.
  *
+ * R25 I4a: `markCovered(save)` tags by the same rule WITHOUT writing the
+ * snapshot — what a regular autosave does (the 1.4 MB snapshot is for
+ * pagehide, hidden, emergency, leave and SAVE). The snapshot's revision is
+ * kept under its own small key, so neither call parses the snapshot to apply
+ * the "strictly older is refused" rule.
+ *
  * Growth: the entries key holds what was appended since the last `clear`;
  * the snapshot key holds one save. Save → IndexedDB → `clear` keeps both small.
  *
@@ -38,6 +44,12 @@ import { ActionEntrySchema, type ActionEntry, type SaveV1 } from './schema';
 
 export const WAL_KEY = 'onespace.wal.v1';
 export const WAL_SNAPSHOT_KEY = 'onespace.wal.v1.snapshot';
+/**
+ * R25 I4a: the stored snapshot's revision, kept beside it so `markCovered`
+ * can apply the R11 rule without reading (let alone parsing) the 1.4 MB
+ * snapshot. Missing (an older build, a failed write): the snapshot is read.
+ */
+export const WAL_SNAPSHOT_REV_KEY = 'onespace.wal.v1.snapshot.rev';
 
 interface Envelope {
   v: 1;
@@ -62,6 +74,13 @@ export interface Wal {
   appendCritical(entry: ActionEntry, saveId?: string): boolean;
   /** Synchronously keep `s` as THE snapshot; it covers the entries its action log holds. */
   writeSnapshot(s: SaveV1): boolean;
+  /**
+   * R25 I4a: tag the entries `s` covers (writeSnapshot's rules: seq ≤ the
+   * highest seq in `s.actions`, a checkpoint counting with its upToSeq; a save
+   * older than the stored snapshot tags nothing) WITHOUT writing the snapshot.
+   * False when nothing could be written or `s` is older than the snapshot.
+   */
+  markCovered(s: SaveV1): boolean;
   /** What is stored, validated; foreign bytes read as empty. */
   read(): { snapshot: unknown | null; critical: ActionEntry[] };
   /** As `read`, each entry with its coverage (`by`) and its game (`saveId`). */
@@ -125,6 +144,32 @@ function loadSnapshot(storage: Storage): unknown {
   return parse(getText(storage, WAL_SNAPSHOT_KEY));
 }
 
+/** The stored snapshot's revision: the side key, else the snapshot itself; null for none. */
+function storedRevision(storage: Storage): number | null {
+  const side = getText(storage, WAL_SNAPSHOT_REV_KEY);
+  if (side !== null) {
+    const n = Number(side);
+    if (Number.isFinite(n)) return n;
+  }
+  return revisionOf(loadSnapshot(storage));
+}
+
+/** Tag the untagged entries `save` covers by its revision; false if that write failed. */
+function tagCovered(storage: Storage, save: SaveV1): boolean {
+  const env = loadEntries(storage);
+  if (!env) return true;
+  const upTo = coveredSeq(save);
+  let changed = false;
+  for (const c of env.critical) {
+    const seq = seqOf(c.e);
+    if (c.by === null && seq !== null && seq <= upTo) {
+      c.by = save.revision;
+      changed = true;
+    }
+  }
+  return changed ? storeEntries(storage, env) : true;
+}
+
 function revisionOf(snapshot: unknown): number | null {
   if (!snapshot || typeof snapshot !== 'object') return null;
   const r = (snapshot as { revision?: unknown }).revision;
@@ -179,25 +224,30 @@ export function createWal(storage: Storage | null | undefined): Wal {
 
     writeSnapshot(save) {
       if (!s) return false;
-      const stored = revisionOf(loadSnapshot(s));
+      const stored = storedRevision(s);
       if (stored !== null && save.revision < stored) return false;
       try {
         s.setItem(WAL_SNAPSHOT_KEY, JSON.stringify(save));
       } catch {
         return false;
       }
-      const env = loadEntries(s);
-      if (!env) return true;
-      const upTo = coveredSeq(save);
-      let changed = false;
-      for (const c of env.critical) {
-        const seq = seqOf(c.e);
-        if (c.by === null && seq !== null && seq <= upTo) {
-          c.by = save.revision;
-          changed = true;
+      try {
+        s.setItem(WAL_SNAPSHOT_REV_KEY, String(save.revision));
+      } catch {
+        try {
+          s.removeItem(WAL_SNAPSHOT_REV_KEY); // a stale side key would lie; the snapshot is read instead
+        } catch {
+          // left; storedRevision then reads a revision ≤ this one, which refuses nothing newer
         }
       }
-      return changed ? storeEntries(s, env) : true;
+      return tagCovered(s, save);
+    },
+
+    markCovered(save) {
+      if (!s) return false;
+      const stored = storedRevision(s);
+      if (stored !== null && save.revision < stored) return false;
+      return tagCovered(s, save);
     },
 
     read() {
@@ -211,10 +261,11 @@ export function createWal(storage: Storage | null | undefined): Wal {
 
     clear(upToRevision) {
       if (!s) return;
-      const rev = revisionOf(loadSnapshot(s));
+      const rev = storedRevision(s);
       if (rev !== null && rev <= upToRevision) {
         try {
           s.removeItem(WAL_SNAPSHOT_KEY);
+          s.removeItem(WAL_SNAPSHOT_REV_KEY);
         } catch {
           // left for the next clear
         }
@@ -239,6 +290,7 @@ function currentStorage(): Storage | null {
 export const wal: Wal = {
   appendCritical: (entry, saveId) => createWal(currentStorage()).appendCritical(entry, saveId),
   writeSnapshot: (save) => createWal(currentStorage()).writeSnapshot(save),
+  markCovered: (save) => createWal(currentStorage()).markCovered(save),
   read: () => createWal(currentStorage()).read(),
   readTagged: () => createWal(currentStorage()).readTagged(),
   clear: (upTo) => createWal(currentStorage()).clear(upTo),

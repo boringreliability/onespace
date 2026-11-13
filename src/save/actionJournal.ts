@@ -155,6 +155,11 @@ export class ActionJournal {
     return this.pending.slice();
   }
 
+  /** How many entries are noted and not yet drained (R25 M4: cheap, no copy). */
+  get size(): number {
+    return this.pending.length;
+  }
+
   /** Everything noted since the last drain, oldest first. */
   drain(): ActionEntry[] {
     const out = this.pending;

@@ -12,7 +12,14 @@
  *  - manually from the pause sheet (`saveNow('manual')`, logs SAVED).
  *
  * How (the order is the point):
- *    capture (buildSave) → wal.writeSnapshot → store.save (IndexedDB) → wal.clear(revision)
+ *    capture (buildSave) → wal.writeSnapshot | wal.markCovered → store.save (IndexedDB) → wal.clear(revision)
+ *  - R25 I4a: hidden, emergency, leave and SAVE write the whole snapshot;
+ *    interval, landing, mine and system entry only tag WAL coverage. A failed
+ *    tag-only save writes its snapshot after all (C2);
+ *  - R25 I3: a store write gets STORE_TIMEOUT_MS, then it is SAVE FAILED;
+ *  - R25 I2: with `storeAvailable: false` (the store failed at boot) every
+ *    save is a WAL snapshot only — no store write, no clear — and SAVE says
+ *    the storage is unavailable;
  *  - the built save is `prev` at once, whatever happens to the writes: buildSave
  *    drains the journal, so the next save appends to it and nothing is lost;
  *    revisions therefore rise strictly across every save, pagehide included;
@@ -44,9 +51,11 @@ import type { EngineContext, GameModule } from '@/core/Engine';
 import type { Mode } from '@/core/Modes';
 import { bus, type GameEvents } from '@/core/EventBus';
 import { modes } from '@/core/Modes';
+import { MAX_ACTIONS } from '@/save/actionJournal';
+import { STORE_UNAVAILABLE_TEXT } from '@/save/bootLoad';
 import { buildSave, type SaveWorld } from '@/save/capture';
 import type { SaveV1 } from '@/save/schema';
-import type { SaveStore } from '@/save/store';
+import { STORE_TIMEOUT_MS, withTimeout, type SaveStore } from '@/save/store';
 import type { Wal } from '@/save/wal';
 import type { WriterLock } from '@/save/writerLock';
 import { START_FILL, type Propellant } from '@/ship/propellant';
@@ -72,10 +81,25 @@ export interface SaveGameOptions {
   readonly lock: WriterLock;
   /** Absent (node): no hidden/pagehide saves. */
   readonly page?: SavePage | null;
+  /**
+   * R25 I2: false when the store failed (or did not answer) at boot. The
+   * session is then store-inert: every save goes to the WAL snapshot, never
+   * to the store, and the WAL is never cleared. Default true.
+   */
+  readonly storeAvailable?: boolean;
 }
 
 /** Triggers that wait for the gap, in the order they are tried. */
 const GAPPED: readonly SaveReason[] = ['emergency', 'landed', 'mined', 'system'];
+
+/**
+ * R25 I4a / C1: the saves that write the WHOLE snapshot to the WAL before the
+ * store. The rest (interval, landing, mine, system entry) only tag WAL
+ * coverage (`markCovered`): the paid entries stay in the WAL until a durable
+ * store write clears them, so nothing paid is lost, and the 1.4 MB snapshot
+ * is not serialised on the frame of every autosave.
+ */
+const WHOLE_SNAPSHOT: ReadonlySet<SaveReason> = new Set<SaveReason>(['hidden', 'emergency', 'leave', 'manual']);
 
 export class SaveGame implements GameModule {
   readonly name = 'save';
@@ -85,6 +109,7 @@ export class SaveGame implements GameModule {
   private readonly wal: Wal;
   private readonly lock: WriterLock;
   private readonly page: SavePage | null;
+  private readonly storeAvailable: boolean;
 
   /** The last save built — durable or not; the next one continues it. */
   private prev: SaveV1 | null = null;
@@ -116,6 +141,7 @@ export class SaveGame implements GameModule {
     this.wal = opts.wal;
     this.lock = opts.lock;
     this.page = opts.page ?? null;
+    this.storeAvailable = opts.storeAvailable !== false;
   }
 
   get status(): SaveStatus {
@@ -182,7 +208,13 @@ export class SaveGame implements GameModule {
   }
 
   update(dt: number, _ctx?: EngineContext): void {
-    if (!this.lock.writer) return;
+    if (!this.lock.writer) {
+      // R25 M4: a reader never drains, so its journal is folded instead —
+      // never more than MAX_ACTIONS (a reader's log is never saved anyway).
+      const journal = this.world.journal;
+      if (journal.size > MAX_ACTIONS) journal.compact();
+      return;
+    }
     const step = Number.isFinite(dt) && dt > 0 ? dt : 0;
     this.sinceSaveS += step;
     this.sinceIntervalS += step;
@@ -254,14 +286,30 @@ export class SaveGame implements GameModule {
     }
 
     // Synchronously first: a false here is no cover — the store write goes on.
-    this.wal.writeSnapshot(save);
+    // R25 I4a: the whole snapshot only where it is needed (or when the WAL is
+    // the only place the save can go); otherwise tag the coverage.
+    const whole = !this.storeAvailable || WHOLE_SNAPSHOT.has(reason);
+    if (whole) this.wal.writeSnapshot(save);
+    else this.wal.markCovered(save);
+
+    // R25 I2: the store failed at boot — it is never written this session.
+    if (!this.storeAvailable) {
+      if (reason === 'manual') bus.emit('log', { text: STORE_UNAVAILABLE_TEXT, tone: 'warn' });
+      return false;
+    }
 
     this.inFlight++;
-    const write = this.queue.then(() => this.store.save(save));
+    // R25 I3: a write that has not landed in STORE_TIMEOUT_MS has failed, and
+    // the queue moves on. (IndexedDB still commits readwrite transactions on
+    // one store in creation order, so a late commit is never overtaken.)
+    const write = this.queue.then(() => withTimeout(() => this.store.save(save), STORE_TIMEOUT_MS));
     this.queue = write.catch(() => undefined);
     try {
       await write;
     } catch {
+      // R25 C2: a save that only tagged coverage leaves its snapshot in the
+      // WAL after all, so a crash now loses nothing it held.
+      if (!whole) this.wal.writeSnapshot(save);
       bus.emit('log', { text: SAVE_FAILED_TEXT, tone: 'warn' });
       return false;
     } finally {

@@ -304,6 +304,8 @@ export interface BootState {
   readonly afterRevision: number;
   /** Log lines for the player, shown once the HUD is up. */
   readonly notices: readonly string[];
+  /** R25 I2: false when the store failed or hung at boot — the session never writes it. */
+  readonly storeAvailable: boolean;
 }
 
 /** sessionStorage, or null where the browser refuses it. */
@@ -495,6 +497,7 @@ export async function registerModules(engine: Engine, progress: ProgressFn, boot
     wal,
     lock: boot.lock,
     page: { document, window },
+    storeAvailable: boot.storeAvailable,
   });
   await engine.add(saveGame);
   // The same world, for applySave: what the save holds goes back into these.
@@ -503,13 +506,21 @@ export async function registerModules(engine: Engine, progress: ProgressFn, boot
   // so revisions go on and nothing the boot queued saves the opening world.
   const notices: string[] = [...boot.notices];
   let hasSave = false;
-  if (continued && !universe.restoreFailed && applySave(saveWorld, continued)) {
+  // R25 M1: the Universe was built in the save's place — do not place the ship
+  // (and enter the system) a second time.
+  if (continued && !universe.restoreFailed && applySave(saveWorld, continued, { universeRestored: true })) {
     saveGame.continueFrom(continued);
     hasSave = true;
   } else if (continued) {
     // The saved place cannot be found: a new start, above the kept old game.
     // The log already is the new start's (logBeforeWorld + its arrival).
-    const r = await restartAfterRestoreFail({ store: boot.store, wal, lock: boot.lock, load: boot.load });
+    const r = await restartAfterRestoreFail({
+      store: boot.store,
+      wal,
+      lock: boot.lock,
+      load: boot.load,
+      storeAvailable: boot.storeAvailable,
+    });
     notices.push(...r.notices);
     saveGame.startNew(r.afterRevision);
   } else {

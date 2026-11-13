@@ -31,7 +31,10 @@ import type { ActionEntry } from './schema';
 export interface ReplayState {
   tank: { massKg: number; capacityLossFrac: number };
   cargo: Record<Resource, number>;
-  /** kg taken per asteroid id, per resource. */
+  /**
+   * kg taken per asteroid id, per resource. R25 I1: a null-prototype map, so
+   * no key (not even "__proto__") can reach Object.prototype.
+   */
   depletion: Record<string, Record<Resource, number>>;
   emergency: { cannibalize: number; cannibalizeCargo: number; beacon: number };
 }
@@ -42,18 +45,23 @@ function perResource(): Record<Resource, number> {
   return { ice: 0, metal: 0, silicate: 0, rare: 0 };
 }
 
+/** An empty depletion map without a prototype (R25 I1). */
+function depletionMap(): ReplayState['depletion'] {
+  return Object.create(null) as ReplayState['depletion'];
+}
+
 /** Nothing at all: the start a checkpoint's net effects are measured from. */
 export function zeroState(): ReplayState {
   return {
     tank: { massKg: 0, capacityLossFrac: 0 },
     cargo: perResource(),
-    depletion: {},
+    depletion: depletionMap(),
     emergency: { cannibalize: 0, cannibalizeCargo: 0, beacon: 0 },
   };
 }
 
 function copyState(s: ReplayState): ReplayState {
-  const depletion: ReplayState['depletion'] = {};
+  const depletion = depletionMap();
   for (const [id, d] of Object.entries(s.depletion)) depletion[id] = { ...d };
   return {
     tank: { ...s.tank },
@@ -68,10 +76,12 @@ function emptyHold(s: ReplayState): void {
 }
 
 function deplete(s: ReplayState, id: string): Record<Resource, number> {
-  let d = s.depletion[id];
+  // An initial state from outside may be a plain object: own keys only.
+  let d = Object.prototype.hasOwnProperty.call(s.depletion, id) ? s.depletion[id] : undefined;
   if (!d) {
     d = perResource();
-    s.depletion[id] = d;
+    // defineProperty, not `=`: on a plain object `["__proto__"] =` would set its prototype.
+    Object.defineProperty(s.depletion, id, { value: d, writable: true, enumerable: true, configurable: true });
   }
   return d;
 }

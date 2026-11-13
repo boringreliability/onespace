@@ -8,7 +8,7 @@
  *     notice: string | null;         // one log line for the player, or null
  *     legacyLog: SaveV1['log'] | null; // the pre-save logbook, only when no save exists at all
  *   }>
- *   prepareNewGame(store, wal, load): Promise<{ afterRevision: number }>
+ *   replaceGame(store, wal, load): Promise<{ afterRevision: number; kept: boolean }>
  *   openingLog(load, start: 'continue' | 'new'): SaveV1['log']
  *   universeOptionsFor(route, save | null): UniverseOptions   // { seed?, restore? }
  *
@@ -32,7 +32,7 @@
  *    logbook's `BEACON RECOVERY` note under the next `beacon:<n>` key;
  *  - the legacy logbook (`onespace.log.v1`) is offered for import only when
  *    no save exists at all, and its key is never deleted (backup);
- *  - NEW GAME (prepareNewGame) destroys nothing: the old game, WAL entries
+ *  - NEW GAME (replaceGame) destroys nothing: the old game, WAL entries
  *    merged, is written back as revision + 1 and the WAL is emptied of it;
  *    the new game's first save (afterRevision + 1) pushes it to `previous`.
  */
@@ -45,7 +45,7 @@ import { parseRoute } from '@/core/Route';
 import { PROBE_TANK_CAPACITY_KG } from '@/ship/propellant';
 import { BEACON_FILL_FRAC, BEACON_NOTE_TITLE, cannibalizeLossFrac } from '@/ship/emergency';
 import { compactEntries } from './actionJournal';
-import { loadForBoot, mergeCritical, openingLog, prepareNewGame, replaceGame, universeOptionsFor } from './bootLoad';
+import { loadForBoot, mergeCritical, openingLog, replaceGame, universeOptionsFor } from './bootLoad';
 import golden from './fixtures/v1-golden.json';
 import legacy from './fixtures/v0-legacy-log.json';
 import { idbStore } from './idbStore';
@@ -449,11 +449,11 @@ describe('openingLog — the log a boot starts with', () => {
   });
 });
 
-describe('prepareNewGame — NEW GAME destroys nothing (carried obligation 5)', () => {
+describe('replaceGame — NEW GAME destroys nothing (carried obligation 5)', () => {
   it('Given no save, Then afterRevision is 0 and the store is untouched', async () => {
     const store = memoryStore();
     const load = await loadForBoot(store, wal);
-    expect(await prepareNewGame(store, wal, load)).toEqual({ afterRevision: 0 });
+    expect((await replaceGame(store, wal, load)).afterRevision).toBe(0);
     expect(await store.load()).toEqual({ current: null, previous: null });
   });
 
@@ -461,7 +461,7 @@ describe('prepareNewGame — NEW GAME destroys nothing (carried obligation 5)', 
     append(beaconAfterGolden());
     const store = await storeWith(save(7));
     const load = await loadForBoot(store, wal);
-    expect(await prepareNewGame(store, wal, load)).toEqual({ afterRevision: 8 });
+    expect((await replaceGame(store, wal, load)).afterRevision).toBe(8);
     const { current } = await store.load();
     expect((current as SaveV1).revision).toBe(8);
     expect((current as SaveV1).saveId).toBe(G.saveId);
@@ -472,7 +472,7 @@ describe('prepareNewGame — NEW GAME destroys nothing (carried obligation 5)', 
   it('Given NEW GAME confirmed but the tab closed before the new game saved, Then the next boot still offers the old game (beacon once)', async () => {
     append(beaconAfterGolden());
     const store = await storeWith(save(7));
-    await prepareNewGame(store, wal, await loadForBoot(store, wal));
+    await replaceGame(store, wal, await loadForBoot(store, wal));
     const again = (await loadForBoot(store, wal)).save!;
     expect(again.saveId).toBe(G.saveId);
     expect(again.revision).toBe(8);
@@ -481,7 +481,7 @@ describe('prepareNewGame — NEW GAME destroys nothing (carried obligation 5)', 
 
   it("Given the new game's first save (afterRevision + 1, a fresh saveId), Then it is what the next boot continues, and the old game is kept as previous", async () => {
     const store = await storeWith(save(7));
-    const { afterRevision } = await prepareNewGame(store, wal, await loadForBoot(store, wal));
+    const { afterRevision } = await replaceGame(store, wal, await loadForBoot(store, wal));
     const fresh = save(afterRevision + 1, { saveId: OTHER_UUID, actions: [] });
     await store.save(fresh);
     const r = await loadForBoot(store, wal);
@@ -491,11 +491,11 @@ describe('prepareNewGame — NEW GAME destroys nothing (carried obligation 5)', 
     expect((previous as SaveV1).saveId).toBe(G.saveId);
   });
 
-  it('Given the store cannot write, Then prepareNewGame still resolves with afterRevision above the old save (the new game outranks it)', async () => {
+  it('Given the store cannot write, Then replaceGame still resolves with afterRevision above the old save (the new game outranks it)', async () => {
     walSnapshot(save(8));
     const store = brokenStore();
     const load = await loadForBoot(store, wal);
-    await expect(prepareNewGame(store, wal, load)).resolves.toEqual({ afterRevision: 9 });
+    expect((await replaceGame(store, wal, load)).afterRevision).toBe(9);
   });
 });
 
@@ -543,7 +543,7 @@ describe('universeOptionsFor — the Universe a boot builds', () => {
 //
 // Minors: keepCorrupt only in writer tabs (`loadForBoot(store, wal, { writer })`,
 // writer by default), and never twice for an identical raw.
-// I2: prepareNewGame keeps a copy of the replaced game on the kept shelf.
+// I2: replaceGame keeps a copy of the replaced game on the kept shelf.
 // =============================================================================
 
 function appendAs(saveId: string, entries: readonly ActionEntry[]): void {
@@ -557,7 +557,7 @@ describe('fix round 1 — I1: an old game\'s WAL entries never reach a new game'
     appendAs(G.saveId, beaconAfterGolden());
     const old = await loadForBoot(store, wal);
     expect(beaconNotes(old.save!)).toHaveLength(1);
-    const { afterRevision } = await prepareNewGame(store, wal, old);
+    const { afterRevision } = await replaceGame(store, wal, old);
     const fresh = save(afterRevision + 1, { saveId: OTHER_UUID, actions: [] });
     expect(wal.writeSnapshot(fresh)).toBe(true);
 
@@ -570,7 +570,7 @@ describe('fix round 1 — I1: an old game\'s WAL entries never reach a new game'
     walSnapshot(save(7));
     append(beaconAfterGolden());
     const old = await loadForBoot(store, wal);
-    await prepareNewGame(store, wal, old);
+    await replaceGame(store, wal, old);
     const fresh = save(10, { saveId: OTHER_UUID, actions: [] });
     wal.writeSnapshot(fresh);
     expect((await loadForBoot(store, wal)).save).toEqual(fresh);
@@ -637,10 +637,10 @@ describe('fix round 1 — keepCorrupt only by a writer, and once per identical r
 });
 
 describe('fix round 1 — I2: NEW GAME keeps a copy of the replaced game', () => {
-  it('Given a save (7) and its beacon in the WAL, When prepareNewGame runs, Then the merged old game is also on the kept shelf', async () => {
+  it('Given a save (7) and its beacon in the WAL, When replaceGame runs, Then the merged old game is also on the kept shelf', async () => {
     appendAs(G.saveId, beaconAfterGolden());
     const store = await storeWith(save(7));
-    await prepareNewGame(store, wal, await loadForBoot(store, wal));
+    await replaceGame(store, wal, await loadForBoot(store, wal));
     expect(store.corrupt).toHaveLength(1);
     const copy = store.corrupt[0]!.raw as SaveV1;
     expect(copy.saveId).toBe(G.saveId);
@@ -651,7 +651,7 @@ describe('fix round 1 — I2: NEW GAME keeps a copy of the replaced game', () =>
 
   it("Given the new game then saves twice (the old game leaves `previous`), Then the copy is still there", async () => {
     const store = await storeWith(save(7));
-    const { afterRevision } = await prepareNewGame(store, wal, await loadForBoot(store, wal));
+    const { afterRevision } = await replaceGame(store, wal, await loadForBoot(store, wal));
     await store.save(save(afterRevision + 1, { saveId: OTHER_UUID, actions: [] }));
     await store.save(save(afterRevision + 2, { saveId: OTHER_UUID, actions: [] }));
     const { current, previous } = await store.load();
@@ -781,6 +781,50 @@ describe('R25 I3 — the store gets 3 s at boot', () => {
     await vi.advanceTimersByTimeAsync(6_000);
     expect(r).not.toBeNull();
     expect(r!.afterRevision).toBe(8);
+  });
+});
+
+// R26 addition: at boot, a save of ANOTHER game that loses the newest-of
+// comparison is kept on the shelf (deduplicated by raw value); an older
+// revision of the SAME game is not.
+describe('R26 — a losing save of another game is kept at boot', () => {
+  it('Given IndexedDB current is game A (revision 7) and the WAL snapshot is game B (revision 9), When the game boots, Then B wins and A is on the kept shelf', async () => {
+    const store = await storeWith(save(7));
+    walSnapshot(save(9, { saveId: OTHER_UUID, actions: [] }));
+    const r = await loadForBoot(store, wal);
+    expect(r.save?.saveId).toBe(OTHER_UUID);
+    expect(store.corrupt.map((c) => (c.raw as SaveV1).saveId)).toEqual([G.saveId]);
+    expect((store.corrupt[0]!.raw as SaveV1).revision).toBe(7);
+  });
+
+  it('Given the same situation over two boots, Then A is kept once (deduplicated by raw value)', async () => {
+    const store = await storeWith(save(7));
+    walSnapshot(save(9, { saveId: OTHER_UUID, actions: [] }));
+    await loadForBoot(store, wal);
+    await loadForBoot(store, wal);
+    expect(store.corrupt).toHaveLength(1);
+  });
+
+  it('Given current is game B and previous is game A (another game), When the game boots, Then A is kept', async () => {
+    const store = await storeWith(save(7), save(8, { saveId: OTHER_UUID, actions: [] }));
+    const r = await loadForBoot(store, wal);
+    expect(r.save?.saveId).toBe(OTHER_UUID);
+    expect(store.corrupt.map((c) => (c.raw as SaveV1).saveId)).toEqual([G.saveId]);
+  });
+
+  it('Given an older revision of the SAME game loses (previous slot, WAL snapshot), Then nothing is shelved', async () => {
+    const store = await storeWith(save(6), save(7));
+    walSnapshot(save(5));
+    const r = await loadForBoot(store, wal);
+    expect(r.save?.revision).toBe(7);
+    expect(store.corrupt).toHaveLength(0);
+  });
+
+  it('Given a reader tab, Then nothing is shelved (readers never write)', async () => {
+    const store = await storeWith(save(7));
+    walSnapshot(save(9, { saveId: OTHER_UUID, actions: [] }));
+    await loadForBoot(store, wal, { writer: false });
+    expect(store.corrupt).toHaveLength(0);
   });
 });
 

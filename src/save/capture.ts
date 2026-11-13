@@ -14,6 +14,7 @@
  *    interval's unannounced thrust is booked, so the tank always balances.
  *  - The log is read with `exportState()` NOW (the sink's last write can be
  *    stale: mission time moves without writing).
+ *  - Mined world entries are saved aggregated per (asteroid, resource) (R25 I4b).
  *  - applySave restores the Universe FIRST and imports the log AFTER (R6):
  *    the restore's `system:entered` logs an extra ARRIVED visit, which the
  *    import then overwrites. `grounded` is honoured only with a parent; a hull
@@ -168,6 +169,39 @@ function playerPlace(u: Universe): { parentId: string | null; flight: Flight } {
   };
 }
 
+type MinedEntry = SaveV1['world']['entries'][number];
+
+/**
+ * R25 I4b: one entry per (asteroid, resource) — kg summed, the newest mine's
+ * clocks, in first-seen order. The depletion a load rebuilds is the same
+ * (WorldState.restore sums per id and resource); the action log still holds
+ * every single mine.
+ */
+function aggregateMined(entries: readonly MinedEntry[]): MinedEntry[] {
+  const out: MinedEntry[] = [];
+  const byId = new Map<string, Partial<Record<MinedEntry['resource'], MinedEntry>>>();
+  for (const e of entries) {
+    let perRes = byId.get(e.id);
+    if (!perRes) {
+      perRes = {};
+      byId.set(e.id, perRes);
+    }
+    const a = perRes[e.resource];
+    if (!a) {
+      const copy = { ...e };
+      perRes[e.resource] = copy;
+      out.push(copy);
+      continue;
+    }
+    a.kg += e.kg;
+    if (e.wallMs >= a.wallMs) {
+      a.wallMs = e.wallMs;
+      a.orbitSeconds = e.orbitSeconds;
+    }
+  }
+  return out;
+}
+
 export function buildSave(w: SaveWorld, prev: SaveV1 | null): SaveV1 {
   const u = w.universe;
   const tank = u.flight.propellant;
@@ -199,19 +233,28 @@ export function buildSave(w: SaveWorld, prev: SaveV1 | null): SaveV1 {
       emergencyTimesUsed: w.emergency.timesUsed,
     },
     log: { time: log.time, entries: log.entries.map((e) => ({ ...e, body: [...e.body] })) },
-    world: { universeId, entries: w.worldState.entries().map((e) => ({ ...e })) },
+    world: { universeId, entries: aggregateMined(w.worldState.entries()) },
     actions,
   };
+}
+
+export interface ApplyOptions {
+  /**
+   * R25 M1: the boot already built the Universe in this save's place
+   * (universeOptionsFor → `restore`), so the ship is not placed — nor the
+   * system entered — a second time.
+   */
+  readonly universeRestored?: boolean;
 }
 
 /**
  * Put a save back into the running game. False — and nothing changed — when
  * its system (or parent body) cannot be found.
  */
-export function applySave(w: SaveWorld, s: SaveV1): boolean {
+export function applySave(w: SaveWorld, s: SaveV1, opts: ApplyOptions = {}): boolean {
   const u = w.universe;
   const p = s.player;
-  const ok = u.restoreState({
+  const ok = opts.universeRestored === true || u.restoreState({
     system: p.system,
     orbitSeconds: s.savedAt.orbitSeconds,
     parentId: p.parentId,

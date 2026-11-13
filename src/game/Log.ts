@@ -253,22 +253,6 @@ export class ShipLog implements GameModule {
     this.sink = sink;
   }
 
-  /**
-   * [v4-save] The pre-save log under `onespace.log.v1`, for migration into
-   * the first save. Read only: the key is left in place.
-   */
-  legacyState(): LogState | null {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return null;
-      const data = JSON.parse(raw) as { version?: number; time?: number; entries?: LogEntry[] };
-      if (data.version !== LOG_VERSION || !Array.isArray(data.entries)) return null;
-      return { time: typeof data.time === 'number' ? data.time : 0, entries: data.entries };
-    } catch {
-      return null;
-    }
-  }
-
   private sink: ((state: LogState) => void) | null = null;
 
   private save(): void {

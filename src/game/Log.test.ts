@@ -425,30 +425,6 @@ describe('v4 save — export / import, sink and the legacy key', () => {
     bus.emit('system:entered', { system: system('s1', 'Fyss') });
     expect(store.map.has(KEY)).toBe(true);
   });
-
-  it('Given an old onespace.log.v1, When legacyState() is read, Then it returns its time and entries and leaves the key in place', () => {
-    const a = played();
-    const expected = a.exportState();
-    a.dispose();
-    const raw = store.map.get(KEY);
-    expect(raw).toBeDefined();
-
-    bus.clear();
-    const b = new ShipLog();
-    const legacy = b.legacyState();
-    expect(legacy).not.toBeNull();
-    expect(legacy!.time).toBeCloseTo(expected.time, 9);
-    expect(legacy!.entries).toEqual(expected.entries);
-    expect(store.map.get(KEY)).toBe(raw);
-  });
-
-  it('Given no (or a corrupt, or a wrong-version) onespace.log.v1, Then legacyState() is null', () => {
-    expect(new ShipLog().legacyState()).toBeNull();
-    store.map.set(KEY, '{not json');
-    expect(new ShipLog().legacyState()).toBeNull();
-    store.map.set(KEY, JSON.stringify({ version: 99, time: 1, entries: [] }));
-    expect(new ShipLog().legacyState()).toBeNull();
-  });
 });
 
 describe('R25 M2 — dead code', () => {

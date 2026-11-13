@@ -8,7 +8,8 @@
  *    a bare or replayed link boots the title (CONTINUE first) with a notice.
  *    `new` and `nonce` always leave the URL here, so a reload never repeats
  *    them. A replaced game is kept (current as revision + 1, and a copy on
- *    the kept shelf, I2). Reader tabs never write.
+ *    the kept shelf, I2). Reader tabs never write; nor does a boot whose
+ *    store failed or did not answer in 3 s (`storeAvailable: false`, R25).
  *  - `restartAfterRestoreFail`: the saved system cannot be found — a new
  *    start above the kept old game.
  *  - `logBeforeWorld`: the log imported before the Universe exists is the
@@ -17,7 +18,7 @@
  */
 
 import { bootPlan, parseRoute, type BootPlan, type Route } from '@/core/Route';
-import { loadForBoot, openingLog, replaceGame, type BootLoad } from './bootLoad';
+import { loadForBootResult, openingLog, replaceGame, type BootLoad } from './bootLoad';
 import { consumeNewGameNonce, type SessionLike } from './newGameNonce';
 import type { SaveV1 } from './schema';
 import type { SaveStore } from './store';
@@ -48,6 +49,11 @@ export interface BootDecision {
   readonly afterRevision: number;
   /** Log lines for the player, in order. */
   readonly notices: string[];
+  /**
+   * R25 I2: false when the store failed (or did not answer) at boot — the
+   * session is then store-inert: SaveGame writes the WAL only.
+   */
+  readonly storeAvailable: boolean;
 }
 
 /** `search` without `new` and `nonce`; null when it carries neither. */
@@ -72,7 +78,7 @@ export async function decideBoot(d: BootDeps): Promise<BootDecision> {
   }
 
   const notices: string[] = [];
-  const load = await loadForBoot(d.store, d.wal, { writer: d.lock.writer });
+  const { load, storeAvailable } = await loadForBootResult(d.store, d.wal, { writer: d.lock.writer });
   if (load.notice) notices.push(load.notice);
   const hasSave = load.save !== null;
 
@@ -91,14 +97,14 @@ export async function decideBoot(d: BootDeps): Promise<BootDecision> {
   let afterRevision = 0;
   if (plan.start === 'new' && load.save) {
     if (d.lock.writer) {
-      const r = await replaceGame(d.store, d.wal, load);
+      const r = await replaceGame(d.store, d.wal, load, { storeAvailable });
       afterRevision = r.afterRevision;
       if (r.kept) notices.push(OLD_SAVE_KEPT_TEXT);
     } else {
       afterRevision = load.save.revision + 1;
     }
   }
-  return { route, plan, load, afterRevision, notices };
+  return { route, plan, load, afterRevision, notices, storeAvailable };
 }
 
 /** The saved place cannot be found: a new start, above the kept old game (writer only). */
@@ -107,12 +113,14 @@ export async function restartAfterRestoreFail(d: {
   readonly wal: Wal;
   readonly lock: WriterLock;
   readonly load: BootLoad;
+  /** R25 I2/C4: the boot's verdict on the store; false writes nothing to it. Default true. */
+  readonly storeAvailable?: boolean;
 }): Promise<{ afterRevision: number; notices: string[] }> {
   const notices = [RESTORE_FAILED_TEXT];
   const save = d.load.save;
   if (!save) return { afterRevision: 0, notices };
   if (!d.lock.writer) return { afterRevision: save.revision + 1, notices };
-  const r = await replaceGame(d.store, d.wal, d.load);
+  const r = await replaceGame(d.store, d.wal, d.load, { storeAvailable: d.storeAvailable });
   if (r.kept) notices.push(OLD_SAVE_KEPT_TEXT);
   return { afterRevision: r.afterRevision, notices };
 }
