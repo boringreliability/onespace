@@ -198,3 +198,107 @@ describe('ActionEntrySchema — the checkpoint entry (compaction of the oldest a
     });
   }
 });
+
+describe('SaveV1Schema — constraints pinned by mutation testing (Task 7)', () => {
+  type Loose = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+  const looseCopy = () => goldenCopy() as unknown as Loose;
+  const rejects = (s: unknown) => SaveV1Schema.safeParse(s).success === false;
+  const accepts = (s: unknown) => SaveV1Schema.safeParse(s).success === true;
+
+  it('S1: Given a universeId with junk before or after the pattern, or an empty seed part, When parsed, Then it is rejected', () => {
+    for (const id of ['xgx-abc:v1', 'gx-abc:v1x', 'gx-:v1']) {
+      const s = looseCopy();
+      s.universeId = id;
+      s.world.universeId = id;
+      expect(rejects(s), id).toBe(true);
+    }
+  });
+
+  it('S2: Given a log entry with key "", visits 0 or visits 1.5, When parsed, Then it is rejected', () => {
+    for (const [field, v] of [['key', ''], ['visits', 0], ['visits', 1.5]] as const) {
+      const s = looseCopy();
+      s.log.entries[0][field] = v;
+      expect(rejects(s), `${field}=${String(v)}`).toBe(true);
+    }
+  });
+
+  it('S3: Given a world entry whose `by` is "remote", When parsed, Then it is rejected', () => {
+    const s = looseCopy();
+    s.world.entries[0].by = 'remote';
+    expect(rejects(s)).toBe(true);
+  });
+
+  it('S4: Given an action entry with seq 1.5, When parsed, Then it is rejected', () => {
+    const thrust = golden.actions.find((a) => a.source === 'thrust')!;
+    expect(ActionEntrySchema.safeParse({ ...thrust, seq: 1.5 }).success).toBe(false);
+  });
+
+  it('S5: Given a negative cruise-leg distance, jump-refund kg or spool-refund kg, When parsed, Then each is rejected; a cannibalize without timesUsed is accepted', () => {
+    const propellant = (action: Record<string, unknown>) => ({
+      seq: 1,
+      source: 'propellant',
+      payload: { action, ok: true, kg: 1, tankDeltaKg: 0 },
+      wallMs: 1,
+      orbitSeconds: 1,
+    });
+    for (const action of [
+      { kind: 'cruise-leg', distanceKm: -1 },
+      { kind: 'jump-refund', kg: -1 },
+      { kind: 'spool-refund', kg: -1 },
+    ]) {
+      expect(ActionEntrySchema.safeParse(propellant(action)).success, action.kind).toBe(false);
+    }
+    expect(ActionEntrySchema.safeParse(propellant({ kind: 'cannibalize', part: 'tank' })).success).toBe(true);
+  });
+
+  it('S6: Given an emergency timesUsed or ship.emergencyTimesUsed of -1 or 1.5, When parsed, Then each is rejected', () => {
+    const emergency = (timesUsed: number) => ({
+      seq: 1,
+      source: 'emergency',
+      payload: { kind: 'cannibalize', timesUsed },
+      wallMs: 1,
+      orbitSeconds: 1,
+    });
+    for (const v of [-1, 1.5]) {
+      expect(ActionEntrySchema.safeParse(emergency(v)).success, `payload ${v}`).toBe(false);
+      const s = looseCopy();
+      s.ship.emergencyTimesUsed = v;
+      expect(rejects(s), `ship ${v}`).toBe(true);
+    }
+  });
+
+  it('S7: Given bad system seed, system id, parentId or capacityLossFrac, When parsed, Then the bad ones are rejected and the boundaries pass', () => {
+    const bad: Array<[string, (s: Loose) => void]> = [
+      ['seed -1', (s) => (s.player.system.seed = -1)],
+      ['seed 1.5', (s) => (s.player.system.seed = 1.5)],
+      ['system id ""', (s) => (s.player.system.id = '')],
+      ['parentId ""', (s) => (s.player.parentId = '')],
+      ['capacityLossFrac -0.1', (s) => (s.ship.propellant.capacityLossFrac = -0.1)],
+      ['capacityLossFrac 1.1', (s) => (s.ship.propellant.capacityLossFrac = 1.1)],
+    ];
+    for (const [what, mutate] of bad) {
+      const s = looseCopy();
+      mutate(s);
+      expect(rejects(s), what).toBe(true);
+    }
+    const good: Array<[string, (s: Loose) => void]> = [
+      ['parentId null', (s) => (s.player.parentId = null)],
+      ['capacityLossFrac 0', (s) => (s.ship.propellant.capacityLossFrac = 0)],
+      ['capacityLossFrac 1', (s) => (s.ship.propellant.capacityLossFrac = 1)],
+    ];
+    for (const [what, mutate] of good) {
+      const s = looseCopy();
+      mutate(s);
+      expect(accepts(s), what).toBe(true);
+    }
+  });
+
+  it('S8: Given an unknown key inside savedAt or inside world, When parsed, Then it is rejected', () => {
+    const a = looseCopy();
+    a.savedAt.extra = 1;
+    expect(rejects(a)).toBe(true);
+    const b = looseCopy();
+    b.world.extra = 1;
+    expect(rejects(b)).toBe(true);
+  });
+});

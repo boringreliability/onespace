@@ -241,3 +241,57 @@ describe('legacyLogToV1 — the old localStorage logbook', () => {
     }
   });
 });
+
+describe('migrate — messages and reasons pinned by mutation testing (Task 7)', () => {
+  it('M1: Given null, [] or a string, When migrated, Then reason is invalid and issues is exactly the not-an-object message', () => {
+    for (const raw of [null, [], 'save']) {
+      const r = migrate(raw);
+      expect(r.ok).toBe(false);
+      if (r.ok) continue;
+      expect(r.reason).toBe('invalid');
+      expect(r.issues).toEqual(['(root): not an object']);
+    }
+  });
+
+  it('M2: Given format 1.5, When migrated, Then reason is invalid and the issue names format and integer', () => {
+    const r = migrate({ ...goldenCopy(), format: 1.5 });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toBe('invalid');
+    expect(r.issues[0]!.startsWith('format:')).toBe(true);
+    expect(r.issues[0]).toContain('integer');
+  });
+
+  it('M3: Given format 0 or -1, When migrated, Then reason is unknown-format with the "unknown format N" message', () => {
+    for (const f of [0, -1]) {
+      const r = migrate({ ...goldenCopy(), format: f });
+      expect(r.ok).toBe(false);
+      if (r.ok) continue;
+      expect(r.reason).toBe('unknown-format');
+      expect(r.issues).toEqual([`format: unknown format ${f}`]);
+    }
+  });
+
+  it('M4: Given an object whose format getter throws, When migrated, Then it does not throw and is invalid with the error message', () => {
+    const o: Record<string, unknown> = {};
+    Object.defineProperty(o, 'format', {
+      get() {
+        throw new Error('boom');
+      },
+    });
+    expect(() => migrate(o)).not.toThrow();
+    const r = migrate(o);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toBe('invalid');
+    expect(r.issues[0]).toBe('(root): boom');
+  });
+
+  it('M5: Given the golden save plus a top-level unknown key, When migrated, Then reason is newer-build and an issue is labelled (root)', () => {
+    const r = migrate({ ...goldenCopy(), cheat: true });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toBe('newer-build');
+    expect(r.issues.some((i) => i.startsWith('(root):'))).toBe(true);
+  });
+});

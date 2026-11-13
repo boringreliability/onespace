@@ -445,3 +445,165 @@ describe('wal — entries know their game (Task 6 fix round 1, I1)', () => {
     expect(w.readTagged().snapshot).toEqual(w.read().snapshot);
   });
 });
+
+// =============================================================================
+// Task 7 — gaps the mutation run found (W1–W10).
+// =============================================================================
+
+const SNAP_KEY = 'onespace.wal.v1.snapshot';
+
+/** Put raw critical items under KEY, as another build or a hand edit might have. */
+function putEnvelope(storage: FakeStorage, env: unknown): void {
+  storage.setItem(KEY, JSON.stringify(env));
+}
+
+function storedCritical(storage: FakeStorage): Array<Record<string, unknown>> {
+  return (JSON.parse(storage.getItem(KEY)!) as { critical: Array<Record<string, unknown>> }).critical;
+}
+
+describe('wal — Task 7: a hostile or foreign envelope (W1, W2, W3, W6)', () => {
+  it('W1a: Given junk items (null, 5, "x") beside one good entry, When read, Then it does not throw, returns the good entry, and the next append drops the junk', () => {
+    const storage = new FakeStorage();
+    putEnvelope(storage, { v: 1, critical: [null, 5, 'x', { e: thrust(1), by: null }] });
+    const w = createWal(storage);
+    expect(() => w.read()).not.toThrow();
+    expect(w.read().critical).toEqual([thrust(1)]);
+    expect(w.appendCritical(thrust(2))).toBe(true);
+    expect(storedCritical(storage)).toHaveLength(2);
+  });
+
+  it('W1b: Given a wrong version or a critical that is not an array, When read, Then it is empty and does not throw', () => {
+    for (const env of [{ v: 2, critical: [{ e: thrust(1), by: null }] }, { v: 1, critical: {} }]) {
+      const storage = new FakeStorage();
+      putEnvelope(storage, env);
+      const w = createWal(storage);
+      expect(() => w.read()).not.toThrow();
+      expect(w.read().critical).toEqual([]);
+    }
+  });
+
+  it('W2: Given one valid and one invalid stored entry, When read and readTagged, Then only the valid one comes back (no hole)', () => {
+    const storage = new FakeStorage();
+    putEnvelope(storage, {
+      v: 1,
+      critical: [
+        { e: thrust(1), by: null },
+        { e: { seq: 0, source: 'thrust', payload: { kg: -5 } }, by: null },
+      ],
+    });
+    const w = createWal(storage);
+    expect(w.read().critical).toEqual([thrust(1)]);
+    expect(w.readTagged().critical).toEqual([{ e: thrust(1), by: null, saveId: null }]);
+  });
+
+  it('W3: Given a stored snapshot that fails migrate ({"format":1}), When read, Then snapshot is null', () => {
+    const storage = new FakeStorage();
+    storage.setItem(SNAP_KEY, '{"format":1}');
+    expect(createWal(storage).read().snapshot).toBeNull();
+    expect(createWal(storage).readTagged().snapshot).toBeNull();
+  });
+
+  it('W6: Given a stored entry whose saveId is the number 7, When readTagged, Then its saveId is null', () => {
+    const storage = new FakeStorage();
+    putEnvelope(storage, { v: 1, critical: [{ e: thrust(1), by: null, saveId: 7 }] });
+    expect(createWal(storage).readTagged().critical).toEqual([{ e: thrust(1), by: null, saveId: null }]);
+  });
+});
+
+describe('wal — Task 7: clear and writeSnapshot touch only what they must (W4, W5, W9, W10)', () => {
+  it('W4: Given the only entry is covered by snapshot r5, When clear(5), Then the entries key is removed, not left as an empty envelope', () => {
+    const storage = new FakeStorage();
+    const w = createWal(storage);
+    w.appendCritical(thrust(1));
+    w.writeSnapshot(saveAt(5));
+    expect(w.readTagged().critical[0]!.by).toBe(5);
+    w.clear(5);
+    expect(storage.getItem(KEY)).toBeNull();
+  });
+
+  it('W5a: Given untagged entries and a snapshot that covers none, When writeSnapshot, Then the entries key is not rewritten', () => {
+    const storage = new FakeStorage();
+    const w = createWal(storage);
+    w.appendCritical(thrust(1));
+    const save = saveAt(2);
+    save.actions = [];
+    const spy = vi.spyOn(storage, 'setItem');
+    expect(w.writeSnapshot(save)).toBe(true);
+    expect(spy.mock.calls.filter(([k]) => k === KEY)).toHaveLength(0);
+  });
+
+  it('W5b: Given entries covered by r8, When clear(7) drops nothing, Then the entries key is not rewritten', () => {
+    const storage = new FakeStorage();
+    const w = createWal(storage);
+    w.appendCritical(thrust(1));
+    w.writeSnapshot(saveAt(8));
+    const before = storage.getItem(KEY);
+    const spy = vi.spyOn(storage, 'setItem');
+    w.clear(7);
+    expect(spy.mock.calls.filter(([k]) => k === KEY)).toHaveLength(0);
+    expect(storage.getItem(KEY)).toBe(before);
+  });
+
+  it('W9: Given a stored snapshot with no readable revision, When clear(100), Then it is left in place', () => {
+    const storage = new FakeStorage();
+    storage.setItem(SNAP_KEY, '{"no":"revision"}');
+    createWal(storage).clear(100);
+    expect(storage.getItem(SNAP_KEY)).toBe('{"no":"revision"}');
+  });
+
+  it('W10: Given a stored entry with no seq, When a snapshot is written and cleared, Then the entry is still there, untagged', () => {
+    const storage = new FakeStorage();
+    putEnvelope(storage, { v: 1, critical: [{ e: {}, by: null }] });
+    const w = createWal(storage);
+    w.writeSnapshot(saveAt(3));
+    w.clear(3);
+    expect(storedCritical(storage)).toEqual([{ e: {}, by: null }]);
+  });
+});
+
+describe('wal — Task 7: coverage by the highest seq (W7, W8)', () => {
+  it('W7: Given an entry stored and a save whose actions is not an array, When writeSnapshot, Then it does not throw and returns true', () => {
+    const storage = new FakeStorage();
+    const w = createWal(storage);
+    w.appendCritical(thrust(1));
+    const save = saveAt(4);
+    (save as { actions: unknown }).actions = undefined;
+    expect(() => w.writeSnapshot(save)).not.toThrow();
+    expect(w.writeSnapshot(save)).toBe(true);
+  });
+
+  it('W8: Given an untagged entry seq 6 and actions out of order [seq 9, seq 4], When writeSnapshot(r3), Then the entry is tagged r3 (the highest seq counts)', () => {
+    const storage = new FakeStorage();
+    const w = createWal(storage);
+    w.appendCritical(thrust(6));
+    const save = saveAt(3);
+    save.actions = [thrust(9), thrust(4)] as SaveV1['actions'];
+    w.writeSnapshot(save);
+    expect(w.readTagged().critical[0]!.by).toBe(3);
+  });
+
+  it('W8b: Given an untagged entry seq 6 and actions [seq 9, a checkpoint with seq 2 and upToSeq 3], When writeSnapshot(r3), Then the entry is tagged r3 (a lower upToSeq never lowers the cover)', () => {
+    const storage = new FakeStorage();
+    const w = createWal(storage);
+    w.appendCritical(thrust(6));
+    const save = saveAt(3);
+    const checkpoint = {
+      seq: 2,
+      source: 'checkpoint',
+      payload: {
+        upToSeq: 3,
+        tankNetKg: 0,
+        capacityLossNetFrac: 0,
+        cargoNetKg: { ice: 0, metal: 0, silicate: 0, rare: 0 },
+        minedByAsteroid: {},
+        emergency: { cannibalize: 0, cannibalizeCargo: 0, beacon: 0 },
+        lastCannibalizeTimesUsed: 0,
+      },
+      wallMs: 1,
+      orbitSeconds: 1,
+    };
+    save.actions = [thrust(9), checkpoint] as SaveV1['actions'];
+    w.writeSnapshot(save);
+    expect(w.readTagged().critical[0]!.by).toBe(3);
+  });
+});

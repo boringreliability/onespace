@@ -17,7 +17,7 @@
  * oldest entries fold into one `checkpoint` holding their sums.
  */
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Vector3 } from 'three';
 
 import { bus } from '@/core/EventBus';
@@ -31,7 +31,7 @@ import { WorldState, type MinedEntry } from '@/game/worldState';
 import { CARGO_CAPACITY_KG, Cargo, type CargoAction, type CargoResult } from '@/ship/cargo';
 import { PROBE_TANK_CAPACITY_KG, Propellant } from '@/ship/propellant';
 import type { PropellantAction } from '@/ship/travelCost';
-import { ActionJournal, MAX_ACTIONS } from './actionJournal';
+import { ActionJournal, MAX_ACTIONS, compactEntries } from './actionJournal';
 import { replay, type ReplayState } from './replay';
 import { ActionEntrySchema, type ActionEntry } from './schema';
 
@@ -621,5 +621,202 @@ describe('R13/R14 — noteEmergency and its claim', () => {
     j.drain();
     bus.emit('emergency:used', { kind: 'beacon' });
     expect(j.drain().filter((e) => e.source === 'emergency')).toHaveLength(1);
+  });
+});
+
+// =============================================================================
+// Task 7 — gaps the mutation run found (J1–J13).
+// =============================================================================
+
+function thrustEntry(seq: number, over: Partial<ActionEntry> = {}): ActionEntry {
+  return { seq, source: 'thrust', payload: { kg: 1 }, wallMs: 1_000 + seq, orbitSeconds: seq, ...over } as ActionEntry;
+}
+
+function cannibalizeEntry(seq: number, kind: 'cannibalize' | 'cannibalize-cargo', timesUsed: number): ActionEntry {
+  return { seq, source: 'emergency', payload: { kind, timesUsed }, wallMs: 1_000 + seq, orbitSeconds: seq };
+}
+
+describe('Task 7 — the books ignore non-finite named amounts (J1)', () => {
+  it('J1: Given baseline 100, a NaN tankDeltaKg, a -10 spend and an ok cargo action with fuelKg NaN, When settleThrust(70, 100), Then thrust of 20 kg is drained', () => {
+    const { j } = journal();
+    j.setBaseline(100);
+    bus.emit('propellant:action', { action: { kind: 'beacon' }, ok: true, kg: 0, tankDeltaKg: Number.NaN });
+    propellant({ kind: 'beacon' }, 10);
+    cargo({ kind: 'refine' }, okResult({ fuelKg: Number.NaN }));
+    j.settleThrust(70, 100);
+    const thrusts = j.drain().filter((e) => e.source === 'thrust');
+    expect(thrusts).toHaveLength(1);
+    expect((thrusts[0]!.payload as { kg: number }).kg).toBeCloseTo(20, 9);
+  });
+});
+
+describe('Task 7 — a noted emergency is claimed exactly once, by kind AND timesUsed (J2)', () => {
+  it('J2a: Given noteEmergency(beacon), When emergency:used cannibalize-cargo arrives (both timesUsed undefined), Then it is logged too', () => {
+    const { j } = journal();
+    j.noteEmergency({ kind: 'beacon' });
+    bus.emit('emergency:used', { kind: 'cannibalize-cargo' });
+    const out = j.drain();
+    expect(out).toHaveLength(2);
+    expectStrictlyRising(seqsOf(out));
+  });
+
+  it('J2b: Given noteEmergency(cannibalize, timesUsed 1), When emergency:used cannibalize timesUsed 2 arrives, Then it is logged too', () => {
+    const { j } = journal();
+    j.noteEmergency({ kind: 'cannibalize', timesUsed: 1 });
+    bus.emit('emergency:used', { kind: 'cannibalize', timesUsed: 2 });
+    expect(j.drain()).toHaveLength(2);
+  });
+
+  it('J2c: Given one noteEmergency(beacon) and TWO emergency:used beacon, Then the drain holds 2 entries — a claim is consumed once', () => {
+    const { j } = journal();
+    j.noteEmergency({ kind: 'beacon' });
+    bus.emit('emergency:used', { kind: 'beacon' });
+    bus.emit('emergency:used', { kind: 'beacon' });
+    expect(j.drain()).toHaveLength(2);
+  });
+});
+
+describe('Task 7 — dispose (J3, J4)', () => {
+  it('J3: Given the journal subscribed to the bus, When it is disposed, Then every unsubscribe it was handed is called exactly once', () => {
+    const real = bus.on.bind(bus);
+    const captured: Array<ReturnType<typeof vi.fn>> = [];
+    const spy = vi.spyOn(bus, 'on').mockImplementation(((event: never, fn: never) => {
+      const off = vi.fn(real(event, fn));
+      captured.push(off);
+      return off;
+    }) as never);
+    try {
+      const { clock } = handClock();
+      const j = new ActionJournal(clock);
+      expect(captured.length).toBeGreaterThan(0);
+      j.dispose();
+      for (const off of captured) expect(off).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('J4: Given a disposed journal, When noteThrust and settleThrust run, Then nothing is logged', () => {
+    const { j } = journal();
+    j.dispose();
+    j.noteThrust(100, 50, 0);
+    j.settleThrust(50, 100);
+    expect(j.drain()).toEqual([]);
+  });
+});
+
+describe('Task 7 — noteThrust refuses what is not a number, and dust (J5, J6)', () => {
+  it('J5: Given a non-finite tank before or after, When noteThrust runs, Then nothing is logged and no gain is counted', () => {
+    const { j } = journal();
+    j.noteThrust(Number.POSITIVE_INFINITY, 10, 0);
+    j.noteThrust(10, Number.POSITIVE_INFINITY, 0);
+    expect(j.drain()).toEqual([]);
+    expect(j.unexplainedGainKg).toBe(0);
+  });
+
+  it('J6: Given a remainder of ±1e-12 kg (float dust), When noteThrust runs, Then it is neither a burn nor a gain', () => {
+    const { j } = journal();
+    j.noteThrust(100, 100 - 1e-12, 0);
+    j.noteThrust(100, 100 + 1e-12, 0);
+    expect(j.drain()).toEqual([]);
+    expect(j.unexplainedGainKg).toBe(0);
+  });
+});
+
+describe('Task 7 — the baseline must be a finite number (J7)', () => {
+  for (const [what, v] of [['NaN', Number.NaN], ['Infinity', Number.POSITIVE_INFINITY]] as const) {
+    it(`J7: Given setBaseline(${what}), When settleThrust(50, 100), Then one thrust of 50 kg — the opening mass stands in`, () => {
+      const { j } = journal();
+      j.setBaseline(v);
+      j.settleThrust(50, 100);
+      const out = j.drain();
+      expect(out).toHaveLength(1);
+      expect(out[0]!.source).toBe('thrust');
+      expect((out[0]!.payload as { kg: number }).kg).toBe(50);
+    });
+  }
+});
+
+describe('Task 7 — peek is a copy (J8)', () => {
+  it('J8: Given one noted entry, When peek() is held and another action is noted, Then the held array is unchanged', () => {
+    const { j } = journal();
+    j.noteMined(mined());
+    const p = j.peek();
+    expect(p).toHaveLength(1);
+    j.noteMined(mined({ id: 'gx-test:f0:a2' }));
+    expect(p).toHaveLength(1);
+    expect(j.peek()).toHaveLength(2);
+  });
+});
+
+describe('Task 7 — restore forgets the other timeline (J9, J10)', () => {
+  it('J9a: Given a noted beacon whose emit never came, When restore([]) and a beacon is announced, Then it is logged (the claim was cleared)', () => {
+    const { j } = journal();
+    j.noteEmergency({ kind: 'beacon' });
+    j.restore([]);
+    bus.emit('emergency:used', { kind: 'beacon' });
+    expect(j.drain()).toHaveLength(1);
+  });
+
+  it('J9b: Given baseline 100 and a -10 spend, When restore([]) and settleThrust(70, 100), Then thrust is 30 (the stale -10 is gone)', () => {
+    const { j } = journal();
+    j.setBaseline(100);
+    propellant({ kind: 'beacon' }, 10);
+    j.restore([]);
+    j.settleThrust(70, 100);
+    const out = j.drain();
+    expect(out).toHaveLength(1);
+    expect((out[0]!.payload as { kg: number }).kg).toBeCloseTo(30, 9);
+  });
+
+  it('J10: Given a restored checkpoint whose upToSeq (10) exceeds its seq (3), When a mine is noted, Then its seq is 11', () => {
+    const { j } = journal();
+    const checkpoint = {
+      seq: 3,
+      source: 'checkpoint',
+      payload: {
+        upToSeq: 10,
+        tankNetKg: 0,
+        capacityLossNetFrac: 0,
+        cargoNetKg: { ice: 0, metal: 0, silicate: 0, rare: 0 },
+        minedByAsteroid: {},
+        emergency: { cannibalize: 0, cannibalizeCargo: 0, beacon: 0 },
+        lastCannibalizeTimesUsed: 0,
+      },
+      wallMs: 1,
+      orbitSeconds: 1,
+    } as ActionEntry;
+    j.restore([checkpoint]);
+    j.noteMined(mined());
+    expect(j.drain()[0]!.seq).toBe(11);
+  });
+});
+
+describe('Task 7 — compactEntries edges (J11–J13)', () => {
+  it('J11a: Given max 0, When one entry is compacted, Then it comes back as it is (at least one is kept)', () => {
+    const e1 = thrustEntry(1);
+    expect(compactEntries([e1], 0)).toEqual([e1]);
+  });
+
+  it('J11b: Given 5 entries and a fractional max 2.5, When compacted, Then 2 entries remain (the max is floored)', () => {
+    const entries = [1, 2, 3, 4, 5].map((n) => thrustEntry(n));
+    expect(compactEntries(entries, 2.5)).toHaveLength(2);
+  });
+
+  it('J12: Given a cannibalize (timesUsed 1) then a cannibalize-cargo (timesUsed 3), When folded, Then lastCannibalizeTimesUsed is 1', () => {
+    const entries = [cannibalizeEntry(1, 'cannibalize', 1), cannibalizeEntry(2, 'cannibalize-cargo', 3), thrustEntry(3), thrustEntry(4), thrustEntry(5)];
+    const out = compactEntries(entries, 3);
+    const cp = out[0]!;
+    expect(cp.source).toBe('checkpoint');
+    if (cp.source === 'checkpoint') expect(cp.payload.lastCannibalizeTimesUsed).toBe(1);
+  });
+
+  it('J13: Given entries with different clocks folded at max 2, Then the checkpoint carries the clocks of the LAST absorbed entry', () => {
+    const entries = [1, 2, 3, 4].map((n) => thrustEntry(n, { wallMs: 5_000 + n * 10, orbitSeconds: n * 100 }));
+    const out = compactEntries(entries, 2);
+    expect(out).toHaveLength(2);
+    expect(out[0]!.source).toBe('checkpoint');
+    expect(out[0]!.wallMs).toBe(5_030);
+    expect(out[0]!.orbitSeconds).toBe(300);
   });
 });
