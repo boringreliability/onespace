@@ -11,8 +11,9 @@
  *  - player and world are separate (P2); both clocks on everything (P5);
  *  - the log is read with `ShipLog.exportState()` AT SAVE TIME (mission time
  *    is current, not whatever the sink last saw);
- *  - a cruising ship is saved as a circular orbit about the nearest body at
- *    its current radius (§5.2) — and the live ship keeps cruising;
+ *  - a cruising ship is saved as a prograde circular orbit at its current
+ *    radius about the deepest body whose SOI holds it (§5.2, R23, R24) — and
+ *    the live ship keeps cruising;
  *  - unannounced thrust is aggregated so the books balance;
  *  - the action log is append-only across saves and capped at MAX_ACTIONS;
  *  - round trip: buildSave → JSON → migrate → applySave into a fresh Universe;
@@ -282,7 +283,7 @@ describe('buildSave — the log comes from exportState at save time', () => {
   });
 });
 
-describe('buildSave — cruise is saved as a circular orbit about the nearest body (§5.2)', () => {
+describe('buildSave — cruise is saved as a circular orbit about the deepest SOI that holds the ship (§5.2, R23)', () => {
   function cruising() {
     const g = live();
     g.frames(1); // nearest is found by update
@@ -481,6 +482,43 @@ describe('R23: a cruise save keeps its place through a load', () => {
     }
     expect(worstSpeedRel).toBeLessThan(1e-6);
     expect(worstRadiusKm).toBeLessThan(1e-3);
+  });
+
+  it('Given a cruise save in open space in Fyss, When restored, Then its orbital angular momentum points the same way as the planets\'', () => {
+    /** Save a cruise placed by `place`, load it into a fresh Universe, return that Universe. */
+    const roundTrip = (place: (g: Live) => void): Universe => {
+      const a = live();
+      place(a);
+      const loaded = throughStorage(buildSave(a.w, null));
+      a.dispose();
+      bus.clear();
+      vi.stubGlobal('localStorage', new MemoryStorage());
+      const b = live();
+      expect(applySave(b.w, loaded)).toBe(true);
+      return b.u;
+    };
+    const angular = (u: Universe) => new Vector3().crossVectors(u.flight.position, u.flight.velocity);
+
+    // Open space: the parent is the star; the planets' sense is Σ r × v about it.
+    const u = roundTrip((g) => {
+      g.u.setOrbitSeconds(S9.orbitSeconds);
+      cruiseAt(g, null, bodyEnding(g.u, ':p2').world.clone().multiplyScalar(1.5), new Vector3(30, 0, -20));
+    });
+    expect(u.shipParent).toBeNull();
+    const planets = new Vector3();
+    for (const b of u.allBodies()) if (b.parent === null) planets.add(new Vector3().crossVectors(b.local, b.worldVelocity));
+    expect(angular(u).dot(planets)).toBeGreaterThan(0);
+
+    // A planet parent (the s9 place, Remit 31): the sense of its moons.
+    const v = roundTrip((g) => void cruisingAtS9(g));
+    const planet = bodyEnding(v, ':p2');
+    expect(v.shipParent).toBe(planet);
+    const moons = new Vector3();
+    for (const m of v.allBodies()) {
+      if (m.parent === planet) moons.add(new Vector3().crossVectors(m.local, m.worldVelocity.clone().sub(planet.worldVelocity)));
+    }
+    expect(moons.lengthSq()).toBeGreaterThan(0);
+    expect(angular(v).dot(moons)).toBeGreaterThan(0);
   });
 
   /**

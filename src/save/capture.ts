@@ -6,8 +6,10 @@
  *
  *  - Player and world are separate (P2); both clocks ride on everything (P5).
  *  - Cruise is saved as having dropped out at the nearest stable point
- *    (§5.2): a circular orbit about the nearest body at the ship's current
- *    radius. The live ship keeps cruising — a save reads, it does not act.
+ *    (§5.2): a circular orbit at the ship's current radius about the DEEPEST
+ *    body whose SOI holds it — moon, else its planet, else the star (R23) —
+ *    PROGRADE: in the sense of that body's own children, else of its own
+ *    orbit (R24). The live ship keeps cruising — a save reads, it does not act.
  *  - The books (R7): Cruise's pending leg is announced first, then the
  *    interval's unannounced thrust is booked, so the tank always balances.
  *  - The log is read with `exportState()` NOW (the sink's last write can be
@@ -23,7 +25,7 @@ import { Vector3 } from 'three';
 import type { ShipLog } from '@/game/Log';
 import type { Universe } from '@/game/Universe';
 import type { WorldState } from '@/game/worldState';
-import { circularOrbitState, starRadiusKm } from '@/game/recovery';
+import { circularOrbitState, progradeAttitude, starRadiusKm } from '@/game/recovery';
 import { START_FILL } from '@/ship/propellant';
 import { compactEntries, MAX_ACTIONS, type ActionJournal } from './actionJournal';
 import { CURRENT_FORMAT, type SaveV1 } from './schema';
@@ -49,19 +51,31 @@ type Flight = SaveV1['player']['flight'];
 
 const tuple = (v: Vector3): Vec3 => [v.x, v.y, v.z];
 
-/** A circular orbit at the ship's current radius about a centre (§5.2). */
+type Body = ReturnType<Universe['allBodies']>[number];
+
+/**
+ * A circular orbit at the ship's current radius about a centre (§5.2),
+ * turning the same way as `sense` (an angular momentum; zero: either way).
+ */
 function circularAt(
   fm: Universe['flight'],
   centre: Vector3,
   radiusKm: number,
   mu: number,
   parentId: string | null,
+  sense: Vector3,
 ): { parentId: string | null; flight: Flight } {
   // R21: the ship at the stamped clock, not the substep carry behind it.
   const radial = new Vector3().subVectors(fm.renderWorldPosition, centre);
   const r = radial.length();
   const state = circularOrbitState(radial, radiusKm, mu, radiusKm > 0 && r > 0 ? r / radiusKm - 1 : undefined);
-  const q = state.orientation;
+  // R24: prograde. circularOrbitState turns about +Y (UP × r̂); against the
+  // system's sense, turn it round — the nose (roof still radial) with it.
+  let q = state.orientation;
+  if (new Vector3().crossVectors(state.position, state.velocity).dot(sense) < 0) {
+    state.velocity.negate();
+    q = progradeAttitude(state.velocity, state.position.clone().normalize());
+  }
   return {
     parentId,
     flight: {
@@ -76,18 +90,63 @@ function circularAt(
 
 const ORIGIN = new Vector3();
 
+/** Σ r × v of `bodies` about a centre at `centre` moving at `centreVel`. */
+function angularMomentum(bodies: readonly Body[], centre: Vector3, centreVel: Vector3): Vector3 {
+  const sum = new Vector3();
+  const r = new Vector3();
+  const v = new Vector3();
+  for (const b of bodies) {
+    r.subVectors(b.world, centre);
+    v.subVectors(b.worldVelocity, centreVel);
+    sum.add(new Vector3().crossVectors(r, v));
+  }
+  return sum;
+}
+
+/**
+ * R24: the sense an orbit about `body` (null: the star) turns — its own
+ * children's (the planets' for the star, a planet's moons'), else, without
+ * children, the body's own orbit about its parent.
+ */
+function senseAbout(u: Universe, body: Body | null): Vector3 {
+  const kids = u.allBodies().filter((b) => b.parent === body);
+  if (body === null) return angularMomentum(kids, ORIGIN, ORIGIN);
+  if (kids.length > 0) return angularMomentum(kids, body.world, body.worldVelocity);
+  const p = body.parent;
+  return angularMomentum([body], p ? p.world : ORIGIN, p ? p.worldVelocity : ORIGIN);
+}
+
+/**
+ * R23: the deepest body whose SOI holds `at` (world, km): from the star down
+ * to the child that holds it, and on — or null (the star). A strict
+ * `< soiRadius` agrees with the Universe's hysteresis (enter < 0.98, leave
+ * > 1.02): a ship restored there is neither entered into a child nor lifted
+ * out on its first SOI check.
+ */
+function deepestSoi(u: Universe, at: Vector3): Body | null {
+  const all = u.allBodies();
+  let body: Body | null = null;
+  for (;;) {
+    const next = all.find((b) => b.parent === body && b.soiRadius > 0 && at.distanceTo(b.world) < b.soiRadius);
+    if (!next) return body;
+    body = next;
+  }
+}
+
 /** Where the player is: parent-relative, or — cruising — a circular orbit. */
 function playerPlace(u: Universe): { parentId: string | null; flight: Flight } {
   const fm = u.flight;
   if (fm.cruising) {
-    // About the nearest body only inside its sphere of influence (M-4): an
-    // orbit outside it would not be that body's to keep. Else about the star.
-    const body = u.nearest ?? u.shipParent;
-    if (body && fm.worldPosition.distanceTo(body.world) < body.soiRadius) {
-      return circularAt(fm, body.world, body.spec.radius, body.frame.mu, body.spec.id);
+    // R23: about the deepest body whose SOI holds the ship at the stamped
+    // clock. An orbit outside a body's SOI is not that body's to keep (M-4),
+    // and the nearest body is not always the one that holds the ship (a moon
+    // can be nearer than its planet). Else about the star.
+    const body = deepestSoi(u, fm.renderWorldPosition);
+    if (body) {
+      return circularAt(fm, body.world, body.spec.radius, body.frame.mu, body.spec.id, senseAbout(u, body));
     }
     const star = u.system.stars[0];
-    return circularAt(fm, ORIGIN, star ? starRadiusKm(star) : 0, u.starMu, null);
+    return circularAt(fm, ORIGIN, star ? starRadiusKm(star) : 0, u.starMu, null, senseAbout(u, null));
   }
   const parentId = u.shipParent ? u.shipParent.spec.id : null;
   const grounded = parentId !== null && fm.grounded;
