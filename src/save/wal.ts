@@ -41,16 +41,31 @@ export const WAL_SNAPSHOT_KEY = 'onespace.wal.v1.snapshot';
 
 interface Envelope {
   v: 1;
-  critical: Array<{ e: unknown; by: number | null }>;
+  /** `saveId` (Task 6 fix round 1, I1): the game that wrote the entry; null when not given. */
+  critical: Array<{ e: unknown; by: number | null; saveId?: string | null }>;
+}
+
+/** A critical entry with what the WAL knows of it: which save covers it, which game wrote it. */
+export interface TaggedEntry {
+  readonly e: ActionEntry;
+  /** Revision of the save that contains it; null while none does. */
+  readonly by: number | null;
+  /** The saveId of the game that wrote it; null for an entry written without one. */
+  readonly saveId: string | null;
 }
 
 export interface Wal {
-  /** Synchronously record a resource-critical action. False if invalid or not written. */
-  appendCritical(entry: ActionEntry): boolean;
+  /**
+   * Synchronously record a resource-critical action, with the saveId of the
+   * game it belongs to (I1). False if invalid or not written.
+   */
+  appendCritical(entry: ActionEntry, saveId?: string): boolean;
   /** Synchronously keep `s` as THE snapshot; it covers the entries its action log holds. */
   writeSnapshot(s: SaveV1): boolean;
   /** What is stored, validated; foreign bytes read as empty. */
   read(): { snapshot: unknown | null; critical: ActionEntry[] };
+  /** As `read`, each entry with its coverage (`by`) and its game (`saveId`). */
+  readTagged(): { snapshot: unknown | null; critical: TaggedEntry[] };
   /** Drop what a durable save of revision ≤ `upToRevision` already holds. */
   clear(upToRevision: number): void;
 }
@@ -86,7 +101,11 @@ function loadEntries(storage: Storage): Envelope | null {
   for (const item of o.critical) {
     if (!item || typeof item !== 'object') continue; // M3: gone at the next write
     const it = item as Record<string, unknown>;
-    critical.push({ e: it.e, by: isNum(it.by) ? it.by : null });
+    critical.push({
+      e: it.e,
+      by: isNum(it.by) ? it.by : null,
+      saveId: typeof it.saveId === 'string' ? it.saveId : null,
+    });
   }
   return { v: 1, critical };
 }
@@ -130,14 +149,31 @@ function coveredSeq(s: SaveV1): number {
   return m;
 }
 
+function readTagged(s: Storage | null): { snapshot: unknown | null; critical: TaggedEntry[] } {
+  if (!s) return { snapshot: null, critical: [] };
+  const critical: TaggedEntry[] = [];
+  for (const c of loadEntries(s)?.critical ?? []) {
+    const r = ActionEntrySchema.safeParse(c.e);
+    if (r.success) critical.push({ e: r.data, by: c.by, saveId: c.saveId ?? null });
+  }
+  let snapshot: unknown | null = null;
+  const raw = loadSnapshot(s);
+  if (raw !== undefined && raw !== null) {
+    const m = migrate(raw);
+    snapshot = m.ok ? m.save : null;
+  }
+  return { snapshot, critical };
+}
+
 export function createWal(storage: Storage | null | undefined): Wal {
   const s = storage ?? null;
   return {
-    appendCritical(entry) {
+    appendCritical(entry, saveId) {
       if (!s) return false;
+      if (saveId !== undefined && typeof saveId !== 'string') return false;
       if (!ActionEntrySchema.safeParse(entry).success) return false;
       const env = loadEntries(s) ?? { v: 1, critical: [] };
-      env.critical.push({ e: entry, by: null });
+      env.critical.push({ e: entry, by: null, saveId: saveId ?? null });
       return storeEntries(s, env);
     },
 
@@ -165,19 +201,12 @@ export function createWal(storage: Storage | null | undefined): Wal {
     },
 
     read() {
-      if (!s) return { snapshot: null, critical: [] };
-      const critical: ActionEntry[] = [];
-      for (const c of loadEntries(s)?.critical ?? []) {
-        const r = ActionEntrySchema.safeParse(c.e);
-        if (r.success) critical.push(r.data);
-      }
-      let snapshot: unknown | null = null;
-      const raw = loadSnapshot(s);
-      if (raw !== undefined && raw !== null) {
-        const m = migrate(raw);
-        snapshot = m.ok ? m.save : null;
-      }
-      return { snapshot, critical };
+      const t = readTagged(s);
+      return { snapshot: t.snapshot, critical: t.critical.map((c) => c.e) };
+    },
+
+    readTagged() {
+      return readTagged(s);
     },
 
     clear(upToRevision) {
@@ -208,8 +237,9 @@ function currentStorage(): Storage | null {
 
 /** The game's WAL on `localStorage`, looked up at call time. */
 export const wal: Wal = {
-  appendCritical: (entry) => createWal(currentStorage()).appendCritical(entry),
+  appendCritical: (entry, saveId) => createWal(currentStorage()).appendCritical(entry, saveId),
   writeSnapshot: (save) => createWal(currentStorage()).writeSnapshot(save),
   read: () => createWal(currentStorage()).read(),
+  readTagged: () => createWal(currentStorage()).readTagged(),
   clear: (upTo) => createWal(currentStorage()).clear(upTo),
 };

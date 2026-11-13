@@ -16,8 +16,31 @@ export interface SaveStore {
   load(): Promise<{ current: unknown | null; previous: unknown | null }>;
   /** Write `s` as current; the old current becomes previous. Rejects on failure, changing nothing. */
   save(s: SaveV1): Promise<void>;
-  /** Keep a save that could not be read, untouched, with the wall time it was found. */
+  /**
+   * Keep a save — one that could not be read, or one a NEW GAME replaced —
+   * untouched, with the wall time it was found. A raw already on the shelf
+   * (structurally equal) is not kept twice.
+   */
   keepCorrupt(raw: unknown, wallMs: number): Promise<void>;
+}
+
+/** A key-order-independent fingerprint of a raw value; null when it has none (not JSON). */
+export function rawKey(raw: unknown): string | null {
+  const norm = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(norm);
+    if (v && typeof v === 'object') {
+      const o = v as Record<string, unknown>;
+      return Object.keys(o)
+        .sort()
+        .map((k) => [k, norm(o[k])]);
+    }
+    return v;
+  };
+  try {
+    return JSON.stringify(norm(raw)) ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /**

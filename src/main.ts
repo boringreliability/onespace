@@ -51,14 +51,8 @@ async function main(): Promise<void> {
   // [v4-save] The latest save, before anything is built: IndexedDB plus the
   // WAL, newest valid, migrated (src/save/bootLoad.ts).
   boot.set(0.12, 'reading the logbook vault');
-  const saved = await loadBoot(window.location.search);
-  // `?new=1` has done its work once: a reload must continue the new game,
-  // not start yet another one.
-  if (saved.route.newGame) {
-    const u = new URL(window.location.href);
-    u.searchParams.delete('new');
-    window.history.replaceState(window.history.state, '', u.toString());
-  }
+  // `new` and `nonce` leave the URL inside (decideBoot): a reload continues.
+  const saved = await loadBoot();
   await registerModules(
     engine,
     (progress, status) => bus.emit('boot:progress', { progress: 0.1 + progress * 0.85, status }),

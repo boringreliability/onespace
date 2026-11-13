@@ -8,15 +8,19 @@
  *    (`store.keepCorrupt`) and the notice says so. A store that cannot be
  *    opened (a VersionError after another tab upgraded the database) never
  *    crashes the boot: the WAL snapshot is used if there is one.
- *  - WAL critical entries are merged with DEDUP BY SEQ: an entry the chosen
- *    save already covers (its seq is ≤ the highest seq in its actions, a
- *    checkpoint counting with its upToSeq) is not applied again. A newer one
- *    is appended and applied by the replay rules (R16): the ship's tank and
- *    hold, a `mined` entry into the world (P2), a cannibalization's
- *    timesUsed, and a beacon's logbook note.
+ *  - WAL critical entries are merged only into THEIR game (fix round 1, I1):
+ *    an entry is applied when its saveId is the chosen save's (an entry
+ *    without one: by the rules below only), it is not tagged as covered by a
+ *    revision ≤ the chosen one (`by`), and its seq is above what the save
+ *    covers (the highest seq in its actions, a checkpoint counting with its
+ *    upToSeq). It is appended and applied by the replay rules (R16): the
+ *    ship's tank and hold, a `mined` entry into the world (P2), a
+ *    cannibalization's timesUsed, and a beacon's logbook note.
+ *  - Only a writer tab keeps a copy of an unreadable slot.
  *  - The legacy logbook is offered only when nothing at all is stored.
  *  - `prepareNewGame` destroys nothing: the old game (merged) is written back
- *    as revision + 1; the new game saves from `afterRevision + 1`.
+ *    as revision + 1 AND kept as a copy on the kept shelf (I2), which no
+ *    later save evicts; the new game saves from `afterRevision + 1`.
  *
  * Never throws.
  */
@@ -28,7 +32,7 @@ import { legacyLogToV1, migrate } from './migrate';
 import { applyEntry, zeroState, type ReplayState } from './replay';
 import type { ActionEntry, SaveV1 } from './schema';
 import { newestOf, type SaveStore } from './store';
-import type { Wal } from './wal';
+import type { TaggedEntry, Wal } from './wal';
 
 export const SAVE_UNREADABLE_TEXT = 'SAVE UNREADABLE — KEPT A COPY';
 export const STORE_UNAVAILABLE_TEXT = 'SAVE STORAGE UNAVAILABLE — RELOAD THE TAB';
@@ -64,12 +68,26 @@ function nextBeacon(log: SaveV1['log']): number {
   return n + 1;
 }
 
-/** `s` with the WAL entries it does not cover applied, in seq order. Returns `s` itself when none apply. */
-export function mergeCritical(s: SaveV1, entries: readonly ActionEntry[]): SaveV1 {
+/** An entry the WAL holds, with or without its tags (a bare entry: no saveId, not covered). */
+export type WalEntry = ActionEntry | TaggedEntry;
+
+function tagged(x: WalEntry): TaggedEntry {
+  return 'e' in x ? x : { e: x, by: null, saveId: null };
+}
+
+/**
+ * `s` with the WAL entries of ITS game that it does not cover applied, in seq
+ * order. Returns `s` itself when none apply.
+ */
+export function mergeCritical(s: SaveV1, entries: readonly WalEntry[]): SaveV1 {
   const upTo = coveredSeq(s);
   const seen = new Set<number>();
   const fresh: ActionEntry[] = [];
-  for (const e of [...entries].sort((a, b) => a.seq - b.seq)) {
+  const mine = entries
+    .map(tagged)
+    .filter((t) => (t.saveId === null || t.saveId === s.saveId) && !(t.by !== null && t.by <= s.revision))
+    .map((t) => t.e);
+  for (const e of mine.sort((a, b) => a.seq - b.seq)) {
     if (e.seq <= upTo || seen.has(e.seq)) continue;
     seen.add(e.seq);
     fresh.push(e);
@@ -140,9 +158,9 @@ function readLegacyLog(): SaveV1['log'] | null {
   }
 }
 
-function readWal(wal: Wal): { snapshot: SaveV1 | null; critical: ActionEntry[] } {
+function readWal(wal: Wal): { snapshot: SaveV1 | null; critical: TaggedEntry[] } {
   try {
-    const r = wal.read();
+    const r = wal.readTagged();
     // `read` runs the snapshot through migrate already.
     return { snapshot: (r.snapshot as SaveV1 | null) ?? null, critical: r.critical };
   } catch {
@@ -150,7 +168,13 @@ function readWal(wal: Wal): { snapshot: SaveV1 | null; critical: ActionEntry[] }
   }
 }
 
-export async function loadForBoot(store: SaveStore, wal: Wal): Promise<BootLoad> {
+export interface LoadOptions {
+  /** A reader tab reads but never writes: no copy of an unreadable slot. Default true. */
+  readonly writer?: boolean;
+}
+
+export async function loadForBoot(store: SaveStore, wal: Wal, opts: LoadOptions = {}): Promise<BootLoad> {
+  const writer = opts.writer !== false;
   const w = readWal(wal);
   const merged = (s: SaveV1 | null): SaveV1 | null => (s ? mergeCritical(s, w.critical) : null);
 
@@ -173,6 +197,7 @@ export async function loadForBoot(store: SaveStore, wal: Wal): Promise<BootLoad>
       continue;
     }
     notice = SAVE_UNREADABLE_TEXT;
+    if (!writer) continue;
     try {
       await store.keepCorrupt(raw, Date.now());
     } catch {
@@ -183,13 +208,31 @@ export async function loadForBoot(store: SaveStore, wal: Wal): Promise<BootLoad>
 }
 
 /**
- * NEW GAME confirmed: write the old game (WAL merged) back as revision + 1 and
- * clear its WAL, so nothing of it leaks into the new game. The new game's
- * first save is `afterRevision + 1`, which pushes the old one to `previous`.
+ * NEW GAME confirmed (writer tabs only): write the old game (WAL merged) back
+ * as revision + 1, keep a copy of it on the kept shelf (I2: `previous` alone
+ * is evicted by the new game's second save), and clear its WAL, so nothing of
+ * it leaks into the new game. The new game's first save is `afterRevision + 1`.
  */
 export async function prepareNewGame(store: SaveStore, wal: Wal, load: BootLoad): Promise<{ afterRevision: number }> {
-  if (!load.save) return { afterRevision: 0 };
+  const { afterRevision } = await replaceGame(store, wal, load);
+  return { afterRevision };
+}
+
+/** prepareNewGame, also saying whether the copy of the old game was kept. */
+export async function replaceGame(
+  store: SaveStore,
+  wal: Wal,
+  load: BootLoad,
+): Promise<{ afterRevision: number; kept: boolean }> {
+  if (!load.save) return { afterRevision: 0, kept: false };
   const old: SaveV1 = { ...load.save, revision: load.save.revision + 1 };
+  let kept = false;
+  try {
+    await store.keepCorrupt(old, Date.now());
+    kept = true;
+  } catch {
+    // The copy failed; the old game is still written back below.
+  }
   try {
     wal.writeSnapshot(old);
   } catch {
@@ -201,7 +244,7 @@ export async function prepareNewGame(store: SaveStore, wal: Wal, load: BootLoad)
   } catch {
     // The WAL keeps the old game (tagged); the new game's first durable save clears it.
   }
-  return { afterRevision: old.revision };
+  return { afterRevision: old.revision, kept };
 }
 
 /** The log a boot starts with. NEW GAME over a save starts empty: the legacy entries belong to the old game. */

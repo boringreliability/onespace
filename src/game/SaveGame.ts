@@ -92,6 +92,11 @@ export class SaveGame implements GameModule {
   private revisionFloor = 0;
   /** R16: the highest seq already copied to the WAL by `critical`. */
   private walSeq = 0;
+  /**
+   * I1: a new game's saveId, decided when the game starts — so WAL entries
+   * written before its first save already carry the id that save gets.
+   */
+  private newSaveId: string = crypto.randomUUID();
   /** Seconds since the last save (the gap); +Infinity before the first. */
   private sinceSaveS = Number.POSITIVE_INFINITY;
   /** Seconds since init or the last save (the interval). */
@@ -125,6 +130,7 @@ export class SaveGame implements GameModule {
   continueFrom(save: SaveV1 | null): void {
     this.prev = save;
     this.revisionFloor = 0;
+    if (!save) this.newSaveId = crypto.randomUUID();
     this.sinceSaveS = save ? 0 : Number.POSITIVE_INFINITY;
     this.sinceIntervalS = 0;
     this.wanted.clear();
@@ -211,9 +217,11 @@ export class SaveGame implements GameModule {
     }
     const entry = journal.noteEmergency(used);
     let ok = entry !== null;
+    // I1: each entry names its game, so a reload never applies it to another.
+    const saveId = this.prev?.saveId ?? this.newSaveId;
     for (const e of journal.peek()) {
       if (e.seq <= this.walSeq) continue;
-      if (!this.wal.appendCritical(e)) ok = false;
+      if (!this.wal.appendCritical(e, saveId)) ok = false;
       this.walSeq = Math.max(this.walSeq, e.seq);
     }
     // R14 M4: not on disk is not silent (the autosave on the next tick still tries).
@@ -292,7 +300,7 @@ export class SaveGame implements GameModule {
     // R14 M2: a tank swapped since the last tick starts the books now, not as thrust.
     this.syncBaseline(false);
     let save = buildSave(this.world, this.prev);
-    if (!this.prev && this.revisionFloor > 0) save = { ...save, revision: this.revisionFloor + 1 };
+    if (!this.prev) save = { ...save, saveId: this.newSaveId, revision: this.revisionFloor + 1 };
     this.prev = save;
     this.revisionFloor = 0;
     this.tank = this.world.universe.flight.propellant;

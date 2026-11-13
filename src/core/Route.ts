@@ -70,6 +70,8 @@ export interface Route {
   readonly dev?: boolean;
   /** [v4-save] `?new=1`: start a new game even when a save exists. */
   readonly newGame?: true;
+  /** [v4-save] R17: the one-time nonce NEW GAME's confirmed press issued (32 hex). */
+  readonly newGameNonce?: string;
   /** Human-readable notes about dropped fields, for the log. */
   readonly warnings: readonly string[];
 }
@@ -136,6 +138,11 @@ export function parseRoute(search: string): Route {
   if (fresh !== null) {
     if (fresh === '1') out.newGame = true;
     else warnings.push(`unknown new "${fresh.slice(0, 24)}" ignored`);
+  }
+  const nonce = q.get('nonce');
+  if (nonce !== null) {
+    if (/^[0-9a-f]{32}$/.test(nonce)) out.newGameNonce = nonce;
+    else warnings.push('unreadable nonce ignored');
   }
   return out;
 }
@@ -210,8 +217,11 @@ export function seeInFlightSearch(search: string, ship: RouteShip): string {
 }
 // --- end v3 T4 ---------------------------------------------------------------
 
-/** [v4-save] Where a confirmed NEW GAME goes: a new game in flight, keeping only the developer overrides. */
-export function newGameSearch(search: string): string {
+/**
+ * [v4-save] Where a confirmed NEW GAME goes: a new game in flight, carrying
+ * its one-time nonce (R17), keeping only the developer overrides.
+ */
+export function newGameSearch(search: string, nonce: string): string {
   const from = new URLSearchParams(search);
   const q = new URLSearchParams();
   for (const k of CARRIED_KEYS) {
@@ -219,6 +229,7 @@ export function newGameSearch(search: string): string {
     if (v !== null) q.set(k, v);
   }
   q.set('new', '1');
+  q.set('nonce', nonce);
   q.set('mode', 'flight');
   const out = q.toString().replace(/(^|&)dev=(?=&|$)/, '$1dev');
   return `?${out}`;

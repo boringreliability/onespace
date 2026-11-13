@@ -275,6 +275,7 @@ function recordingWal(events: string[], over: Partial<Wal> = {}): Wal {
       return over.writeSnapshot ? over.writeSnapshot(s) : base.writeSnapshot(s);
     },
     read: () => base.read(),
+    readTagged: () => base.readTagged(),
     clear: (n) => {
       events.push(`clear:${n}`);
       base.clear(n);

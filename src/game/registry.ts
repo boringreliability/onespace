@@ -51,7 +51,7 @@ import { Audio } from '@/audio/Audio';
 import { Photo } from '@/game/Photo';
 import { DevOverlay } from '@/ui/DevOverlay';
 import { Title } from '@/ui/Title';
-import { bootPlan, companionShip, parseRoute, type BootPlan, type Route } from '@/core/Route';
+import { companionShip, parseRoute, type BootPlan, type Route } from '@/core/Route';
 // -- v3 T4: dust, drive field, audio feed, formation, SEE IN FLIGHT -----------
 import { Dust } from '@/render/Dust';
 import { FlightSense } from '@/game/FlightSense';
@@ -73,7 +73,8 @@ import { memoryStore } from '@/save/memoryStore';
 import { wal } from '@/save/wal';
 import { acquireWriterLock, type WriterLock } from '@/save/writerLock';
 import { applySave } from '@/save/capture';
-import { loadForBoot, openingLog, prepareNewGame, universeOptionsFor, type BootLoad } from '@/save/bootLoad';
+import { universeOptionsFor, type BootLoad } from '@/save/bootLoad';
+import { decideBoot, logBeforeWorld, restartAfterRestoreFail } from '@/save/boot';
 import type { SaveStore } from '@/save/store';
 import type { GameEvents } from '@/core/EventBus';
 // -----------------------------------------------------------------------------
@@ -301,27 +302,41 @@ export interface BootState {
   readonly lock: WriterLock;
   /** NEW GAME over a save: the new game's first save goes above this revision. */
   readonly afterRevision: number;
+  /** Log lines for the player, shown once the HUD is up. */
+  readonly notices: readonly string[];
+}
+
+/** sessionStorage, or null where the browser refuses it. */
+function sessionStore(): Storage | null {
+  try {
+    return window.sessionStorage ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /**
- * [v4-save] Task 6: load the latest save before the world is built — IndexedDB
- * and the WAL, newest valid, WAL entries merged (bootLoad). `?new=1` over a
- * save writes the old game back (merged) and starts above it: nothing is
- * destroyed before the new game's first save. Only the writer tab writes.
+ * [v4-save] Task 6: load the latest save before the world is built — the
+ * decisions live in `decideBoot` (src/save/boot.ts, node-tested): newest valid
+ * save, WAL merged; `?new=1` only with NEW GAME's one-time nonce (R17); `new`
+ * and `nonce` leave the URL before any module exists; only the writer writes.
  */
-export async function loadBoot(search: string): Promise<BootState> {
-  const route = parseRoute(search);
+export async function loadBoot(): Promise<BootState> {
   const store = typeof indexedDB === 'undefined' ? memoryStore() : idbStore();
   const lock = await acquireWriterLock();
-  const load = await loadForBoot(store, wal);
-  const plan = bootPlan(route, load.save !== null);
-  let afterRevision = 0;
-  if (plan.start === 'new' && load.save) {
-    afterRevision = lock.writer
-      ? (await prepareNewGame(store, wal, load)).afterRevision
-      : load.save.revision + 1;
-  }
-  return { route, plan, load, store, lock, afterRevision };
+  const d = await decideBoot({
+    search: window.location.search,
+    store,
+    wal,
+    lock,
+    session: sessionStore(),
+    replaceSearch: (search) => {
+      const u = new URL(window.location.href);
+      u.search = search;
+      window.history.replaceState(window.history.state, '', u.toString());
+    },
+  });
+  return { ...d, store, lock };
 }
 
 export async function registerModules(engine: Engine, progress: ProgressFn, boot: BootState): Promise<void> {
@@ -332,11 +347,12 @@ export async function registerModules(engine: Engine, progress: ProgressFn, boot
   // nothing but the bus, so putting it first costs nothing and closes the seam.
   const shipLog = new ShipLog();
   // [v4-save] The save owns the log from here: no more writes to the legacy
-  // key (it stays as a backup), and the log starts as the boot decided — the
-  // save's, the legacy one imported once, or empty for NEW GAME over a save.
+  // key (it stays as a backup). Before the world exists the log is the NEW
+  // game's (the legacy one imported once, or empty); a continued save's own
+  // log comes with applySave below, so a failed restore leaves none of it.
   shipLog.setSink(() => undefined);
   const continued = boot.plan.start === 'continue' ? boot.load.save : null;
-  shipLog.importState(openingLog(boot.load, boot.plan.start));
+  shipLog.importState(logBeforeWorld(boot.load));
   await engine.add(shipLog);
 
   progress(0.05, 'seeding universe');
@@ -485,19 +501,17 @@ export async function registerModules(engine: Engine, progress: ProgressFn, boot
   const saveWorld = { universe, worldState, shipLog, emergency, journal, cruise, input: engine.input };
   // [v4-save] Task 6: put the save back and continue it — before flight starts,
   // so revisions go on and nothing the boot queued saves the opening world.
-  const notices: string[] = boot.load.notice ? [boot.load.notice] : [];
+  const notices: string[] = [...boot.notices];
   let hasSave = false;
   if (continued && !universe.restoreFailed && applySave(saveWorld, continued)) {
     saveGame.continueFrom(continued);
     hasSave = true;
   } else if (continued) {
     // The saved place cannot be found: a new start, above the kept old game.
-    notices.push('SAVED SYSTEM NOT FOUND — NEW START');
-    shipLog.importState(openingLog(boot.load, 'new'));
-    const after = boot.lock.writer
-      ? (await prepareNewGame(boot.store, wal, boot.load)).afterRevision
-      : continued.revision + 1;
-    saveGame.startNew(after);
+    // The log already is the new start's (logBeforeWorld + its arrival).
+    const r = await restartAfterRestoreFail({ store: boot.store, wal, lock: boot.lock, load: boot.load });
+    notices.push(...r.notices);
+    saveGame.startNew(r.afterRevision);
   } else {
     saveGame.startNew(boot.afterRevision);
   }

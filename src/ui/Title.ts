@@ -12,7 +12,9 @@ import type { EngineContext, GameModule } from '@/core/Engine';
 import { modes } from '@/core/Modes';
 import { config } from '@/core/Config';
 import { activeShotName } from '@/game/Shots';
+import { bus } from '@/core/EventBus';
 import { newGameSearch } from '@/core/Route';
+import { issueNewGameNonce } from '@/save/newGameNonce';
 import { initialTitle, titleKey, titleLabel, titleStep, type TitleEffect, type TitleEvent, type TitleState } from './titleMenu';
 
 /** [v4-save] Task 6: what the title knows of the save, and what CONTINUE does. */
@@ -137,8 +139,17 @@ export class Title implements GameModule {
         return;
       case 'newgame':
         // The first press only arms (render shows the confirmation label).
-        // Confirmed: reload into a new game; the old save is kept (bootLoad.prepareNewGame).
-        if (effect.confirmed) window.location.search = newGameSearch(window.location.search);
+        // Confirmed: reload into a new game, carrying a one-time nonce from
+        // sessionStorage — a link alone cannot do this (R17). The old save is
+        // kept (src/save/boot.ts decideBoot).
+        if (effect.confirmed) {
+          const nonce = issueNewGameNonce(sessionStore());
+          if (nonce === null) {
+            bus.emit('log', { text: 'NEW GAME UNAVAILABLE — SESSION STORAGE BLOCKED', tone: 'warn' });
+            return;
+          }
+          window.location.search = newGameSearch(window.location.search, nonce);
+        }
         return;
       case 'settings':
         if (this.settings) this.settings.hidden = !this.settings.hidden;
@@ -189,6 +200,14 @@ export class Title implements GameModule {
   dispose(): void {
     window.removeEventListener('keydown', this.onKey, true);
     this.root?.remove();
+  }
+}
+
+function sessionStore(): Storage | null {
+  try {
+    return window.sessionStorage ?? null;
+  } catch {
+    return null;
   }
 }
 

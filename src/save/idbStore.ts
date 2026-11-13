@@ -13,7 +13,7 @@
  */
 
 import type { SaveV1 } from './schema';
-import type { SaveStore } from './store';
+import { rawKey, type SaveStore } from './store';
 
 const DB_VERSION = 1;
 const SLOTS = 'slots';
@@ -138,8 +138,24 @@ export function idbStore(name = 'onespace'): SaveStore {
     },
 
     keepCorrupt(raw: unknown, wallMs: number) {
-      return run<void>(CORRUPT, 'readwrite', (tx) => {
-        tx.objectStore(CORRUPT).put({ wallMs, raw });
+      // One transaction: look for the same raw, put it only if absent.
+      const key = rawKey(raw);
+      return run<void>(CORRUPT, 'readwrite', (tx, _done, fail) => {
+        const shelf = tx.objectStore(CORRUPT);
+        if (key === null) {
+          shelf.put({ wallMs, raw });
+          return;
+        }
+        const all = shelf.getAll();
+        all.onerror = () => fail(all.error);
+        all.onsuccess = () => {
+          try {
+            const kept = (all.result as Array<{ raw?: unknown }>).some((c) => rawKey(c?.raw) === key);
+            if (!kept) shelf.put({ wallMs, raw });
+          } catch (e) {
+            fail(e);
+          }
+        };
       });
     },
   };

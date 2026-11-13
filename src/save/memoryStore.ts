@@ -4,7 +4,7 @@
  */
 
 import type { SaveV1 } from './schema';
-import type { SaveStore } from './store';
+import { rawKey, type SaveStore } from './store';
 
 export function memoryStore(): SaveStore & { readonly corrupt: ReadonlyArray<{ wallMs: number; raw: unknown }> } {
   let current: unknown | null = null;
@@ -22,6 +22,8 @@ export function memoryStore(): SaveStore & { readonly corrupt: ReadonlyArray<{ w
       current = copy;
     },
     async keepCorrupt(raw: unknown, wallMs: number) {
+      const key = rawKey(raw);
+      if (key !== null && corrupt.some((c) => rawKey(c.raw) === key)) return;
       corrupt.push({ wallMs, raw: structuredClone(raw) });
     },
   };
