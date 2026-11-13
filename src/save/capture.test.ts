@@ -1038,4 +1038,29 @@ describe('R21: a save is where the clock says, not a frame behind', () => {
     expect(new Vector3(...s.player.flight.position).distanceTo(g.u.flight.position)).toBeLessThan(1e-9);
     expect(new Vector3(...s.player.flight.velocity).distanceTo(g.u.flight.velocity)).toBeLessThan(1e-9);
   });
+
+  it('Given a grounded ship with timeBehindS > 0, When saved, Then the saved position equals the integrated position (and it stays grounded on restore)', () => {
+    const a = live();
+    a.frames(1);
+    const body = a.u.shipParent!;
+    // Landed: restoreState holds a grounded ship (no sampler in node tests).
+    a.u.flight.restoreState({
+      position: new Vector3(body.spec.radius, 0, 0),
+      velocity: new Vector3(0, 0, 0.5),
+      orientation: new Quaternion(),
+      grounded: true,
+    });
+    a.u.update(2 / 120 + 0.007, a.ctx);
+    expect(a.u.flight.grounded).toBe(true);
+    expect(a.u.flight.timeBehindS).toBeGreaterThan(0.005);
+    const pos = a.u.flight.position.clone();
+    const s = buildSave(a.w, null);
+    expect(new Vector3(...s.player.flight.position).distanceTo(pos)).toBeLessThan(1e-9);
+    expect(s.player.flight.grounded).toBe(true);
+    a.dispose();
+    vi.stubGlobal('localStorage', new MemoryStorage());
+    const b = live();
+    expect(applySave(b.w, throughStorage(s))).toBe(true);
+    expect(b.u.flight.grounded).toBe(true);
+  });
 });

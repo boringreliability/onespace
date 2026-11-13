@@ -57,7 +57,8 @@ function circularAt(
   mu: number,
   parentId: string | null,
 ): { parentId: string | null; flight: Flight } {
-  const radial = new Vector3().subVectors(fm.worldPosition, centre);
+  // R21: the ship at the stamped clock, not the substep carry behind it.
+  const radial = new Vector3().subVectors(fm.renderWorldPosition, centre);
   const r = radial.length();
   const state = circularOrbitState(radial, radiusKm, mu, radiusKm > 0 && r > 0 ? r / radiusKm - 1 : undefined);
   const q = state.orientation;
@@ -89,14 +90,20 @@ function playerPlace(u: Universe): { parentId: string | null; flight: Flight } {
     return circularAt(fm, ORIGIN, star ? starRadiusKm(star) : 0, u.starMu, null);
   }
   const parentId = u.shipParent ? u.shipParent.spec.id : null;
-  const q = fm.orientation;
+  const grounded = parentId !== null && fm.grounded;
+  // R21/R22: the integrated state trails the clock by `timeBehindS`; the save
+  // is stamped with the clock, so the ship goes in where the clock has it
+  // (position, and orientation by its spin). A grounded ship is not
+  // extrapolated: it rides the ground, its velocity is surface-relative.
+  const at = grounded ? fm.position : fm.renderPosition;
+  const q = grounded ? fm.orientation : fm.renderOrientation;
   return {
     parentId,
     flight: {
-      position: tuple(fm.position),
+      position: tuple(at),
       velocity: tuple(fm.velocity),
       orientation: [q.x, q.y, q.z, q.w],
-      grounded: parentId !== null && fm.grounded,
+      grounded,
       flightAssist: fm.flightAssist,
     },
   };
