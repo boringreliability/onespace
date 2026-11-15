@@ -3,9 +3,9 @@
  *
  *  - `save(o)`: a valid SaveV1 built from the golden v1 save;
  *  - `MemoryStorage` / `ThrowingStorage`: localStorage stand-ins;
- *  - `testStore()`: a memoryStore-backed SaveStore whose slots `clearLocal()`
- *    can empty (the SaveStore seam has no clear — see the Task 5 report),
- *    with every call recorded;
+ *  - `testStore()`: a memoryStore-backed SaveStore (Ruling R34: with
+ *    `replaceAll`), every call recorded; `recordingWal()` records `reset()`
+ *    (Ruling R35) into the same list, so the replacement order can be pinned;
  *  - `fakeApi()`: the `Api` with scripted replies and every call recorded;
  *  - `timerSchedule`: the `schedule` dep on (fake) setTimeout.
  */
@@ -14,6 +14,7 @@ import golden from '@/save/fixtures/v1-golden.json';
 import { memoryStore } from '@/save/memoryStore';
 import type { ActionEntry, SaveV1 } from '@/save/schema';
 import type { SaveStore } from '@/save/store';
+import { createWal, type Wal } from '@/save/wal';
 
 import type { Api, ApiResult, PutBody, ResolveBody } from '../api';
 import type { SyncState } from '../syncState';
@@ -94,12 +95,14 @@ export class ThrowingStorage {
 
 export interface TestStore {
   store: SaveStore;
-  /** Every store call, in order: `save:<saveId>:<rev>`, `keep:<saveId|?>:<rev|?>`, `clear`. */
+  /**
+   * Every store call, in order: `save:<saveId>:<rev>`, `keep:<saveId|?>:<rev|?>`,
+   * `replace:<saveId>:<rev>` / `replace:null` — and `wal:reset` from a
+   * `recordingWal` sharing this list.
+   */
   calls: string[];
   /** What keepCorrupt shelved. */
   readonly shelf: ReadonlyArray<{ wallMs: number; raw: unknown }>;
-  /** The injected `clearLocal` dep: both slots emptied, the shelf kept. */
-  clearLocal(): Promise<void>;
   /** The current slot, as stored. */
   current(): Promise<SaveV1 | null>;
 }
@@ -110,7 +113,7 @@ const tag = (raw: unknown): string => {
 };
 
 export function testStore(): TestStore {
-  let slots = memoryStore();
+  const slots = memoryStore();
   const shelfStore = memoryStore();
   const calls: string[] = [];
   const store: SaveStore = {
@@ -123,16 +126,16 @@ export function testStore(): TestStore {
       calls.push(`keep:${tag(raw)}`);
       await shelfStore.keepCorrupt(raw, wallMs);
     },
+    async replaceAll(s) {
+      calls.push(`replace:${s === null ? 'null' : tag(s)}`);
+      await slots.replaceAll(s);
+    },
   };
   return {
     store,
     calls,
     get shelf() {
       return shelfStore.corrupt;
-    },
-    async clearLocal() {
-      calls.push('clear');
-      slots = memoryStore();
     },
     async current() {
       return ((await slots.load()).current as SaveV1 | null) ?? null;
@@ -217,6 +220,18 @@ export function fakeApi(over: Partial<FakeApi['reply']> = {}): FakeApi {
     },
   } as FakeApi;
   return api;
+}
+
+/** The real WAL on `storage`, with `reset()` recorded as `wal:reset` in `calls`. */
+export function recordingWal(storage: MemoryStorage, calls: string[]): Wal {
+  const base = createWal(storage as unknown as Storage);
+  return {
+    ...base,
+    reset() {
+      calls.push('wal:reset');
+      base.reset();
+    },
+  };
 }
 
 /** The `schedule` dep on (fake) setTimeout; returns its cancel. */

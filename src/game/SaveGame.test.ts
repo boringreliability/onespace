@@ -1640,7 +1640,6 @@ describe('Task 5 — the synchronous part of an autosave with a real SyncClient.
       store: syncStore.store,
       wal: createWal(new MemoryStorage() as unknown as Storage),
       uuid: () => fx.DEVICE_ID,
-      clearLocal: () => syncStore.clearLocal(),
     });
     expect((await sync.boot(L)).decision.kind).toBe('in-sync');
 

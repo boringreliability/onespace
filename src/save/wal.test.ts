@@ -704,3 +704,78 @@ describe('R25 I4a — markCovered: coverage without the snapshot', () => {
     expect(typeof (wal as unknown as Marking).markCovered).toBe('function');
   });
 });
+
+// =============================================================================
+//  v4 sub-plan 4, Task 5 — Ruling R35: `reset(): void`.
+//  When sync replaces the local save (a cloud save, a resolved conflict, an
+//  account switch), the WAL of the replaced save must not come back on top of
+//  the new one. reset removes the snapshot, its revision key and ALL critical
+//  entries — tagged or not — and never throws.
+// =============================================================================
+
+describe('Ruling R35 — wal.reset()', () => {
+  const SNAP = 'onespace.wal.v1.snapshot';
+  const REV = 'onespace.wal.v1.snapshot.rev';
+
+  it('Given a snapshot, tagged and untagged critical entries, When reset, Then read gives nothing and all three keys are gone', () => {
+    const storage = new FakeStorage();
+    const w = createWal(storage);
+    w.appendCritical(emergency(1));
+    expect(w.writeSnapshot(saveWith(8, [emergency(1)]))).toBe(true); // tags e1 by 8
+    w.appendCritical(emergency(20)); // untagged: clear() would never drop it
+    expect(storage.getItem(SNAP)).not.toBeNull();
+    w.reset();
+    expect(w.read()).toEqual({ snapshot: null, critical: [] });
+    expect(storage.getItem(KEY)).toBeNull();
+    expect(storage.getItem(SNAP)).toBeNull();
+    expect(storage.getItem(REV)).toBeNull();
+  });
+
+  it('Given a snapshot at r20 then reset, When a snapshot at r3 is written, Then it is accepted (nothing older to refuse against)', () => {
+    const w = createWal(new FakeStorage());
+    w.writeSnapshot(saveAt(20));
+    w.reset();
+    expect(w.writeSnapshot(saveAt(3))).toBe(true);
+    expect((w.read().snapshot as SaveV1).revision).toBe(3);
+  });
+
+  it('Given foreign bytes under the entries key, When reset, Then they are removed too', () => {
+    const storage = new FakeStorage();
+    storage.setItem(KEY, '{not json');
+    createWal(storage).reset();
+    expect(storage.getItem(KEY)).toBeNull();
+  });
+
+  it('Given other keys in the same storage, When reset, Then only the WAL keys are removed', () => {
+    const storage = new FakeStorage();
+    storage.setItem('onespace.sync.v1', '{"x":1}');
+    storage.setItem('onespace.log.v1', '{"version":1}');
+    const w = createWal(storage);
+    w.writeSnapshot(saveAt(8));
+    w.reset();
+    expect(storage.getItem('onespace.sync.v1')).toBe('{"x":1}');
+    expect(storage.getItem('onespace.log.v1')).toBe('{"version":1}');
+  });
+
+  it('Given no storage, or storage whose removeItem throws, When reset, Then it does not throw', () => {
+    class Stuck extends FakeStorage {
+      override removeItem(_k: string): void {
+        throw new DOMException('denied', 'SecurityError');
+      }
+    }
+    expect(() => createWal(null).reset()).not.toThrow();
+    const stuck = new Stuck();
+    createWal(stuck).appendCritical(emergency(1));
+    expect(() => createWal(stuck).reset()).not.toThrow();
+  });
+
+  it('Given localStorage stubbed after import, When the exported wal resets, Then the stubbed storage is emptied of WAL keys', () => {
+    const storage = new FakeStorage();
+    vi.stubGlobal('localStorage', storage);
+    wal.appendCritical(emergency(1));
+    wal.writeSnapshot(saveAt(8));
+    wal.reset();
+    expect(storage.getItem(KEY)).toBeNull();
+    expect(storage.getItem(SNAP)).toBeNull();
+  });
+});

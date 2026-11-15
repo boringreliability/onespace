@@ -11,8 +11,9 @@
  *     writer: boolean;            // the writer lock's verdict
  *   }): Promise<BootSync>
  *
- * It reads the local save as the boot will (`loadForBoot(store, wal,
- * { writer })` — newest valid, WAL merged), hands it to `sync.boot`, and
+ * It reads the local save as the boot will (`loadForBootResult(store, wal,
+ * { writer })` — newest valid, WAL merged), hands it to
+ * `sync.boot(local, { localDirty: load.walApplied })` (Ruling R36), and
  * resolves once boot's effects are in the store — so `decideBoot` then reads
  * the save sync chose. A cloud that does not answer costs at most 3 s.
  */
@@ -61,7 +62,6 @@ function client(o: { api: ReturnType<typeof fakeApi>; ts: ReturnType<typeof test
     store: o.ts.store,
     wal: o.wal,
     uuid: () => DEVICE_ID,
-    clearLocal: () => o.ts.clearLocal(),
   });
 }
 
@@ -95,7 +95,7 @@ describe('runBootSync — before decideBoot', () => {
     expect(d.load.save).toEqual(cloud);
   });
 
-  it('Given a stored save and a WAL entry of its game, When runBootSync, Then sync.boot gets the local save as the boot loads it (newest valid, WAL merged)', async () => {
+  it('Ruling R36: Given a stored save and a WAL entry of its game, When runBootSync, Then sync.boot gets the local save as the boot loads it (newest valid, WAL merged) and localDirty: true', async () => {
     const ts = testStore();
     const walStorage = new MemoryStorage();
     const wal = createWal(walStorage as unknown as Storage);
@@ -107,15 +107,37 @@ describe('runBootSync — before decideBoot', () => {
     expect(boot).toHaveBeenCalledTimes(1);
     const expected = (await loadForBoot(ts.store, wal)).save;
     expect(expected?.ship.emergencyTimesUsed).toBe(9);
-    expect(boot).toHaveBeenCalledWith(expected);
+    expect(boot).toHaveBeenCalledWith(expected, { localDirty: true });
   });
 
-  it('Given nothing stored, When runBootSync, Then sync.boot gets null', async () => {
+  it('Given nothing stored, When runBootSync, Then sync.boot gets null and localDirty: false', async () => {
     const ts = testStore();
     const wal = createWal(new MemoryStorage() as unknown as Storage);
     const boot = vi.fn(async () => ({ decision: { kind: 'guest' as const }, cloud: null, notice: null }));
     await runBootSync({ sync: { boot } as unknown as SyncClient, store: ts.store, wal, writer: true });
-    expect(boot).toHaveBeenCalledWith(null);
+    expect(boot).toHaveBeenCalledWith(null, { localDirty: false });
+  });
+
+  it('Ruling R36: Given a stored save and an empty WAL, When runBootSync, Then localDirty: false', async () => {
+    const ts = testStore();
+    const wal = createWal(new MemoryStorage() as unknown as Storage);
+    await ts.store.save(save({ revision: 7 }));
+    const boot = vi.fn(async () => ({ decision: { kind: 'in-sync' as const }, cloud: null, notice: null }));
+    await runBootSync({ sync: { boot } as unknown as SyncClient, store: ts.store, wal, writer: true });
+    expect(boot).toHaveBeenCalledWith(save({ revision: 7 }), { localDirty: false });
+  });
+
+  it('Ruling R36: Given save r7 = L stored, a paid WAL entry after it and the cloud at r9, When runBootSync, Then conflict-same — the store is untouched and the next load still holds the paid entry', async () => {
+    const ts = testStore();
+    const wal = createWal(new MemoryStorage() as unknown as Storage);
+    await ts.store.save(save({ revision: 7 }));
+    wal.appendCritical(criticalEntry(50, 9), GAME_X);
+    ts.calls.length = 0;
+    const api = fakeApi({ getSave: () => cloudReply(save({ revision: 9 })) });
+    const b = await runBootSync({ sync: client({ api, ts, wal }), store: ts.store, wal, writer: true });
+    expect(b.decision).toEqual({ kind: 'conflict-same' });
+    expect(ts.calls).toEqual([]);
+    expect((await loadForBoot(ts.store, wal)).save?.ship.emergencyTimesUsed).toBe(9);
   });
 
   it('Given the cloud never answers, When runBootSync, Then it resolves at ≈3 s (not before) as local-only/timeout, and the local save is untouched', async () => {

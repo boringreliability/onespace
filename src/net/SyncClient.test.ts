@@ -17,17 +17,28 @@
  *     storage: StorageLike | null,           // the sync state lives here (onespace.sync.v1)
  *     isWriter: () => boolean,
  *     schedule: (fn: () => void, ms: number) => () => void,   // a timer; returns cancel
- *     store: SaveStore,                      // boot/resolve write the chosen save here
- *     wal: Wal,                              // superseded when the local save is replaced
+ *     store: SaveStore,                      // boot/resolve replace the local save here (R34 replaceAll)
+ *     wal: Wal,                              // reset when the local save is replaced (R35)
  *     uuid: () => string,                    // deviceId, generated once
- *     clearLocal: () => Promise<void>,       // empties the store's slots (switch-account)
  *   })
- *   .boot(local: SaveV1 | null): Promise<BootSync>
+ *   .boot(local: SaveV1 | null, opts?: { localDirty?: boolean }): Promise<BootSync>
+ *      // localDirty (R36) = the boot load applied WAL critical entries (BootLoad.walApplied)
  *   .onStored(save: SaveV1): void           // never works synchronously
  *   .status(): SyncStatus                   // 'pending' while a save is queued or in flight
  *   .statusText(): string | null            // offline/reauth/conflict → the texts; else null
  *   .resolve(keep: 'device' | 'cloud'):
  *      Promise<{ ok: true; save: SaveV1 } | { ok: false; reason: 'offline' | 'reauth' | 'moved'; cloud?: SaveV1 }>
+ *
+ * Replacing the local save (use-cloud, switch-account, a resolved conflict) —
+ * Ruling R35, in this order: (1) shelve the old (WAL-merged) local with
+ * store.keepCorrupt when the rule shelves it, (2) wal.reset(), (3)
+ * store.replaceAll(new | null). A crash after (2) leaves the old stored
+ * snapshot and the next boot reconciles again; the opposite order could apply
+ * old WAL entries on top of the new save.
+ *
+ * Ruling R38: pushes need a `me` confirmed in THIS session with
+ * id === state.accountId; after an offline/timeout boot, onStored checks me()
+ * before any PUT.
  *
  * Timers: vitest fake timers; `schedule` is setTimeout-backed.
  */
@@ -56,6 +67,7 @@ import {
   never,
   noSave,
   ok,
+  recordingWal,
   save,
   syncState,
   testStore,
@@ -103,7 +115,7 @@ function rig(
   const api = fakeApi(o.api);
   const ts = o.ts ?? testStore();
   const walStorage = o.walStorage ?? new MemoryStorage();
-  const wal = createWal(walStorage as unknown as Storage);
+  const wal = recordingWal(walStorage, ts.calls);
   const schedule = vi.fn(timerSchedule);
   const sync = new SyncClient({
     api,
@@ -113,7 +125,6 @@ function rig(
     store: ts.store,
     wal,
     uuid: () => DEVICE_ID,
-    clearLocal: () => ts.clearLocal(),
   });
   return {
     sync,
@@ -309,8 +320,10 @@ describe('SyncClient.boot — effects of each decision, applied before boot reso
     const cloud = save({ revision: 9, tank: 4_000 });
     const r = rig({ state: boundB(save({ revision: 7 })), api: { getSave: () => cloudReply(cloud) } });
     await r.ts.store.save(save({ revision: 7 }));
+    r.ts.calls.length = 0;
     const b = await r.sync.boot(save({ revision: 7 }));
     expect(b.decision).toEqual({ kind: 'use-cloud' });
+    expect(r.ts.calls).toEqual(['wal:reset', `replace:${GAME_X}:9`]);
     expect(b.cloud).toEqual(cloud);
     expect(b.notice).toBeNull();
     expect(await r.ts.current()).toEqual(cloud);
@@ -321,7 +334,7 @@ describe('SyncClient.boot — effects of each decision, applied before boot reso
     expect(r.api.puts).toEqual([]);
   });
 
-  it("Given another device started NEW GAME (cloud Y r3, local X = L r7), When boot, Then 'use-cloud': the local game goes to the shelf FIRST, then the cloud is written, and the next load yields the cloud game", async () => {
+  it("Given another device started NEW GAME (cloud Y r3, local X = L r7), When boot, Then 'use-cloud' — Ruling R35 order: keepCorrupt(local), wal.reset(), store.replaceAll(cloud) — and the next load yields the cloud game", async () => {
     const local = save({ revision: 7 });
     const cloud = save({ saveId: GAME_Y, revision: 3 });
     const r = rig({ state: boundB(local), api: { getSave: () => cloudReply(cloud) } });
@@ -330,10 +343,7 @@ describe('SyncClient.boot — effects of each decision, applied before boot reso
     const b = await r.sync.boot(local);
     expect(b.decision).toEqual({ kind: 'use-cloud' });
     expect(r.ts.shelf.map((e) => e.raw)).toContainEqual(local);
-    const keep = r.ts.calls.indexOf(`keep:${GAME_X}:7`);
-    const write = r.ts.calls.indexOf(`save:${GAME_Y}:3`);
-    expect(keep).toBeGreaterThanOrEqual(0);
-    expect(write).toBeGreaterThan(keep);
+    expect(r.ts.calls).toEqual([`keep:${GAME_X}:7`, 'wal:reset', `replace:${GAME_Y}:3`]);
     expect((await loadForBoot(r.ts.store, r.wal)).save).toEqual(cloud);
     expect(r.state().lastSeenCloud).toEqual({ saveId: GAME_Y, revision: 3 });
   });
@@ -343,6 +353,7 @@ describe('SyncClient.boot — effects of each decision, applied before boot reso
     const r = rig({ api: { getSave: () => cloudReply(cloud) } });
     const b = await r.sync.boot(null);
     expect(b.decision).toEqual({ kind: 'use-cloud' });
+    expect(r.ts.calls).toEqual(['wal:reset', `replace:${GAME_X}:9`]);
     expect(await r.ts.current()).toEqual(cloud);
     expect(r.state()).toMatchObject({ accountId: ACCT_B.id, accountName: ACCT_B.name, lastSeenCloud: head(cloud) });
   });
@@ -388,7 +399,7 @@ describe('SyncClient.boot — effects of each decision, applied before boot reso
     expect(r.state()).toMatchObject({ accountId: ACCT_B.id, accountName: ACCT_B.name });
   });
 
-  it('Concern (ruling says "L unchanged"): Given a guest save equal to the cloud bound by an in-sync boot, When the game saves r8, Then the PUT carries base = the cloud head r7 — with L left null the server would answer 409 and the next boot would be conflict-same', async () => {
+  it('Choice (accepted, replaces "L unchanged"): Given a guest save equal to the cloud bound by an in-sync boot, When the game saves r8, Then the PUT carries base = the cloud head r7 — with L left null the server would answer 409 and the next boot would be conflict-same', async () => {
     const r = rig({ api: { getSave: () => cloudReply(save({ revision: 7 })) } });
     await r.sync.boot(save({ revision: 7 }));
     r.sync.onStored(save({ revision: 8 }));
@@ -420,8 +431,10 @@ describe('SyncClient.boot — effects of each decision, applied before boot reso
     const r = rig({ state: boundA(aLocal), api: { getSave: () => cloudReply(bCloud) }, walStorage });
     await r.ts.store.save(save({ revision: 39 }));
     await r.ts.store.save(aLocal);
+    r.ts.calls.length = 0;
     const b = await r.sync.boot(aLocal);
     expect(b.decision).toEqual({ kind: 'switch-account' });
+    expect(r.ts.calls).toEqual([`keep:${GAME_X}:40`, 'wal:reset', `replace:${GAME_Y}:2`]);
     expect(b.cloud).toEqual(bCloud);
     expect(r.ts.shelf.map((e) => e.raw)).toContainEqual(aLocal);
     expect((await loadForBoot(r.ts.store, r.wal)).save).toEqual(bCloud);
@@ -438,8 +451,10 @@ describe('SyncClient.boot — effects of each decision, applied before boot reso
     createWal(walStorage as unknown as Storage).writeSnapshot(aLocal);
     const r = rig({ state: boundA(aLocal), api: { getSave: noSave }, walStorage });
     await r.ts.store.save(aLocal);
+    r.ts.calls.length = 0;
     const b = await r.sync.boot(aLocal);
     expect(b.decision).toEqual({ kind: 'switch-account' });
+    expect(r.ts.calls).toEqual([`keep:${GAME_X}:7`, 'wal:reset', 'replace:null']);
     expect(r.ts.shelf.map((e) => e.raw)).toContainEqual(aLocal);
     expect((await loadForBoot(r.ts.store, r.wal)).save).toBeNull();
     expect(r.state()).toEqual(syncState({ deviceId: DEVICE_ID, accountId: ACCT_B.id, accountName: ACCT_B.name, lastSeenCloud: null }));
@@ -705,7 +720,7 @@ describe('SyncClient.onStored — failures (R31)', () => {
       await settle(TEN_MIN);
     }
     expect(r.api.puts).toHaveLength(1);
-    const reload = reconcile({ local: save({ revision: 12 }), cloud, state: r.state(), me: { ...ACCT_B } });
+    const reload = reconcile({ local: save({ revision: 12 }), cloud, state: r.state(), me: { ...ACCT_B }, localDirty: false });
     expect(reload.kind).toBe('conflict-same');
   });
 
@@ -729,6 +744,127 @@ describe('SyncClient.onStored — failures (R31)', () => {
     r.sync.onStored(save({ revision: 8 }));
     await settle(TEN_MIN);
     expect(r.api.puts).toEqual([]);
+  });
+});
+
+describe('Ruling R36 — a WAL-merged (dirty) local save at boot', () => {
+  it('Ruling R36: Given bound, a dirty local at L (r7) and the cloud newer (r9), When boot, Then conflict-same — nothing written, the paid entries are not dropped by use-cloud', async () => {
+    const r = rig({ state: boundB(save({ revision: 7 })), api: { getSave: () => cloudReply(save({ revision: 9 })) } });
+    await r.ts.store.save(save({ revision: 7 }));
+    r.ts.calls.length = 0;
+    const b = await r.sync.boot(save({ revision: 7, emergency: 9 }), { localDirty: true });
+    expect(b.decision).toEqual({ kind: 'conflict-same' });
+    expect(r.ts.calls).toEqual([]);
+    expect(r.state().conflict).toBe(true);
+  });
+
+  it('Ruling R36: Given bound, a dirty local at the SAME revision as L and cloud = L, When boot, Then push-local but no PUT of that revision (the server would 409 it): status pending; When r8 is stored, Then r8 is PUT with base r7', async () => {
+    const r = rig({ state: boundB(save({ revision: 7 })), api: { getSave: () => cloudReply(save({ revision: 7 })) } });
+    const b = await r.sync.boot(save({ revision: 7, emergency: 9 }), { localDirty: true });
+    expect(b.decision).toEqual({ kind: 'push-local' });
+    await settle(TEN_MIN);
+    expect(r.api.puts).toEqual([]);
+    expect(r.sync.status()).toBe('pending');
+    r.sync.onStored(save({ revision: 8, emergency: 9 }));
+    await settle(PUSH_MIN_INTERVAL_MS);
+    expect(r.api.puts.map((p) => [p.base, p.save.revision])).toEqual([[{ saveId: GAME_X, revision: 7 }, 8]]);
+  });
+
+  it('Ruling R36: Given bound, a dirty local ABOVE L (r9 > r7) and cloud = L, When boot, Then push-local and r9 is PUT as usual', async () => {
+    const r = rig({ state: boundB(save({ revision: 7 })), api: { getSave: () => cloudReply(save({ revision: 7 })) } });
+    const local = save({ revision: 9, emergency: 9 });
+    expect((await r.sync.boot(local, { localDirty: true })).decision).toEqual({ kind: 'push-local' });
+    await settle(PUSH_MIN_INTERVAL_MS);
+    expect(r.api.puts).toEqual([{ deviceId: DEVICE_ID, base: { saveId: GAME_X, revision: 7 }, save: local }]);
+  });
+
+  it('Ruling R36: Given no opts, When boot, Then localDirty counts as false (a clean local = L with a newer cloud is use-cloud)', async () => {
+    const r = rig({ state: boundB(save({ revision: 7 })), api: { getSave: () => cloudReply(save({ revision: 9 })) } });
+    expect((await r.sync.boot(save({ revision: 7 }))).decision).toEqual({ kind: 'use-cloud' });
+  });
+});
+
+describe('Ruling R38 — pushing needs an identity confirmed this session', () => {
+  /** Bound to B at L r7; the boot could not reach the server (offline or timeout). */
+  async function offlineBoot(how: 'offline' | 'timeout'): Promise<Rig> {
+    const r = rig({
+      state: boundB(save({ revision: 7 })),
+      api: how === 'offline' ? { me: () => fail('offline'), getSave: () => fail('offline') } : { me: never, getSave: never },
+    });
+    const done = r.sync.boot(save({ revision: 7 }));
+    if (how === 'timeout') await settle(3_000);
+    expect((await done).decision).toEqual({ kind: 'local-only', reason: how });
+    return r;
+  }
+
+  it.each(['offline', 'timeout'] as const)(
+    'Ruling R38: Given a %s boot with a state bound to B, When the game saves and me() now says B, Then me() is asked BEFORE the PUT, and the PUT carries base = L',
+    async (how) => {
+      const r = await offlineBoot(how);
+      r.api.reply.me = () => ok(200, { ...ACCT_B });
+      r.api.reply.getSave = () => cloudReply(save({ revision: 7 }));
+      const before = r.api.calls.length;
+      r.sync.onStored(save({ revision: 8 }));
+      await untilPut(r.api);
+      const after = r.api.calls.slice(before);
+      expect(after.indexOf('me')).toBeGreaterThanOrEqual(0);
+      expect(after.indexOf('me')).toBeLessThan(after.indexOf('putSave'));
+      expect(r.api.puts.map((p) => [p.base, p.save.revision])).toEqual([[{ saveId: GAME_X, revision: 7 }, 8]]);
+    },
+  );
+
+  it('Ruling R38: Given an offline boot bound to B, When the game saves and me() answers 401, Then status reauth and no PUT', async () => {
+    const r = await offlineBoot('offline');
+    r.api.reply.me = () => fail(401);
+    r.sync.onStored(save({ revision: 8 }));
+    await settle(TEN_MIN);
+    expect(r.api.puts).toEqual([]);
+    expect(r.sync.status()).toBe('reauth');
+    expect(r.sync.statusText()).toBe(SYNC_REAUTH_TEXT);
+  });
+
+  it("Ruling R38: Given an offline boot bound to B, When me() now says A (another account's cookie), Then no PUT for the rest of the session and status off — B's save is never pushed into A's cloud", async () => {
+    const r = await offlineBoot('offline');
+    r.api.reply.me = () => ok(200, { ...ACCT_A });
+    r.sync.onStored(save({ revision: 8 }));
+    await settle(TEN_MIN);
+    r.sync.onStored(save({ revision: 9 }));
+    await settle(TEN_MIN);
+    expect(r.api.puts).toEqual([]);
+    expect(r.sync.status()).toBe('off');
+  });
+
+  it('Ruling R38: Given an offline boot bound to B, When me() is still offline, Then status offline and the identity check is retried on the backoff (5 s) before any PUT; once me() says B, Then the PUT follows', async () => {
+    const r = await offlineBoot('offline');
+    const meTimes: number[] = [];
+    let n = 0;
+    r.api.reply.me = () => {
+      meTimes.push(Date.now());
+      return n++ === 0 ? fail('offline') : ok(200, { ...ACCT_B });
+    };
+    const before = r.api.calls.length;
+    r.sync.onStored(save({ revision: 8 }));
+    for (let t = 0; t <= 5_100 && meTimes.length < 1; t += 100) await settle(100);
+    expect(meTimes).toHaveLength(1);
+    expect(r.api.puts).toEqual([]);
+    expect(r.sync.status()).toBe('offline');
+    await settle(meTimes[0]! + 4_999 - Date.now());
+    expect(meTimes).toHaveLength(1);
+    expect(r.api.puts).toEqual([]);
+    await settle(1);
+    expect(meTimes).toHaveLength(2);
+    expect(meTimes[1]! - meTimes[0]!).toBe(5_000);
+    await settle(PUSH_MIN_INTERVAL_MS);
+    expect(r.api.calls.slice(before).filter((c) => c === 'me' || c === 'putSave')).toEqual(['me', 'me', 'putSave']);
+    expect(r.api.puts).toHaveLength(1);
+  });
+
+  it('Ruling R38: Given a normal boot where me() confirmed B (bound to B), When the game saves, Then the PUT needs no extra me() call', async () => {
+    const r = await signedIn();
+    const before = r.api.calls.length;
+    r.sync.onStored(save({ revision: 8 }));
+    await untilPut(r.api);
+    expect(r.api.calls.slice(before)).toEqual(['putSave']);
   });
 });
 
@@ -767,6 +903,7 @@ describe('SyncClient.resolve', () => {
       { deviceId: DEVICE_ID, keep: 'device', device: local, base: { saveId: GAME_X, revision: 7 }, cloud: { saveId: GAME_X, revision: 8 } },
     ]);
     expect(out).toEqual({ ok: true, save: result });
+    expect(r.ts.calls).toEqual([`keep:${GAME_X}:9`, 'wal:reset', `replace:${GAME_X}:10`]); // Ruling R35 order
     expect(await r.ts.current()).toEqual(result);
     expect(r.ts.shelf.map((e) => e.raw)).toContainEqual(local);
     expect(r.state()).toMatchObject({ lastSeenCloud: { saveId: GAME_X, revision: 10 }, conflict: false });

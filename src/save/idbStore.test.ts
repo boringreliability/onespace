@@ -155,6 +155,120 @@ describe.each(stores)('SaveStore contract — %s', (_label, make) => {
   });
 });
 
+// --- v4 sub-plan 4, Task 5 — Ruling R34: replaceAll -----------------------------
+//
+//   replaceAll(save: SaveV1 | null): Promise<void>
+//
+// current = save (or empty), previous = empty, in ONE transaction (idbStore);
+// the shelf (`corrupt`) is untouched. Sync uses it when the local save is
+// replaced by a cloud or resolved save, or cleared on an account switch: a
+// plain save() would leave the old game as `previous`, and the boot's
+// newest-by-revision rule could bring it back.
+
+describe.each(stores)('Ruling R34 — SaveStore.replaceAll — %s', (_label, make) => {
+  it('Given revisions 7 and 8 stored, When replaceAll(another game at r3), Then load yields only it: current r3, previous null', async () => {
+    const store = make();
+    await store.save(saveAt(7));
+    await store.save(saveAt(8));
+    const other = { ...saveAt(3), saveId: '11111111-2222-4333-8444-555555555555' };
+    await store.replaceAll(other);
+    await expect(store.load()).resolves.toEqual({ current: other, previous: null });
+  });
+
+  it('Given revisions 7 and 8 stored, When replaceAll(null), Then load yields nothing', async () => {
+    const store = make();
+    await store.save(saveAt(7));
+    await store.save(saveAt(8));
+    await store.replaceAll(null);
+    await expect(store.load()).resolves.toEqual({ current: null, previous: null });
+  });
+
+  it('Given an empty store, When replaceAll(r5), Then current r5 and previous null; When r6 is saved after, Then r5 becomes previous as usual', async () => {
+    const store = make();
+    await store.replaceAll(saveAt(5));
+    await expect(store.load()).resolves.toEqual({ current: saveAt(5), previous: null });
+    await store.save(saveAt(6));
+    const { current, previous } = await store.load();
+    expect((current as SaveV1).revision).toBe(6);
+    expect((previous as SaveV1).revision).toBe(5);
+  });
+
+  it('Given a replaced save, When the caller mutates its object afterwards, Then the stored copy is unchanged', async () => {
+    const store = make();
+    const s = saveAt(5);
+    await store.replaceAll(s);
+    s.revision = 99;
+    expect(((await store.load()).current as SaveV1).revision).toBe(5);
+  });
+});
+
+describe('Ruling R34 — replaceAll leaves the shelf alone', () => {
+  it('Given a kept copy on the memoryStore shelf, When replaceAll(x) and replaceAll(null), Then the shelf still holds it', async () => {
+    const store = memoryStore();
+    await store.keepCorrupt({ format: 99 }, 1);
+    await store.save(saveAt(7));
+    await store.replaceAll(saveAt(3));
+    await store.replaceAll(null);
+    expect(store.corrupt).toEqual([{ wallMs: 1, raw: { format: 99 } }]);
+  });
+
+  it('Given a kept copy in the idbStore corrupt store, When replaceAll(x) and replaceAll(null), Then the corrupt store still holds it', async () => {
+    const name = freshDbName();
+    const store = idbStore(name);
+    await store.keepCorrupt({ format: 99 }, 1);
+    await store.save(saveAt(7));
+    await store.replaceAll(saveAt(3));
+    await store.replaceAll(null);
+    expect(await rawGetAll(name, 'corrupt')).toEqual([{ wallMs: 1, raw: { format: 99 } }]);
+  });
+});
+
+describe('Ruling R34 — a failed replaceAll leaves the old content (one transaction)', () => {
+  /** Make the n-th mutating IDBObjectStore call (put, delete or clear) throw. */
+  function failNthMutation(n: number): { count: () => number } {
+    let calls = 0;
+    for (const m of ['put', 'delete', 'clear'] as const) {
+      const real = IDBObjectStore.prototype[m] as (...a: unknown[]) => IDBRequest;
+      vi.spyOn(IDBObjectStore.prototype, m).mockImplementation(function (this: IDBObjectStore, ...args: unknown[]) {
+        calls += 1;
+        if (calls === n) throw new DOMException('the disk is full', 'QuotaExceededError');
+        return real.apply(this, args);
+      } as never);
+    }
+    return { count: () => calls };
+  }
+
+  it('Given revisions 7 and 8, When the SECOND write of replaceAll(r3) throws, Then it rejects and 8/7 are intact (the first write was rolled back)', async () => {
+    const store = idbStore(freshDbName());
+    await store.save(saveAt(7));
+    await store.save(saveAt(8));
+    const spy = failNthMutation(2);
+    await expect(store.replaceAll(saveAt(3))).rejects.toBeDefined();
+    expect(spy.count()).toBe(2);
+    vi.restoreAllMocks();
+    const { current, previous } = await store.load();
+    expect((current as SaveV1).revision).toBe(8);
+    expect((previous as SaveV1).revision).toBe(7);
+  });
+
+  it.each([
+    ['replaceAll(r3)', () => saveAt(3)],
+    ['replaceAll(null)', () => null],
+  ])('Given revisions 7 and 8, When the FIRST write of %s throws, Then it rejects and 8/7 are intact; the connection still works afterwards', async (_what, next) => {
+    const store = idbStore(freshDbName());
+    await store.save(saveAt(7));
+    await store.save(saveAt(8));
+    failNthMutation(1);
+    await expect(store.replaceAll(next())).rejects.toBeDefined();
+    vi.restoreAllMocks();
+    const { current, previous } = await store.load();
+    expect((current as SaveV1).revision).toBe(8);
+    expect((previous as SaveV1).revision).toBe(7);
+    await store.replaceAll(saveAt(4));
+    await expect(store.load()).resolves.toEqual({ current: saveAt(4), previous: null });
+  });
+});
+
 // --- IndexedDB specifics -------------------------------------------------------
 
 describe('idbStore — layout and foreign bytes', () => {

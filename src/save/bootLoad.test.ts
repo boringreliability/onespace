@@ -835,3 +835,61 @@ describe('R25 M2 — dead code', () => {
     expect(typeof m.replaceGame).toBe('function');
   });
 });
+
+// =============================================================================
+//  v4 sub-plan 4, Task 5 — Ruling R36: the boot says whether WAL critical
+//  entries were applied on top of the chosen snapshot (`BootLoad.walApplied`),
+//  so sync can treat a WAL-merged local save as ahead of the cloud. True only
+//  when mergeCritical applied at least one entry; a WAL snapshot winning on its
+//  own is not "applied entries".
+// =============================================================================
+
+type WithWalApplied = { walApplied?: unknown };
+
+describe('Ruling R36 — BootLoad.walApplied', () => {
+  it('Given save 7 in the store and a beacon paid after it in the WAL (its game), When loaded, Then walApplied is true', async () => {
+    appendAs(G.saveId, beaconAfterGolden());
+    const r = await loadForBoot(await storeWith(save(7)), wal);
+    expect(r.save!.actions.length).toBeGreaterThan(G.actions.length);
+    expect((r as WithWalApplied).walApplied).toBe(true);
+  });
+
+  it('Given save 7 and an empty WAL, When loaded, Then walApplied is false', async () => {
+    const r = await loadForBoot(await storeWith(save(7)), wal);
+    expect((r as WithWalApplied).walApplied).toBe(false);
+  });
+
+  it('Given only entries the save already covers (seq 12), When loaded, Then walApplied is false', async () => {
+    append(G.actions.filter((e) => e.seq === 12));
+    const r = await loadForBoot(await storeWith(save(7)), wal);
+    expect((r as WithWalApplied).walApplied).toBe(false);
+  });
+
+  it('Given only entries of ANOTHER game in the WAL, When loaded, Then walApplied is false', async () => {
+    appendAs(OTHER_UUID, beaconAfterGolden());
+    const r = await loadForBoot(await storeWith(save(7)), wal);
+    expect((r as WithWalApplied).walApplied).toBe(false);
+  });
+
+  it('Given a WAL snapshot (r9) newer than the store and no critical entries, When loaded, Then the snapshot wins and walApplied is false', async () => {
+    walSnapshot(save(9));
+    const r = await loadForBoot(await storeWith(save(7)), wal);
+    expect(r.save!.revision).toBe(9);
+    expect((r as WithWalApplied).walApplied).toBe(false);
+  });
+
+  it('Given nothing stored at all, When loaded, Then walApplied is false', async () => {
+    const r = await loadForBoot(memoryStore(), wal);
+    expect(r.save).toBeNull();
+    expect((r as WithWalApplied).walApplied).toBe(false);
+  });
+
+  it('Given the store cannot be opened and the WAL holds a snapshot plus a beacon after it, When loaded, Then walApplied is true', async () => {
+    walSnapshot(save(7));
+    appendAs(G.saveId, beaconAfterGolden());
+    const broken: SaveStore = { ...memoryStore(), load: () => Promise.reject(new DOMException('blocked', 'VersionError')) };
+    const r = await loadForBoot(broken, wal);
+    expect(r.notice).toBe(UNAVAILABLE);
+    expect((r as WithWalApplied).walApplied).toBe(true);
+  });
+});

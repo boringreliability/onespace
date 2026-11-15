@@ -10,11 +10,17 @@
  *     | { kind: 'refuse-switch'; message: string }
  *     | { kind: 'switch-account' }
  *   reconcile(input: { local: SaveV1 | null; cloud: SaveV1 | null;
- *                      state: SyncState; me: { id: string; name: string } | null }): Decision
+ *                      state: SyncState; me: { id: string; name: string } | null;
+ *                      localDirty: boolean }): Decision
+ *     // localDirty (Ruling R36): the boot load applied WAL critical entries on
+ *     // top of the stored snapshot (BootLoad.walApplied) — paid progress the
+ *     // cloud has never seen, so the local save counts as ahead.
  *   unsyncedProgressText(name: string): string
  *     // 'UNSYNCED PROGRESS FOR <name> — SIGN IN AS <name> ONCE ONLINE TO SYNC'
  *
  * L = state.lastSeenCloud. Equal revisions do NOT mean in sync: only L does.
+ * Ruling R37: in the bound branch, a cloud that moved on the SAME game but is
+ * not strictly newer than local (rolled back) is a conflict, never use-cloud.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -40,8 +46,13 @@ const KINDS = [
 const boundTo = (acct: { id: string; name: string }, L: SaveV1 | null, o: Partial<SyncState> = {}): SyncState =>
   syncState({ accountId: acct.id, accountName: acct.name, lastSeenCloud: L ? head(L) : null, ...o });
 
-function kind(input: Parameters<typeof reconcile>[0]): Decision['kind'] {
-  const d = reconcile(input);
+type Input = Omit<Parameters<typeof reconcile>[0], 'localDirty'> & { localDirty?: boolean };
+
+/** `reconcile` with localDirty false unless the test says otherwise. */
+const rc = (input: Input): Decision => reconcile({ localDirty: false, ...input });
+
+function kind(input: Input): Decision['kind'] {
+  const d = rc(input);
   expect(KINDS).toContain(d.kind);
   return d.kind;
 }
@@ -112,8 +123,17 @@ describe('reconcile — signed in as the bound account', () => {
     );
   });
 
-  it("Given the cloud went BACK below L on the same game (cloud r6, local = L r7), Then 'use-cloud' (any change from L counts as the cloud moving)", () => {
-    expect(kind({ local: save({ revision: 7 }), cloud: save({ revision: 6 }), state: boundTo(me, L), me })).toBe('use-cloud');
+  it("Ruling R37: Given the cloud went BACK below L on the same game (cloud r6, local = L r7), Then 'conflict-same' — never go backwards silently", () => {
+    expect(kind({ local: save({ revision: 7 }), cloud: save({ revision: 6 }), state: boundTo(me, L), me })).toBe('conflict-same');
+  });
+
+  it("Ruling R37: Given local = L = r9 and the cloud one revision back (r8) on the same game, Then 'conflict-same' (use-cloud needs a strictly newer cloud or another game)", () => {
+    const L9 = save({ revision: 9 });
+    expect(kind({ local: save({ revision: 9 }), cloud: save({ revision: 8 }), state: boundTo(me, L9), me })).toBe('conflict-same');
+  });
+
+  it("Ruling R37: Given another game in the cloud at a LOWER revision than local (local = L), Then still 'use-cloud' (another game is never compared by revision)", () => {
+    expect(kind({ local: save({ revision: 7 }), cloud: save({ saveId: GAME_Y, revision: 2 }), state: boundTo(me, L), me })).toBe('use-cloud');
   });
 
   it("Given both moved and the games differ (local NEW GAME Y, cloud X r9, L X r7), Then 'conflict-different'", () => {
@@ -150,7 +170,7 @@ describe('reconcile — signed in as the bound account', () => {
   it('Given the same inputs, When reconciled twice, Then the same decision and the inputs are not changed (pure)', () => {
     const input = { local: save({ revision: 9 }), cloud: save({ revision: 8 }), state: boundTo(me, L), me };
     const before = structuredClone(input);
-    expect(reconcile(input)).toEqual(reconcile(input));
+    expect(rc(input)).toEqual(rc(input));
     expect(input).toEqual(before);
   });
 });
@@ -190,7 +210,7 @@ describe('reconcile — the local save is bound to another account (§5.4)', () 
   const L = save({ revision: 7 });
 
   it('Given a save bound to A with unsynced progress (local r9, L r7) and B signed in, Then refuse-switch with the verbatim text naming A', () => {
-    const d = reconcile({ local: save({ revision: 9 }), cloud: null, state: boundTo(ACCT_A, L), me });
+    const d = rc({ local: save({ revision: 9 }), cloud: null, state: boundTo(ACCT_A, L), me });
     expect(d).toEqual({ kind: 'refuse-switch', message: 'UNSYNCED PROGRESS FOR Ava — SIGN IN AS Ava ONCE ONLINE TO SYNC' });
   });
 
@@ -217,6 +237,48 @@ describe('reconcile — the local save is bound to another account (§5.4)', () 
   });
 });
 
+describe('Ruling R36 — a WAL-merged (dirty) local save counts as ahead', () => {
+  const L = save({ revision: 7 });
+
+  it("Ruling R36: Given bound, local = L but dirty, and cloud = L, Then 'push-local'", () => {
+    expect(kind({ local: save({ revision: 7 }), cloud: save({ revision: 7 }), state: boundTo(ACCT_A, L), me: ACCT_A, localDirty: true })).toBe('push-local');
+  });
+
+  it("Ruling R36: Given bound, local = L but dirty, and the cloud newer (r9) on the same game, Then 'conflict-same' — not use-cloud, which would drop the paid entries", () => {
+    expect(kind({ local: save({ revision: 7 }), cloud: save({ revision: 9 }), state: boundTo(ACCT_A, L), me: ACCT_A, localDirty: true })).toBe('conflict-same');
+  });
+
+  it("Ruling R36: Given bound, local = L but dirty, and another game in the cloud, Then 'conflict-different'", () => {
+    expect(
+      kind({ local: save({ revision: 7 }), cloud: save({ saveId: GAME_Y, revision: 3 }), state: boundTo(ACCT_A, L), me: ACCT_A, localDirty: true }),
+    ).toBe('conflict-different');
+  });
+
+  it("Ruling R36: Given bound, a dirty local and no cloud, Then 'push-local'", () => {
+    expect(kind({ local: save({ revision: 7 }), cloud: null, state: boundTo(ACCT_A, L), me: ACCT_A, localDirty: true })).toBe('push-local');
+  });
+
+  it("Choice (R36 extended): Given a save bound to A that is at L but dirty, and B signed in, Then 'refuse-switch' (A's paid entries are unsynced progress)", () => {
+    expect(kind({ local: save({ revision: 7 }), cloud: null, state: boundTo(ACCT_A, L), me: ACCT_B, localDirty: true })).toBe('refuse-switch');
+  });
+
+  it("Ruling R36: Given a dirty guest save of the cloud's game at the same revision, Then 'conflict-same' instead of 'in-sync'", () => {
+    expect(kind({ local: save({ revision: 7 }), cloud: save({ revision: 7 }), state: syncState(), me: ACCT_B, localDirty: true })).toBe('conflict-same');
+  });
+
+  it.each<[string, SaveV1, SaveV1 | null, string]>([
+    ['an empty cloud', save(), null, 'adopt'],
+    ['another game in the cloud', save(), save({ saveId: GAME_Y }), 'conflict-different'],
+    ["the cloud's game at another revision", save({ revision: 8 }), save({ revision: 7 }), 'conflict-same'],
+  ])('Ruling R36: Given a dirty guest save and %s, Then the guest branch is unchanged (%s)', (_what, local, cloud, expected) => {
+    expect(kind({ local, cloud, state: syncState(), me: ACCT_B, localDirty: true })).toBe(expected);
+  });
+
+  it("Ruling R36: Given a dirty save and nobody signed in, Then 'guest'", () => {
+    expect(kind({ local: save(), cloud: null, state: boundTo(ACCT_A, L), me: null, localDirty: true })).toBe('guest');
+  });
+});
+
 describe('reconcile — only the nine kinds', () => {
   it('Given a sweep of inputs, Then every decision is one of the nine kinds and only refuse-switch carries a message', () => {
     const saves = [null, save({ revision: 5 }), save({ revision: 7 }), save({ revision: 9 }), save({ saveId: GAME_Y, revision: 7 })];
@@ -226,7 +288,13 @@ describe('reconcile — only the nine kinds', () => {
       for (const cloud of saves)
         for (const state of states)
           for (const me of mes) {
-            const d = reconcile({ local, cloud, state, me });
+            for (const localDirty of [false, true]) {
+              const d = reconcile({ local, cloud, state, me, localDirty });
+              expect(KINDS).toContain(d.kind);
+              if (d.kind === 'refuse-switch') expect(typeof d.message).toBe('string');
+              else expect(Object.keys(d)).toEqual(['kind']);
+            }
+            const d = rc({ local, cloud, state, me });
             expect(KINDS).toContain(d.kind);
             if (d.kind === 'refuse-switch') expect(typeof d.message).toBe('string');
             else expect(Object.keys(d)).toEqual(['kind']);
