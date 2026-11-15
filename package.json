@@ -3,17 +3,22 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "oneSpace \u2014 a procedurally generated noir space odyssey",
+  "description": "oneSpace — a procedurally generated noir space odyssey",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --port 4173 --strictPort",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:server": "vitest run -c vitest.server.config.ts",
     "test:watch": "vitest",
     "verify": "npm run typecheck && npm test && node scripts/gen-smoke.mjs && node scripts/ship-smoke.mjs"
   },
   "dependencies": {
+    "@hono/node-server": "^2.1.8",
+    "arctic": "^3.7.0",
+    "hono": "^4.13.18",
+    "postgres": "^4.1.1",
     "three": "^0.180.0",
     "zod": "^4.6.7"
   },

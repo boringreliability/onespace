@@ -1,0 +1,23 @@
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: onespace
+      POSTGRES_PASSWORD: onespace
+      POSTGRES_DB: onespace
+    ports:
+      - '5432:5432'
+    volumes:
+      - db-data:/var/lib/postgresql/data
+  db-test:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: onespace
+      POSTGRES_PASSWORD: onespace
+      POSTGRES_DB: onespace_test
+    ports:
+      - '54329:5432'
+    tmpfs:
+      - /var/lib/postgresql/data
+volumes:
+  db-data:
