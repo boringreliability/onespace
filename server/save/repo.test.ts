@@ -260,6 +260,16 @@ describe('resolveSave', () => {
     expect((await getHead(t.sql, a))?.save).toEqual(s);
   });
 
+  it('Given NO head but a non-null cloud (deleted meanwhile, R27), When resolve, Then the device save is stored with the resolve key: kind "resolved"', async () => {
+    const a = await user('a');
+    const s = mk({ revision: 2 });
+    const r = await resolveSave(t.sql, a, { deviceId: DEV_A, keep: 'device', device: s, base: null, cloud: { saveId: SAVE_X, revision: 1 } });
+    expect(r).toEqual({ kind: 'resolved', revision: 2, save: s });
+    expect((await getHead(t.sql, a))?.save).toEqual(s);
+    const [k] = await t.sql<{ resolve_key: string | null }[]>`select resolve_key from saves where user_id = ${a}`;
+    expect(k!.resolve_key).toBe(`device:${SAVE_X}:2:${SAVE_X}:1`);
+  });
+
   it('Given a diverged same game, When keep "device" with the base digest, Then the cloud fall is subtracted, revision = max + 1, head and digest row stored', async () => {
     const a = await user('a');
     const { base, device, cloudHead } = await diverged(a);

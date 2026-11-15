@@ -583,6 +583,15 @@ describe('POST /api/save/resolve (R22)', () => {
     expect(await snapshot(a.id)).toEqual(before);
   });
 
+  it('Given no cloud head but a non-null cloud (deleted meanwhile, R27), When resolve, Then 200 and the device save is stored', async () => {
+    const a = await mkUser('a');
+    const s = mk({ revision: 2 });
+    const res = await resolve(a, 'device', s, null, { saveId: SAVE_X, revision: 1 });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ revision: 2, save: s });
+    expect((await headRow(a.id))?.body).toEqual(s);
+  });
+
   it('Given a different-game keep "cloud" (no-op), When repeated after a PUT moved the head, Then 409', async () => {
     const a = await mkUser('a');
     const x = mk({ revision: 3 });

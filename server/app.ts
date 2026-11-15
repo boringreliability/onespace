@@ -7,6 +7,7 @@ import type { Sql } from 'postgres';
 
 import { authRoutes } from './auth/routes';
 import type { Config } from './config';
+import { saveRoutes } from './save/routes';
 
 export const MAX_BODY_BYTES = 2 * 1024 * 1024;
 
@@ -87,6 +88,8 @@ export function createApp(deps: AppDeps): Hono {
     '/api',
     authRoutes({ config, sql, now: deps.now ?? Date.now, fetch: deps.fetch ?? fetch, clientIp: deps.clientIp }),
   );
+
+  app.route('/api', saveRoutes({ sql, now: deps.now ?? Date.now }));
 
   app.all('/api/*', (c) => c.json({ error: 'not_found' }, 404));
 

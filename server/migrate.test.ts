@@ -45,8 +45,8 @@ describe('migrate rollback', () => {
 
 describe('migrate', () => {
   describe('given an empty schema', () => {
-    it('when run, then it applies 001_init.sql and returns its name', async () => {
-      expect(await migrate(t.sql)).toEqual(['001_init.sql']);
+    it('when run, then it applies 001_init.sql and 002_resolve_key.sql and returns their names', async () => {
+      expect(await migrate(t.sql)).toEqual(['001_init.sql', '002_resolve_key.sql']);
     });
 
     it('when run a second time, then nothing is applied', async () => {
