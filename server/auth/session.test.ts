@@ -69,6 +69,30 @@ describe('createSession', () => {
   });
 });
 
+describe('createSession housekeeping (R17)', () => {
+  describe('given two users who both have expired sessions', () => {
+    it('when the first user gets a new session, then only their expired rows are deleted', async () => {
+      const [other] = await t.sql<{ id: string }[]>`insert into users (discord_id, name) values ('d-2', 'Bo') returning id`;
+      const old = await createSession(t.sql, userId, NOW);
+      await createSession(t.sql, other!.id, NOW);
+      const later = NOW + 31 * DAY;
+      const fresh = await createSession(t.sql, userId, later);
+
+      expect(await t.sql`select 1 from sessions where user_id = ${userId}`).toHaveLength(1);
+      expect(await t.sql`select 1 from sessions where user_id = ${other!.id}`).toHaveLength(1);
+      expect(await sessionUser(t.sql, old, later)).toBeNull();
+      expect(await sessionUser(t.sql, fresh, later)).toEqual({ id: userId, name: 'Ada' });
+    });
+
+    it('when the first user still has a live session, then it survives the new login', async () => {
+      const live = await createSession(t.sql, userId, NOW);
+      await createSession(t.sql, userId, NOW + DAY);
+      expect(await sessionUser(t.sql, live, NOW + DAY)).toEqual({ id: userId, name: 'Ada' });
+      expect(await t.sql`select 1 from sessions where user_id = ${userId}`).toHaveLength(2);
+    });
+  });
+});
+
 describe('sessionUser', () => {
   describe('given a live session', () => {
     it('when looked up with its token, then it returns the user id and name', async () => {

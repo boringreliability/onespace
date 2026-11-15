@@ -75,6 +75,69 @@ describe('rateLimiter', () => {
     });
   });
 
+  describe('given maxKeys of 3 (R16: fail closed)', () => {
+    const capped = (clock: { t: number }) => {
+      const app = new Hono();
+      app.use(
+        '*',
+        rateLimiter({ limit: 2, windowMs: 1000, maxKeys: 3, key: (c) => c.req.header('x-key') ?? 'anonymous', now: () => clock.t }),
+      );
+      app.get('/', (c) => c.text('ok'));
+      return app;
+    };
+
+    it('when a fourth distinct key arrives, then it is 429 while the three live keys keep working', async () => {
+      const app = capped({ t: 0 });
+      for (const k of ['a', 'b', 'c']) expect((await hit(app, k)).status).toBe(200);
+      expect((await hit(app, 'd')).status).toBe(429);
+      expect((await hit(app, 'a')).status).toBe(200);
+      expect((await hit(app, 'a')).status).toBe(429);
+    });
+
+    it('when the window has expired, then the new key is admitted', async () => {
+      const clock = { t: 0 };
+      const app = capped(clock);
+      for (const k of ['a', 'b', 'c']) await hit(app, k);
+      expect((await hit(app, 'd')).status).toBe(429);
+      clock.t = 1001;
+      expect((await hit(app, 'd')).status).toBe(200);
+    });
+
+    it('when no maxKeys is given, then 10_000 distinct keys are admitted and the 10_001st is 429', async () => {
+      const app = new Hono();
+      app.use('*', rateLimiter({ limit: 1, windowMs: 60_000, key: (c) => c.req.header('x-key')!, now: () => 0 }));
+      app.get('/', (c) => c.text('ok'));
+      for (let i = 0; i < 10_000; i++) expect((await hit(app, `k${i}`)).status).toBe(200);
+      expect((await hit(app, 'one-too-many')).status).toBe(429);
+    });
+  });
+
+  describe('given a rejected request (Retry-After)', () => {
+    it('when 400 ms of a 1000 ms window have passed, then Retry-After is 1 (ceil of 0.6 s)', async () => {
+      const clock = { t: 0 };
+      const app = appWith({ limit: 1, windowMs: 1000 }, clock);
+      await hit(app, 'a');
+      clock.t = 400;
+      expect((await hit(app, 'a')).headers.get('retry-after')).toBe('1');
+    });
+
+    it('when 10.5 s of a 60 s window have passed, then Retry-After is 50 (ceil of 49.5)', async () => {
+      const clock = { t: 5_000 };
+      const app = appWith({ limit: 1, windowMs: 60_000 }, clock);
+      await hit(app, 'a');
+      clock.t = 15_500;
+      expect((await hit(app, 'a')).headers.get('retry-after')).toBe('50');
+    });
+
+    it('when 1 ms of the window is left, then Retry-After is never below 1', async () => {
+      const clock = { t: 0 };
+      const app = appWith({ limit: 1, windowMs: 1000 }, clock);
+      await hit(app, 'a');
+      clock.t = 999;
+      expect((await hit(app, 'a')).headers.get('retry-after')).toBe('1');
+    });
+  });
+
   describe('given two limiter instances', () => {
     it('when one is exhausted, then the other is unaffected', async () => {
       const one = appWith({ limit: 1, windowMs: 1000 }, { t: 0 });

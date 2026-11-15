@@ -13,7 +13,7 @@
 
 import { createHash } from 'node:crypto';
 import type { Context } from 'hono';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createApp } from '../app';
 import type { Config } from '../config';
@@ -102,14 +102,15 @@ function discord(opts: DiscordOpts = {}) {
 
 // ---- App + request helpers ------------------------------------------------
 
-function makeApp(opts: { config?: Partial<Config>; discord?: DiscordOpts } = {}) {
+function makeApp(opts: { config?: Partial<Config>; discord?: DiscordOpts; defaultClientIp?: boolean } = {}) {
   const d = discord(opts.discord);
   const app = createApp({
     config: { ...baseConfig, ...opts.config },
     sql: t.sql,
     now: () => clock,
     fetch: d.fetchFn,
-    clientIp: (c: Context) => c.req.header('x-test-ip') ?? '10.0.0.1',
+    // defaultClientIp: leave createApp's own client-IP resolution in place.
+    ...(opts.defaultClientIp ? {} : { clientIp: (c: Context) => c.req.header('x-test-ip') ?? '10.0.0.1' }),
     staticRoot: '/nonexistent',
   });
   return { app, calls: d.calls };
@@ -718,6 +719,108 @@ describe('rate limit on login routes', () => {
       const h = { headers: { 'x-test-ip': '9.9.9.9' } };
       expect((await app.request('/api/health', h)).status).toBe(200);
       expect((await app.request('/api/me', h)).status).toBe(401);
+    });
+  });
+});
+
+// ---- Fix round 1 (R16, R17) -------------------------------------------------
+
+describe('default client IP (no injected clientIp)', () => {
+  const xff = (app: App, value: string) => app.request('/api/auth/discord', { headers: { 'x-forwarded-for': value } });
+
+  describe('given production, behind Railway (R16: right-most X-Forwarded-For entry)', () => {
+    it('when 21 calls share the right-most entry but vary the left-most, then the 21st is 429', async () => {
+      const { app } = makeApp({ config: { production: true }, defaultClientIp: true });
+      for (let i = 0; i < 20; i++) expect((await xff(app, `1.1.1.${i}, 9.9.9.9`)).status).toBe(302);
+      expect((await xff(app, '1.1.1.99, 9.9.9.9')).status).toBe(429);
+    });
+
+    it('when 21 calls share the left-most but vary the right-most, then none is 429', async () => {
+      const { app } = makeApp({ config: { production: true }, defaultClientIp: true });
+      for (let i = 0; i < 21; i++) expect((await xff(app, `1.1.1.1, 9.9.9.${i}`)).status).toBe(302);
+    });
+
+    it('when the right-most entry has surrounding spaces, then it is trimmed to the same key', async () => {
+      const { app } = makeApp({ config: { production: true }, defaultClientIp: true });
+      for (let i = 0; i < 20; i++) await xff(app, `1.1.1.${i},   9.9.9.9  `);
+      expect((await xff(app, '2.2.2.2, 9.9.9.9')).status).toBe(429);
+    });
+  });
+
+  describe('given production is false', () => {
+    it('when the right-most entry varies, then X-Forwarded-For is ignored and all share one key (21st is 429)', async () => {
+      const { app } = makeApp({ defaultClientIp: true });
+      for (let i = 0; i < 20; i++) expect((await xff(app, `1.1.1.1, 9.9.9.${i}`)).status).toBe(302);
+      expect((await xff(app, '1.1.1.1, 9.9.9.250')).status).toBe(429);
+    });
+  });
+});
+
+describe('test login is never available in production (R17)', () => {
+  describe('given a Config with production and testLogin both true, passed straight to createApp', () => {
+    it('when posting a name, then 404 and nothing is created', async () => {
+      const { app } = makeApp({ config: { production: true, testLogin: true } });
+      const res = await app.request('/api/test/login', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', origin: ORIGIN },
+        body: JSON.stringify({ name: 'tester' }),
+      });
+      expect(res.status).toBe(404);
+      expect(await counts()).toEqual({ users: 0, sessions: 0 });
+    });
+  });
+});
+
+describe('test login names (R17)', () => {
+  const post = (app: App, name: unknown) =>
+    app.request('/api/test/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin: ORIGIN },
+      body: JSON.stringify({ name }),
+    });
+
+  describe('given testLogin is enabled', () => {
+    it('when the name is only whitespace, then 400 and nothing is created', async () => {
+      const { app } = makeApp({ config: { testLogin: true } });
+      expect((await post(app, '   ')).status).toBe(400);
+      expect(await counts()).toEqual({ users: 0, sessions: 0 });
+    });
+
+    it('when the name contains a control character, then 400', async () => {
+      const { app } = makeApp({ config: { testLogin: true } });
+      expect((await post(app, 'a\u0007b')).status).toBe(400);
+      expect((await post(app, 'line\nbreak')).status).toBe(400);
+      expect(await counts()).toEqual({ users: 0, sessions: 0 });
+    });
+
+    it('when the name has surrounding spaces, then it is stored trimmed (name and discord_id)', async () => {
+      const { app } = makeApp({ config: { testLogin: true } });
+      const res = await post(app, ' Dennis ');
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ name: 'Dennis' });
+      const rows = await t.sql<{ discord_id: string; name: string }[]>`select discord_id, name from users`;
+      expect(rows).toEqual([{ discord_id: 'test:Dennis', name: 'Dennis' }]);
+    });
+
+    it('when the name is 65 chars, then 400; when it is 64 chars, then 200', async () => {
+      const { app } = makeApp({ config: { testLogin: true } });
+      expect((await post(app, 'a'.repeat(65))).status).toBe(400);
+      expect((await post(app, 'a'.repeat(64))).status).toBe(200);
+    });
+
+    it('when the database fails, then 500 { error: internal } and the message is logged', async () => {
+      const { app } = makeApp({ config: { testLogin: true } });
+      await t.sql`alter table sessions rename to sessions_gone`;
+      const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const res = await post(app, 'tester');
+        expect(res.status).toBe(500);
+        expect(await res.json()).toEqual({ error: 'internal' });
+        expect(spy).toHaveBeenCalled();
+      } finally {
+        spy.mockRestore();
+        await t.sql`alter table sessions_gone rename to sessions`;
+      }
     });
   });
 });
