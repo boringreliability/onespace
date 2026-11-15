@@ -1503,3 +1503,211 @@ describe('R25 — registry.ts wires the fixes', () => {
     expect(src).toMatch(/applySave\(saveWorld, continued, \{ universeRestored: true \}\)/);
   });
 });
+
+// =============================================================================
+//  v4 sub-plan 4, Task 5 (phase A) — `SaveGameOptions.onStored`.
+//
+//   onStored?: (s: SaveV1) => void
+//
+//  Called once per SUCCESSFUL store.save, with the save that was stored, after
+//  the store holds it. Not on a failed or timed-out store write, not for a
+//  WAL-only write (pagehide, storeAvailable: false), never in a reader tab.
+//  An onStored that throws does not break saving. The sync client's onStored
+//  must keep the synchronous part of an autosave small (R25 I4c bound).
+// =============================================================================
+
+describe('Task 5 — onStored after a durable store save', () => {
+  it('Given onStored, When two manual saves succeed, Then it is called twice, in order, each time with the save the store holds', async () => {
+    const got: SaveV1[] = [];
+    const r = rig({ extra: { onStored: (s: SaveV1) => got.push(structuredClone(s)) } });
+    await r.sg.saveNow('manual');
+    await r.sg.saveNow('manual');
+    expect(got.map((s) => s.revision)).toEqual([1, 2]);
+    expect(got).toEqual(r.s.saved);
+  });
+
+  it('Given onStored, When it is called, Then the store already holds that save (it comes after store.save, not before)', async () => {
+    const atCall: Array<number | undefined> = [];
+    const r: Rig = rig({ extra: { onStored: () => atCall.push(r.s.saved.at(-1)?.revision) } });
+    await r.sg.saveNow('manual');
+    expect(atCall).toEqual([1]);
+  });
+
+  it('Given a landing autosave, When it is stored, Then onStored is called once', async () => {
+    const onStored = vi.fn();
+    const r = rig({ extra: { onStored } });
+    landed(r.g);
+    r.tick();
+    await flush();
+    expect(onStored).toHaveBeenCalledTimes(1);
+  });
+
+  it('Given the store rejects a write, Then onStored is not called for it; When the next save succeeds, Then it is called once, with that save', async () => {
+    const onStored = vi.fn();
+    const r = rig({ extra: { onStored } });
+    r.s.failOnce();
+    await expect(r.sg.saveNow('manual')).resolves.toBe(false);
+    expect(onStored).not.toHaveBeenCalled();
+    await expect(r.sg.saveNow('manual')).resolves.toBe(true);
+    expect(onStored).toHaveBeenCalledTimes(1);
+    expect(onStored.mock.calls[0]![0].revision).toBe(2);
+  });
+
+  it('Given a pagehide (a WAL snapshot only), Then onStored is not called', () => {
+    const onStored = vi.fn();
+    const r = rig({ extra: { onStored } });
+    r.pagehide();
+    expect(walSnapshot()).not.toBeNull();
+    expect(onStored).not.toHaveBeenCalled();
+  });
+
+  it('Given a reader tab (inert), When it is asked to save in every way, Then onStored is never called', async () => {
+    const onStored = vi.fn();
+    const r = rig({ writer: false, extra: { onStored } });
+    await r.sg.saveNow('manual');
+    landed(r.g);
+    r.tick();
+    r.play(121);
+    r.hide();
+    r.pagehide();
+    await flush();
+    expect(onStored).not.toHaveBeenCalled();
+  });
+
+  it('Given storeAvailable: false (store-inert), When it saves, Then onStored is never called', async () => {
+    const onStored = vi.fn();
+    const r = rig({ extra: { storeAvailable: false, onStored } });
+    await r.sg.saveNow('manual');
+    landed(r.g);
+    r.tick();
+    r.hide();
+    await flush();
+    expect(onStored).not.toHaveBeenCalled();
+  });
+
+  it('Given an onStored that throws, When saves are made, Then each still resolves true, the WAL is cleared, SAVE FAILED is never logged, and onStored is still called for the next save', async () => {
+    const onStored = vi.fn(() => {
+      throw new Error('sync blew up (test)');
+    });
+    const r = rig({ extra: { onStored } });
+    await expect(r.sg.saveNow('manual')).resolves.toBe(true);
+    expect(walSnapshot()).toBeNull();
+    await expect(r.sg.saveNow('manual')).resolves.toBe(true);
+    expect(onStored).toHaveBeenCalledTimes(2);
+    expect(r.logs.some((l) => l.text === 'SAVE FAILED')).toBe(false);
+    expect(r.s.saved.map((s) => s.revision)).toEqual([1, 2]);
+  });
+});
+
+describe('Task 5 — onStored and a store write that times out', () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout', 'clearTimeout'] });
+    vi.setSystemTime(WALL);
+  });
+
+  it('Given store.save hangs past 3 s, Then onStored is not called — not even when the hung write lands later', async () => {
+    const onStored = vi.fn();
+    const r = rig({ extra: { onStored } });
+    const release = r.s.hold();
+    let done: boolean | null = null;
+    void r.sg.saveNow('manual').then((x) => (done = x));
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(done).toBe(false);
+    release();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(r.s.saved).toHaveLength(1); // the late commit did land
+    expect(onStored).not.toHaveBeenCalled();
+  });
+});
+
+describe('Task 5 — the synchronous part of an autosave with a real SyncClient.onStored (R25 I4c bound)', () => {
+  it('Given the I4c load (MAX_ACTIONS, 5 000 world entries, a WAL snapshot) and onStored wired to a signed-in SyncClient, When interval autosaves run, Then the fastest (synchronous tick + onStored call) is under 2 ms, and the client did queue a push', async () => {
+    const { SyncClient } = await import('@/net/SyncClient');
+    const fx = await import('@/net/__fixtures__/sync');
+    const syncStorage = new fx.MemoryStorage();
+    const L = fx.save({ revision: 7 });
+    syncStorage.setItem(
+      'onespace.sync.v1',
+      JSON.stringify(fx.syncState({ accountId: fx.ACCT_B.id, accountName: fx.ACCT_B.name, lastSeenCloud: fx.head(L) })),
+    );
+    const syncStore = fx.testStore();
+    const sync = new SyncClient({
+      api: fx.fakeApi({ getSave: () => fx.cloudReply(L) }),
+      storage: syncStorage,
+      isWriter: () => true,
+      schedule: fx.timerSchedule,
+      store: syncStore.store,
+      wal: createWal(new MemoryStorage() as unknown as Storage),
+      uuid: () => fx.DEVICE_ID,
+      clearLocal: () => syncStore.clearLocal(),
+    });
+    expect((await sync.boot(L)).decision.kind).toBe('in-sync');
+
+    const onStoredMs: number[] = [];
+    const statuses: string[] = [];
+    const onStored = (s: SaveV1): void => {
+      const t0 = performance.now();
+      sync.onStored(s);
+      onStoredMs.push(performance.now() - t0);
+      statuses.push(sync.status());
+    };
+
+    const r = rig({ extra: { onStored } });
+    await r.sg.saveNow('manual');
+    const base = r.s.saved[0]!;
+    const ids = Array.from({ length: 4 }, (_, k) => fyssField(k).asteroids.map((x) => x.id)).flat();
+    const RES = ['ice', 'metal', 'silicate', 'rare'] as const;
+    const actions: ActionEntry[] = [];
+    for (let i = 1; i <= MAX_ACTIONS; i++) {
+      const id = ids[i % ids.length]!;
+      actions.push(
+        i % 2
+          ? {
+              seq: i,
+              source: 'cargo',
+              payload: {
+                action: { kind: 'mine', asteroidId: id, resource: 'ice', kg: 100 },
+                result: { ok: true, kgIn: 100, kgOut: 0, fuelKg: 0, restoredFrac: 0 },
+              },
+              wallMs: WALL + i,
+              orbitSeconds: 12_345.678 + i,
+            }
+          : { seq: i, source: 'mined', payload: { id, by: 'local', resource: 'ice', kg: 100 }, wallMs: WALL + i, orbitSeconds: 12_345.678 + i },
+      );
+    }
+    const world = Array.from({ length: 5_000 }, (_, i) => ({
+      id: ids[i % ids.length]!,
+      by: 'local' as const,
+      resource: RES[i % 4]!,
+      kg: 100,
+      wallMs: WALL + i,
+      orbitSeconds: 1 + i,
+    }));
+    r.g.worldState.restore(world);
+    const big: SaveV1 = { ...base, revision: 2, actions, world: { ...base.world, entries: world } };
+    r.sg.continueFrom(big);
+    r.g.journal.restore(actions);
+
+    const wal = createWal(storage as unknown as Storage);
+    const times: number[] = [];
+    for (let k = 0; k < 5; k++) {
+      expect(wal.writeSnapshot({ ...big, revision: r.sg.revision })).toBe(true);
+      for (let i = 0; i < 20; i++) {
+        bus.emit('propellant:action', { action: { kind: 'jump', distanceLy: 1 }, ok: true, kg: 0, tankDeltaKg: 0 });
+      }
+      const attempts = r.s.attempts.length;
+      const calls = onStoredMs.length;
+      const t0 = performance.now();
+      r.tick(AUTOSAVE_INTERVAL);
+      const tickMs = performance.now() - t0;
+      await flush();
+      expect(r.s.attempts.length).toBe(attempts + 1); // it did save
+      expect(onStoredMs.length).toBe(calls + 1); // and told the sync client
+      times.push(tickMs + onStoredMs.at(-1)!);
+    }
+    expect(statuses.every((s) => s !== 'off')).toBe(true);
+    const fastest = Math.min(...times);
+    expect(fastest, `autosave sync + onStored ms: ${times.map((t) => t.toFixed(2)).join(' ')}`).toBeLessThan(2);
+  });
+});
