@@ -22,6 +22,7 @@ import { describe, expect, it } from 'vitest';
 
 const SRC = fileURLToPath(new URL('..', import.meta.url));
 const ENTRIES = ['save/schema.ts', 'save/migrate.ts', 'save/replay.ts']; // Task 3 appends 'save/conflict.ts'
+const IMPURE_FIXTURE = 'save/__fixtures__/impure.ts'; // negative control: the checker must flag it
 const FORBIDDEN_GLOBALS = ['window', 'document', 'indexedDB', 'localStorage'] as const;
 
 async function bundle(entry: string) {
@@ -37,35 +38,61 @@ async function bundle(entry: string) {
   });
 }
 
+/** The one checker every entry (and the negative control) goes through. */
+async function checkPurity(entry: string) {
+  const result = await bundle(entry);
+  const inputs = Object.keys(result.metafile.inputs);
+  const threeInputs = inputs.filter((p) => /node_modules\/three(\/|$)/.test(p));
+  const code = result.outputFiles[0].text;
+  const touched: string[] = [];
+  const g = globalThis as Record<string, unknown>;
+  for (const name of FORBIDDEN_GLOBALS) {
+    Object.defineProperty(g, name, {
+      configurable: true,
+      get() {
+        touched.push(name);
+        return undefined;
+      },
+    });
+  }
+  // Node caches data: imports by URL; a per-run suffix forces re-evaluation.
+  let threw: unknown = null;
+  try {
+    await import(/* @vite-ignore */ 'data:text/javascript;base64,' + Buffer.from(`${code}\n// run ${Math.random()}`).toString('base64'));
+  } catch (e) {
+    threw = e;
+  } finally {
+    for (const name of FORBIDDEN_GLOBALS) delete g[name];
+  }
+  return { inputCount: inputs.length, threeInputs, touched, threw };
+}
+
 describe.each(ENTRIES)('save core purity: src/%s', (entry) => {
   describe('given the module and its transitive imports', () => {
     it('when bundled, then no input comes from three', async () => {
-      const result = await bundle(entry);
-      const inputs = Object.keys(result.metafile.inputs);
-      expect(inputs.length).toBeGreaterThan(0);
-      expect(inputs.filter((p) => /node_modules\/three(\/|$)/.test(p))).toEqual([]);
+      const r = await checkPurity(entry);
+      expect(r.inputCount).toBeGreaterThan(0);
+      expect(r.threeInputs).toEqual([]);
     });
 
     it('when its top level runs in node, then it touches none of window/document/indexedDB/localStorage', async () => {
-      const result = await bundle(entry);
-      const code = result.outputFiles[0].text;
-      const touched: string[] = [];
-      const g = globalThis as Record<string, unknown>;
-      for (const name of FORBIDDEN_GLOBALS) {
-        Object.defineProperty(g, name, {
-          configurable: true,
-          get() {
-            touched.push(name);
-            return undefined;
-          },
-        });
-      }
-      try {
-        await import(/* @vite-ignore */ 'data:text/javascript;base64,' + Buffer.from(code).toString('base64'));
-      } finally {
-        for (const name of FORBIDDEN_GLOBALS) delete g[name];
-      }
-      expect(touched).toEqual([]);
+      const r = await checkPurity(entry);
+      expect(r.threw).toBeNull();
+      expect(r.touched).toEqual([]);
+    });
+  });
+});
+
+describe('purity checker negative control', () => {
+  describe('given a fixture that imports three and reads window at top level', () => {
+    it('when checked, then the three-input check flags it', async () => {
+      const r = await checkPurity(IMPURE_FIXTURE);
+      expect(r.threeInputs.length).toBeGreaterThan(0);
+    });
+
+    it('when checked, then the global-trap check flags window', async () => {
+      const r = await checkPurity(IMPURE_FIXTURE);
+      expect(r.touched).toContain('window');
     });
   });
 });

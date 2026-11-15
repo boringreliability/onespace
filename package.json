@@ -6,7 +6,8 @@
   "description": "oneSpace — a procedurally generated noir space odyssey",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit && vite build && node scripts/build-server.mjs",
+    "start": "node dist-server/index.mjs",
     "preview": "vite preview --port 4173 --strictPort",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
