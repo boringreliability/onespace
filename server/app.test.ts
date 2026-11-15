@@ -4,7 +4,7 @@
  * body limit, security headers.
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -22,6 +22,22 @@ const CSP =
 const ORIGIN = 'https://onespace.example';
 const INDEX_HTML = '<!doctype html><title>oneSpace</title><div id="app"></div>';
 
+const SECRET = 'TOP-SECRET-OUTSIDE-STATIC-ROOT';
+
+// What the game ships today is html/js/map (dist/); the rest covers assets it may add.
+const MIME_CASES: Record<string, string> = {
+  '.js': 'text/javascript',
+  '.css': 'text/css',
+  '.html': 'text/html',
+  '.json': 'application/json',
+  '.map': 'application/json',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.webp': 'image/webp',
+  '.wasm': 'application/wasm',
+  '.woff2': 'font/woff2',
+};
+
 const config: Config = {
   databaseUrl: 'postgres://unused',
   publicOrigin: ORIGIN,
@@ -32,18 +48,25 @@ const config: Config = {
 };
 
 let t: TestSchema;
+let base: string;
 let staticRoot: string;
 let app: ReturnType<typeof createApp>;
 
 beforeAll(async () => {
   t = await withTestSchema();
-  staticRoot = mkdtempSync(join(tmpdir(), 'onespace-static-'));
+  base = mkdtempSync(join(tmpdir(), 'onespace-static-'));
+  staticRoot = join(base, 'public');
+  mkdirSync(join(staticRoot, 'assets'), { recursive: true });
   writeFileSync(join(staticRoot, 'index.html'), INDEX_HTML);
+  writeFileSync(join(staticRoot, 'assets', 'a.js'), 'export const a = 1;');
+  for (const ext of Object.keys(MIME_CASES)) writeFileSync(join(staticRoot, 'assets', `f${ext}`), 'x');
+  // Lives next to, not inside, the static root: must never be served.
+  writeFileSync(join(base, 'secret.txt'), SECRET);
   app = createApp({ config, sql: t.sql, staticRoot });
 });
 afterAll(async () => {
   await t.drop();
-  rmSync(staticRoot, { recursive: true, force: true });
+  rmSync(base, { recursive: true, force: true });
 });
 
 describe('GET /api/health', () => {
@@ -138,4 +161,100 @@ describe('security headers', () => {
       });
     });
   }
+});
+
+describe('guards on /api: more cases', () => {
+  describe('given an oversized declared Content-Length', () => {
+    it('when POST declares Content-Length over MAX_BODY_BYTES, then it is 413', async () => {
+      const res = await app.request('/api/anything', {
+        method: 'POST',
+        headers: { Origin: ORIGIN, 'Content-Type': 'application/json', 'Content-Length': String(MAX_BODY_BYTES + 1) },
+        body: '{}',
+      });
+      expect(res.status).toBe(413);
+    });
+  });
+
+  describe('given other write methods or a missing/opaque origin', () => {
+    it.each(['PUT', 'DELETE', 'PATCH'])('when %s with Origin https://evil.example, then it is 403', async (method) => {
+      const res = await app.request('/api/anything', { method, headers: { Origin: 'https://evil.example' } });
+      expect(res.status).toBe(403);
+    });
+
+    it('when POST has no Origin header, then it is 403', async () => {
+      const res = await app.request('/api/anything', { method: 'POST', body: '{}' });
+      expect(res.status).toBe(403);
+    });
+
+    it('when POST has Origin: null, then it is 403', async () => {
+      const res = await app.request('/api/anything', { method: 'POST', headers: { Origin: 'null' }, body: '{}' });
+      expect(res.status).toBe(403);
+    });
+  });
+});
+
+describe('static serving: path traversal', () => {
+  describe('given a secret file just outside staticRoot', () => {
+    it.each(['/%2e%2e/secret.txt', '/..%2fsecret.txt', '/..%2f..%2fpackage.json', '/%2e%2e/%2e%2e/package.json', '/%00', '/assets/..%2f..%2fsecret.txt'])(
+      'when GET %s, then nothing from outside staticRoot is served',
+      async (path) => {
+        const res = await app.request(path);
+        const text = await res.text();
+        expect(text).not.toContain(SECRET);
+        expect(text).not.toContain('"scripts"');
+      },
+    );
+  });
+});
+
+describe('static serving: assets and MIME', () => {
+  it('when GET /assets/a.js, then it is 200 with the file and a JavaScript type', async () => {
+    const res = await app.request('/assets/a.js');
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('export const a = 1;');
+    expect(res.headers.get('content-type')).toContain('text/javascript');
+  });
+
+  it.each(Object.entries(MIME_CASES))('when GET a %s file, then Content-Type starts with %s', async (ext, mime) => {
+    const res = await app.request(`/assets/f${ext}`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toMatch(new RegExp(`^${mime.replace('+', '\\+')}`));
+  });
+});
+
+describe('security headers on non-trivial responses', () => {
+  const expectHeaders = (res: Response) => {
+    expect(res.headers.get('X-Content-Type-Options')).toBe('nosniff');
+    expect(res.headers.get('Referrer-Policy')).toBe('same-origin');
+    expect(res.headers.get('Content-Security-Policy')).toBe(CSP);
+    expect(res.headers.get('Access-Control-Allow-Origin')).toBeNull();
+  };
+
+  it('when the body limit answers 413, then the headers are present', async () => {
+    const res = await app.request('/api/anything', {
+      method: 'POST',
+      headers: { Origin: ORIGIN },
+      body: 'x'.repeat(MAX_BODY_BYTES + 1),
+    });
+    expect(res.status).toBe(413);
+    expectHeaders(res);
+  });
+
+  it('when health answers 503, then the headers are present', async () => {
+    const closed = await withTestSchema();
+    await closed.sql.end({ timeout: 1 });
+    try {
+      const res = await createApp({ config, sql: closed.sql, staticRoot }).request('/api/health');
+      expect(res.status).toBe(503);
+      expectHeaders(res);
+    } finally {
+      await closed.drop();
+    }
+  });
+
+  it('when a static asset answers 200, then the headers are present', async () => {
+    const res = await app.request('/assets/a.js');
+    expect(res.status).toBe(200);
+    expectHeaders(res);
+  });
 });

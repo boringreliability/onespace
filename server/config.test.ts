@@ -58,6 +58,42 @@ describe('loadConfig', () => {
     });
   });
 
+  describe('given a PUBLIC_ORIGIN that is not a bare origin', () => {
+    it.each(['https://x.example/', 'x.example', 'ftp://x', 'https://x.example/path'])(
+      'when PUBLIC_ORIGIN is %s, then it throws a ConfigError naming PUBLIC_ORIGIN',
+      (value) => {
+        const env = { ...VALID_ENV, PUBLIC_ORIGIN: value };
+        expect(() => loadConfig(env)).toThrow(ConfigError);
+        expect(() => loadConfig(env)).toThrow(/PUBLIC_ORIGIN/);
+      },
+    );
+
+    it.each(['https://x.example', 'http://localhost:8787'])(
+      'when PUBLIC_ORIGIN is %s, then it is accepted unchanged',
+      (value) => {
+        expect(loadConfig({ ...VALID_ENV, PUBLIC_ORIGIN: value }).publicOrigin).toBe(value);
+      },
+    );
+  });
+
+  describe('given an invalid PORT', () => {
+    it.each(['abc', '0', '70000', '-1', '80.5'])(
+      'when PORT is %s, then it throws a ConfigError naming PORT',
+      (value) => {
+        const env = { ...VALID_ENV, PORT: value };
+        expect(() => loadConfig(env)).toThrow(ConfigError);
+        expect(() => loadConfig(env)).toThrow(/PORT/);
+      },
+    );
+
+    it.each([['1', 1], ['8787', 8787], ['65535', 65535]] as const)(
+      'when PORT is %s, then the port is %i',
+      (value, expected) => {
+        expect(loadConfig({ ...VALID_ENV, PORT: value }).port).toBe(expected);
+      },
+    );
+  });
+
   describe('given the test login in production', () => {
     it('when NODE_ENV=production and ONESPACE_TEST_LOGIN=1, then it throws "ONESPACE_TEST_LOGIN is not allowed in production"', () => {
       const env = { ...VALID_ENV, NODE_ENV: 'production', ONESPACE_TEST_LOGIN: '1' };

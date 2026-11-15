@@ -3,6 +3,9 @@
  * Postgres (`docker compose up -d db-test`), in a fresh schema per file.
  */
 
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { migrate } from './migrate';
@@ -14,6 +17,30 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   await t.drop();
+});
+
+describe('migrate rollback', () => {
+  describe('given a migrations dir whose second file fails halfway', () => {
+    it('when run, then it rejects, 002 is not recorded and its first statement is rolled back', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'onespace-mig-'));
+      const own = await withTestSchema();
+      try {
+        writeFileSync(join(dir, '001_ok.sql'), 'create table ok_one (id int);');
+        writeFileSync(join(dir, '002_bad.sql'), 'create table half_done (id int);\nthis is not sql;');
+        await expect(migrate(own.sql, dir)).rejects.toThrow();
+        const recorded = await own.sql<{ name: string }[]>`select name from schema_migrations order by name`;
+        expect(recorded.map((r) => r.name)).toEqual(['001_ok.sql']);
+        const tables = await own.sql<{ table_name: string }[]>`
+          select table_name from information_schema.tables where table_schema = current_schema()`;
+        const names = tables.map((r) => r.table_name);
+        expect(names).toContain('ok_one');
+        expect(names).not.toContain('half_done');
+      } finally {
+        await own.drop();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  });
 });
 
 describe('migrate', () => {
