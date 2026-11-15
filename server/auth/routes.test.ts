@@ -4,7 +4,7 @@
  * mocked `fetch`; the clock and the client IP are injected into createApp.
  *
  * Deps added to createApp for this task (phase B implements them):
- *   clientIp?: (c: Context) => string   // prod: getConnInfo, x-forwarded-for first hop only when config.production
+ *   clientIp?: (c: Context) => string   // prod: getConnInfo, x-forwarded-for right-most entry only when config.production
  *
  * Pinned formats:
  *   oauth cookie  __Host-onespace_oauth   = "<state>.<verifier>"  (HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=600)
@@ -752,6 +752,50 @@ describe('default client IP (no injected clientIp)', () => {
       const { app } = makeApp({ defaultClientIp: true });
       for (let i = 0; i < 20; i++) expect((await xff(app, `1.1.1.1, 9.9.9.${i}`)).status).toBe(302);
       expect((await xff(app, '1.1.1.1, 9.9.9.250')).status).toBe(429);
+    });
+  });
+});
+
+describe('default client IP: IPv6 /64 keys and fall-through (R19)', () => {
+  const xff = (app: App, value?: string) =>
+    app.request('/api/auth/discord', { headers: value === undefined ? {} : { 'x-forwarded-for': value } });
+  const prod = () => makeApp({ config: { production: true }, defaultClientIp: true }).app;
+
+  describe('given production and IPv6 clients', () => {
+    it('when 21 right-most addresses lie inside one /64, then the 21st is 429', async () => {
+      const app = prod();
+      for (let i = 0; i < 20; i++) expect((await xff(app, `1.1.1.1, 2001:db8:1:2::${(i + 1).toString(16)}`)).status).toBe(302);
+      expect((await xff(app, '1.1.1.1, 2001:db8:1:2:ffff::1')).status).toBe(429);
+    });
+
+    it('when 21 right-most addresses lie in 21 different /64s, then none is 429', async () => {
+      const app = prod();
+      for (let i = 0; i < 21; i++) expect((await xff(app, `2001:db8:1:${(i + 1).toString(16)}::1`)).status).toBe(302);
+    });
+
+    it('when the same client appears as IPv4 and as ::ffff:IPv4-mapped, then they share one key', async () => {
+      const app = prod();
+      for (let i = 0; i < 10; i++) await xff(app, '5.6.7.8');
+      for (let i = 0; i < 10; i++) await xff(app, '::FFFF:5.6.7.8');
+      expect((await xff(app, '5.6.7.8')).status).toBe(429);
+    });
+  });
+
+  describe('given production and no usable X-Forwarded-For entry', () => {
+    it.each([['trailing comma and space', '1.1.1.1, '], ['a lone comma', ','], ['no header at all', undefined]])(
+      'when it is %s, then all calls share the fallback key and the 21st is 429',
+      async (_label, value) => {
+        const app = prod();
+        for (let i = 0; i < 20; i++) expect((await xff(app, value)).status).toBe(302);
+        expect((await xff(app, value)).status).toBe(429);
+      },
+    );
+
+    it('when the entry is empty, then it shares one key with a request that has no header', async () => {
+      const app = prod();
+      for (let i = 0; i < 10; i++) await xff(app, ',');
+      for (let i = 0; i < 10; i++) await xff(app);
+      expect((await xff(app, '1.1.1.1, ')).status).toBe(429);
     });
   });
 });
