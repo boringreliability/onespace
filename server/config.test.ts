@@ -33,8 +33,8 @@ describe('loadConfig', () => {
       });
     });
 
-    it('when PORT is omitted, then the port is 8787', () => {
-      expect(loadConfig(VALID_ENV).port).toBe(8787);
+    it('when PORT is omitted, then the port is 8790', () => {
+      expect(loadConfig(VALID_ENV).port).toBe(8790);
     });
 
     it('when NODE_ENV is production, then production is true', () => {

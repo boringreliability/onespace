@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { extname, join, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import type { Sql } from 'postgres';
@@ -26,8 +27,13 @@ const MIME: Record<string, string> = {
   '.jpg': 'image/jpeg',
   '.ico': 'image/x-icon',
   '.woff2': 'font/woff2',
+  '.wasm': 'application/wasm',
+  '.webp': 'image/webp',
   '.txt': 'text/plain; charset=utf-8',
 };
+
+// Anchored to this module, not cwd: dist-server/index.mjs -> ../dist (and server/app.ts -> ../dist).
+const DEFAULT_STATIC_ROOT = fileURLToPath(new URL('../dist', import.meta.url));
 
 export type AppDeps = {
   config: Config;
@@ -39,7 +45,7 @@ export type AppDeps = {
 
 export function createApp(deps: AppDeps): Hono {
   const { config, sql } = deps;
-  const root = resolve(deps.staticRoot ?? 'dist');
+  const root = resolve(deps.staticRoot ?? DEFAULT_STATIC_ROOT);
   const app = new Hono();
 
   // Security headers on every response, including errors and early rejections.
@@ -68,7 +74,8 @@ export function createApp(deps: AppDeps): Hono {
     try {
       await sql`select 1`;
       return c.json({ ok: true });
-    } catch {
+    } catch (err) {
+      console.error('health check failed:', err);
       return c.json({ ok: false }, 503);
     }
   });

@@ -42,7 +42,7 @@ esbuild (findes) til server-bundlen, Vitest, Docker (Postgres 17) til server-tes
   `NODE_ENV !== 'production'`. Er begge sat i produktion, nægter serveren at starte og skriver
   `ONESPACE_TEST_LOGIN is not allowed in production`.
 - **Miljøvariabler:** `DATABASE_URL`, `PUBLIC_ORIGIN`, `DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET`,
-  `DISCORD_GUILD_ID`, `DISCORD_ROLE_ID`, `PORT` (default 8787), `NODE_ENV`, `ONESPACE_TEST_LOGIN`. De
+  `DISCORD_GUILD_ID`, `DISCORD_ROLE_ID`, `PORT` (default 8790), `NODE_ENV`, `ONESPACE_TEST_LOGIN`. De
   valideres med Zod ved start, og en fejl giver exit 1 med feltets navn.
 - **Ruter:**
   - `GET /api/health`
@@ -120,7 +120,7 @@ esbuild (findes) til server-bundlen, Vitest, Docker (Postgres 17) til server-tes
 - Modify:
   - `package.json` (deps; scripts `test:server`, `build` = klient + server, `start` =
     `node dist-server/index.mjs`)
-  - `vite.config.ts` (dev-proxy `/api` → `http://127.0.0.1:8787`)
+  - `vite.config.ts` (dev-proxy `/api` → `http://127.0.0.1:8790`)
   - `tsconfig.json` (include `server`)
   - `.gitignore` (`dist-server`)
 - Test:
@@ -150,7 +150,7 @@ esbuild (findes) til server-bundlen, Vitest, Docker (Postgres 17) til server-tes
     - Mangler `DISCORD_ROLE_ID` → `ConfigError` med teksten `DISCORD_ROLE_ID`.
     - `NODE_ENV=production` + `ONESPACE_TEST_LOGIN=1` → `ConfigError` med teksten
       `ONESPACE_TEST_LOGIN is not allowed in production`.
-    - `PORT` udeladt → 8787.
+    - `PORT` udeladt → 8790.
   - **Migrate:** på et tomt skema anvendes `['001_init.sql']`. Anden kørsel → `[]`. Alle seks tabeller
     findes.
   - **App:**

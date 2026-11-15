@@ -11,9 +11,9 @@
  *      node_modules/three;
  *   2. dynamic: bundle to ESM, then import the bundle in node, where `window`,
  *      `document`, `indexedDB` and `localStorage` do not exist. Booby-trapped
- *      getters on globalThis record any touch, so a guarded `typeof` check
- *      is fine but a bare read at module level is caught (and a ReferenceError
- *      thrown by evaluating the module fails the test too).
+ *      getters on globalThis record any touch. Any read counts, `typeof window`
+ *      included, since the getter is invoked; a module-level access must not
+ *      happen at all (a throw while evaluating the module fails the test too).
  */
 
 import { build } from 'esbuild';
@@ -38,14 +38,23 @@ async function bundle(entry: string) {
   });
 }
 
-/** The one checker every entry (and the negative control) goes through. */
-async function checkPurity(entry: string) {
+const cache = new Map<string, ReturnType<typeof runCheck>>();
+
+/** The one checker every entry (and the negative control) goes through; one run per entry. */
+function checkPurity(entry: string) {
+  let r = cache.get(entry);
+  if (!r) cache.set(entry, (r = runCheck(entry)));
+  return r;
+}
+
+async function runCheck(entry: string) {
   const result = await bundle(entry);
   const inputs = Object.keys(result.metafile.inputs);
   const threeInputs = inputs.filter((p) => /node_modules\/three(\/|$)/.test(p));
   const code = result.outputFiles[0].text;
   const touched: string[] = [];
   const g = globalThis as Record<string, unknown>;
+  const original = new Map(FORBIDDEN_GLOBALS.map((n) => [n, Object.getOwnPropertyDescriptor(g, n)]));
   for (const name of FORBIDDEN_GLOBALS) {
     Object.defineProperty(g, name, {
       configurable: true,
@@ -62,7 +71,11 @@ async function checkPurity(entry: string) {
   } catch (e) {
     threw = e;
   } finally {
-    for (const name of FORBIDDEN_GLOBALS) delete g[name];
+    for (const name of FORBIDDEN_GLOBALS) {
+      delete g[name];
+      const d = original.get(name);
+      if (d) Object.defineProperty(g, name, d);
+    }
   }
   return { inputCount: inputs.length, threeInputs, touched, threw };
 }

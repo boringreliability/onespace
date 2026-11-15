@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "oneSpace — a procedurally generated noir space odyssey",
+  "description": "oneSpace \u2014 a procedurally generated noir space odyssey",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build && node scripts/build-server.mjs",
