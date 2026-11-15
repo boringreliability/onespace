@@ -27,7 +27,7 @@ export function rateLimiter(opts: RateLimitOptions): MiddlewareHandler {
     const k = key(c);
     let entry = hits.get(k);
     if (!entry || entry.resetAt <= t) {
-      if (!entry && hits.size >= maxKeys) sweep();
+      // Expired keys were already swept above (at most once per window): no O(n) work per rejected request.
       if (!entry && hits.size >= maxKeys) {
         c.header('Retry-After', String(Math.max(1, Math.ceil(windowMs / 1000))));
         return c.json({ error: 'rate_limited' }, 429);

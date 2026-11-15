@@ -5,6 +5,7 @@ import { getCookie, setCookie } from 'hono/cookie';
 import type { Sql } from 'postgres';
 
 import type { Config } from '../config';
+import { ipKey } from '../clientIp';
 import { rateLimiter } from '../rateLimit';
 import { checkMembership, DISCORD_AUTHORIZE_URL, DISCORD_SCOPE, exchangeCode } from './discord';
 import {
@@ -36,10 +37,10 @@ export function defaultClientIp(config: Config): (c: Context) => string {
     if (config.production) {
       // Railway's edge appends the real client address: trust only the right-most entry.
       const last = c.req.header('x-forwarded-for')?.split(',').pop()?.trim();
-      if (last) return last;
+      if (last) return ipKey(last);
     }
     try {
-      return getConnInfo(c).remote.address ?? 'unknown';
+      return ipKey(getConnInfo(c).remote.address ?? '');
     } catch {
       return 'unknown';
     }
