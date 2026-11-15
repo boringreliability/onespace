@@ -311,14 +311,32 @@ describe('resolveSameGame — revision, identity, what is kept, purity', () => {
 });
 
 describe('cardSummary — the conflict screen', () => {
-  it('Given a grounded save, Then place is "landed <parent name>"', () => {
-    const s = save({ grounded: true, parentId: 'gx-1mwhji--377.-3.266.1:p2' });
-    expect(cardSummary(s, 20_000).place).toBe('landed gx-1mwhji--377.-3.266.1:p2');
+  const PID = 'gx-1mwhji--377.-3.266.1:p2';
+
+  it('Given a resolver that names the parent, Then place is "orbit Remit 31" / "landed Remit 31" and the resolver gets the parentId', () => {
+    const seen: string[] = [];
+    const name = (id: string) => (seen.push(id), 'Remit 31');
+    expect(cardSummary(save({ grounded: false, parentId: PID }), 20_000, name).place).toBe('orbit Remit 31');
+    expect(cardSummary(save({ grounded: true, parentId: PID }), 20_000, name).place).toBe('landed Remit 31');
+    expect(seen).toEqual([PID, PID]);
   });
 
-  it('Given a flying save, Then place is "orbit <parent name>"', () => {
-    const s = save({ grounded: false, parentId: 'gx-1mwhji--377.-3.266.1:p2' });
-    expect(cardSummary(s, 20_000).place).toBe('orbit gx-1mwhji--377.-3.266.1:p2');
+  it('Given no resolver, Then place uses the raw parentId: "landed <id>" / "orbit <id>"', () => {
+    expect(cardSummary(save({ grounded: true, parentId: PID }), 20_000).place).toBe(`landed ${PID}`);
+    expect(cardSummary(save({ grounded: false, parentId: PID }), 20_000).place).toBe(`orbit ${PID}`);
+  });
+
+  it('Given a resolver that returns null, Then place falls back to the raw parentId', () => {
+    expect(cardSummary(save({ grounded: false, parentId: PID }), 20_000, () => null).place).toBe(`orbit ${PID}`);
+    expect(cardSummary(save({ grounded: true, parentId: PID }), 20_000, () => null).place).toBe(`landed ${PID}`);
+  });
+
+  it('Given parentId null, Then place is "deep space" with or without a resolver (and the resolver is not called)', () => {
+    let called = false;
+    const name = () => ((called = true), 'x');
+    expect(cardSummary(save({ parentId: null }), 20_000).place).toBe('deep space');
+    expect(cardSummary(save({ parentId: null, grounded: true }), 20_000, name).place).toBe('deep space');
+    expect(called).toBe(false);
   });
 
   it("Given a save, Then tankFrac = tank / capacityKg, cargoKg = Σ hold, savedAtWallMs = savedAt.wallMs, systemName = the system's name", () => {
