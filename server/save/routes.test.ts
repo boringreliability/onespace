@@ -15,7 +15,7 @@
  * and `entry` is the whole entry as jsonb.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { shipDigest } from '../../src/save/conflict';
 import golden from '../../src/save/fixtures/v1-golden.json';
@@ -99,8 +99,8 @@ function call(method: string, path: string, u: User | null, body?: unknown, extr
 const get = (u: User | null) => call('GET', '/api/save', u);
 const put = (u: User | null, save: unknown, base: Base = null, deviceId = DEV_A) =>
   call('PUT', '/api/save', u, { deviceId, base, save });
-const resolve = (u: User | null, keep: 'device' | 'cloud', device: unknown, base: Base = null, deviceId = DEV_A) =>
-  call('POST', '/api/save/resolve', u, { deviceId, keep, device, base });
+const resolve = (u: User | null, keep: 'device' | 'cloud', device: unknown, base: Base, cloud: Base, deviceId = DEV_A) =>
+  call('POST', '/api/save/resolve', u, { deviceId, keep, device, base, cloud });
 
 async function snapshot(userId: string) {
   const q = async (table: string) => (await t.sql.unsafe(`select * from ${table} where user_id = $1`, [userId])).length;
@@ -354,10 +354,52 @@ describe('Validation (R23)', () => {
     const s = mk({ revision: 1 });
     await put(a, s, null);
     const before = await snapshot(a.id);
-    const res = await resolve(a, 'device', { ...mk({ revision: 2 }), format: 99 }, head(s));
+    const res = await resolve(a, 'device', { ...mk({ revision: 2 }), format: 99 }, head(s), head(s));
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: 'invalid-save' });
     expect(await snapshot(a.id)).toEqual(before);
+  });
+
+  const withSeq = (seq: number) => {
+    const s = mk({ revision: 2 });
+    s.actions[s.actions.length - 1] = { ...s.actions[s.actions.length - 1]!, seq } as SaveV1['actions'][number];
+    return s;
+  };
+  bad('an action seq of 2147483648 (beyond int4, R25)', () => withSeq(2_147_483_648));
+  bad('an action seq of 2**40', () => withSeq(2 ** 40));
+
+  it('Given an action seq of exactly 2147483647, When PUT, Then it is accepted (200) and stored', async () => {
+    const a = await mkUser('a');
+    const res = await put(a, withSeq(2_147_483_647), null);
+    expect(res.status).toBe(200);
+    expect(await actionCount(a.id)).toBe(ACTIONS_IN_GOLDEN);
+  });
+
+  it('Given an out-of-range action seq in the device save, When resolve, Then 400 invalid-save and nothing is written', async () => {
+    const a = await mkUser('a');
+    const s = mk({ revision: 1 });
+    await put(a, s, null);
+    const before = await snapshot(a.id);
+    const res = await resolve(a, 'device', withSeq(2_147_483_648), head(s), head(s));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'invalid-save' });
+    expect(await snapshot(a.id)).toEqual(before);
+  });
+
+  it('Given the actions table is unavailable, When PUT, Then 500 { error: "internal" } and no head and no digest row were written (transaction rolled back)', async () => {
+    const a = await mkUser('a');
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await t.sql`alter table actions rename to actions_gone`;
+    let res: Response;
+    try {
+      res = await put(a, mk({ revision: 1 }), null);
+    } finally {
+      await t.sql`alter table actions_gone rename to actions`;
+      spy.mockRestore();
+    }
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: 'internal' });
+    expect((await snapshot(a.id))).toMatchObject({ saves: 0, revisions: 0, actions: 0 });
   });
 
   const envelope = (label: string, send: (a: User) => Response | Promise<Response>) =>
@@ -377,9 +419,11 @@ describe('Validation (R23)', () => {
   envelope('PUT with a malformed base', (a) => call('PUT', '/api/save', a, { deviceId: DEV_A, base: { saveId: 5 }, save: mk({ revision: 2 }) }));
   envelope('PUT with the base key missing', (a) => call('PUT', '/api/save', a, { deviceId: DEV_A, save: mk({ revision: 2 }) }));
   envelope('PUT without a save', (a) => call('PUT', '/api/save', a, { deviceId: DEV_A, base: null }));
-  envelope('resolve with keep "both"', (a) => call('POST', '/api/save/resolve', a, { deviceId: DEV_A, keep: 'both', device: mk({ revision: 2 }), base: null }));
+  envelope('resolve with keep "both"', (a) => call('POST', '/api/save/resolve', a, { deviceId: DEV_A, keep: 'both', device: mk({ revision: 2 }), base: null, cloud: null }));
   envelope('resolve with malformed JSON', (a) => call('POST', '/api/save/resolve', a, 'garbage'));
-  envelope('resolve with a non-uuid deviceId', (a) => call('POST', '/api/save/resolve', a, { deviceId: 'x', keep: 'device', device: mk({ revision: 2 }), base: null }));
+  envelope('resolve with a non-uuid deviceId', (a) => call('POST', '/api/save/resolve', a, { deviceId: 'x', keep: 'device', device: mk({ revision: 2 }), base: null, cloud: null }));
+  envelope('resolve without the cloud key', (a) => call('POST', '/api/save/resolve', a, { deviceId: DEV_A, keep: 'device', device: mk({ revision: 2 }), base: null }));
+  envelope('resolve with a malformed cloud', (a) => call('POST', '/api/save/resolve', a, { deviceId: DEV_A, keep: 'device', device: mk({ revision: 2 }), base: null, cloud: { saveId: 3 } }));
 });
 
 // ---- Resolve ----------------------------------------------------------------
@@ -388,7 +432,7 @@ describe('POST /api/save/resolve (R22)', () => {
   it('Given an empty cloud, When resolve, Then the device save is stored and returned: 200 { revision, save }', async () => {
     const a = await mkUser('a');
     const s = mk({ revision: 5 });
-    const res = await resolve(a, 'device', s, null);
+    const res = await resolve(a, 'device', s, null, null);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ revision: 5, save: s });
     expect((await headRow(a.id))?.body).toEqual(s);
@@ -401,13 +445,13 @@ describe('POST /api/save/resolve (R22)', () => {
     const cloud = mk({ revision: 6, tank: 9_000 });
     await put(a, cloud, head(base));
     const device = mk({ revision: 6, tank: 11_000 });
-    return { base, cloud, device };
+    return { base, cloud, device, cloudHead: head(cloud) };
   }
 
   it('Given a diverged same game, When keep "device", Then the cloud branch tank fall (12000 -> 9000) is subtracted: tank 8000, revision max + 1 = 7, stored as head with a digest row', async () => {
     const a = await mkUser('a');
-    const { base, device } = await diverged(a);
-    const res = await resolve(a, 'device', device, head(base), DEV_B);
+    const { base, device, cloudHead } = await diverged(a);
+    const res = await resolve(a, 'device', device, head(base), cloudHead, DEV_B);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { revision: number; save: SaveV1 };
     expect(body.revision).toBe(7);
@@ -425,8 +469,8 @@ describe('POST /api/save/resolve (R22)', () => {
 
   it('Given a diverged same game, When keep "cloud", Then the cloud save is the chosen one and the device fall (12000 -> 11000) is subtracted: tank 8000, revision 7', async () => {
     const a = await mkUser('a');
-    const { base, device } = await diverged(a);
-    const res = await resolve(a, 'cloud', device, head(base), DEV_B);
+    const { base, device, cloudHead } = await diverged(a);
+    const res = await resolve(a, 'cloud', device, head(base), cloudHead, DEV_B);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { revision: number; save: SaveV1 };
     expect(body.revision).toBe(7);
@@ -436,8 +480,8 @@ describe('POST /api/save/resolve (R22)', () => {
 
   it('Given a diverged same game and base null, When resolve, Then the unchosen own digest is the base: nothing is subtracted, revision is still max + 1', async () => {
     const a = await mkUser('a');
-    const { device } = await diverged(a);
-    const res = await resolve(a, 'device', device, null, DEV_B);
+    const { device, cloudHead } = await diverged(a);
+    const res = await resolve(a, 'device', device, null, cloudHead, DEV_B);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { revision: number; save: SaveV1 };
     expect(body.revision).toBe(7);
@@ -446,8 +490,8 @@ describe('POST /api/save/resolve (R22)', () => {
 
   it('Given a base that has no save_revisions row, When resolve, Then it behaves like base null (nothing subtracted)', async () => {
     const a = await mkUser('a');
-    const { device } = await diverged(a);
-    const res = await resolve(a, 'device', device, { saveId: SAVE_X, revision: 2 }, DEV_B);
+    const { device, cloudHead } = await diverged(a);
+    const res = await resolve(a, 'device', device, { saveId: SAVE_X, revision: 2 }, cloudHead, DEV_B);
     expect(res.status).toBe(200);
     expect(((await res.json()) as { save: SaveV1 }).save.ship.propellant.massKg).toBe(11_000);
   });
@@ -458,7 +502,7 @@ describe('POST /api/save/resolve (R22)', () => {
     const { base } = await diverged(a);
     await put(b, mk({ revision: 6, tank: 9_000 }), null);
     const before = await snapshot(a.id);
-    const res = await resolve(b, 'device', mk({ revision: 6, tank: 11_000 }), head(base), DEV_B);
+    const res = await resolve(b, 'device', mk({ revision: 6, tank: 11_000 }), head(base), { saveId: SAVE_X, revision: 6 }, DEV_B);
     expect(res.status).toBe(200);
     expect(((await res.json()) as { save: SaveV1 }).save.ship.propellant.massKg).toBe(11_000);
     expect(await snapshot(a.id)).toEqual(before);
@@ -469,7 +513,7 @@ describe('POST /api/save/resolve (R22)', () => {
     const x = mk({ saveId: SAVE_X, revision: 3 });
     await put(a, x, null);
     const y = mk({ saveId: SAVE_Y, revision: 2, tank: 1_000 });
-    const res = await resolve(a, 'device', y, head(x));
+    const res = await resolve(a, 'device', y, head(x), head(x));
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ revision: 2, save: y });
     expect((await headRow(a.id))?.save_id).toBe(SAVE_Y);
@@ -484,24 +528,114 @@ describe('POST /api/save/resolve (R22)', () => {
     const x = mk({ saveId: SAVE_X, revision: 3 });
     await put(a, x, null);
     const before = await snapshot(a.id);
-    const res = await resolve(a, 'cloud', mk({ saveId: SAVE_Y, revision: 2 }), head(x));
+    const res = await resolve(a, 'cloud', mk({ saveId: SAVE_Y, revision: 2 }), head(x), head(x));
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ revision: 3, save: x });
     expect(await snapshot(a.id)).toEqual(before);
     expect(await archiveRows(a.id)).toHaveLength(0);
   });
 
-  it('Given a successful resolve, When the same resolve is repeated, Then 200 again and GET still returns a valid head (revision may bump)', async () => {
+  it('Given a successful resolve, When the identical resolve is repeated (response lost), Then 200 with the SAME revision and save, tank NOT subtracted twice (8000), no extra save_revisions row (R26)', async () => {
+    const a = await mkUser('a');
+    const { base, device, cloudHead } = await diverged(a);
+    const r1 = await resolve(a, 'device', device, head(base), cloudHead, DEV_B);
+    const b1 = (await r1.json()) as { revision: number; save: SaveV1 };
+    const revs = (await snapshot(a.id)).revisions;
+    const r2 = await resolve(a, 'device', device, head(base), cloudHead, DEV_B);
+    expect(r2.status).toBe(200);
+    const b2 = (await r2.json()) as { revision: number; save: SaveV1 };
+    expect(b1.save.ship.propellant.massKg).toBe(8_000);
+    expect(b2.save.ship.propellant.massKg).toBe(8_000);
+    expect(b2).toEqual(b1);
+    expect((await snapshot(a.id)).revisions).toBe(revs);
+    const got = (await (await get(a)).json()) as { revision: number; save: SaveV1 };
+    expect(got).toEqual(b1);
+  });
+
+  it('Given a resolved head, When a later forward PUT moves it (key cleared) and the same resolve is repeated, Then 409 with the new head and nothing changes', async () => {
+    const a = await mkUser('a');
+    const { base, device, cloudHead } = await diverged(a);
+    const r1 = (await (await resolve(a, 'device', device, head(base), cloudHead, DEV_B)).json()) as { revision: number; save: SaveV1 };
+    const next = mk({ revision: r1.revision + 1, tank: 7_000 });
+    expect((await put(a, next, head(r1.save))).status).toBe(200);
+    const before = await snapshot(a.id);
+    const res = await resolve(a, 'device', device, head(base), cloudHead, DEV_B);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ cloud: { revision: r1.revision + 1, save: next } });
+    expect(await snapshot(a.id)).toEqual(before);
+  });
+
+  it('Given the cloud moved since the client looked, When resolve names the stale cloud head, Then 409 with the current head and nothing changes', async () => {
     const a = await mkUser('a');
     const { base, device } = await diverged(a);
-    expect((await resolve(a, 'device', device, head(base), DEV_B)).status).toBe(200);
-    expect((await resolve(a, 'device', device, head(base), DEV_B)).status).toBe(200);
-    const got = await get(a);
-    expect(got.status).toBe(200);
-    const g = (await got.json()) as { revision: number; save: SaveV1 };
-    expect(g.revision).toBeGreaterThanOrEqual(7);
-    expect(g.save.revision).toBe(g.revision);
-    expect(migrateSave(g.save).ok).toBe(true);
+    const before = await snapshot(a.id);
+    const res = await resolve(a, 'device', device, head(base), head(base), DEV_B);
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { cloud: { revision: number } }).cloud.revision).toBe(6);
+    expect(await snapshot(a.id)).toEqual(before);
+  });
+
+  it('Given a cloud head, When resolve says it saw NO cloud (cloud null), Then 409 and nothing changes', async () => {
+    const a = await mkUser('a');
+    const { device } = await diverged(a);
+    const before = await snapshot(a.id);
+    expect((await resolve(a, 'device', device, null, null, DEV_B)).status).toBe(409);
+    expect(await snapshot(a.id)).toEqual(before);
+  });
+
+  it('Given a different-game keep "cloud" (no-op), When repeated after a PUT moved the head, Then 409', async () => {
+    const a = await mkUser('a');
+    const x = mk({ revision: 3 });
+    await put(a, x, null);
+    const y = mk({ saveId: SAVE_Y, revision: 1 });
+    expect((await resolve(a, 'cloud', y, head(x), head(x))).status).toBe(200);
+    const x4 = mk({ revision: 4 });
+    expect((await put(a, x4, head(x))).status).toBe(200);
+    expect((await resolve(a, 'cloud', y, head(x), head(x))).status).toBe(409);
+  });
+
+  it('Given user A resolved, When user B (own head) sends the same resolve body, Then B does not replay A key: B is judged against B own head', async () => {
+    const a = await mkUser('a');
+    const b = await mkUser('b');
+    const { base, device, cloudHead } = await diverged(a);
+    await resolve(a, 'device', device, head(base), cloudHead, DEV_B);
+    await put(b, mk({ revision: 6, tank: 9_000 }), null);
+    const bBefore = await headRow(b.id);
+    const aBefore = await snapshot(a.id);
+    const res = await resolve(b, 'device', device, head(base), cloudHead, DEV_B);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { revision: number; save: SaveV1 };
+    // B had no digest for the base: nothing subtracted, revision bumped: a fresh resolve, not a replay of A
+    expect(body.revision).toBe(7);
+    expect(body.save.ship.propellant.massKg).toBe(11_000);
+    expect(bBefore?.revision).toBe(6);
+    expect(await snapshot(a.id)).toEqual(aBefore);
+  });
+
+  it('Given a diverged same game, When two identical resolves race, Then both 200 with the same revision and save (one resolved, one replayed), tank 8000', async () => {
+    const a = await mkUser('a');
+    const { base, device, cloudHead } = await diverged(a);
+    const [r1, r2] = await Promise.all([
+      resolve(a, 'device', device, head(base), cloudHead, DEV_B),
+      resolve(a, 'device', device, head(base), cloudHead, DEV_B),
+    ]);
+    expect([r1.status, r2.status]).toEqual([200, 200]);
+    const [b1, b2] = [(await r1.json()) as { revision: number; save: SaveV1 }, (await r2.json()) as { revision: number; save: SaveV1 }];
+    expect(b1).toEqual(b2);
+    expect(b1.revision).toBe(7);
+    expect(b1.save.ship.propellant.massKg).toBe(8_000);
+    expect((await snapshot(a.id)).revisions).toBe(3);
+  });
+
+  it('Given a stored save, When a later PUT stores a new head, Then saves.resolve_key is NULL again (it was `<keep>:<device saveId>:<device rev>:<cloud saveId>:<cloud rev>`)', async () => {
+    const a = await mkUser('a');
+    const { base, device, cloudHead } = await diverged(a);
+    const r1 = (await (await resolve(a, 'device', device, head(base), cloudHead, DEV_B)).json()) as { save: SaveV1 };
+    const [row] = await t.sql<{ resolve_key: string | null }[]>`select resolve_key from saves where user_id = ${a.id}`;
+    expect(row!.resolve_key).toBe(`device:${SAVE_X}:6:${SAVE_X}:6`);
+    await put(a, mk({ revision: 8 }), head(r1.save));
+    const [after] = await t.sql<{ resolve_key: string | null }[]>`select resolve_key from saves where user_id = ${a.id}`;
+    expect(after!.resolve_key).toBeNull();
   });
 });
 
@@ -513,7 +647,7 @@ describe('Auth, Origin and limits', () => {
     for (const res of [
       await get(null),
       await put(null, s, null),
-      await resolve(null, 'device', s, null),
+      await resolve(null, 'device', s, null, null),
       await call('DELETE', '/api/account', null),
     ]) {
       expect(res.status).toBe(401);
@@ -526,7 +660,7 @@ describe('Auth, Origin and limits', () => {
     const evil = { Origin: 'https://evil.example' };
     const s = mk();
     const r1 = await call('PUT', '/api/save', a, { deviceId: DEV_A, base: null, save: s }, evil);
-    const r2 = await call('POST', '/api/save/resolve', a, { deviceId: DEV_A, keep: 'device', device: s, base: null }, evil);
+    const r2 = await call('POST', '/api/save/resolve', a, { deviceId: DEV_A, keep: 'device', device: s, base: null, cloud: null }, evil);
     const r3 = await call('DELETE', '/api/account', a, undefined, evil);
     expect([r1.status, r2.status, r3.status]).toEqual([403, 403, 403]);
     expect((await snapshot(a.id)).saves).toBe(0);
@@ -548,7 +682,7 @@ describe('Auth, Origin and limits', () => {
     for (let i = 0; i < 15; i++) {
       expect((await put(a, s, null)).status).toBe(200);
       // different game + keep "cloud": a no-op write that still spends budget
-      expect((await resolve(a, 'cloud', mk({ saveId: SAVE_Y }), head(s))).status).toBe(200);
+      expect((await resolve(a, 'cloud', mk({ saveId: SAVE_Y }), head(s), head(s))).status).toBe(200);
     }
     const over = await call('DELETE', '/api/account', a);
     expect(over.status).toBe(429);
@@ -629,7 +763,7 @@ describe('Isolation between accounts', () => {
     await put(b, mk({ saveId: SAVE_Z, revision: 2 }), null, DEV_B);
     const before = await snapshot(a.id);
     expect((await put(b, mk({ saveId: SAVE_X, revision: 6 }), { saveId: SAVE_X, revision: 5 }, DEV_B)).status).toBe(409);
-    expect((await resolve(b, 'device', mk({ saveId: SAVE_Y, revision: 1 }), { saveId: SAVE_Z, revision: 2 }, DEV_B)).status).toBe(200);
+    expect((await resolve(b, 'device', mk({ saveId: SAVE_Y, revision: 1 }), { saveId: SAVE_Z, revision: 2 }, { saveId: SAVE_Z, revision: 2 }, DEV_B)).status).toBe(200);
     expect(await snapshot(a.id)).toEqual(before);
     expect((await headRow(b.id))?.save_id).toBe(SAVE_Y);
     expect((await archiveRows(b.id))[0]?.save_id).toBe(SAVE_Z);

@@ -8,8 +8,11 @@
  *       | { kind: 'stored'; revision: number; archived: boolean }   // archived: old head moved to save_archive
  *       | { kind: 'unchanged'; revision: number }                   // idempotent retry, nothing written
  *       | { kind: 'conflict'; cloud: { revision: number; save: SaveV1 } }>
- *   resolveSave(sql, userId, { deviceId, keep: 'device' | 'cloud', device, base }): Promise<
- *       { revision: number; save: SaveV1 }>
+ *   resolveSave(sql, userId, { deviceId, keep: 'device' | 'cloud', device, base, cloud }): Promise<
+ *       | { kind: 'resolved' | 'replayed'; revision: number; save: SaveV1 }
+ *       | { kind: 'conflict'; cloud: { revision: number; save: SaveV1 } }>
+ *   (R26: saves.resolve_key = `${keep}:${device.saveId}:${device.revision}:${cloud ? cloud.saveId+':'+cloud.revision : 'none'}`;
+ *    every successful putSave store sets it back to null.)
  *   deleteAccount(sql, userId): Promise<void>
  *
  * `save` / `device` arrive already validated (routes call `migrate`); the repo trusts them.
@@ -198,15 +201,32 @@ describe('putSave', () => {
     expect(await n('saves', a)).toBe(1);
   });
 
-  it('Given a failure part-way (a save whose action seq would violate a column), When put, Then the transaction rolls back: no head, no digest, no actions', async () => {
+  it('Given the actions table is unavailable, When put, Then it throws and the transaction rolls back: no head, no digest, no actions', async () => {
     const a = await user('a');
-    const bad = mk({ revision: 1 });
-    // seq beyond int4 makes the actions insert fail after the head insert
-    bad.actions[bad.actions.length - 1] = { ...bad.actions[bad.actions.length - 1]!, seq: 2 ** 40 } as SaveV1['actions'][number];
-    await expect(putSave(t.sql, a, { deviceId: DEV_A, base: null, save: bad })).rejects.toThrow();
+    await t.sql`alter table actions rename to actions_gone`;
+    try {
+      await expect(putSave(t.sql, a, { deviceId: DEV_A, base: null, save: mk({ revision: 1 }) })).rejects.toThrow();
+    } finally {
+      await t.sql`alter table actions_gone rename to actions`;
+    }
     expect(await n('saves', a)).toBe(0);
     expect(await n('save_revisions', a)).toBe(0);
     expect(await n('actions', a)).toBe(0);
+  });
+
+  it('Given a head set by a resolve, When a later put stores a new head, Then saves.resolve_key is NULL', async () => {
+    const a = await user('a');
+    const base = mk({ revision: 5, tank: 12_000 });
+    await putSave(t.sql, a, { deviceId: DEV_A, base: null, save: base });
+    const cloud = mk({ revision: 6, tank: 9_000 });
+    await putSave(t.sql, a, { deviceId: DEV_A, base: head(base), save: cloud });
+    const r = await resolveSave(t.sql, a, { deviceId: DEV_B, keep: 'device', device: mk({ revision: 6, tank: 11_000 }), base: head(base), cloud: head(cloud) });
+    if (r.kind === 'conflict') throw new Error('unexpected conflict');
+    const [k1] = await t.sql<{ resolve_key: string | null }[]>`select resolve_key from saves where user_id = ${a}`;
+    expect(k1!.resolve_key).toBe(`device:${SAVE_X}:6:${SAVE_X}:6`);
+    await putSave(t.sql, a, { deviceId: DEV_A, base: head(r.save), save: mk({ revision: 8 }) });
+    const [k2] = await t.sql<{ resolve_key: string | null }[]>`select resolve_key from saves where user_id = ${a}`;
+    expect(k2!.resolve_key).toBeNull();
   });
 
   it('Given user A has a head, When user B puts with base = A head, Then A rows are untouched', async () => {
@@ -224,21 +244,27 @@ describe('resolveSave', () => {
   async function diverged(a: string) {
     const base = mk({ revision: 5, tank: 12_000 });
     await putSave(t.sql, a, { deviceId: DEV_A, base: null, save: base });
-    await putSave(t.sql, a, { deviceId: DEV_A, base: head(base), save: mk({ revision: 6, tank: 9_000 }) });
-    return { base, device: mk({ revision: 6, tank: 11_000 }) };
+    const cloud = mk({ revision: 6, tank: 9_000 });
+    await putSave(t.sql, a, { deviceId: DEV_A, base: head(base), save: cloud });
+    return { base, device: mk({ revision: 6, tank: 11_000 }), cloudHead: head(cloud) };
   }
+  const ok = (r: Awaited<ReturnType<typeof resolveSave>>) => {
+    if (r.kind === 'conflict') throw new Error('unexpected conflict');
+    return r;
+  };
 
-  it('Given no head, When resolve, Then the device save is stored and returned', async () => {
+  it('Given no head, When resolve with cloud null, Then kind "resolved": the device save is stored and returned', async () => {
     const a = await user('a');
     const s = mk({ revision: 2 });
-    expect(await resolveSave(t.sql, a, { deviceId: DEV_A, keep: 'device', device: s, base: null })).toEqual({ revision: 2, save: s });
+    expect(await resolveSave(t.sql, a, { deviceId: DEV_A, keep: 'device', device: s, base: null, cloud: null })).toEqual({ kind: 'resolved', revision: 2, save: s });
     expect((await getHead(t.sql, a))?.save).toEqual(s);
   });
 
   it('Given a diverged same game, When keep "device" with the base digest, Then the cloud fall is subtracted, revision = max + 1, head and digest row stored', async () => {
     const a = await user('a');
-    const { base, device } = await diverged(a);
-    const r = await resolveSave(t.sql, a, { deviceId: DEV_B, keep: 'device', device, base: head(base) });
+    const { base, device, cloudHead } = await diverged(a);
+    const r = ok(await resolveSave(t.sql, a, { deviceId: DEV_B, keep: 'device', device, base: head(base), cloud: cloudHead }));
+    expect(r.kind).toBe('resolved');
     expect(r.revision).toBe(7);
     expect(r.save.ship.propellant.massKg).toBe(8_000);
     expect(await getHead(t.sql, a)).toEqual({ saveId: SAVE_X, revision: 7, save: r.save });
@@ -248,27 +274,30 @@ describe('resolveSave', () => {
 
   it('Given a diverged same game, When keep "cloud", Then the device fall is subtracted from the cloud save', async () => {
     const a = await user('a');
-    const { base, device } = await diverged(a);
-    const r = await resolveSave(t.sql, a, { deviceId: DEV_B, keep: 'cloud', device, base: head(base) });
+    const { base, device, cloudHead } = await diverged(a);
+    const r = ok(await resolveSave(t.sql, a, { deviceId: DEV_B, keep: 'cloud', device, base: head(base), cloud: cloudHead }));
     expect(r.revision).toBe(7);
     expect(r.save.ship.propellant.massKg).toBe(8_000);
   });
 
   it('Given base null or a base without a digest row, When resolve, Then nothing is subtracted', async () => {
     const a = await user('a');
-    const { device } = await diverged(a);
-    const r1 = await resolveSave(t.sql, a, { deviceId: DEV_B, keep: 'device', device, base: null });
+    const { device, cloudHead } = await diverged(a);
+    const r1 = ok(await resolveSave(t.sql, a, { deviceId: DEV_B, keep: 'device', device, base: null, cloud: cloudHead }));
     expect(r1.save.ship.propellant.massKg).toBe(11_000);
-    const r2 = await resolveSave(t.sql, a, { deviceId: DEV_B, keep: 'device', device: mk({ revision: 6, tank: 11_000 }), base: { saveId: SAVE_X, revision: 99 } });
-    expect(r2.save.ship.propellant.massKg).toBeGreaterThan(0);
+    const b = await user('b');
+    await putSave(t.sql, b, { deviceId: DEV_B, base: null, save: mk({ revision: 6, tank: 9_000 }) });
+    const r2 = ok(await resolveSave(t.sql, b, { deviceId: DEV_B, keep: 'device', device, base: { saveId: SAVE_X, revision: 99 }, cloud: cloudHead }));
+    expect(r2.save.ship.propellant.massKg).toBe(11_000);
   });
 
   it('Given another user holds the base digest, When this user resolves with that base, Then it is treated as missing', async () => {
     const a = await user('a');
     const b = await user('b');
-    const { base } = await diverged(a);
+    const { base, cloudHead } = await diverged(a);
     await putSave(t.sql, b, { deviceId: DEV_B, base: null, save: mk({ revision: 6, tank: 9_000 }) });
-    const r = await resolveSave(t.sql, b, { deviceId: DEV_B, keep: 'device', device: mk({ revision: 6, tank: 11_000 }), base: head(base) });
+    const r = ok(await resolveSave(t.sql, b, { deviceId: DEV_B, keep: 'device', device: mk({ revision: 6, tank: 11_000 }), base: head(base), cloud: cloudHead }));
+    expect(r.kind).toBe('resolved');
     expect(r.save.ship.propellant.massKg).toBe(11_000);
   });
 
@@ -277,40 +306,83 @@ describe('resolveSave', () => {
     const x = mk({ revision: 3 });
     await putSave(t.sql, a, { deviceId: DEV_A, base: null, save: x });
     const y = mk({ saveId: SAVE_Y, revision: 1 });
-    expect(await resolveSave(t.sql, a, { deviceId: DEV_A, keep: 'device', device: y, base: head(x) })).toEqual({ revision: 1, save: y });
+    expect(await resolveSave(t.sql, a, { deviceId: DEV_A, keep: 'device', device: y, base: head(x), cloud: head(x) })).toEqual({ kind: 'resolved', revision: 1, save: y });
     const arch = await t.sql<{ save_id: string; body: SaveV1 }[]>`select save_id, body from save_archive where user_id = ${a}`;
     expect(arch).toHaveLength(1);
     expect(arch[0]!.save_id).toBe(SAVE_X);
     expect(arch[0]!.body).toEqual(x);
   });
 
-  it('Given different games, When keep "cloud", Then nothing changes and the head is returned', async () => {
+  it('Given different games, When keep "cloud", Then the head is returned unchanged (kind "resolved"), the key is set, nothing is archived', async () => {
     const a = await user('a');
     const x = mk({ revision: 3 });
     await putSave(t.sql, a, { deviceId: DEV_A, base: null, save: x });
-    expect(await resolveSave(t.sql, a, { deviceId: DEV_A, keep: 'cloud', device: mk({ saveId: SAVE_Y }), base: head(x) })).toEqual({ revision: 3, save: x });
+    const y = mk({ saveId: SAVE_Y });
+    expect(await resolveSave(t.sql, a, { deviceId: DEV_A, keep: 'cloud', device: y, base: head(x), cloud: head(x) })).toEqual({ kind: 'resolved', revision: 3, save: x });
     expect(await n('save_archive', a)).toBe(0);
     expect(await n('save_revisions', a)).toBe(1);
+    const [k] = await t.sql<{ resolve_key: string | null }[]>`select resolve_key from saves where user_id = ${a}`;
+    expect(k!.resolve_key).toBe(`cloud:${SAVE_Y}:1:${SAVE_X}:3`);
+    expect(await resolveSave(t.sql, a, { deviceId: DEV_A, keep: 'cloud', device: y, base: head(x), cloud: head(x) })).toEqual({ kind: 'replayed', revision: 3, save: x });
   });
 
-  it('Given a resolved game, When the same resolve repeats, Then it does not throw and the head stays a valid save', async () => {
+  it('Given a resolved game, When the identical resolve repeats, Then kind "replayed": same revision and save, tank still 8000, no new digest row', async () => {
     const a = await user('a');
-    const { base, device } = await diverged(a);
-    await resolveSave(t.sql, a, { deviceId: DEV_B, keep: 'device', device, base: head(base) });
-    const again = await resolveSave(t.sql, a, { deviceId: DEV_B, keep: 'device', device, base: head(base) });
-    expect(again.revision).toBeGreaterThanOrEqual(7);
-    expect((await getHead(t.sql, a))?.revision).toBe(again.revision);
+    const { base, device, cloudHead } = await diverged(a);
+    const input = { deviceId: DEV_B, keep: 'device' as const, device, base: head(base), cloud: cloudHead };
+    const first = ok(await resolveSave(t.sql, a, input));
+    const revs = await n('save_revisions', a);
+    const again = ok(await resolveSave(t.sql, a, input));
+    expect(first.kind).toBe('resolved');
+    expect(again).toEqual({ kind: 'replayed', revision: first.revision, save: first.save });
+    expect(again.save.ship.propellant.massKg).toBe(8_000);
+    expect(await n('save_revisions', a)).toBe(revs);
   });
 
-  it('Given two racing resolves, When run in parallel, Then both settle without error and the head revision is one of the results', async () => {
+  it('Given a resolved game moved on by a put, When the same resolve repeats, Then conflict with the current head, nothing changes', async () => {
+    const a = await user('a');
+    const { base, device, cloudHead } = await diverged(a);
+    const input = { deviceId: DEV_B, keep: 'device' as const, device, base: head(base), cloud: cloudHead };
+    const first = ok(await resolveSave(t.sql, a, input));
+    const next = mk({ revision: 8, tank: 7_000 });
+    await putSave(t.sql, a, { deviceId: DEV_A, base: head(first.save), save: next });
+    const before = await n('save_revisions', a);
+    expect(await resolveSave(t.sql, a, input)).toEqual({ kind: 'conflict', cloud: { revision: 8, save: next } });
+    expect(await n('save_revisions', a)).toBe(before);
+  });
+
+  it('Given the cloud moved since the client looked (stale cloud, or null while a head exists), When resolve, Then conflict and nothing changes', async () => {
     const a = await user('a');
     const { base, device } = await diverged(a);
-    const rs = await Promise.all([
-      resolveSave(t.sql, a, { deviceId: DEV_A, keep: 'device', device, base: head(base) }),
-      resolveSave(t.sql, a, { deviceId: DEV_B, keep: 'device', device, base: head(base) }),
-    ]);
-    const h = await getHead(t.sql, a);
-    expect(rs.map((r) => r.revision)).toContain(h!.revision);
+    const before = { head: await getHead(t.sql, a), revs: await n('save_revisions', a) };
+    for (const cloud of [head(base), null]) {
+      const r = await resolveSave(t.sql, a, { deviceId: DEV_B, keep: 'device', device, base: head(base), cloud });
+      expect(r.kind).toBe('conflict');
+    }
+    expect(await getHead(t.sql, a)).toEqual(before.head);
+    expect(await n('save_revisions', a)).toBe(before.revs);
+  });
+
+  it('Given user A resolved, When user B sends the same input, Then B does not replay A key', async () => {
+    const a = await user('a');
+    const b = await user('b');
+    const { base, device, cloudHead } = await diverged(a);
+    const input = { deviceId: DEV_B, keep: 'device' as const, device, base: head(base), cloud: cloudHead };
+    await resolveSave(t.sql, a, input);
+    await putSave(t.sql, b, { deviceId: DEV_B, base: null, save: mk({ revision: 6, tank: 9_000 }) });
+    const r = ok(await resolveSave(t.sql, b, input));
+    expect(r.kind).toBe('resolved');
+  });
+
+  it('Given two racing identical resolves, When run in parallel, Then one "resolved" and one "replayed" with the same revision and save', async () => {
+    const a = await user('a');
+    const { base, device, cloudHead } = await diverged(a);
+    const input = { deviceId: DEV_B, keep: 'device' as const, device, base: head(base), cloud: cloudHead };
+    const rs = (await Promise.all([resolveSave(t.sql, a, input), resolveSave(t.sql, a, input)])).map(ok);
+    expect(rs.map((r) => r.kind).sort()).toEqual(['replayed', 'resolved']);
+    expect(rs[0]!.revision).toBe(rs[1]!.revision);
+    expect(rs[0]!.save).toEqual(rs[1]!.save);
+    expect(rs[0]!.save.ship.propellant.massKg).toBe(8_000);
   });
 });
 
