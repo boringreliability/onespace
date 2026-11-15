@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 const SRC = fileURLToPath(new URL('..', import.meta.url));
-const ENTRIES = ['save/schema.ts', 'save/migrate.ts', 'save/replay.ts']; // Task 3 appends 'save/conflict.ts'
+const ENTRIES = ['save/schema.ts', 'save/migrate.ts', 'save/replay.ts', 'save/conflict.ts'];
 const IMPURE_FIXTURE = 'save/__fixtures__/impure.ts'; // negative control: the checker must flag it
 const FORBIDDEN_GLOBALS = ['window', 'document', 'indexedDB', 'localStorage'] as const;
 
