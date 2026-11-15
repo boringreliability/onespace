@@ -16,7 +16,6 @@
   },
   "dependencies": {
     "@hono/node-server": "^2.1.8",
-    "arctic": "^3.7.0",
     "hono": "^4.13.18",
     "postgres": "^4.1.1",
     "three": "^0.180.0",
