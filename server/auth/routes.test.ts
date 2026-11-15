@@ -689,6 +689,15 @@ describe('rate limit on login routes', () => {
       expect((await testLogin(app, '9.9.9.9')).status).toBe(429);
     });
 
+    it('when starts, callbacks and test logins share one IP, then they spend one shared budget of 20', async () => {
+      const { app } = makeApp({ config: { testLogin: true } });
+      for (let i = 0; i < 10; i++) expect((await authorize(app, '9.9.9.9')).status).toBe(302);
+      for (let i = 0; i < 10; i++) expect((await callback(app, {}, undefined, '9.9.9.9')).status).toBe(302);
+      expect((await authorize(app, '9.9.9.9')).status).toBe(429);
+      expect((await callback(app, {}, undefined, '9.9.9.9')).status).toBe(429);
+      expect((await testLogin(app, '9.9.9.9')).status).toBe(429);
+    });
+
     it('when a different IP calls, then it is not limited', async () => {
       const { app } = makeApp();
       for (let i = 0; i < 21; i++) await authorize(app, '9.9.9.9');

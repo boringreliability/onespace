@@ -1,10 +1,11 @@
 import { readFile } from 'node:fs/promises';
 import { extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import type { Sql } from 'postgres';
 
+import { authRoutes } from './auth/routes';
 import type { Config } from './config';
 
 export const MAX_BODY_BYTES = 2 * 1024 * 1024;
@@ -41,6 +42,8 @@ export type AppDeps = {
   now?: () => number;
   fetch?: typeof fetch;
   staticRoot?: string;
+  /** Client IP for rate limiting. Default: x-forwarded-for first hop in production, else the socket address. */
+  clientIp?: (c: Context) => string;
 };
 
 export function createApp(deps: AppDeps): Hono {
@@ -79,6 +82,11 @@ export function createApp(deps: AppDeps): Hono {
       return c.json({ ok: false }, 503);
     }
   });
+
+  app.route(
+    '/api',
+    authRoutes({ config, sql, now: deps.now ?? Date.now, fetch: deps.fetch ?? fetch, clientIp: deps.clientIp }),
+  );
 
   app.all('/api/*', (c) => c.json({ error: 'not_found' }, 404));
 
