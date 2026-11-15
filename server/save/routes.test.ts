@@ -837,3 +837,131 @@ describe('Concurrent writes', () => {
     expect((await archiveRows(a.id)).length).toBeLessThanOrEqual(1);
   });
 });
+
+// ---- Fix round 1 (review of Task 4, R33) -------------------------------------
+
+describe('Revision range (M1)', () => {
+  const INT4_MAX = 2_147_483_647;
+
+  it('Given a save at revision 2147483647, When PUT, Then it is accepted; 2147483648 is invalid-save', async () => {
+    const a = await mkUser('a');
+    expect((await put(a, mk({ revision: INT4_MAX }), null)).status).toBe(200);
+    const b = await mkUser('b');
+    const res = await put(b, mk({ revision: INT4_MAX + 1 }), null);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'invalid-save' });
+  });
+
+  it('Given a same-game resolve whose max revision is 2147483647 (max + 1 would overflow), When resolve, Then 400 invalid-save and nothing changes (not 500)', async () => {
+    const a = await mkUser('a');
+    const s = mk({ revision: INT4_MAX, tank: 9_000 });
+    await put(a, s, null);
+    const before = await snapshot(a.id);
+    const res = await resolve(a, 'device', mk({ revision: INT4_MAX - 1, tank: 8_000 }), null, head(s));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'invalid-save' });
+    expect(await snapshot(a.id)).toEqual(before);
+  });
+
+  it('Given a device save at 2147483647 and a lower head, When same-game resolve, Then 400 invalid-save too', async () => {
+    const a = await mkUser('a');
+    const s = mk({ revision: 3 });
+    await put(a, s, null);
+    const before = await snapshot(a.id);
+    const res = await resolve(a, 'device', mk({ revision: INT4_MAX }), null, head(s));
+    expect(res.status).toBe(400);
+    expect(await snapshot(a.id)).toEqual(before);
+  });
+});
+
+describe('Unstorable strings (M2)', () => {
+  const variants: [string, (s: SaveV1) => void][] = [
+    ['NUL in player.system.name', (s) => void (s.player.system.name = 'a\u0000b')],
+    ['a lone surrogate in player.system.name', (s) => void (s.player.system.name = '\ud800')],
+    ['NUL in a log entry title', (s) => void (s.log.entries[0]!.title = 'x\u0000y')],
+    ['a lone surrogate in a log entry body line', (s) => void (s.log.entries[1]!.body = ['ok', 'bad\udc00'])],
+    ['NUL in a log entry key', (s) => void (s.log.entries[2]!.key = 'k\u0000')],
+  ];
+  for (const [label, mutate] of variants) {
+    it(`Given ${label}, When PUT, Then 400 invalid-save and nothing changes (not 500)`, async () => {
+      const a = await mkUser('a');
+      const s1 = mk({ revision: 1 });
+      await put(a, s1, null);
+      const before = await snapshot(a.id);
+      const bad = mk({ revision: 2 });
+      mutate(bad);
+      const res = await put(a, bad, head(s1));
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: 'invalid-save' });
+      expect(await snapshot(a.id)).toEqual(before);
+    });
+
+    it(`Given ${label}, When resolve, Then 400 invalid-save and nothing changes`, async () => {
+      const a = await mkUser('a');
+      const s1 = mk({ revision: 1 });
+      await put(a, s1, null);
+      const before = await snapshot(a.id);
+      const bad = mk({ revision: 2 });
+      mutate(bad);
+      const res = await resolve(a, 'device', bad, head(s1), head(s1));
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: 'invalid-save' });
+      expect(await snapshot(a.id)).toEqual(before);
+    });
+  }
+
+  it('Given an ordinary non-ASCII save (valid surrogate pair, accents), When PUT, Then it is accepted', async () => {
+    const a = await mkUser('a');
+    const s = mk({ revision: 1 });
+    s.player.system.name = 'Æther \u{1F680} ø';
+    expect((await put(a, s, null)).status).toBe(200);
+    expect(((await (await get(a)).json()) as { save: SaveV1 }).save.player.system.name).toBe('Æther \u{1F680} ø');
+  });
+});
+
+describe('Delete racing a write (M3)', () => {
+  it('Given DELETE /api/account and a PUT fired together (several rounds), Then both settle, PUT is 200 or 401, never 500, and no rows remain for the user', async () => {
+    for (let i = 0; i < 5; i++) {
+      const a = await mkUser(`race-${i}`);
+      const [del, wr] = await Promise.all([call('DELETE', '/api/account', a), put(a, mk({ revision: 1 }), null)]);
+      expect(del.status).toBe(204);
+      expect([200, 401]).toContain(wr.status);
+      if (wr.status === 401) expect(await wr.json()).toEqual({ error: 'unauthenticated' });
+      for (const table of ['users', 'sessions', 'saves', 'save_archive', 'save_revisions', 'actions']) {
+        const col = table === 'users' ? 'id' : 'user_id';
+        const rows = await t.sql.unsafe(`select 1 from ${table} where ${col} = $1`, [a.id]);
+        expect(rows, table).toHaveLength(0);
+      }
+    }
+  });
+});
+
+describe('Resolve base from another game (M5)', () => {
+  it('Given a base naming a revision of an ARCHIVED other game (digest row exists), When same-game resolve, Then the base is ignored: nothing subtracted', async () => {
+    const a = await mkUser('a');
+    const x = mk({ saveId: SAVE_X, revision: 1, tank: 20_000 });
+    await put(a, x, null);
+    const y1 = mk({ saveId: SAVE_Y, revision: 1, tank: 9_000 });
+    expect((await put(a, y1, head(x))).status).toBe(200); // X archived, digest (X,1) tank 20000 kept
+    const res = await resolve(a, 'device', mk({ saveId: SAVE_Y, revision: 1, tank: 8_000 }), head(x), head(y1), DEV_B);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { revision: number; save: SaveV1 };
+    expect(body.revision).toBe(2);
+    expect(body.save.ship.propellant.massKg).toBe(8_000); // 20000 -> 9000 would have driven it to 0
+  });
+});
+
+describe('Digest history is immutable (M7)', () => {
+  it('Given digest (X, 1) exists, When a resolve (different game, keep device) restores X rev 1 with a different tank, Then the ORIGINAL digest row survives', async () => {
+    const a = await mkUser('a');
+    const x = mk({ saveId: SAVE_X, revision: 1, tank: 20_000 });
+    await put(a, x, null);
+    const y1 = mk({ saveId: SAVE_Y, revision: 1, tank: 9_000 });
+    await put(a, y1, head(x));
+    const res = await resolve(a, 'device', mk({ saveId: SAVE_X, revision: 1, tank: 5_000 }), head(y1), head(y1), DEV_B);
+    expect(res.status).toBe(200);
+    expect((await headRow(a.id))?.body.ship.propellant.massKg).toBe(5_000);
+    const [row] = await t.sql<{ digest: { tankKg: number } }[]>`select digest from save_revisions where user_id = ${a.id} and save_id = ${SAVE_X} and revision = 1`;
+    expect(row!.digest.tankKg).toBe(20_000);
+  });
+});

@@ -27,7 +27,7 @@ import type { SaveV1 } from '../../src/save/schema';
 import { migrate } from '../migrate';
 import { withTestSchema, type TestSchema } from '../test/db';
 
-import { deleteAccount, getHead, putSave, resolveSave } from './repo';
+import { deleteAccount, getHead, putSave, resolveSave, UserGoneError } from './repo';
 
 const SAVE_X = '3f9c2b1e-7a4d-4e8b-9c61-2d5f0a8e7b14';
 const SAVE_Y = '11111111-2222-4333-8444-555555555555';
@@ -417,5 +417,67 @@ describe('deleteAccount', () => {
 
   it('Given an unknown user id, When deleteAccount, Then it resolves without error', async () => {
     await expect(deleteAccount(t.sql, '00000000-0000-4000-8000-000000000000')).resolves.toBeUndefined();
+  });
+});
+
+// ---- Fix round 1 (review of Task 4, R33) -------------------------------------
+
+describe('Unknown user (M3)', () => {
+  const GHOST = '00000000-0000-4000-8000-000000000000';
+
+  it('Given a user id that does not exist, When putSave, Then it throws UserGoneError and writes nothing', async () => {
+    await expect(putSave(t.sql, GHOST, { deviceId: DEV_A, base: null, save: mk() })).rejects.toBeInstanceOf(UserGoneError);
+    expect(await n('saves', GHOST)).toBe(0);
+  });
+
+  it('Given a user id that does not exist, When resolveSave, Then it throws UserGoneError', async () => {
+    await expect(
+      resolveSave(t.sql, GHOST, { deviceId: DEV_A, keep: 'device', device: mk(), base: null, cloud: null }),
+    ).rejects.toBeInstanceOf(UserGoneError);
+  });
+
+  it('Given a user deleted by deleteAccount, When putSave runs afterwards, Then UserGoneError', async () => {
+    const a = await user('a');
+    await deleteAccount(t.sql, a);
+    await expect(putSave(t.sql, a, { deviceId: DEV_A, base: null, save: mk() })).rejects.toBeInstanceOf(UserGoneError);
+  });
+});
+
+describe('Digest history is immutable (M7) at repo level', () => {
+  it('Given digest (X, 1), When the same (saveId, revision) is stored again with another tank (restored via resolve), Then the original digest survives', async () => {
+    const a = await user('a');
+    const x = mk({ saveId: SAVE_X, revision: 1, tank: 20_000 });
+    await putSave(t.sql, a, { deviceId: DEV_A, base: null, save: x });
+    const y = mk({ saveId: SAVE_Y, revision: 1, tank: 9_000 });
+    await putSave(t.sql, a, { deviceId: DEV_A, base: head(x), save: y });
+    const r = await resolveSave(t.sql, a, { deviceId: DEV_B, keep: 'device', device: mk({ saveId: SAVE_X, revision: 1, tank: 5_000 }), base: head(y), cloud: head(y) });
+    expect(r.kind).toBe('resolved');
+    const [row] = await t.sql<{ digest: { tankKg: number } }[]>`select digest from save_revisions where user_id = ${a} and save_id = ${SAVE_X} and revision = 1`;
+    expect(row!.digest.tankKg).toBe(20_000);
+  });
+});
+
+describe('Lock strength (M4)', () => {
+  it('Given a slow save transaction in flight for user U, When a session row is inserted for U on another connection, Then the insert completes BEFORE the save transaction does (the user lock must not block the FK key-share)', async () => {
+    const a = await user('a');
+    // Slow the transaction down after the user lock is taken: a trigger on save_revisions sleeps.
+    await t.sql.unsafe(
+      'create function slow_rev() returns trigger language plpgsql as $f$ begin perform pg_sleep(0.8); return new; end $f$',
+    );
+    await t.sql.unsafe('create trigger slow_rev_t before insert on save_revisions for each row execute function slow_rev()');
+    try {
+      const putDone = putSave(t.sql, a, { deviceId: DEV_A, base: null, save: mk() }).then(() => Date.now());
+      for (let i = 0; i < 100; i++) {
+        const busy = await t.sql`select 1 from pg_stat_activity where wait_event = 'PgSleep'`;
+        if (busy.length > 0) break;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      const insDone = t.sql`insert into sessions (token_hash, user_id, expires_at) values (${Buffer.from('slow-tok')}, ${a}, now() + interval '1 day')`.then(() => Date.now());
+      const [ins, put] = await Promise.all([insDone, putDone]);
+      expect(ins).toBeLessThan(put);
+    } finally {
+      await t.sql.unsafe('drop trigger if exists slow_rev_t on save_revisions');
+      await t.sql.unsafe('drop function if exists slow_rev()');
+    }
   });
 });
