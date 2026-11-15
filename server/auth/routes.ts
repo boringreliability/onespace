@@ -30,12 +30,13 @@ export type AuthDeps = {
   clientIp?: (c: Context) => string;
 };
 
-/** Production sits behind Railway's proxy: first x-forwarded-for hop. Otherwise the socket address. */
+/** Production sits behind Railway's proxy: right-most x-forwarded-for entry. Otherwise the socket address. */
 export function defaultClientIp(config: Config): (c: Context) => string {
   return (c) => {
     if (config.production) {
-      const first = c.req.header('x-forwarded-for')?.split(',')[0]?.trim();
-      if (first) return first;
+      // Railway's edge appends the real client address: trust only the right-most entry.
+      const last = c.req.header('x-forwarded-for')?.split(',').pop()?.trim();
+      if (last) return last;
     }
     try {
       return getConnInfo(c).remote.address ?? 'unknown';
@@ -134,14 +135,20 @@ export function authRoutes(deps: AuthDeps): Hono<{ Variables: AuthVariables }> {
     return c.body(null, 204);
   });
 
-  if (config.testLogin) {
+  if (config.testLogin && !config.production) {
     app.post('/test/login', async (c) => {
       const body = await c.req.json().catch(() => null);
-      const name = (body as { name?: unknown } | null)?.name;
-      if (typeof name !== 'string' || name.length < 1 || name.length > 64) return c.json({ error: 'bad_request' }, 400);
-      const id = await upsertUser(`test:${name}`, name);
-      setSessionCookie(c, await createSession(sql, id, now()));
-      return c.json({ id, name });
+      const raw = (body as { name?: unknown } | null)?.name;
+      const name = typeof raw === 'string' ? raw.trim() : '';
+      if (name.length < 1 || name.length > 64 || /\p{Cc}/u.test(name)) return c.json({ error: 'bad_request' }, 400);
+      try {
+        const id = await upsertUser(`test:${name}`, name);
+        setSessionCookie(c, await createSession(sql, id, now()));
+        return c.json({ id, name });
+      } catch (err) {
+        console.error('test login failed:', err instanceof Error ? err.message : err);
+        return c.json({ error: 'internal' }, 500);
+      }
     });
   }
 

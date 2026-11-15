@@ -13,6 +13,7 @@ const hash = (token: string) => createHash('sha256').update(token).digest();
 
 /** Creates a session and returns the raw token; only its sha256 is stored. */
 export async function createSession(sql: Sql, userId: string, now: number): Promise<string> {
+  await sql`delete from sessions where user_id = ${userId} and expires_at <= ${new Date(now)}`;
   const token = randomBytes(32).toString('base64url');
   await sql`
     insert into sessions (token_hash, user_id, expires_at)
