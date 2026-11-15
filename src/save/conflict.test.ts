@@ -55,7 +55,7 @@ function save(o: Over = {}): SaveV1 {
   return s;
 }
 
-function digest(o: Partial<ShipDigest> & { cargo?: Partial<Record<Resource, number>> } = {}): ShipDigest {
+function digest(o: Partial<Omit<ShipDigest, 'cargo'>> & { cargo?: Partial<Record<Resource, number>> } = {}): ShipDigest {
   return {
     tankKg: o.tankKg ?? 12_000,
     capacityLossFrac: o.capacityLossFrac ?? 0,
