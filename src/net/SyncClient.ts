@@ -47,6 +47,8 @@ export const PUSH_BACKOFF_MS: readonly number[] = [5_000, 15_000, 60_000, 300_00
 export const SYNC_OFFLINE_TEXT = 'OFFLINE — SAVED LOCALLY';
 export const SYNC_REAUTH_TEXT = 'SIGN IN AGAIN TO SYNC';
 export const SYNC_CONFLICT_TEXT = 'SYNC CONFLICT — CHOOSE ON NEXT START';
+/** R47: the cloud holds a save this build cannot read; sync stays off this session. */
+export const SYNC_UNREADABLE_TEXT = 'CLOUD SAVE UNREADABLE — SYNC OFF';
 
 export type SyncStatus = 'off' | 'synced' | 'pending' | 'offline' | 'reauth' | 'conflict';
 
@@ -202,14 +204,22 @@ export class SyncClient {
         // Review Focus 4: an unreadable cloud is no cloud, and nothing is pushed over it.
         this.pushing = false;
         this.st = 'off';
-        return localOnly('unreadable');
+        return { ...localOnly('unreadable'), notice: SYNC_UNREADABLE_TEXT };
       }
       cloud = c.save;
       this.cloudHead = { saveId: c.save.saveId, revision: c.revision };
     }
 
     this.me = me.data;
-    const decision = reconcile({ local, cloud, state: this.state, me: me.data, localDirty: opts.localDirty === true });
+    const sameContent = local !== null && cloud !== null && rawKey(local) === rawKey(cloud);
+    const decision = reconcile({
+      local,
+      cloud,
+      state: this.state,
+      me: me.data,
+      localDirty: opts.localDirty === true,
+      sameContent,
+    });
     try {
       return await this.apply(decision, local, cloud, me.data, opts.localDirty === true);
     } catch {
@@ -223,15 +233,23 @@ export class SyncClient {
   /** An offline/timed-out boot: pushes wait for an identity check (R38), if the save is bound at all. */
   private afterOffline(meRes: ApiResult | null): void {
     this.st = 'offline';
+    const me = meRes && meRes.ok ? MeSchema.safeParse(meRes.body) : null;
+    if (me?.success) this.me = me.data;
+    // R46: a conflict chosen nowhere yet holds until a boot reaches the cloud.
+    if (this.state.conflict) {
+      this.pushing = false;
+      this.st = 'conflict';
+      return;
+    }
     if (this.state.accountId === null) {
       this.pushing = false;
       return;
     }
-    const me = meRes && meRes.ok ? MeSchema.safeParse(meRes.body) : null;
     if (me?.success) {
-      this.me = me.data;
-      this.pushing = me.data.id === this.state.accountId;
       this.needsIdentity = false;
+      this.pushing = me.data.id === this.state.accountId;
+      // R44: a confirmed other account is not "offline" — sync is off for it.
+      if (!this.pushing) this.st = 'off';
       return;
     }
     this.pushing = true;
@@ -292,8 +310,10 @@ export class SyncClient {
         return out();
 
       case 'in-sync':
-        // Unbound and equal to the cloud: L is the cloud's head, or the next PUT would 409.
-        if (this.state.accountId === null) bind(cloud ? head(cloud) : null);
+        // R43: (re-)bound to the confirmed me, L = the cloud's head (or the next PUT would 409);
+        // R46: a boot that reached the cloud clears a stale conflict flag.
+        bind(cloud ? head(cloud) : this.state.accountId === me.id ? this.state.lastSeenCloud : null);
+        this.state.conflict = false;
         this.persist();
         this.pushing = true;
         this.st = 'synced';
@@ -301,12 +321,17 @@ export class SyncClient {
 
       case 'adopt':
         bind(null);
+        this.state.conflict = false;
         this.persist();
         this.pushing = true;
         this.enqueue(local!);
         return out();
 
       case 'push-local': {
+        if (this.state.conflict) {
+          this.state = { ...this.state, conflict: false };
+          this.persist();
+        }
         this.pushing = true;
         const L = this.state.lastSeenCloud;
         const l = local!;
@@ -387,23 +412,25 @@ export class SyncClient {
   }
 
   private async pump(): Promise<void> {
-    const save = this.queued;
-    if (!save || !this.pushing || this.inFlight) return;
+    if (!this.queued || !this.pushing || this.inFlight) return;
     this.inFlight = true;
     try {
       if (this.needsIdentity) {
         const r = await this.d.api.me();
         if (!r.ok) {
           if (r.status === 401) return this.stop('reauth');
-          return this.backoff(save);
+          return this.backoff(this.queued!);
         }
         const me = MeSchema.safeParse(r.body);
-        if (!me.success) return this.backoff(save);
+        if (!me.success) return this.backoff(this.queued!);
         if (me.data.id !== this.state.accountId) return this.stop('off'); // never push A's save with B's cookie
         this.me = me.data;
         this.needsIdentity = false;
       }
 
+      // R40: the newest save queued NOW — a save stored during the identity check included.
+      const save = this.queued;
+      if (!save) return;
       this.queued = null;
       this.lastPutStart = Date.now();
       this.st = 'pending';
@@ -457,6 +484,9 @@ export class SyncClient {
   // Resolve
 
   async resolve(keep: 'device' | 'cloud'): Promise<ResolveResult> {
+    // R48: only for an identity confirmed this session — and, when bound, the bound account's.
+    const me = this.me;
+    if (!me || (this.state.accountId !== null && me.id !== this.state.accountId)) return { ok: false, reason: 'reauth' };
     const device = this.latest;
     if (!device) return { ok: false, reason: 'offline' };
     const r = await this.d.api.resolve({
@@ -495,14 +525,15 @@ export class SyncClient {
     }
     this.state = {
       ...this.state,
-      ...(this.me ? { accountId: this.me.id, accountName: this.me.name } : {}),
+      accountId: me.id,
+      accountName: me.name,
       lastSeenCloud: { saveId: save.saveId, revision: result.revision },
       conflict: false,
     };
     this.persist();
     this.cloudHead = { saveId: save.saveId, revision: result.revision };
     this.latest = save;
-    this.pushing = this.me !== null && this.me.id === this.state.accountId;
+    this.pushing = true;
     this.needsIdentity = false;
     this.st = 'synced';
     return { ok: true, save };

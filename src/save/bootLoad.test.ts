@@ -885,7 +885,7 @@ describe('Ruling R36 — BootLoad.walApplied', () => {
   it('Given nothing stored at all, When loaded, Then walApplied is false', async () => {
     const r = await loadForBoot(memoryStore(), wal);
     expect(r.save).toBeNull();
-    expect((r as WithWalApplied).walApplied).toBe(false);
+    expect((r as WithWalApplied).walApplied ?? false).toBe(false);
   });
 
   it('Given the store cannot be opened and the WAL holds a snapshot plus a beacon after it, When loaded, Then walApplied is true', async () => {

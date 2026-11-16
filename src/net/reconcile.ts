@@ -9,9 +9,10 @@
  *  - Not signed in → guest.
  *  - Bound to another account A: A's unsynced progress (or paid WAL entries,
  *    `localDirty`) refuses the switch; a synced save switches accounts.
- *  - A guest save / fresh device: adopt into an empty cloud, use the cloud
- *    when there is no local save, otherwise in-sync only for the same game at
- *    the same revision with nothing paid on top (R36).
+ *  - R43: local and cloud with the same content are in sync in every
+ *    signed-in branch; R41: no local save and a cloud save → use-cloud.
+ *  - A guest save / fresh device: adopt into an empty cloud; the same game
+ *    with other content is conflict-same; another game conflict-different.
  *  - Bound to me: local ahead of L, cloud ahead of L, or both (a conflict).
  *    R37: a cloud that moved on the SAME game but is not strictly newer than
  *    local is a conflict, never a silent step back.
@@ -40,6 +41,8 @@ export interface ReconcileInput {
   me: { id: string; name: string } | null;
   /** R36: the boot load applied WAL critical entries on top of the stored snapshot. */
   localDirty: boolean;
+  /** R43: local and cloud are deep-equal as saves (rawKey equality). */
+  sameContent: boolean;
 }
 
 export function unsyncedProgressText(name: string): string {
@@ -49,8 +52,12 @@ export function unsyncedProgressText(name: string): string {
 const conflict = (a: SaveV1, b: SaveV1): Decision => ({ kind: sameGame(a, b) ? 'conflict-same' : 'conflict-different' });
 
 export function reconcile(input: ReconcileInput): Decision {
-  const { local, cloud, state, me, localDirty } = input;
+  const { local, cloud, state, me, localDirty, sameContent } = input;
   if (me === null) return { kind: 'guest' };
+  // R43: the cloud already holds exactly this save — in sync, whatever the bookkeeping says.
+  if (local !== null && cloud !== null && sameContent) return { kind: 'in-sync' };
+  // R41: nothing local, something in the cloud — load the cloud's save.
+  if (local === null && cloud !== null) return { kind: 'use-cloud' };
   const L = state.lastSeenCloud;
   const dirty = local !== null && localDirty;
   const localAhead =
@@ -65,7 +72,8 @@ export function reconcile(input: ReconcileInput): Decision {
     if (local === null) return { kind: cloud === null ? 'in-sync' : 'use-cloud' };
     if (cloud === null) return { kind: 'adopt' };
     if (!sameGame(local, cloud)) return { kind: 'conflict-different' };
-    return { kind: local.revision === cloud.revision && !dirty ? 'in-sync' : 'conflict-same' };
+    // Same game, different content (R43): whatever the revisions, a choice.
+    return { kind: 'conflict-same' };
   }
 
   // Bound to me. A local save and an empty cloud: the cloud needs it.
