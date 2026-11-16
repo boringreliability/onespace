@@ -1094,12 +1094,24 @@ describe('Ruling R45 — resolve needs a confirmed identity', () => {
     expect(r.api.resolves).toEqual([]);
   });
 
-  it('Ruling R45: Given an UNBOUND state and no identity confirmed (offline boot), When resolve, Then the request is sent (the ruling allows an unbound state)', async () => {
+  // R48 replaces R45's unbound exception: resolve ALWAYS needs a me confirmed this session.
+  it("Ruling R48: Given an UNBOUND state and no identity confirmed (offline boot), When resolve, Then {ok: false, reason: 'reauth'} and nothing is sent", async () => {
     const result = save({ revision: 8 });
     const r = rig({ api: { me: () => fail('offline'), getSave: () => fail('offline'), resolve: () => ok(200, { revision: 8, save: result }) } });
     await r.sync.boot(save({ revision: 7 }));
-    await r.sync.resolve('device');
+    expect(await r.sync.resolve('device')).toEqual({ ok: false, reason: 'reauth' });
+    expect(r.api.resolves).toEqual([]);
+    expect(r.ts.calls).toEqual([]);
+  });
+
+  it('Ruling R48: Given an UNBOUND state and me() confirmed as B this session (a guest save in conflict with B\'s cloud), When resolve succeeds, Then the request was sent and the state is bound to B', async () => {
+    const local = save({ revision: 7 });
+    const result = save({ saveId: GAME_Y, revision: 3 });
+    const r = rig({ api: { getSave: () => cloudReply(result), resolve: () => ok(200, { revision: 3, save: result }) } });
+    expect((await r.sync.boot(local)).decision.kind).toBe('conflict-different');
+    expect(await r.sync.resolve('cloud')).toEqual({ ok: true, save: result });
     expect(r.api.resolves).toHaveLength(1);
+    expect(r.state()).toMatchObject({ accountId: ACCT_B.id, accountName: ACCT_B.name, lastSeenCloud: head(result), conflict: false });
   });
 });
 
