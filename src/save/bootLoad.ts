@@ -54,6 +54,12 @@ export interface BootLoad {
   readonly notice: string | null;
   /** The pre-save logbook, only when nothing at all is stored. */
   readonly legacyLog: SaveV1['log'] | null;
+  /**
+   * R36 (v4 sub-plan 4): true when WAL critical entries were applied on top
+   * of the chosen snapshot — paid progress no durable save (and so no cloud)
+   * holds yet. A WAL snapshot winning on its own is not that. Absent = false.
+   */
+  readonly walApplied?: boolean;
 }
 
 /** The highest seq a save's log holds (a checkpoint counts with its upToSeq). */
@@ -203,15 +209,22 @@ export async function loadForBoot(store: SaveStore, wal: Wal, opts: LoadOptions 
 export async function loadForBootResult(store: SaveStore, wal: Wal, opts: LoadOptions = {}): Promise<BootLoadResult> {
   const writer = opts.writer !== false;
   const w = readWal(wal);
-  const merged = (s: SaveV1 | null): SaveV1 | null => (s ? mergeCritical(s, w.critical) : null);
+  let walApplied = false;
+  const merged = (s: SaveV1 | null): SaveV1 | null => {
+    if (!s) return null;
+    const m = mergeCritical(s, w.critical);
+    walApplied = m !== s;
+    return m;
+  };
 
   let slots: { current: unknown | null; previous: unknown | null };
   try {
     // R25 I3: a hung open or load is an unavailable store after 3 s.
     slots = await withTimeout(() => store.load(), STORE_TIMEOUT_MS);
   } catch {
+    const save = merged(w.snapshot);
     return {
-      load: { save: merged(w.snapshot), notice: STORE_UNAVAILABLE_TEXT, legacyLog: null },
+      load: { save, notice: STORE_UNAVAILABLE_TEXT, legacyLog: null, ...(save ? { walApplied } : {}) },
       storeAvailable: false,
     };
   }
@@ -246,7 +259,12 @@ export async function loadForBootResult(store: SaveStore, wal: Wal, opts: LoadOp
       if (v.save.saveId !== best.saveId) await tryStore(() => store.keepCorrupt(v.raw, Date.now()));
     }
   }
-  return { load: { save: merged(best), notice, legacyLog: anyStored ? null : readLegacyLog() }, storeAvailable: true };
+  const save = merged(best);
+  // walApplied is only stated when there is a save (an empty boot's load stays { save, notice, legacyLog }).
+  return {
+    load: { save, notice, legacyLog: anyStored ? null : readLegacyLog(), ...(save ? { walApplied } : {}) },
+    storeAvailable: true,
+  };
 }
 
 export interface ReplaceOptions {

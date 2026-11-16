@@ -137,6 +137,16 @@ export function idbStore(name = 'onespace'): SaveStore {
       });
     },
 
+    replaceAll(s: SaveV1 | null) {
+      // R34: one transaction — the new current (or none) and no previous, or nothing at all.
+      return run<void>(SLOTS, 'readwrite', (tx) => {
+        const slots = tx.objectStore(SLOTS);
+        if (s === null) slots.delete('current');
+        else slots.put(s, 'current');
+        slots.delete('previous');
+      });
+    },
+
     keepCorrupt(raw: unknown, wallMs: number) {
       // One transaction: look for the same raw, put it only if absent.
       const key = rawKey(raw);

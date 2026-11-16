@@ -87,6 +87,14 @@ export interface Wal {
   readTagged(): { snapshot: unknown | null; critical: TaggedEntry[] };
   /** Drop what a durable save of revision ≤ `upToRevision` already holds. */
   clear(upToRevision: number): void;
+  /**
+   * R35 (v4 sub-plan 4): forget everything — the snapshot, its revision key
+   * and every critical entry, tagged or not. Sync calls it when the local
+   * save is replaced (a cloud save, a resolved conflict, an account switch),
+   * so nothing of the replaced save comes back on top of the new one.
+   * Never throws.
+   */
+  reset(): void;
 }
 
 function isNum(x: unknown): x is number {
@@ -275,6 +283,17 @@ export function createWal(storage: Storage | null | undefined): Wal {
       const kept = env.critical.filter((c) => c.by === null || c.by > upToRevision);
       if (kept.length !== env.critical.length) storeEntries(s, { v: 1, critical: kept });
     },
+
+    reset() {
+      if (!s) return;
+      for (const key of [WAL_KEY, WAL_SNAPSHOT_KEY, WAL_SNAPSHOT_REV_KEY]) {
+        try {
+          s.removeItem(key);
+        } catch {
+          // storage refused; the next reset or write tries again
+        }
+      }
+    },
   };
 }
 
@@ -294,4 +313,5 @@ export const wal: Wal = {
   read: () => createWal(currentStorage()).read(),
   readTagged: () => createWal(currentStorage()).readTagged(),
   clear: (upTo) => createWal(currentStorage()).clear(upTo),
+  reset: () => createWal(currentStorage()).reset(),
 };

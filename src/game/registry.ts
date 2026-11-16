@@ -75,6 +75,9 @@ import { acquireWriterLock, type WriterLock } from '@/save/writerLock';
 import { applySave } from '@/save/capture';
 import { universeOptionsFor, type BootLoad } from '@/save/bootLoad';
 import { decideBoot, logBeforeWorld, restartAfterRestoreFail } from '@/save/boot';
+import { createApi } from '@/net/api';
+import { runBootSync } from '@/net/bootSync';
+import { SyncClient } from '@/net/SyncClient';
 import type { SaveStore } from '@/save/store';
 import type { GameEvents } from '@/core/EventBus';
 // -----------------------------------------------------------------------------
@@ -306,6 +309,17 @@ export interface BootState {
   readonly notices: readonly string[];
   /** R25 I2: false when the store failed or hung at boot — the session never writes it. */
   readonly storeAvailable: boolean;
+  /** v4 sub-plan 4, Task 5: the cloud sync — SaveGame tells it of every durable save. */
+  readonly sync: SyncClient;
+}
+
+/** localStorage, or null where the browser refuses it. */
+function localStore(): Storage | null {
+  try {
+    return window.localStorage ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /** sessionStorage, or null where the browser refuses it. */
@@ -326,6 +340,21 @@ function sessionStore(): Storage | null {
 export async function loadBoot(): Promise<BootState> {
   const store = typeof indexedDB === 'undefined' ? memoryStore() : idbStore();
   const lock = await acquireWriterLock();
+  // [v4-net] Task 5: sync with the cloud first (≤ 3 s); its effects are in the
+  // store before decideBoot reads it.
+  const sync = new SyncClient({
+    api: createApi({ fetch: (input, init) => fetch(input, init) }),
+    storage: localStore(),
+    isWriter: () => lock.writer,
+    schedule: (fn, ms) => {
+      const id = setTimeout(fn, ms);
+      return () => clearTimeout(id);
+    },
+    store,
+    wal,
+    uuid: () => crypto.randomUUID(),
+  });
+  const synced = await runBootSync({ sync, store, wal, writer: lock.writer });
   const d = await decideBoot({
     search: window.location.search,
     store,
@@ -338,7 +367,8 @@ export async function loadBoot(): Promise<BootState> {
       window.history.replaceState(window.history.state, '', u.toString());
     },
   });
-  return { ...d, store, lock };
+  const syncNotices = [synced.notice, sync.statusText()].filter((t): t is string => t !== null);
+  return { ...d, notices: [...syncNotices, ...d.notices], store, lock, sync };
 }
 
 export async function registerModules(engine: Engine, progress: ProgressFn, boot: BootState): Promise<void> {
@@ -498,6 +528,7 @@ export async function registerModules(engine: Engine, progress: ProgressFn, boot
     lock: boot.lock,
     page: { document, window },
     storeAvailable: boot.storeAvailable,
+    onStored: (s) => boot.sync.onStored(s),
   });
   await engine.add(saveGame);
   // The same world, for applySave: what the save holds goes back into these.

@@ -129,6 +129,7 @@ function brokenStore(): SaveStore & { saved: SaveV1[] } {
       throw new DOMException('closed', 'InvalidStateError');
     },
     keepCorrupt: () => Promise.reject(new DOMException('closed', 'InvalidStateError')),
+    replaceAll: () => Promise.reject(new DOMException('closed', 'InvalidStateError')),
   };
 }
 
@@ -262,6 +263,7 @@ describe('loadForBoot — the store cannot be opened (carried: VersionError afte
       },
       save: () => Promise.resolve(),
       keepCorrupt: () => Promise.resolve(),
+      replaceAll: () => Promise.resolve(),
     };
     expect((await loadForBoot(store, wal)).notice).toBe(UNAVAILABLE);
   });
@@ -287,6 +289,7 @@ describe('loadForBoot — the store cannot be opened (carried: VersionError afte
       load: () => inner.load(),
       save: (s) => inner.save(s),
       keepCorrupt: () => Promise.reject(new Error('quota')),
+      replaceAll: (s) => inner.replaceAll(s),
     };
     const r = await loadForBoot(store, wal);
     expect(r.save?.revision).toBe(6);
@@ -725,6 +728,7 @@ describe('R25 I3 — the store gets 3 s at boot', () => {
         calls.save++;
         return over.save ? over.save(s) : never();
       },
+      replaceAll: over.replaceAll ?? (() => never()),
       keepCorrupt: (raw, wallMs) => {
         calls.keepCorrupt++;
         return over.keepCorrupt ? over.keepCorrupt(raw, wallMs) : never();

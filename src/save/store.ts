@@ -17,6 +17,15 @@ export interface SaveStore {
   /** Write `s` as current; the old current becomes previous. Rejects on failure, changing nothing. */
   save(s: SaveV1): Promise<void>;
   /**
+   * R34 (v4 sub-plan 4): replace the local save outright — current = `s` (or
+   * empty), previous = empty — in one transaction; the shelf is untouched.
+   * Rejects on failure, changing nothing. Sync uses it when a cloud or
+   * resolved save replaces the local one, or an account switch clears it: a
+   * plain `save` would keep the old game as previous, and the boot's
+   * newest-by-revision rule could bring it back.
+   */
+  replaceAll(s: SaveV1 | null): Promise<void>;
+  /**
    * Keep a save — one that could not be read, or one a NEW GAME replaced —
    * untouched, with the wall time it was found. A raw already on the shelf
    * (structurally equal) is not kept twice.

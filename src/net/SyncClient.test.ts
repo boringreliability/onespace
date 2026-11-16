@@ -706,6 +706,17 @@ describe('SyncClient.onStored — failures (R31)', () => {
     expect(gaps(r.api)).toEqual([gap]);
   });
 
+  it("Ruling R39: Given a 429 (Retry-After 1 s) and then the network down, Then the status is 'pending' after the 429, and the 429 did NOT advance the backoff: the retry after the following failure still waits 5 s, not 15 s", async () => {
+    const replies = [fail(429, { retryAfterS: 1, body: { error: 'rate_limited' } }), fail('offline'), ok(200, { revision: 8 })];
+    const r = await signedIn({ putSave: () => replies.shift() ?? fail('offline') });
+    r.sync.onStored(save({ revision: 8 }));
+    await untilPut(r.api);
+    expect(r.sync.status()).toBe('pending');
+    await settle(r.api.putTimes[0]! + 5_000 + 5_000 + 100 - Date.now());
+    expect(gaps(r.api)).toEqual([5_000, 5_000]);
+    expect(r.sync.status()).toBe('synced');
+  });
+
   it('Given a PUT answered 409 mid-game, Then conflict: true is persisted, status conflict with its text, no more PUTs — and a reload reconciles to a conflict', async () => {
     const cloud = save({ revision: 9, tank: 1_000 });
     const r = await signedIn({ putSave: () => fail(409, { body: { cloud: { revision: 9, save: cloud } } }) });

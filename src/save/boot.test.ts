@@ -106,6 +106,7 @@ function spyStore() {
       calls.keepCorrupt++;
       return inner.keepCorrupt(raw, wallMs);
     },
+    replaceAll: (s) => inner.replaceAll(s),
   };
   return { store, inner, calls };
 }

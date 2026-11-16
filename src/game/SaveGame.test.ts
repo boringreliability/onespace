@@ -232,6 +232,7 @@ function spyStore(events?: string[]): SpyStore {
   const store: SaveStore = {
     load: () => inner.load(),
     keepCorrupt: (raw, wallMs) => inner.keepCorrupt(raw, wallMs),
+    replaceAll: (s) => inner.replaceAll(s),
     async save(s) {
       events?.push(`store:${s.revision}`);
       attempts.push(s.revision);

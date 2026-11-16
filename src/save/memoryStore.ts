@@ -21,6 +21,10 @@ export function memoryStore(): SaveStore & { readonly corrupt: ReadonlyArray<{ w
       if (current !== null) previous = current;
       current = copy;
     },
+    async replaceAll(s: SaveV1 | null) {
+      current = s === null ? null : structuredClone(s);
+      previous = null;
+    },
     async keepCorrupt(raw: unknown, wallMs: number) {
       const key = rawKey(raw);
       if (key !== null && corrupt.some((c) => rawKey(c.raw) === key)) return;

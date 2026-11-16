@@ -87,6 +87,13 @@ export interface SaveGameOptions {
    * to the store, and the WAL is never cleared. Default true.
    */
   readonly storeAvailable?: boolean;
+  /**
+   * v4 sub-plan 4, Task 5: told once per SUCCESSFUL store write, with the
+   * save the store now holds — the cloud sync's cue. Never for a failed or
+   * timed-out write, a WAL-only write or a reader tab. Must return at once
+   * (the sync client only schedules); a throw here never breaks saving.
+   */
+  readonly onStored?: (s: SaveV1) => void;
 }
 
 /** Triggers that wait for the gap, in the order they are tried. */
@@ -110,6 +117,7 @@ export class SaveGame implements GameModule {
   private readonly lock: WriterLock;
   private readonly page: SavePage | null;
   private readonly storeAvailable: boolean;
+  private readonly onStored: ((s: SaveV1) => void) | null;
 
   /** The last save built — durable or not; the next one continues it. */
   private prev: SaveV1 | null = null;
@@ -142,6 +150,7 @@ export class SaveGame implements GameModule {
     this.lock = opts.lock;
     this.page = opts.page ?? null;
     this.storeAvailable = opts.storeAvailable !== false;
+    this.onStored = opts.onStored ?? null;
   }
 
   get status(): SaveStatus {
@@ -316,6 +325,14 @@ export class SaveGame implements GameModule {
       this.inFlight--;
     }
     this.wal.clear(save.revision);
+    if (this.onStored) {
+      try {
+        this.onStored(save);
+      } catch (e) {
+        // the save is durable; sync trouble is not a save failure
+        console.error('onStored failed:', e instanceof Error ? e.message : String(e));
+      }
+    }
     if (reason === 'manual') bus.emit('log', { text: SAVED_TEXT, tone: 'normal' });
     return true;
   }
