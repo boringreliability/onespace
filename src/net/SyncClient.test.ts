@@ -40,6 +40,12 @@
  * id === state.accountId; after an offline/timeout boot, onStored checks me()
  * before any PUT.
  *
+ * Fix round 1 (R40, R43–R47): the newest save is sent once identity is
+ * confirmed; same content is in sync; a confirmed other account is 'off';
+ * resolve needs a confirmed identity; a persisted conflict holds while the
+ * cloud is unreachable; an unreadable cloud says so
+ * (`CLOUD SAVE UNREADABLE — SYNC OFF`).
+ *
  * Timers: vitest fake timers; `schedule` is setTimeout-backed.
  */
 
@@ -731,7 +737,7 @@ describe('SyncClient.onStored — failures (R31)', () => {
       await settle(TEN_MIN);
     }
     expect(r.api.puts).toHaveLength(1);
-    const reload = reconcile({ local: save({ revision: 12 }), cloud, state: r.state(), me: { ...ACCT_B }, localDirty: false });
+    const reload = reconcile({ local: save({ revision: 12 }), cloud, state: r.state(), me: { ...ACCT_B }, localDirty: false, sameContent: false });
     expect(reload.kind).toBe('conflict-same');
   });
 
@@ -965,5 +971,182 @@ describe('SyncClient.resolve', () => {
     expect(r.api.puts).toEqual([]);
     await r.sync.resolve('device');
     expect(r.api.resolves[0]!.device).toEqual(save({ revision: 10, tank: 6_000 }));
+  });
+});
+
+// =============================================================================
+//  Fix round 1 — what the Task 5 review found (R40, R43–R47)
+// =============================================================================
+
+const UNREADABLE_TEXT = 'CLOUD SAVE UNREADABLE — SYNC OFF';
+
+describe('Ruling R40 — the newest save is the one sent', () => {
+  it('Ruling R40: Given an offline boot bound to B, When r8 is stored, me() is still answering, r9 is stored, and me() then says B, Then exactly one PUT — of r9 — and status synced once r9 is acknowledged', async () => {
+    const r = rig({ state: boundB(save({ revision: 7 })), api: { me: () => fail('offline'), getSave: () => fail('offline') } });
+    expect((await r.sync.boot(save({ revision: 7 }))).decision).toEqual({ kind: 'local-only', reason: 'offline' });
+    const me = deferred();
+    r.api.reply.me = () => me.promise;
+    r.sync.onStored(save({ revision: 8 }));
+    for (let t = 0; t <= 5_100 && !r.api.calls.slice(2).includes('me'); t += 100) await settle(100);
+    expect(r.api.calls.slice(2)).toContain('me');
+    r.sync.onStored(save({ revision: 9 }));
+    me.settle(ok(200, { ...ACCT_B }));
+    await settle(TEN_MIN);
+    expect(r.api.puts.map((p) => p.save.revision)).toEqual([9]);
+    expect(r.sync.status()).toBe('synced');
+    expect(r.state().lastSeenCloud).toEqual({ saveId: GAME_X, revision: 9 });
+  });
+
+  it("Ruling R40: Given a PUT of r8 in flight and r9 stored meanwhile, When r8 is acknowledged, Then the status is 'pending' (not synced) until r9 is acknowledged too", async () => {
+    const first = deferred();
+    const second = deferred();
+    const replies = [first.promise, second.promise];
+    const r = await signedIn({ putSave: () => replies.shift()! });
+    r.sync.onStored(save({ revision: 8 }));
+    await untilPut(r.api);
+    r.sync.onStored(save({ revision: 9 }));
+    first.settle(ok(200, { revision: 8 }));
+    await settle(0);
+    expect(r.sync.status()).toBe('pending');
+    await settle(PUSH_MIN_INTERVAL_MS);
+    expect(r.api.puts.map((p) => p.save.revision)).toEqual([8, 9]);
+    expect(r.sync.status()).toBe('pending');
+    second.settle(ok(200, { revision: 9 }));
+    await settle(0);
+    expect(r.sync.status()).toBe('synced');
+  });
+});
+
+describe('Ruling R43 — the same content is in sync (boot)', () => {
+  it("Ruling R43: Given the store holds B's save identical to B's cloud while the state is still bound to A, When B signs in, Then in-sync: re-bound to B with L = the cloud head, store and WAL untouched, no logout, no refuse-switch", async () => {
+    const local = save({ revision: 9 });
+    const cloud = save({ revision: 9 });
+    const r = rig({ state: boundA(save({ saveId: GAME_Y, revision: 3 })), api: { getSave: () => cloudReply(cloud) } });
+    await r.ts.store.save(local);
+    r.ts.calls.length = 0;
+    const b = await r.sync.boot(local);
+    expect(b.decision).toEqual({ kind: 'in-sync' });
+    expect(b.notice).toBeNull();
+    expect(r.api.calls).not.toContain('logout');
+    expect(r.ts.calls).toEqual([]);
+    expect(r.state()).toEqual(
+      syncState({ deviceId: DEVICE_ID, accountId: ACCT_B.id, accountName: ACCT_B.name, lastSeenCloud: head(cloud) }),
+    );
+    expect(r.sync.status()).toBe('synced');
+  });
+
+  it('Ruling R43: Given bound to B with L behind (r7) and local identical to the cloud at r9 (a lost PUT acknowledgement), When boot, Then in-sync with L = r9, nothing replaced, no PUT', async () => {
+    const r = rig({ state: boundB(save({ revision: 7 })), api: { getSave: () => cloudReply(save({ revision: 9 })) } });
+    const b = await r.sync.boot(save({ revision: 9 }));
+    expect(b.decision).toEqual({ kind: 'in-sync' });
+    expect(r.ts.calls).toEqual([]);
+    expect(r.state().lastSeenCloud).toEqual({ saveId: GAME_X, revision: 9 });
+    await settle(TEN_MIN);
+    expect(r.api.puts).toEqual([]);
+  });
+
+  it("Ruling R43: Given a guest save of the cloud's game at the same revision but different content, When boot, Then conflict-same — nothing written", async () => {
+    const r = rig({ api: { getSave: () => cloudReply(save({ revision: 7, tank: 9_000 })) } });
+    const b = await r.sync.boot(save({ revision: 7, tank: 100 }));
+    expect(b.decision).toEqual({ kind: 'conflict-same' });
+    expect(r.ts.calls).toEqual([]);
+  });
+});
+
+describe('Ruling R44 — a confirmed other account is off, not offline', () => {
+  it.each(['offline', 'timeout'] as const)(
+    "Ruling R44: Given a state bound to A, me() answering B in time and getSave() %s, When boot, Then status 'off' (not offline) and no PUT",
+    async (how) => {
+      const r = rig({
+        state: boundA(save({ revision: 7 })),
+        api: { me: () => ok(200, { ...ACCT_B }), getSave: how === 'offline' ? () => fail('offline') : never },
+      });
+      const done = r.sync.boot(save({ revision: 9 }));
+      if (how === 'timeout') await settle(3_000);
+      expect((await done).decision).toEqual({ kind: 'local-only', reason: how });
+      expect(r.sync.status()).toBe('off');
+      r.sync.onStored(save({ revision: 10 }));
+      await settle(TEN_MIN);
+      expect(r.api.puts).toEqual([]);
+    },
+  );
+});
+
+describe('Ruling R45 — resolve needs a confirmed identity', () => {
+  it("Ruling R45: Given an offline boot bound to B (no identity confirmed) with a persisted conflict, When resolve, Then {ok: false, reason: 'reauth'} and nothing is sent", async () => {
+    const r = rig({
+      state: boundB(save({ revision: 7 }), { conflict: true }),
+      api: { me: () => fail('offline'), getSave: () => fail('offline'), resolve: () => ok(200, { revision: 10, save: save({ revision: 10 }) }) },
+    });
+    await r.sync.boot(save({ revision: 9 }));
+    expect(await r.sync.resolve('device')).toEqual({ ok: false, reason: 'reauth' });
+    expect(r.api.resolves).toEqual([]);
+    expect(r.ts.calls).toEqual([]);
+  });
+
+  it("Ruling R45: Given a refused switch (state bound to A, me() = B), When resolve, Then {ok: false, reason: 'reauth'} and nothing is sent", async () => {
+    const r = rig({
+      state: boundA(save({ revision: 7 })),
+      api: { getSave: () => cloudReply(save({ saveId: GAME_Y, revision: 2 })), resolve: () => ok(200, { revision: 10, save: save({ revision: 10 }) }) },
+    });
+    expect((await r.sync.boot(save({ revision: 9 }))).decision.kind).toBe('refuse-switch');
+    expect(await r.sync.resolve('device')).toEqual({ ok: false, reason: 'reauth' });
+    expect(r.api.resolves).toEqual([]);
+  });
+
+  it('Ruling R45: Given an UNBOUND state and no identity confirmed (offline boot), When resolve, Then the request is sent (the ruling allows an unbound state)', async () => {
+    const result = save({ revision: 8 });
+    const r = rig({ api: { me: () => fail('offline'), getSave: () => fail('offline'), resolve: () => ok(200, { revision: 8, save: result }) } });
+    await r.sync.boot(save({ revision: 7 }));
+    await r.sync.resolve('device');
+    expect(r.api.resolves).toHaveLength(1);
+  });
+});
+
+describe('Ruling R46 — a persisted conflict holds until a boot reaches the cloud', () => {
+  it.each(['offline', 'timeout'] as const)(
+    "Ruling R46: Given a persisted conflict and the cloud %s at boot, Then status conflict, and no PUT for the session even after saves",
+    async (how) => {
+      const r = rig({
+        state: boundB(save({ revision: 7 }), { conflict: true }),
+        api: how === 'offline' ? { me: () => fail('offline'), getSave: () => fail('offline') } : { me: never, getSave: never },
+      });
+      const done = r.sync.boot(save({ revision: 9 }));
+      if (how === 'timeout') await settle(3_000);
+      await done;
+      expect(r.sync.status()).toBe('conflict');
+      expect(r.sync.statusText()).toBe(SYNC_CONFLICT_TEXT);
+      r.api.reply.me = () => ok(200, { ...ACCT_B });
+      for (let i = 10; i < 13; i++) {
+        r.sync.onStored(save({ revision: i }));
+        await settle(TEN_MIN);
+      }
+      expect(r.api.puts).toEqual([]);
+      expect(r.state().conflict).toBe(true);
+    },
+  );
+
+  it.each<[string, SaveV1, SaveV1, string]>([
+    ['in-sync (local = cloud = L)', save({ revision: 7 }), save({ revision: 7 }), 'in-sync'],
+    ['push-local (local ahead, cloud = L)', save({ revision: 9 }), save({ revision: 7 }), 'push-local'],
+    ['use-cloud (cloud ahead, local = L)', save({ revision: 7 }), save({ revision: 9 }), 'use-cloud'],
+  ])('Ruling R46: Given a stale persisted conflict flag and a boot that reaches the cloud with %s, Then the persisted flag is cleared', async (_what, local, cloud, kind) => {
+    const r = rig({ state: boundB(save({ revision: 7 }), { conflict: true }), api: { getSave: () => cloudReply(cloud) } });
+    expect((await r.sync.boot(local)).decision).toEqual({ kind });
+    expect(r.state().conflict).toBe(false);
+    expect(r.sync.status()).not.toBe('conflict');
+  });
+});
+
+describe('Ruling R47 — an unreadable cloud says so', () => {
+  it.each<[string, () => ReturnType<FakeApi['reply']['getSave']>]>([
+    ['format 99', () => cloudReply({ ...save({ revision: 9 }), format: 99 })],
+    ['an invalid save', () => cloudReply({ format: 1, revision: 9, junk: true })],
+  ])("Ruling R47: Given the cloud holds %s, When boot, Then the notice is exactly 'CLOUD SAVE UNREADABLE — SYNC OFF' and status stays off", async (_what, getSave) => {
+    const r = rig({ state: boundB(save({ revision: 7 })), api: { getSave } });
+    const b = await r.sync.boot(save({ revision: 9 }));
+    expect(b.decision).toEqual({ kind: 'local-only', reason: 'unreadable' });
+    expect(b.notice).toBe(UNREADABLE_TEXT);
+    expect(r.sync.status()).toBe('off');
   });
 });

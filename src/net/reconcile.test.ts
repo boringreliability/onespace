@@ -11,16 +11,20 @@
  *     | { kind: 'switch-account' }
  *   reconcile(input: { local: SaveV1 | null; cloud: SaveV1 | null;
  *                      state: SyncState; me: { id: string; name: string } | null;
- *                      localDirty: boolean }): Decision
+ *                      localDirty: boolean; sameContent: boolean }): Decision
  *     // localDirty (Ruling R36): the boot load applied WAL critical entries on
  *     // top of the stored snapshot (BootLoad.walApplied) — paid progress the
  *     // cloud has never seen, so the local save counts as ahead.
+ *     // sameContent (Ruling R43, fix round 1): local and cloud are deep-equal
+ *     // as saves → 'in-sync' in every signed-in branch (other account included).
  *   unsyncedProgressText(name: string): string
  *     // 'UNSYNCED PROGRESS FOR <name> — SIGN IN AS <name> ONCE ONLINE TO SYNC'
  *
  * L = state.lastSeenCloud. Equal revisions do NOT mean in sync: only L does.
  * Ruling R37: in the bound branch, a cloud that moved on the SAME game but is
  * not strictly newer than local (rolled back) is a conflict, never use-cloud.
+ * Ruling R41 (fix round 1): no local save and a cloud save → 'use-cloud' in
+ * every signed-in branch.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -46,10 +50,13 @@ const KINDS = [
 const boundTo = (acct: { id: string; name: string }, L: SaveV1 | null, o: Partial<SyncState> = {}): SyncState =>
   syncState({ accountId: acct.id, accountName: acct.name, lastSeenCloud: L ? head(L) : null, ...o });
 
-type Input = Omit<Parameters<typeof reconcile>[0], 'localDirty'> & { localDirty?: boolean };
+type Input = Omit<Parameters<typeof reconcile>[0], 'localDirty' | 'sameContent'> & {
+  localDirty?: boolean;
+  sameContent?: boolean;
+};
 
-/** `reconcile` with localDirty false unless the test says otherwise. */
-const rc = (input: Input): Decision => reconcile({ localDirty: false, ...input });
+/** `reconcile` with localDirty and sameContent false unless the test says otherwise. */
+const rc = (input: Input): Decision => reconcile({ localDirty: false, sameContent: false, ...input });
 
 function kind(input: Input): Decision['kind'] {
   const d = rc(input);
@@ -154,8 +161,9 @@ describe('reconcile — signed in as the bound account', () => {
     expect(kind({ local: null, cloud: save({ revision: 9 }), state: boundTo(me, L), me })).toBe('use-cloud');
   });
 
-  it("Given no local save and a cloud = L, Then 'in-sync'", () => {
-    expect(kind({ local: null, cloud: save({ revision: 7 }), state: boundTo(me, L), me })).toBe('in-sync');
+  // CHANGED by Ruling R41 (fix round 1): was "…Then 'in-sync'" / toBe('in-sync').
+  it("Ruling R41: Given no local save and a cloud = L, Then 'use-cloud' (the cloud's save is what this device should load)", () => {
+    expect(kind({ local: null, cloud: save({ revision: 7 }), state: boundTo(me, L), me })).toBe('use-cloud');
   });
 
   it("Given both present and L = null (bound, never saw the cloud), Then both count as moved: 'conflict-same' on one game", () => {
@@ -196,8 +204,15 @@ describe('reconcile — a guest save or a fresh device (state.accountId = null)'
     );
   });
 
-  it("Given a guest save of the cloud's game at the same revision, Then 'in-sync'", () => {
-    expect(kind({ local: save({ revision: 7 }), cloud: save({ revision: 7 }), state: syncState(), me })).toBe('in-sync');
+  // EDITED by Ruling R43 (fix round 1): input gains sameContent: true and the name says so; the assertion is unchanged.
+  it("Given a guest save of the cloud's game at the same revision with the same content, Then 'in-sync'", () => {
+    expect(kind({ local: save({ revision: 7 }), cloud: save({ revision: 7 }), state: syncState(), me, sameContent: true })).toBe('in-sync');
+  });
+
+  it("Ruling R43: Given a guest save of the cloud's game at the same revision but DIFFERENT content, Then 'conflict-same'", () => {
+    expect(
+      kind({ local: save({ revision: 7, tank: 100 }), cloud: save({ revision: 7, tank: 9_000 }), state: syncState(), me, sameContent: false }),
+    ).toBe('conflict-same');
   });
 
   it("Given a guest save of the cloud's game at another revision, Then 'conflict-same'", () => {
@@ -279,6 +294,46 @@ describe('Ruling R36 — a WAL-merged (dirty) local save counts as ahead', () =>
   });
 });
 
+describe('Ruling R41 — no local save and a cloud save: use-cloud everywhere', () => {
+  const cloud = save({ revision: 9 });
+
+  it.each<[string, SyncState]>([
+    ['a guest state', syncState()],
+    ['a state bound to me with cloud = L', boundTo(ACCT_B, save({ revision: 9 }))],
+    ['a state bound to me with cloud ≠ L', boundTo(ACCT_B, save({ revision: 7 }))],
+    ['a state bound to me with L = null', boundTo(ACCT_B, null)],
+    ['a state bound to ANOTHER account', boundTo(ACCT_A, save({ revision: 7 }))],
+  ])("Ruling R41: Given no local save, a cloud save and %s, Then 'use-cloud'", (_what, state) => {
+    expect(kind({ local: null, cloud, state, me: ACCT_B })).toBe('use-cloud');
+  });
+
+  it("Ruling R41: Given no local save, a cloud save and a dirty flag (nothing to be dirty), Then still 'use-cloud'", () => {
+    expect(kind({ local: null, cloud, state: boundTo(ACCT_B, save({ revision: 9 })), me: ACCT_B, localDirty: true })).toBe('use-cloud');
+  });
+});
+
+describe('Ruling R43 — the same content is in sync, whatever the bookkeeping says', () => {
+  const same = (): { local: SaveV1; cloud: SaveV1 } => ({ local: save({ revision: 9 }), cloud: save({ revision: 9 }) });
+
+  it.each<[string, SyncState, { id: string; name: string }]>([
+    ['bound to me, L = null', boundTo(ACCT_B, null), ACCT_B],
+    ['bound to me, L behind (r7)', boundTo(ACCT_B, save({ revision: 7 })), ACCT_B],
+    ['a guest state', syncState(), ACCT_B],
+    ['bound to ANOTHER account with L behind (would be refuse-switch)', boundTo(ACCT_A, save({ revision: 7 })), ACCT_B],
+    ['bound to ANOTHER account, L = null', boundTo(ACCT_A, null), ACCT_B],
+  ])("Ruling R43: Given local and cloud with the same content and %s, Then 'in-sync'", (_what, state, me) => {
+    expect(kind({ ...same(), state, me, sameContent: true })).toBe('in-sync');
+  });
+
+  it("Ruling R43: Given the same content but a dirty local (WAL entries merged), Then still 'in-sync' (the cloud already holds exactly this save)", () => {
+    expect(kind({ ...same(), state: boundTo(ACCT_B, save({ revision: 7 })), me: ACCT_B, sameContent: true, localDirty: true })).toBe('in-sync');
+  });
+
+  it("Ruling R43: Given the same content but nobody signed in, Then 'guest'", () => {
+    expect(kind({ ...same(), state: syncState(), me: null, sameContent: true })).toBe('guest');
+  });
+});
+
 describe('reconcile — only the nine kinds', () => {
   it('Given a sweep of inputs, Then every decision is one of the nine kinds and only refuse-switch carries a message', () => {
     const saves = [null, save({ revision: 5 }), save({ revision: 7 }), save({ revision: 9 }), save({ saveId: GAME_Y, revision: 7 })];
@@ -289,7 +344,7 @@ describe('reconcile — only the nine kinds', () => {
         for (const state of states)
           for (const me of mes) {
             for (const localDirty of [false, true]) {
-              const d = reconcile({ local, cloud, state, me, localDirty });
+              const d = reconcile({ local, cloud, state, me, localDirty, sameContent: false });
               expect(KINDS).toContain(d.kind);
               if (d.kind === 'refuse-switch') expect(typeof d.message).toBe('string');
               else expect(Object.keys(d)).toEqual(['kind']);

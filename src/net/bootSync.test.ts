@@ -110,6 +110,19 @@ describe('runBootSync — before decideBoot', () => {
     expect(boot).toHaveBeenCalledWith(expected, { localDirty: true });
   });
 
+  it('Ruling R42: Given the store cannot be opened at boot (the WAL may be the only copy), When runBootSync, Then local-only/offline and sync.boot is NOT called', async () => {
+    const ts = testStore();
+    const wal = createWal(new MemoryStorage() as unknown as Storage);
+    wal.writeSnapshot(save({ revision: 7 }));
+    const store = { ...ts.store, load: () => Promise.reject(new DOMException('blocked', 'VersionError')) };
+    const boot = vi.fn(async () => ({ decision: { kind: 'use-cloud' as const }, cloud: null, notice: null }));
+    const b = await runBootSync({ sync: { boot } as unknown as SyncClient, store, wal, writer: true });
+    expect(b.decision).toEqual({ kind: 'local-only', reason: 'offline' });
+    expect(boot).not.toHaveBeenCalled();
+    expect(ts.calls).toEqual([]);
+    expect(wal.read().snapshot).not.toBeNull();
+  });
+
   it('Given nothing stored, When runBootSync, Then sync.boot gets null and localDirty: false', async () => {
     const ts = testStore();
     const wal = createWal(new MemoryStorage() as unknown as Storage);
