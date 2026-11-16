@@ -24,14 +24,33 @@ export type ResolveResult =
   | { kind: 'resolved' | 'replayed'; revision: number; save: SaveV1 }
   | { kind: 'conflict'; cloud: { revision: number; save: SaveV1 } };
 
+/** The user row vanished (account deleted) before the write took its lock. */
+export class UserGoneError extends Error {
+  constructor() {
+    super('user not found');
+    this.name = 'UserGoneError';
+  }
+}
+
+/** A same-game resolve would need revision max + 1 beyond Postgres int4. */
+export class RevisionOverflowError extends Error {
+  constructor() {
+    super('revision overflow');
+    this.name = 'RevisionOverflowError';
+  }
+}
+
+const INT4_MAX = 2_147_483_647;
+
 type Tx = TransactionSql;
 type HeadRow = { save_id: string; revision: number; body: SaveV1; resolve_key: string | null };
 
 const json = (tx: Tx, v: unknown) => tx.json(v as Parameters<Tx['json']>[0]);
 
 async function lockUser(tx: Tx, userId: string): Promise<void> {
-  const rows = await tx`select id from users where id = ${userId} for update`;
-  if (rows.length === 0) throw new Error('user not found');
+  // NO KEY UPDATE: still conflicts with the delete of the row, but not with FK key-shares (session inserts).
+  const rows = await tx`select id from users where id = ${userId} for no key update`;
+  if (rows.length === 0) throw new UserGoneError();
 }
 
 async function readHead(tx: Tx, userId: string): Promise<HeadRow | undefined> {
@@ -65,7 +84,7 @@ async function storeHead(
   await tx`
     insert into save_revisions (user_id, save_id, revision, digest)
     values (${userId}, ${save.saveId}, ${save.revision}, ${json(tx, shipDigest(save))}::jsonb)
-    on conflict (user_id, save_id, revision) do update set digest = excluded.digest`;
+    on conflict (user_id, save_id, revision) do nothing`;
   if (save.actions.length > 0) {
     await tx`
       insert into actions (user_id, save_id, device_id, seq, entry)
@@ -135,9 +154,11 @@ export async function resolveSave(
     if (!sawHead) return { kind: 'conflict', cloud: cloudOf(head) };
 
     if (sameGame(head.body, device)) {
+      if (Math.max(head.revision, device.revision) >= INT4_MAX) throw new RevisionOverflowError();
       const [chosen, unchosen] = keep === 'device' ? [device, head.body] : [head.body, device];
       let baseDigest: ShipDigest = shipDigest(unchosen);
-      if (base) {
+      // A base only counts for the head's own game.
+      if (base && base.saveId === head.save_id) {
         const rows = await tx<{ digest: ShipDigest }[]>`
           select digest from save_revisions
           where user_id = ${userId} and save_id = ${base.saveId} and revision = ${base.revision}`;

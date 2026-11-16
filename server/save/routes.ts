@@ -6,7 +6,7 @@ import { migrate } from '../../src/save/migrate';
 import type { SaveV1 } from '../../src/save/schema';
 import { clearSessionCookie, requireUser, type AuthVariables } from '../auth/session';
 import { rateLimiter } from '../rateLimit';
-import { deleteAccount, getHead, putSave, resolveSave } from './repo';
+import { deleteAccount, getHead, putSave, resolveSave, RevisionOverflowError, UserGoneError } from './repo';
 
 export const WRITE_LIMIT = 30;
 export const WRITE_WINDOW_MS = 60_000;
@@ -20,12 +20,25 @@ const ResolveBody = z
   .object({ deviceId: z.uuid(), keep: z.enum(['device', 'cloud']), device: z.unknown(), base: Base, cloud: Base })
   .refine((b) => b.device !== undefined);
 
+/** A string Postgres jsonb cannot store: U+0000, or a lone surrogate (not well-formed UTF-16). */
+const UNSTORABLE = /\u0000|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+
+/** Walks every string value and object key. */
+function hasUnstorable(v: unknown): boolean {
+  if (typeof v === 'string') return UNSTORABLE.test(v);
+  if (Array.isArray(v)) return v.some(hasUnstorable);
+  if (v && typeof v === 'object') {
+    return Object.entries(v).some(([k, x]) => UNSTORABLE.test(k) || hasUnstorable(x));
+  }
+  return false;
+}
+
 /** `migrate`, then the range checks the Postgres int columns need (R25). */
 function validateSave(raw: unknown): SaveV1 | null {
   const r = migrate(raw);
   if (!r.ok) return null;
   const s = r.save;
-  if (s.revision > INT4_MAX) return null;
+  if (s.revision > INT4_MAX || hasUnstorable(s)) return null;
   for (const a of s.actions) if (!Number.isInteger(a.seq) || a.seq < 0 || a.seq > INT4_MAX) return null;
   return s;
 }
@@ -49,7 +62,9 @@ export function saveRoutes(deps: { sql: Sql; now: () => number }): Hono<Env> {
       return await run();
     } catch (err) {
       // resolveSameGame parses its output with Zod: bad input is a client error, not a 500.
-      if (err instanceof z.ZodError) return c.json({ error: 'invalid-save' }, 400);
+      if (err instanceof z.ZodError || err instanceof RevisionOverflowError) return c.json({ error: 'invalid-save' }, 400);
+      // The account was deleted while this write waited for its lock.
+      if (err instanceof UserGoneError) return c.json({ error: 'unauthenticated' }, 401);
       console.error('save route failed:', err instanceof Error ? err.message : String(err));
       return c.json({ error: 'internal' }, 500);
     }
