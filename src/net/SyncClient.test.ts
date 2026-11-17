@@ -221,12 +221,12 @@ describe('SyncClient.boot — a reader tab (Review Focus 3)', () => {
 });
 
 describe('SyncClient.boot — one 3 s budget for me() and getSave()', () => {
-  it('Given me() is still pending, Then getSave() has already been called (they run in parallel)', async () => {
+  it('Ruling R66: Given me() is still pending, Then getSave() has NOT been called yet (it waits for a signed-in me)', async () => {
     const r = rig({ state: boundB(save()), api: { me: never, getSave: never } });
     void r.sync.boot(save());
     await settle(0);
     expect(r.api.calls).toContain('me');
-    expect(r.api.calls).toContain('getSave');
+    expect(r.api.calls).not.toContain('getSave');
   });
 
   it('Given neither me() nor getSave() answers, When boot, Then it resolves at 3 000 ms — not before — as local-only/timeout, with no conflict and the local save untouched', async () => {
@@ -1182,6 +1182,83 @@ describe('Ruling R47 — an unreadable cloud says so', () => {
 //      // null, no more PUTs, status 'off', the store untouched. false →
 //      // nothing changes. Without a confirmed identity: false, no request.
 // =============================================================================
+
+// =============================================================================
+//  Task 6 fix round 2 — Ruling R66: a guest never asks for a save. boot()
+//  calls getSave() only after me() answered with a signed-in user; both
+//  share the ONE 3 s budget (R30): getSave gets only what me() left.
+// =============================================================================
+
+describe('Ruling R66 — getSave() only after a signed-in me()', () => {
+  it.each<[string, SyncState | null]>([
+    ['a guest state', null],
+    ['a state bound to A', boundA(save({ revision: 7 }))],
+  ])('Ruling R66: Given me() answers 401 and %s, When boot, Then guest and NO request for the save', async (_what, state) => {
+    const r = rig({ ...(state ? { state } : {}), api: { me: () => fail(401) } });
+    const b = await r.sync.boot(save());
+    expect(b.decision).toEqual({ kind: 'guest' });
+    expect(r.api.calls).toEqual(['me']);
+  });
+
+  it.each<[string, Partial<FakeApi['reply']>, string]>([
+    ['me() is offline', { me: () => fail('offline') }, 'offline'],
+    ['me() answers 500', { me: () => fail(500) }, 'offline'],
+    ["me() reports 'timeout'", { me: () => fail('timeout') }, 'timeout'],
+    ['me() answers 200 without a user', { me: () => ok(200, { nope: true }) }, 'offline'],
+  ])('Ruling R66: Given %s, When boot, Then local-only as before and no request for the save', async (_what, api, reason) => {
+    const r = rig({ state: boundB(save({ revision: 7 })), api });
+    const b = await r.sync.boot(save({ revision: 9 }));
+    expect(b.decision).toEqual({ kind: 'local-only', reason });
+    expect(r.api.calls).not.toContain('getSave');
+  });
+
+  it('Ruling R66: Given a signed-in boot, Then getSave() is called only once me() has answered — me first, then getSave', async () => {
+    const me = deferred();
+    const r = rig({ state: boundB(save({ revision: 7 })), api: { me: () => me.promise, getSave: () => cloudReply(save({ revision: 7 })) } });
+    const p = r.sync.boot(save({ revision: 7 }));
+    await settle(500);
+    expect(r.api.calls).toEqual(['me']);
+    me.settle(ok(200, { ...ACCT_B }));
+    const b = await p;
+    expect(r.api.calls).toEqual(['me', 'getSave']);
+    expect(b.decision).toEqual({ kind: 'in-sync' });
+  });
+
+  it('Ruling R66 (R30): Given me() answers at 1 s and getSave() 1.5 s after it is asked, When boot, Then it completes at 2.5 s inside the one budget', async () => {
+    const r = rig({
+      state: boundB(save({ revision: 7 })),
+      api: {
+        me: () => new Promise((res) => setTimeout(() => res(ok(200, { ...ACCT_B })), 1_000)),
+        getSave: () => new Promise((res) => setTimeout(() => res(cloudReply(save({ revision: 7 }))), 1_500)),
+      },
+    });
+    let b: { decision: unknown } | null = null;
+    void r.sync.boot(save({ revision: 7 })).then((x) => (b = x));
+    await settle(2_499);
+    expect(b).toBeNull();
+    await settle(1);
+    expect(b!.decision).toEqual({ kind: 'in-sync' });
+  });
+
+  it('Ruling R66 (R30): Given me() answers at 2 s and getSave() would take 1.5 s more, When boot, Then the budget is shared — it resolves at 3 000 ms as local-only/timeout, not at 3.5 s or 5 s', async () => {
+    const r = rig({
+      state: boundB(save({ revision: 7 })),
+      api: {
+        me: () => new Promise((res) => setTimeout(() => res(ok(200, { ...ACCT_B })), 2_000)),
+        getSave: () => new Promise((res) => setTimeout(() => res(cloudReply(save({ revision: 7 }))), 1_500)),
+      },
+    });
+    let b: { decision: unknown } | null = null;
+    void r.sync.boot(save({ revision: 9 })).then((x) => (b = x));
+    await settle(2_000);
+    expect(r.api.calls).toEqual(['me', 'getSave']);
+    await settle(999);
+    expect(b).toBeNull();
+    await settle(1);
+    expect(b!.decision).toEqual({ kind: 'local-only', reason: 'timeout' });
+    expect(r.ts.calls).toEqual([]);
+  });
+});
 
 describe('Task 6 — SyncClient.identity() (R51)', () => {
   it('Given a client before boot, Then identity() is null', () => {
