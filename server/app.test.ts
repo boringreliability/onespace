@@ -258,3 +258,30 @@ describe('security headers on non-trivial responses', () => {
     expectHeaders(res);
   });
 });
+
+// Final fix round — Ruling R72: HSTS in production only (local development runs on http).
+describe('Strict-Transport-Security (R72)', () => {
+  const HSTS = 'max-age=31536000; includeSubDomains';
+  const prodApp = () => createApp({ config: { ...config, production: true }, sql: t.sql, staticRoot });
+
+  describe('given production', () => {
+    const cases: [string, RequestInit?][] = [
+      ['/api/health'],
+      ['/'],
+      ['/assets/a.js'],
+      ['/api/nope'],
+      ['/api/anything', { method: 'POST', headers: { Origin: 'https://evil.example' } }],
+    ];
+    it.each(cases)('when %s is answered, then Strict-Transport-Security is exactly "max-age=31536000; includeSubDomains"', async (path, init) => {
+      const res = await prodApp().request(path, init);
+      expect(res.headers.get('Strict-Transport-Security')).toBe(HSTS);
+    });
+  });
+
+  describe('given production is false', () => {
+    it.each(['/api/health', '/'])('when %s is answered, then there is no Strict-Transport-Security header', async (path) => {
+      const res = await app.request(path);
+      expect(res.headers.get('Strict-Transport-Security')).toBeNull();
+    });
+  });
+});

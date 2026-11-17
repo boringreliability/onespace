@@ -25,7 +25,10 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { ACCT_A, DEVICE_ID, DEVICE_ID_2, GAME_X, MemoryStorage, ThrowingStorage, syncState } from './__fixtures__/sync';
+import type { SaveV1 } from '@/save/schema';
+
+import { ACCT_A, DEVICE_ID, DEVICE_ID_2, GAME_X, MemoryStorage, ThrowingStorage, save, syncState } from './__fixtures__/sync';
+import type { ResolveBody } from './api';
 import { SYNC_STATE_KEY, readSyncState, writeSyncState } from './syncState';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -142,5 +145,47 @@ describe('syncState — storage that throws (private mode)', () => {
   it('Given no storage at all (null), Then read gives a fresh state and write gives false', () => {
     expect(readSyncState(null, () => DEVICE_ID)).toEqual({ deviceId: DEVICE_ID, ...FRESH });
     expect(writeSyncState(null, syncState())).toBe(false);
+  });
+});
+
+// =============================================================================
+//  Final fix round — Rulings R68(b) and R69: two OPTIONAL fields.
+//    inFlightPut?:    { saveId: uuid; revision: int ≥ 0; fingerprint: non-empty string }
+//    pendingResolve?: ResolveBody  { deviceId, keep: 'device' | 'cloud', device: SaveV1,
+//                                    base: CloudHead | null, cloud: CloudHead | null }
+//  An old state without them still parses unchanged.
+// =============================================================================
+
+describe('syncState — the in-flight marker and the pending resolve (R68, R69)', () => {
+  const bound = (): ReturnType<typeof syncState> =>
+    syncState({ accountId: ACCT_A.id, accountName: ACCT_A.name, lastSeenCloud: { saveId: GAME_X, revision: 7 } });
+
+  it('Ruling R68: Given an old state written without the new fields, When read, Then it parses unchanged (no reset, nothing added)', () => {
+    const storage = new MemoryStorage();
+    stored(storage, bound());
+    const uuid = vi.fn(() => DEVICE_ID_2);
+    expect(readSyncState(storage, uuid)).toStrictEqual(bound());
+    expect(uuid).not.toHaveBeenCalled();
+  });
+
+  it('Ruling R68: Given a state with an in-flight marker, When written and read back, Then the marker survives exactly', () => {
+    const storage = new MemoryStorage();
+    const s = { ...bound(), inFlightPut: { saveId: GAME_X, revision: 8, fingerprint: '9e3779b9' } };
+    expect(writeSyncState(storage, s)).toBe(true);
+    const uuid = vi.fn(() => DEVICE_ID_2);
+    expect(readSyncState(storage, uuid)).toEqual(s);
+    expect(uuid).not.toHaveBeenCalled();
+  });
+
+  it.each<[string, (s: SaveV1) => ResolveBody]>([
+    ['keep device, with base and cloud heads', (s) => ({ deviceId: DEVICE_ID, keep: 'device', device: s, base: { saveId: GAME_X, revision: 7 }, cloud: { saveId: GAME_X, revision: 8 } })],
+    ['keep cloud, base and cloud null', (s) => ({ deviceId: DEVICE_ID, keep: 'cloud', device: s, base: null, cloud: null })],
+  ])('Ruling R69: Given a state with a pending resolve (%s), When written and read back, Then the body survives deep-equal', (_what, body) => {
+    const storage = new MemoryStorage();
+    const s = { ...bound(), conflict: true, pendingResolve: body(save({ revision: 9 })) };
+    expect(writeSyncState(storage, s)).toBe(true);
+    const uuid = vi.fn(() => DEVICE_ID_2);
+    expect(readSyncState(storage, uuid)).toEqual(s);
+    expect(uuid).not.toHaveBeenCalled();
   });
 });

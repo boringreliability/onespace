@@ -33,7 +33,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { DEVICE_ID, GAME_X, save } from './__fixtures__/sync';
-import { SYNC_TIMEOUT_MS, createApi } from './api';
+import { SYNC_TIMEOUT_MS, SYNC_WRITE_TIMEOUT_MS, createApi } from './api';
 
 interface Call {
   url: string;
@@ -276,5 +276,92 @@ describe('api — offline, timeout and odd replies (never throws)', () => {
       ok: false,
       status: 502,
     });
+  });
+});
+
+// =============================================================================
+//  Final fix round — Ruling R70: timeouts per call. me() and getSave() keep
+//  SYNC_TIMEOUT_MS (3 000 ms; the boot budget is unchanged); putSave() and
+//  resolve() get SYNC_WRITE_TIMEOUT_MS (30 000 ms) — an upload near the save
+//  ceiling needs more than 3 s on a slow uplink.
+// =============================================================================
+
+describe('Ruling R70 — timeouts per call', () => {
+  /** A fetch that never answers on its own; it rejects when its signal aborts. Records the signal. */
+  function hanging(): { fetch: typeof fetch; signal: () => AbortSignal | undefined } {
+    let signal: AbortSignal | undefined;
+    const f = fakeFetch((_u, init) => {
+      signal = init.signal ?? undefined;
+      return new Promise<Response>((_res, rej) => {
+        init.signal?.addEventListener('abort', () => rej(new DOMException('aborted', 'AbortError')));
+      });
+    });
+    return { fetch: f.fetch, signal: () => signal };
+  }
+
+  /** A fetch that answers `body` after `ms` (fake timers). */
+  const slow = (ms: number, body: unknown): typeof fetch =>
+    fakeFetch(() => new Promise<Response>((res) => setTimeout(() => res(json(200, body)), ms))).fetch;
+
+  it('Ruling R70: Given the module, Then SYNC_WRITE_TIMEOUT_MS is 30 000 and SYNC_TIMEOUT_MS is still 3 000', () => {
+    expect(SYNC_WRITE_TIMEOUT_MS).toBe(30_000);
+    expect(SYNC_TIMEOUT_MS).toBe(3_000);
+  });
+
+  it('Ruling R70: Given a PUT that answers after 10 s, When putSave, Then it succeeds (no 3 s abort)', async () => {
+    let r: unknown = null;
+    void createApi({ fetch: slow(10_000, { revision: 8 }) })
+      .putSave({ deviceId: DEVICE_ID, base: null, save: save({ revision: 8 }) })
+      .then((x) => (r = x));
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(r).toEqual({ ok: true, status: 200, body: { revision: 8 } });
+  });
+
+  it("Ruling R70: Given a PUT with no answer, When putSave, Then 'timeout' at 30 000 ms — not before — and the request's signal is aborted", async () => {
+    const h = hanging();
+    let r: unknown = null;
+    void createApi({ fetch: h.fetch })
+      .putSave({ deviceId: DEVICE_ID, base: null, save: save() })
+      .then((x) => (r = x));
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(r).toBeNull();
+    expect(h.signal()?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(r).toEqual({ ok: false, status: 'timeout' });
+    expect(h.signal()?.aborted).toBe(true);
+  });
+
+  it('Ruling R70: Given a resolve that answers after 10 s, When resolve, Then it succeeds', async () => {
+    const result = save({ revision: 10 });
+    let r: unknown = null;
+    void createApi({ fetch: slow(10_000, { revision: 10, save: result }) })
+      .resolve({ deviceId: DEVICE_ID, keep: 'device', device: save({ revision: 9 }), base: null, cloud: null })
+      .then((x) => (r = x));
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(r).toEqual({ ok: true, status: 200, body: { revision: 10, save: result } });
+  });
+
+  it("Ruling R70: Given a resolve with no answer, When resolve, Then 'timeout' at 30 000 ms — not before", async () => {
+    const h = hanging();
+    let r: unknown = null;
+    void createApi({ fetch: h.fetch })
+      .resolve({ deviceId: DEVICE_ID, keep: 'cloud', device: save(), base: null, cloud: null })
+      .then((x) => (r = x));
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(r).toBeNull();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(r).toEqual({ ok: false, status: 'timeout' });
+    expect(h.signal()?.aborted).toBe(true);
+  });
+
+  it.each(['me', 'getSave'] as const)("Ruling R70: Given %s() with no answer, Then 'timeout' still at 3 000 ms (the boot budget is unchanged)", async (call) => {
+    const h = hanging();
+    let r: unknown = null;
+    const api = createApi({ fetch: h.fetch });
+    void api[call]().then((x) => (r = x));
+    await vi.advanceTimersByTimeAsync(2_999);
+    expect(r).toBeNull();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(r).toEqual({ ok: false, status: 'timeout' });
   });
 });

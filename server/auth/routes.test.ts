@@ -880,3 +880,42 @@ describe('no email anywhere', () => {
     });
   });
 });
+
+// Final fix round — Ruling R72: a login that ends not-invited because the role was taken
+// away deletes every session of that Discord user id (a de-invited user keeps no 30-day door).
+describe('a de-invited user loses every session (R72)', () => {
+  const me = (app: App, token: string) => app.request('/api/me', { headers: { cookie: `${SESSION}=${token}` } });
+
+  describe('given Discord user 1001 holds two sessions and user 2002 one', () => {
+    it('when 1001 logs in again WITHOUT the role, then /?auth=not-invited, both of 1001\'s sessions are gone, 2002\'s survives, and no user row is deleted', async () => {
+      const ada = makeApp({ discord: { member: memberOk({ id: '1001' }) } }).app;
+      const a1 = await login(ada);
+      const a2 = await login(ada);
+      const bob = makeApp({ discord: { member: memberOk({ id: '2002', global_name: 'Bob' }) } }).app;
+      const b1 = await login(bob);
+      expect(await counts()).toEqual({ users: 2, sessions: 3 });
+
+      const { app } = makeApp({ discord: { member: memberOk({ id: '1001', roles: ['other'] }) } });
+      const { state, verifier } = await startLogin(app);
+      const res = await callback(app, { code: 'code-1', state }, `${state}.${verifier}`);
+      expect(res.headers.get('location')).toBe('/?auth=not-invited');
+      expect(cookieNamed(res, SESSION)).toBeUndefined();
+
+      expect(await counts()).toEqual({ users: 2, sessions: 1 });
+      expect((await me(app, a1)).status).toBe(401);
+      expect((await me(app, a2)).status).toBe(401);
+      expect((await me(app, b1)).status).toBe(200);
+    });
+
+    it('when the not-invited login is a Discord id that never logged in, then nothing changes (no user is created, other sessions survive)', async () => {
+      const ada = makeApp({ discord: { member: memberOk({ id: '1001' }) } }).app;
+      const a1 = await login(ada);
+      const { app } = makeApp({ discord: { member: memberOk({ id: '3003', roles: ['other'] }) } });
+      const { state, verifier } = await startLogin(app);
+      const res = await callback(app, { code: 'code-1', state }, `${state}.${verifier}`);
+      expect(res.headers.get('location')).toBe('/?auth=not-invited');
+      expect(await counts()).toEqual({ users: 1, sessions: 1 });
+      expect((await me(app, a1)).status).toBe(200);
+    });
+  });
+});

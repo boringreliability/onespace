@@ -30,6 +30,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { SaveV1 } from '@/save/schema';
+import { displayName } from '@/ui/accountMenu';
 
 import { ACCT_A, ACCT_B, GAME_X, GAME_Y, head, save, syncState } from './__fixtures__/sync';
 import { reconcile, unsyncedProgressText, type Decision } from './reconcile';
@@ -376,5 +377,23 @@ describe('reconcile — only the nine kinds', () => {
             if (d.kind === 'refuse-switch') expect(typeof d.message).toBe('string');
             else expect(Object.keys(d)).toEqual(['kind']);
           }
+  });
+});
+
+// =============================================================================
+//  Final fix round — Ruling R72: the refuse-switch text shows the account
+//  name through displayName() (src/ui/accountMenu.ts: control and format
+//  characters stripped, at most 32 code points), like every other place a
+//  name is shown.
+// =============================================================================
+
+describe('Ruling R72 — the refuse-switch text passes the name through displayName()', () => {
+  it('Ruling R72: Given a save bound to an account whose stored name holds a bidi override, a zero-width space, a newline and 40 more letters, When B signs in with unsynced progress, Then the text names displayName(name) — nothing hidden, at most 32 code points', () => {
+    const raw = 'Ev‮il​\n' + 'x'.repeat(40);
+    const d = rc({ local: save({ revision: 9 }), cloud: null, state: boundTo(ACCT_A, save({ revision: 7 }), { accountName: raw }), me: ACCT_B });
+    const shown = displayName(raw);
+    expect(shown).toBe('Evil' + 'x'.repeat(28));
+    expect(d).toEqual({ kind: 'refuse-switch', message: unsyncedProgressText(shown) });
+    expect((d as { message: string }).message).not.toMatch(/[‮​\n]/u);
   });
 });

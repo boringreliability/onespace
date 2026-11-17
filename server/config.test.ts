@@ -41,8 +41,9 @@ describe('loadConfig', () => {
       expect(loadConfig({ ...VALID_ENV, NODE_ENV: 'production' }).production).toBe(true);
     });
 
-    it('when ONESPACE_TEST_LOGIN=1 outside production, then testLogin is true', () => {
-      expect(loadConfig({ ...VALID_ENV, ONESPACE_TEST_LOGIN: '1' }).testLogin).toBe(true);
+    // CHANGED by Ruling R72 (final fix round): the env gains a localhost PUBLIC_ORIGIN — test login now also needs one.
+    it('when ONESPACE_TEST_LOGIN=1 outside production with a localhost PUBLIC_ORIGIN, then testLogin is true', () => {
+      expect(loadConfig({ ...VALID_ENV, PUBLIC_ORIGIN: 'http://localhost:5173', ONESPACE_TEST_LOGIN: '1' }).testLogin).toBe(true);
     });
   });
 
@@ -99,6 +100,35 @@ describe('loadConfig', () => {
       const env = { ...VALID_ENV, NODE_ENV: 'production', ONESPACE_TEST_LOGIN: '1' };
       expect(() => loadConfig(env)).toThrow(ConfigError);
       expect(() => loadConfig(env)).toThrow('ONESPACE_TEST_LOGIN is not allowed in production');
+    });
+  });
+
+  // Final fix round — Ruling R72: the test login (a door that skips Discord) also needs a
+  // localhost PUBLIC_ORIGIN, on top of NODE_ENV and ONESPACE_TEST_LOGIN — NODE_ENV alone
+  // must not be what keeps it shut on a deployed host.
+  describe('given the test login and PUBLIC_ORIGIN (R72)', () => {
+    it.each(['http://localhost:5173', 'http://localhost', 'http://127.0.0.1:8787', 'http://[::1]:5173', 'https://localhost:5173'])(
+      'when ONESPACE_TEST_LOGIN=1 and PUBLIC_ORIGIN is the localhost origin %s, then testLogin is true',
+      (value) => {
+        expect(loadConfig({ ...VALID_ENV, PUBLIC_ORIGIN: value, ONESPACE_TEST_LOGIN: '1' }).testLogin).toBe(true);
+      },
+    );
+
+    it.each([
+      'https://onespace.example',
+      'https://onespace.up.railway.app',
+      'http://localhost.evil.example',
+      'http://127.0.0.2:5173',
+      'http://10.0.0.5:5173',
+      'http://[::2]:5173',
+    ])('when ONESPACE_TEST_LOGIN=1 and PUBLIC_ORIGIN is %s (not localhost), then it throws a ConfigError naming ONESPACE_TEST_LOGIN', (value) => {
+      const env = { ...VALID_ENV, PUBLIC_ORIGIN: value, ONESPACE_TEST_LOGIN: '1' };
+      expect(() => loadConfig(env)).toThrow(ConfigError);
+      expect(() => loadConfig(env)).toThrow(/ONESPACE_TEST_LOGIN/);
+    });
+
+    it('when ONESPACE_TEST_LOGIN is not set, then a non-localhost PUBLIC_ORIGIN is fine and testLogin is false', () => {
+      expect(loadConfig(VALID_ENV).testLogin).toBe(false);
     });
   });
 });

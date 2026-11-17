@@ -81,6 +81,7 @@ import {
   type FakeApi,
   type TestStore,
 } from './__fixtures__/sync';
+import type { ApiResult, PutBody, ResolveBody } from './api';
 import { reconcile } from './reconcile';
 import {
   PUSH_BACKOFF_MS,
@@ -654,7 +655,8 @@ describe('SyncClient.onStored — failures (R31)', () => {
     expect(gaps(r.api)).toEqual([5_000, 15_000, 60_000, 300_000, 300_000]);
   });
 
-  it('Given an offline failure, When a newer save is stored during the backoff, Then the backoff is not cut short and the retry sends the LATEST save', async () => {
+  // CHANGED by Ruling R68(a) (final fix round): was "…the retry sends the LATEST save" / toEqual([8, 9]).
+  it('Ruling R68: Given an offline failure, When a newer save is stored during the backoff, Then the backoff is not cut short and the retry resends the SAME save (r8), not the newer one', async () => {
     const r = await signedIn({ putSave: () => fail('offline') });
     r.sync.onStored(save({ revision: 8 }));
     await untilPut(r.api);
@@ -664,7 +666,7 @@ describe('SyncClient.onStored — failures (R31)', () => {
     await settle(t + 4_999 - Date.now());
     expect(r.api.puts).toHaveLength(1);
     await settle(1);
-    expect(r.api.puts.map((p) => p.save.revision)).toEqual([8, 9]);
+    expect(r.api.puts.map((p) => p.save.revision)).toEqual([8, 8]);
   });
 
   it('Given failures then a success, When the next failure comes, Then the backoff starts again at 5 s', async () => {
@@ -920,7 +922,8 @@ describe('SyncClient.resolve', () => {
       { deviceId: DEVICE_ID, keep: 'device', device: local, base: { saveId: GAME_X, revision: 7 }, cloud: { saveId: GAME_X, revision: 8 } },
     ]);
     expect(out).toEqual({ ok: true, save: result });
-    expect(r.ts.calls).toEqual([`keep:${GAME_X}:9`, 'wal:reset', `replace:${GAME_X}:10`]); // Ruling R35 order
+    // CHANGED by Ruling R71 (final fix round): the unchosen cloud r8 is shelved first; was [`keep:${GAME_X}:9`, 'wal:reset', …].
+    expect(r.ts.calls).toEqual([`keep:${GAME_X}:8`, `keep:${GAME_X}:9`, 'wal:reset', `replace:${GAME_X}:10`]); // Ruling R35 order
     expect(await r.ts.current()).toEqual(result);
     expect(r.ts.shelf.map((e) => e.raw)).toContainEqual(local);
     expect(r.state()).toMatchObject({ lastSeenCloud: { saveId: GAME_X, revision: 10 }, conflict: false });
@@ -1400,7 +1403,12 @@ describe('Ruling R60 — a late PUT after sign-out / delete changes nothing', ()
   type Action = 'signOut' | 'deleteAccount';
   type Answer = Parameters<ReturnType<typeof deferred>['settle']>[0];
   /** What the persisted state must be after the action (and after the late answer). */
-  const after = (action: Action): SyncState => (action === 'signOut' ? boundB(save({ revision: 7 })) : syncState({ deviceId: DEVICE_ID }));
+  // CHANGED by Ruling R68(b) (final fix round): after signOut the r8 in-flight marker persisted before the PUT stays
+  // (a late answer touches nothing, R60); was boundB(save({ revision: 7 })).
+  const after = (action: Action): SyncState =>
+    action === 'signOut'
+      ? boundB(save({ revision: 7 }), { inFlightPut: { saveId: GAME_X, revision: 8, fingerprint: expect.any(String) } })
+      : syncState({ deviceId: DEVICE_ID });
 
   /** Signed in as B, in sync at r7; r8 stored and its PUT in flight (unanswered). */
   async function putInFlight(): Promise<{ r: Rig; answer: (a: Answer) => Promise<void> }> {
@@ -1476,5 +1484,382 @@ describe('Ruling R60 — a late PUT after sign-out / delete changes nothing', ()
     r.sync.onStored(save({ revision: 9 }));
     await settle(TEN_MIN);
     expect(r.api.puts).toEqual([]);
+  });
+});
+
+// =============================================================================
+//  Final fix round — what the final review found (R68–R71; final-fix-brief.md).
+//  Assumed surface (phase B implements it):
+//
+//   SyncState gains two OPTIONAL fields (an old state without them still parses):
+//     inFlightPut?: { saveId: string; revision: number; fingerprint: string }
+//        // R68(b): persisted before each PUT, cleared (absent or null) when the
+//        // PUT is acknowledged; fingerprint = a cheap deterministic hash of the
+//        // save's content key (rawKey). At boot a cloud head whose saveId,
+//        // revision AND fingerprint equal it counts as last-seen-cloud.
+//     pendingResolve?: ResolveBody
+//        // R69: the exact resolve request body, persisted before the POST,
+//        // cleared on success or a definitive refusal; replayed verbatim at
+//        // the next boot before reconcile.
+//   R68(a): after a retryable PUT failure (timeout / offline / 5xx / 429) the
+//   SAME save is resent before any newer queued one.
+//   R69: a retryable resolve failure is retried once, at once (no timer — the
+//   approved test "Given resolve gets offline/timeout…" awaits resolve() with
+//   no timer advanced).
+//   R71: resolve('device') on the same game shelves the unchosen cloud save
+//   (store.keepCorrupt) before the local save changes.
+// =============================================================================
+
+/** The persisted sync state, as raw JSON (fields phase B adds included). */
+const rawState = (r: Rig): Record<string, unknown> => JSON.parse(r.storage.getItem(SYNC_KEY)!) as Record<string, unknown>;
+
+describe('Ruling R68(a) — an unacknowledged PUT is resent before any newer save', () => {
+  it.each<[string, ApiResult]>([
+    ['a timeout', fail('timeout')],
+    ['offline', fail('offline')],
+    ['a 503', fail(503)],
+    ['a 429', fail(429, { retryAfterS: null, body: { error: 'rate_limited' } })],
+  ])(
+    'Ruling R68: Given L r7 and the PUT of r8 failing with %s, When r9 is stored during the backoff, Then the next PUT is r8 again (base r7), and only then r9 with base r8 — no conflict',
+    async (_what, failure) => {
+      let n = 0;
+      const r = await signedIn({ putSave: (b) => (n++ === 0 ? failure : ok(200, { revision: b.save.revision })) });
+      r.sync.onStored(save({ revision: 8 }));
+      await untilPut(r.api);
+      await settle(1_000);
+      r.sync.onStored(save({ revision: 9 }));
+      await settle(60_000);
+      expect(r.api.puts.map((p) => [p.base, p.save.revision])).toEqual([
+        [{ saveId: GAME_X, revision: 7 }, 8],
+        [{ saveId: GAME_X, revision: 7 }, 8],
+        [{ saveId: GAME_X, revision: 8 }, 9],
+      ]);
+      expect(r.api.puts[1]!.save).toEqual(save({ revision: 8 }));
+      expect(r.sync.status()).toBe('synced');
+      expect(r.state().conflict).toBe(false);
+      expect(r.state().lastSeenCloud).toEqual({ saveId: GAME_X, revision: 9 });
+    },
+  );
+
+  it('Ruling R68: Given the PUT of r8 fails, When r9 AND r10 are stored during the backoff, Then the PUTs are r8, r8, then r10 (the newest) — nothing in between', async () => {
+    let n = 0;
+    const r = await signedIn({ putSave: (b) => (n++ === 0 ? fail('timeout') : ok(200, { revision: b.save.revision })) });
+    r.sync.onStored(save({ revision: 8 }));
+    await untilPut(r.api);
+    await settle(1_000);
+    r.sync.onStored(save({ revision: 9 }));
+    r.sync.onStored(save({ revision: 10 }));
+    await settle(60_000);
+    expect(r.api.puts.map((p) => p.save.revision)).toEqual([8, 8, 10]);
+    expect(r.api.puts[2]!.base).toEqual({ saveId: GAME_X, revision: 8 });
+  });
+
+  it('Ruling R68 (I1): Given a server that COMMITS the PUT of r8 but whose answer is lost (timeout), When r9 is stored during the backoff, Then the resend of r8 is answered unchanged, r9 follows with base r8 — no 409, no conflict, and the cloud ends at r9', async () => {
+    // The server's rules (server/save/repo.ts): an identical save is `unchanged`; a stale base is a 409.
+    let cloud = save({ revision: 7 });
+    let lose = 1;
+    const putSave = (b: PutBody): ApiResult => {
+      if (JSON.stringify(b.save) === JSON.stringify(cloud)) return ok(200, { revision: cloud.revision });
+      if (!b.base || b.base.saveId !== cloud.saveId || b.base.revision !== cloud.revision) {
+        return fail(409, { body: { cloud: { revision: cloud.revision, save: cloud } } });
+      }
+      cloud = b.save;
+      if (lose > 0) {
+        lose--;
+        return fail('timeout');
+      }
+      return ok(200, { revision: cloud.revision });
+    };
+    const r = await signedIn({ putSave });
+    r.sync.onStored(save({ revision: 8 }));
+    await untilPut(r.api);
+    await settle(1_000);
+    r.sync.onStored(save({ revision: 9 }));
+    await settle(60_000);
+    expect(r.sync.status()).toBe('synced');
+    expect(r.state().conflict).toBe(false);
+    expect(r.state().lastSeenCloud).toEqual({ saveId: GAME_X, revision: 9 });
+    expect(cloud).toEqual(save({ revision: 9 }));
+  });
+});
+
+describe('Ruling R68(b) — the in-flight marker (tab death mid-PUT)', () => {
+  it('Ruling R68: Given a PUT of r8, When putSave is called, Then the sync state ALREADY holds the marker {saveId, revision: 8, fingerprint} — persisted before the request', async () => {
+    let seen: unknown = 'not called';
+    const r: Rig = await signedIn({
+      putSave: (b) => {
+        seen = rawState(r).inFlightPut;
+        return ok(200, { revision: b.save.revision });
+      },
+    });
+    r.sync.onStored(save({ revision: 8 }));
+    await untilPut(r.api);
+    expect(seen).toEqual({ saveId: GAME_X, revision: 8, fingerprint: expect.any(String) });
+    expect((seen as { fingerprint: string }).fingerprint.length).toBeGreaterThan(0);
+  });
+
+  it('Ruling R68: Given the PUT of r8 is acknowledged, Then the marker is cleared from the persisted state', async () => {
+    const r = await signedIn();
+    r.sync.onStored(save({ revision: 8 }));
+    await untilPut(r.api);
+    await settle(0);
+    expect(r.state().lastSeenCloud).toEqual({ saveId: GAME_X, revision: 8 });
+    expect(r.state().inFlightPut ?? null).toBeNull();
+  });
+
+  it('Ruling R68: Given the PUT of r8 times out, Then the marker for r8 stays (the server may have committed it)', async () => {
+    const r = await signedIn({ putSave: () => fail('timeout') });
+    r.sync.onStored(save({ revision: 8 }));
+    await untilPut(r.api);
+    await settle(0);
+    expect(r.state().inFlightPut).toEqual({ saveId: GAME_X, revision: 8, fingerprint: expect.any(String) });
+  });
+
+  it('Ruling R68: Given two devices PUT the same save and a third the same saveId + revision with other content, Then the fingerprint is deterministic (equal for the same content) and differs for other content', async () => {
+    const markerOf = async (s: SaveV1): Promise<unknown> => {
+      const r = await signedIn({ putSave: never });
+      r.sync.onStored(s);
+      await untilPut(r.api);
+      return (r.state().inFlightPut as { fingerprint: unknown } | undefined)?.fingerprint;
+    };
+    const a = await markerOf(save({ revision: 8, tank: 1_234 }));
+    const b = await markerOf(save({ revision: 8, tank: 1_234 }));
+    const c = await markerOf(save({ revision: 8, tank: 999 }));
+    expect(typeof a).toBe('string');
+    expect(b).toBe(a);
+    expect(c).not.toBe(a);
+  });
+
+  /** Session 1: bound to B at L r7, the PUT of `sent` is in flight when the tab dies. Returns its persisted state. */
+  async function tabDiedMidPut(sent: SaveV1): Promise<SyncState> {
+    const r1 = await signedIn({ putSave: never });
+    r1.sync.onStored(sent);
+    await untilPut(r1.api);
+    return r1.state();
+  }
+
+  it('Ruling R68 (I1, tab death): Given the PUT of r8 was in flight when the tab died and the cloud now holds EXACTLY that r8, When the next boot has local r9 (the pagehide snapshot), Then push-local — not a conflict — and r9 is PUT with base r8', async () => {
+    const sent = save({ revision: 8, tank: 1_234 });
+    const state = await tabDiedMidPut(sent);
+    const r = rig({ state, api: { getSave: () => cloudReply(sent) } });
+    const b = await r.sync.boot(save({ revision: 9, tank: 1_234 }));
+    expect(b.decision).toEqual({ kind: 'push-local' });
+    expect(r.state().conflict).toBe(false);
+    expect(r.sync.status()).not.toBe('conflict');
+    await settle(PUSH_MIN_INTERVAL_MS);
+    expect(r.api.puts.map((p) => [p.base, p.save.revision])).toEqual([[{ saveId: GAME_X, revision: 8 }, 9]]);
+  });
+
+  it('Ruling R68 (guard): Given the marker names r8 but the cloud holds an r8 with OTHER content (another device wrote it), When the next boot has local r9, Then it is NOT trusted — conflict-same, as without a marker', async () => {
+    const state = await tabDiedMidPut(save({ revision: 8, tank: 1_234 }));
+    const r = rig({ state, api: { getSave: () => cloudReply(save({ revision: 8, tank: 999 })) } });
+    const b = await r.sync.boot(save({ revision: 9, tank: 1_234 }));
+    expect(b.decision).toEqual({ kind: 'conflict-same' });
+    expect(r.state().conflict).toBe(true);
+  });
+});
+
+/** Bound to B, L r7, local r9 (stored), cloud r8 on the same game: a conflict-same boot. */
+async function conflictRig(api: Partial<FakeApi['reply']> = {}, local = save({ revision: 9 })): Promise<Rig> {
+  const r = rig({ state: boundB(save({ revision: 7 })), api: { getSave: () => cloudReply(save({ revision: 8 })), ...api } });
+  await r.ts.store.save(local);
+  r.ts.calls.length = 0;
+  expect((await r.sync.boot(local)).decision.kind).toBe('conflict-same');
+  return r;
+}
+
+/** The body resolve('device') sends from conflictRig. */
+const DEVICE_BODY = (): ResolveBody => ({
+  deviceId: DEVICE_ID,
+  keep: 'device',
+  device: save({ revision: 9 }),
+  base: { saveId: GAME_X, revision: 7 },
+  cloud: { saveId: GAME_X, revision: 8 },
+});
+
+describe('Ruling R69 — resolve is persisted, retried once, and replayed verbatim at the next boot', () => {
+  it('Ruling R69: Given a conflict, When resolve("device") is POSTed, Then the exact request body is ALREADY in the persisted sync state', async () => {
+    let seen: unknown = 'not called';
+    const result = save({ revision: 10, tank: 5_000 });
+    const r: Rig = await conflictRig({
+      resolve: () => {
+        seen = rawState(r).pendingResolve;
+        return ok(200, { revision: 10, save: result });
+      },
+    });
+    await r.sync.resolve('device');
+    expect(r.api.resolves).toHaveLength(1);
+    expect(seen).toEqual(r.api.resolves[0]);
+    expect(seen).toEqual(DEVICE_BODY());
+  });
+
+  it('Ruling R69: Given resolve succeeds at once, Then the pending resolve is cleared', async () => {
+    const r = await conflictRig({ resolve: () => ok(200, { revision: 10, save: save({ revision: 10 }) }) });
+    expect((await r.sync.resolve('device')).ok).toBe(true);
+    expect(r.state().pendingResolve ?? null).toBeNull();
+  });
+
+  it.each<[string, ApiResult]>([
+    ['a timeout', fail('timeout')],
+    ['offline', fail('offline')],
+    ['a 503', fail(503)],
+    ['a 429', fail(429, { retryAfterS: 1, body: { error: 'rate_limited' } })],
+  ])(
+    'Ruling R69: Given every resolve POST fails with %s, When resolve("device"), Then it is sent exactly twice with deep-equal bodies, answers {ok: false, reason: "offline"}, and the body stays persisted with the conflict flag',
+    async (_what, failure) => {
+      const r = await conflictRig({ resolve: () => failure });
+      expect(await r.sync.resolve('device')).toEqual({ ok: false, reason: 'offline' });
+      expect(r.api.resolves).toHaveLength(2);
+      expect(r.api.resolves[1]).toEqual(r.api.resolves[0]);
+      expect(r.state().pendingResolve).toEqual(r.api.resolves[0]);
+      expect(r.state().conflict).toBe(true);
+      expect(r.ts.calls).toEqual([]);
+    },
+  );
+
+  it('Ruling R69: Given the first resolve POST times out and the retry answers 200, Then ok, both bodies are identical, the result is stored and the pending resolve is cleared', async () => {
+    const result = save({ revision: 10, tank: 5_000 });
+    const replies = [fail('timeout'), ok(200, { revision: 10, save: result })];
+    const r = await conflictRig({ resolve: () => replies.shift()! });
+    expect(await r.sync.resolve('device')).toEqual({ ok: true, save: result });
+    expect(r.api.resolves).toHaveLength(2);
+    expect(r.api.resolves[1]).toEqual(r.api.resolves[0]);
+    expect(await r.ts.current()).toEqual(result);
+    expect(r.state().pendingResolve ?? null).toBeNull();
+    expect(r.state().conflict).toBe(false);
+  });
+
+  it.each<[string, ApiResult]>([
+    ['401', fail(401)],
+    ['409 (the cloud moved)', fail(409, { body: { cloud: { revision: 11, save: save({ revision: 11 }) } } })],
+  ])('Ruling R69: Given resolve answers %s (a definitive answer), Then it is NOT retried', async (_what, reply) => {
+    const r = await conflictRig({ resolve: () => reply });
+    await r.sync.resolve('device');
+    expect(r.api.resolves).toHaveLength(1);
+  });
+
+  /** Session 1: a conflict, resolve("device") whose answers are lost (both POSTs time out). Returns its rig. */
+  async function lostResolve(): Promise<Rig> {
+    const r1 = await conflictRig({ resolve: () => fail('timeout') });
+    expect(await r1.sync.resolve('device')).toEqual({ ok: false, reason: 'offline' });
+    expect(r1.state().pendingResolve).toEqual(DEVICE_BODY());
+    return r1;
+  }
+
+  /** The next boot on the same device: the same store and sync state, a new client. */
+  function nextBoot(prev: Rig, api: Partial<FakeApi['reply']>): Rig {
+    const r = rig({ state: prev.state(), ts: prev.ts, walStorage: prev.walStorage, api });
+    r.ts.calls.length = 0;
+    return r;
+  }
+
+  it('Ruling R69 (I2): Given a resolve whose response was lost (the server committed r10), When the next boot runs, Then the IDENTICAL body is sent again (deep equal) before reconcile, the result is applied like a normal resolve, the pending entry is cleared and the boot is in sync', async () => {
+    const result = save({ revision: 10, tank: 5_000 });
+    const r1 = await lostResolve();
+    const r = nextBoot(r1, { getSave: () => cloudReply(result), resolve: () => ok(200, { revision: 10, save: result }) });
+    const b = await r.sync.boot(save({ revision: 9 }));
+    expect(r.api.resolves).toEqual([DEVICE_BODY()]);
+    expect(r.api.resolves[0]).toEqual(r1.api.resolves[0]);
+    expect(b.decision).toEqual({ kind: 'in-sync' });
+    expect(await r.ts.current()).toEqual(result);
+    expect(r.state()).toMatchObject({ lastSeenCloud: { saveId: GAME_X, revision: 10 }, conflict: false });
+    expect(r.state().pendingResolve ?? null).toBeNull();
+    expect(r.sync.status()).toBe('synced');
+  });
+
+  it.each<[string, ApiResult]>([
+    ['409 (the cloud moved on)', fail(409, { body: { cloud: { revision: 11, save: save({ revision: 11 }) } } })],
+    ['400', fail(400, { body: { error: 'invalid' } })],
+  ])(
+    'Ruling R69: Given a pending resolve and the replay at the next boot answers %s (a definitive refusal), Then the pending entry is cleared and boot continues normally (reconcile: conflict-same against the cloud r11)',
+    async (_what, reply) => {
+      const r1 = await lostResolve();
+      const r = nextBoot(r1, { getSave: () => cloudReply(save({ revision: 11 })), resolve: () => reply });
+      const b = await r.sync.boot(save({ revision: 9 }));
+      expect(r.api.resolves).toEqual([DEVICE_BODY()]);
+      expect(r.state().pendingResolve ?? null).toBeNull();
+      expect(b.decision).toEqual({ kind: 'conflict-same' });
+      expect(r.ts.calls).toEqual([]);
+    },
+  );
+
+  it.each<[string, ApiResult]>([
+    ['a timeout', fail('timeout')],
+    ['offline', fail('offline')],
+    ['a 503', fail(503)],
+  ])(
+    'Ruling R69: Given a pending resolve and the replay at the next boot fails with %s, Then the entry stays, boot continues local with the conflict flag kept, nothing is written and nothing is pushed',
+    async (_what, reply) => {
+      const r1 = await lostResolve();
+      const r = nextBoot(r1, { getSave: () => cloudReply(save({ revision: 10 })), resolve: () => reply });
+      const b = await r.sync.boot(save({ revision: 9 }));
+      expect(r.api.resolves.length).toBeGreaterThanOrEqual(1);
+      for (const body of r.api.resolves) expect(body).toEqual(DEVICE_BODY());
+      expect(b.decision.kind).toBe('local-only');
+      expect(r.state().pendingResolve).toEqual(DEVICE_BODY());
+      expect(r.state().conflict).toBe(true);
+      expect(r.sync.status()).toBe('conflict');
+      expect(r.ts.calls).toEqual([]);
+      r.sync.onStored(save({ revision: 12 }));
+      await settle(TEN_MIN);
+      expect(r.api.puts).toEqual([]);
+    },
+  );
+
+  it('Ruling R69 (I2): Given a lost resolve, a boot whose replay times out, and a later boot whose replay succeeds, Then every resolve ever sent for this conflict is the same body — never a second, different one', async () => {
+    const result = save({ revision: 10, tank: 5_000 });
+    const r1 = await lostResolve();
+    const r2 = nextBoot(r1, { getSave: () => cloudReply(result), resolve: () => fail('timeout') });
+    await r2.sync.boot(save({ revision: 9 }));
+    const r3 = nextBoot(r2, { getSave: () => cloudReply(result), resolve: () => ok(200, { revision: 10, save: result }) });
+    expect((await r3.sync.boot(save({ revision: 9 }))).decision).toEqual({ kind: 'in-sync' });
+    const all = [...r1.api.resolves, ...r2.api.resolves, ...r3.api.resolves];
+    expect(r3.api.resolves.length).toBeGreaterThanOrEqual(1);
+    for (const body of all) expect(body).toEqual(DEVICE_BODY());
+  });
+
+  it('Ruling R69 (guard, R48): Given a pending resolve bound to B and the next boot signed in as A, Then nothing is replayed (B\'s resolve is never sent with A\'s cookie) and the entry is not used up', async () => {
+    const r1 = await lostResolve();
+    const r = nextBoot(r1, { me: () => ok(200, { ...ACCT_A }), getSave: () => noSave(), resolve: () => ok(200, { revision: 10, save: save({ revision: 10 }) }) });
+    await r.sync.boot(save({ revision: 9 }));
+    expect(r.api.resolves).toEqual([]);
+  });
+
+  it('Ruling R69 (guard): Given a pending resolve and a reader tab, When boot, Then nothing is replayed', async () => {
+    const r1 = await lostResolve();
+    const r = rig({ state: r1.state(), ts: r1.ts, writer: false, api: { resolve: () => ok(200, { revision: 10, save: save({ revision: 10 }) }) } });
+    await r.sync.boot(save({ revision: 9 }));
+    expect(r.api.resolves).toEqual([]);
+  });
+});
+
+describe('Ruling R71 — the unchosen cloud snapshot goes on the shelf', () => {
+  it('Ruling R71: Given a same-game conflict (local r9, cloud r8), When resolve("device") succeeds, Then the cloud r8 the boot saw is on the shelf, shelved before the local save changes', async () => {
+    const cloud = save({ revision: 8 });
+    const r = await conflictRig({ resolve: () => ok(200, { revision: 10, save: save({ revision: 10, tank: 5_000 }) }) });
+    expect((await r.sync.resolve('device')).ok).toBe(true);
+    expect(r.ts.shelf.map((e) => e.raw)).toContainEqual(cloud);
+    const keepCloud = r.ts.calls.indexOf(`keep:${GAME_X}:8`);
+    expect(keepCloud).toBeGreaterThanOrEqual(0);
+    expect(keepCloud).toBeLessThan(r.ts.calls.indexOf('wal:reset'));
+    expect(keepCloud).toBeLessThan(r.ts.calls.indexOf(`replace:${GAME_X}:10`));
+  });
+
+  it('Ruling R71: Given the cloud moved during the choice (409 with r11) and resolve("device") then succeeds, Then the cloud that was actually overruled — r11 — is on the shelf', async () => {
+    const moved = save({ revision: 11, tank: 7_000 });
+    const replies = [fail(409, { body: { cloud: { revision: 11, save: moved } } }), ok(200, { revision: 12, save: save({ revision: 12 }) })];
+    const r = await conflictRig({ resolve: () => replies.shift()! });
+    expect(await r.sync.resolve('device')).toEqual({ ok: false, reason: 'moved', cloud: moved });
+    expect((await r.sync.resolve('device')).ok).toBe(true);
+    expect(r.ts.shelf.map((e) => e.raw)).toContainEqual(moved);
+  });
+
+  it('Ruling R71 (guard, existing behaviour): Given a same-game conflict, When resolve("cloud") succeeds with the cloud r8, Then the device r9 is on the shelf and the chosen cloud is not', async () => {
+    const cloud = save({ revision: 8 });
+    const r = await conflictRig({ resolve: () => ok(200, { revision: 8, save: cloud }) });
+    expect((await r.sync.resolve('cloud')).ok).toBe(true);
+    const shelf = r.ts.shelf.map((e) => e.raw);
+    expect(shelf).toContainEqual(save({ revision: 9 }));
+    expect(shelf).not.toContainEqual(cloud);
   });
 });
