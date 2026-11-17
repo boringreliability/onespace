@@ -299,9 +299,15 @@ describe('v4-net Task 6 — the account line and the sync status in the sheet (R
     expect(SYNC_CONFLICT_TEXT).toBe('SYNC CONFLICT — CHOOSE ON NEXT START');
   });
 
-  it('Given a guest (a save bound to an account that is signed out), Then no account line and no DELETE ACCOUNT, but the status still shows', () => {
-    expect(pauseAccountView({ kind: 'guest' }, SYNC_REAUTH_TEXT)).toEqual({ line: null, syncLine: SYNC_REAUTH_TEXT, deleteAccount: false });
+  it('Ruling R57: Given a guest (even a save bound to a signed-out account), Then no account line, no sync line and no DELETE ACCOUNT', () => {
+    expect(pauseAccountView({ kind: 'guest' }, SYNC_REAUTH_TEXT)).toEqual({ line: null, syncLine: null, deleteAccount: false });
+    expect(pauseAccountView({ kind: 'guest' }, SYNC_OFFLINE_TEXT)).toEqual({ line: null, syncLine: null, deleteAccount: false });
     expect(pauseAccountView({ kind: 'guest' }, null)).toEqual({ line: null, syncLine: null, deleteAccount: false });
+  });
+
+  it('Ruling R57: Given Pause.ts, Then it never offers sign-in (the title only)', () => {
+    const s = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'Pause.ts'), 'utf8');
+    expect(s).not.toMatch(/SIGN_IN_TEXT|SIGN_IN_PATH|SIGN IN WITH DISCORD/);
   });
 
   it('Given a reader tab (hidden), Then no account line and no DELETE ACCOUNT', () => {

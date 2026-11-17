@@ -1173,8 +1173,8 @@ describe('Ruling R47 — an unreadable cloud says so', () => {
 //      // a refused switch (which logs out) / a deleted account.
 //   .signOut(): Promise<boolean>
 //      // POST logout (api.logout). true → identity null, no more PUTs, the
-//      // persisted sync state (the binding) and the store untouched; status as
-//      // a 401 boot would say it: 'reauth' while bound, else 'off'.
+//      // persisted sync state (the binding) and the store untouched; R56:
+//      // status 'off' (a voluntary sign-out is not a reauth).
 //      // false (the request failed) → nothing changes.
 //   .deleteAccount(): Promise<boolean>
 //      // DELETE /api/account (api.deleteAccount). true → the sync state is
@@ -1248,11 +1248,11 @@ describe('Task 6 — SyncClient.signOut() (R53)', () => {
     expect(r.api.puts).toEqual([]);
   });
 
-  it("Given signed in and bound to B, When signOut succeeds, Then status is 'reauth' — what the next boot (a 401 while bound) would say", async () => {
+  it("Ruling R56: Given signed in and bound to B, When signOut succeeds, Then status is 'off' (not reauth) and there is no status text to log", async () => {
     const r = await signedIn();
     await r.sync.signOut();
-    expect(r.sync.status()).toBe('reauth');
-    expect(r.sync.statusText()).toBe(SYNC_REAUTH_TEXT);
+    expect(r.sync.status()).toBe('off');
+    expect(r.sync.statusText()).toBeNull();
   });
 
   it.each<[string, ReturnType<FakeApi['reply']['logout']>]>([
