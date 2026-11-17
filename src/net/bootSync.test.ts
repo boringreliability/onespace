@@ -201,3 +201,109 @@ describe('registry.ts wires the sync', () => {
     expect(src.slice(i, src.indexOf(';', i))).toMatch(/onStored/);
   });
 });
+
+// =============================================================================
+//  v4 sub-plan 4, Task 6 (phase A) — the conflict screen needs the local card.
+//
+//  runBootSync's result also carries `local: SaveV1 | null` — the save it
+//  handed to sync.boot (newest valid, WAL merged); null when the store failed
+//  at boot (sync.boot not called). The registry gives it to
+//  settleBootConflict (src/ui/conflictScreen.ts) for the THIS DEVICE card.
+// =============================================================================
+
+describe('runBootSync — the local save for the conflict screen (Task 6)', () => {
+  it('Given a WAL-merged local save in conflict with the cloud, When runBootSync, Then the result carries local = the save sync.boot got', async () => {
+    const ts = testStore();
+    const wal = createWal(new MemoryStorage() as unknown as Storage);
+    await ts.store.save(save({ revision: 7 }));
+    wal.appendCritical(criticalEntry(50, 9), GAME_X);
+    const api = fakeApi({ getSave: () => cloudReply(save({ revision: 9 })) });
+    const b = await runBootSync({ sync: client({ api, ts, wal }), store: ts.store, wal, writer: true });
+    expect(b.decision).toEqual({ kind: 'conflict-same' });
+    expect(b.local).toEqual((await loadForBoot(ts.store, wal)).save);
+    expect(b.local?.ship.emergencyTimesUsed).toBe(9);
+  });
+
+  it('Given nothing stored, When runBootSync, Then local is null', async () => {
+    const ts = testStore();
+    const wal = createWal(new MemoryStorage() as unknown as Storage);
+    const boot = vi.fn(async () => ({ decision: { kind: 'guest' as const }, cloud: null, notice: null }));
+    const b = await runBootSync({ sync: { boot } as unknown as SyncClient, store: ts.store, wal, writer: true });
+    expect(b.local).toBeNull();
+  });
+
+  it('Given the store cannot be opened at boot, When runBootSync, Then local is null (sync.boot was not called)', async () => {
+    const ts = testStore();
+    const wal = createWal(new MemoryStorage() as unknown as Storage);
+    const store = { ...ts.store, load: () => Promise.reject(new DOMException('blocked', 'VersionError')) };
+    const b = await runBootSync({ sync: { boot: vi.fn() } as unknown as SyncClient, store, wal, writer: true });
+    expect(b.local).toBeNull();
+  });
+});
+
+describe('registry.ts wires sign-in, the account and the conflict screen (Task 6)', () => {
+  const dir = dirname(fileURLToPath(import.meta.url));
+  const src = readFileSync(join(dir, '../game/registry.ts'), 'utf8');
+  const loadBootBody = (): string => {
+    const start = src.indexOf('export async function loadBoot(');
+    expect(start).toBeGreaterThanOrEqual(0);
+    return src.slice(start, src.indexOf('\n}\n', start));
+  };
+
+  it('R49: Given loadBoot, Then the conflict is settled after runBootSync and before decideBoot — the screen appears only at boot, before the game continues', () => {
+    const body = loadBootBody();
+    const sync = body.indexOf('runBootSync(');
+    const settle = body.indexOf('settleBootConflict(');
+    const decide = body.indexOf('decideBoot(');
+    expect(sync).toBeGreaterThanOrEqual(0);
+    expect(settle).toBeGreaterThan(sync);
+    expect(decide).toBeGreaterThan(settle);
+  });
+
+  it('R49: Given the sources, Then settleBootConflict is called from registry.ts loadBoot only — never mid-session', async () => {
+    const { readdirSync, statSync } = await import('node:fs');
+    const root = join(dir, '..');
+    const callers: string[] = [];
+    const walk = (d: string): void => {
+      for (const n of readdirSync(d)) {
+        const p = join(d, n);
+        if (statSync(p).isDirectory()) walk(p);
+        else if (/\.ts$/.test(n) && !/\.test\.ts$/.test(n) && readFileSync(p, 'utf8').includes('settleBootConflict(')) callers.push(p);
+      }
+    };
+    walk(root);
+    const nonDefining = callers.filter((p) => !p.endsWith(join('ui', 'conflictScreen.ts')));
+    expect(nonDefining.map((p) => p.slice(root.length + 1))).toEqual([join('game', 'registry.ts')]);
+  });
+
+  it('R55: Given loadBoot, Then the conflict screen gets a body-name resolver (bodyName), so a card names the body rather than its id', () => {
+    const body = loadBootBody();
+    const i = body.indexOf('settleBootConflict(');
+    expect(i).toBeGreaterThanOrEqual(0);
+    expect(body.slice(i, body.indexOf(');', i))).toMatch(/bodyName/);
+  });
+
+  it('R49: Given loadBoot, Then the status line is read after the conflict is settled (a resolved conflict is not reported as one)', () => {
+    const body = loadBootBody();
+    const settle = body.indexOf('settleBootConflict(');
+    expect(settle).toBeGreaterThanOrEqual(0);
+    expect(body.lastIndexOf('statusText()')).toBeGreaterThan(settle);
+  });
+
+  it('R50: Given loadBoot, Then the auth return (?auth=…) is read and cleaned before decideBoot reads the search', () => {
+    const body = loadBootBody();
+    const auth = body.indexOf('authReturn(');
+    expect(auth).toBeGreaterThanOrEqual(0);
+    expect(body.indexOf('decideBoot(')).toBeGreaterThan(auth);
+  });
+
+  it('R51: Given the registry, Then the title and the pause get the account (accountView from the writer lock and the identity confirmed this session)', () => {
+    expect(src).toMatch(/accountView\(/);
+    expect(src).toMatch(/identity\(\)/);
+    const t = src.indexOf('new Title(');
+    expect(src.slice(t, src.indexOf(';', t))).toMatch(/account/);
+    const p = src.indexOf('new Pause(');
+    expect(src.slice(p, src.indexOf(';', p))).toMatch(/account/);
+    expect(src.slice(p, src.indexOf(';', p))).toMatch(/sync/);
+  });
+});

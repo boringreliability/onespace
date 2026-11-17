@@ -1,8 +1,13 @@
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import type { AccountView } from './accountMenu';
 import {
   TITLE_ITEMS,
   initialTitle,
   parseSeedField,
+  titleAccountLine,
   titleItems,
   titleKey,
   titleLabel,
@@ -222,5 +227,162 @@ describe('title menu with a save (v4 Task 6)', () => {
     titleStep(s, { kind: 'enter' });
     titleStep(s, { kind: 'down' });
     expect(JSON.stringify(s)).toBe(frozen);
+  });
+});
+
+// =============================================================================
+// v4 sub-plan 4 (backend), Task 6 — sign in with Discord, the account (R51–R53).
+//
+// `initialTitle({ hasSave, account })` takes the account the menu shows
+// (src/ui/accountMenu.ts `AccountView`):
+//  - guest     → 'signin' is the LAST item, label `SIGN IN WITH DISCORD`,
+//                enter → effect `{ kind: 'signin' }` (Title.ts navigates to
+//                SIGN_IN_PATH, /api/auth/discord);
+//  - signed-in → 'account' is the LAST item, label `SIGN OUT`, enter →
+//                effect `{ kind: 'signout' }`; `titleAccountLine(s)` is the
+//                line `SIGNED IN AS <name>` (name truncated to 32, R52);
+//  - hidden    → (a reader tab, R51; and the default when `account` is
+//                omitted) no sign-in or account item at all — the menus
+//                above are unchanged.
+// Event `{ kind: 'account', account }` swaps the account items after a sign
+// out (R53) or a deleted account; the selection stays in range, NEW GAME
+// disarms. Sign-in is never a requirement: CONTINUE / UNDOCK act the same.
+// =============================================================================
+
+describe('title menu — sign in and the account (v4-net Task 6)', () => {
+  const GUEST: AccountView = { kind: 'guest' };
+  const DENNIS: AccountView = { kind: 'signed-in', name: 'Dennis' };
+  const HIDDEN: AccountView = { kind: 'hidden' };
+  const at = (s: TitleState, item: TitleItem): TitleState => {
+    const i = s.items.indexOf(item);
+    expect(i).toBeGreaterThanOrEqual(0);
+    return { ...s, index: i };
+  };
+
+  it('Given a guest without a save, Then SIGN IN WITH DISCORD is the last item, after the v3 menu', () => {
+    const s = initialTitle({ account: GUEST });
+    expect(s.items).toEqual(['undock', 'yard', 'settings', 'signin']);
+    expect(titleItems(false, GUEST)).toEqual(['undock', 'yard', 'settings', 'signin']);
+    expect(titleLabel(s, 'signin')).toBe('SIGN IN WITH DISCORD');
+    expect(titleAccountLine(s)).toBeNull();
+  });
+
+  it('Given a guest with a save, Then SIGN IN WITH DISCORD is last, after SETTINGS', () => {
+    const s = initialTitle({ hasSave: true, account: GUEST });
+    expect(s.items).toEqual(['continue', 'newgame', 'yard', 'settings', 'signin']);
+    expect(titleItems(true, GUEST)).toEqual(['continue', 'newgame', 'yard', 'settings', 'signin']);
+  });
+
+  it('Given a guest, When enter on SIGN IN WITH DISCORD, Then the effect is signin', () => {
+    expect(titleStep(at(initialTitle({ account: GUEST }), 'signin'), { kind: 'enter' }).effect).toEqual({ kind: 'signin' });
+  });
+
+  it('Given a guest, When SIGN IN WITH DISCORD is clicked, Then it is selected and the effect is signin in one step', () => {
+    const s = initialTitle({ hasSave: true, account: GUEST });
+    const r = titleStep(s, { kind: 'click', index: s.items.indexOf('signin') });
+    expect(r.state.items[r.state.index]).toBe('signin');
+    expect(r.effect).toEqual({ kind: 'signin' });
+  });
+
+  it('Given signed in as Dennis, Then the line reads SIGNED IN AS Dennis and the last item is SIGN OUT (no sign-in item)', () => {
+    for (const hasSave of [false, true]) {
+      const s = initialTitle({ hasSave, account: DENNIS });
+      expect(s.items[s.items.length - 1]).toBe('account');
+      expect(s.items).not.toContain('signin');
+      expect(titleLabel(s, 'account')).toBe('SIGN OUT');
+      expect(titleAccountLine(s)).toBe('SIGNED IN AS Dennis');
+    }
+    expect(titleItems(true, DENNIS)).toEqual(['continue', 'newgame', 'yard', 'settings', 'account']);
+  });
+
+  it('Given signed in, When enter on SIGN OUT, Then the effect is signout', () => {
+    expect(titleStep(at(initialTitle({ account: DENNIS }), 'account'), { kind: 'enter' }).effect).toEqual({ kind: 'signout' });
+  });
+
+  it('R52: Given a 40-character Discord name, Then the account line shows its first 32 characters', () => {
+    const name = 'abcdefghij'.repeat(4);
+    expect(titleAccountLine(initialTitle({ account: { kind: 'signed-in', name } }))).toBe(`SIGNED IN AS ${name.slice(0, 32)}`);
+  });
+
+  it('R51: Given a reader tab (hidden), Then no sign-in or account item at all, and no account line', () => {
+    for (const hasSave of [false, true]) {
+      const s = initialTitle({ hasSave, account: HIDDEN });
+      expect(s.items).toEqual(hasSave ? ['continue', 'newgame', 'yard', 'settings'] : ['undock', 'yard', 'settings']);
+      expect(titleAccountLine(s)).toBeNull();
+    }
+  });
+
+  it.each([
+    ['a guest', GUEST],
+    ['signed in', DENNIS],
+    ['hidden', HIDDEN],
+  ] as const)('Sign-in is never a requirement: Given %s, Then UNDOCK (no save) and CONTINUE (a save) are first, selected, and act at once', (_who, account) => {
+    const fresh = initialTitle({ account });
+    expect(fresh.items[fresh.index]).toBe('undock');
+    expect(titleStep(fresh, { kind: 'enter' }).effect).toEqual({ kind: 'go', mode: 'flight' });
+    const saved = initialTitle({ hasSave: true, account });
+    expect(saved.items[saved.index]).toBe('continue');
+    expect(titleStep(saved, { kind: 'enter' }).effect).toEqual({ kind: 'continue' });
+  });
+
+  it('Given NEW GAME armed, When SIGN IN WITH DISCORD is clicked, Then NEW GAME is disarmed (like any other item)', () => {
+    const armed = titleStep(at(initialTitle({ hasSave: true, account: GUEST }), 'newgame'), { kind: 'enter' }).state;
+    expect(armed.armed).toBe(true);
+    const clicked = titleStep(armed, { kind: 'click', index: armed.items.indexOf('signin') });
+    expect(clicked.effect).toEqual({ kind: 'signin' });
+    expect(clicked.state.armed).toBe(false);
+  });
+
+  it('Given a guest with a save, When down past SIGN IN, Then it wraps to CONTINUE (five items)', () => {
+    let s = initialTitle({ hasSave: true, account: GUEST });
+    for (let i = 0; i < 5; i++) s = titleStep(s, { kind: 'down' }).state;
+    expect(s.items[s.index]).toBe('continue');
+  });
+
+  it('R53: Given signed in with SIGN OUT selected, When the account becomes guest (the sign-out succeeded), Then SIGN IN WITH DISCORD takes its place, the selection stays in range, and there is no effect', () => {
+    const s = at(initialTitle({ hasSave: true, account: DENNIS }), 'account');
+    const r = titleStep(s, { kind: 'account', account: GUEST });
+    expect(r.effect).toEqual({ kind: 'none' });
+    expect(r.state.items).toEqual(['continue', 'newgame', 'yard', 'settings', 'signin']);
+    expect(r.state.index).toBeLessThan(r.state.items.length);
+    expect(titleAccountLine(r.state)).toBeNull();
+  });
+
+  it('Given a guest with SIGN IN selected, When the account becomes hidden, Then the sign-in item goes and the selection is clamped into range', () => {
+    const s = at(initialTitle({ account: GUEST }), 'signin');
+    const r = titleStep(s, { kind: 'account', account: HIDDEN });
+    expect(r.state.items).toEqual(['undock', 'yard', 'settings']);
+    expect(r.state.index).toBe(2);
+  });
+
+  it('Given NEW GAME armed, When the account changes, Then NEW GAME is disarmed', () => {
+    const armed = titleStep(at(initialTitle({ hasSave: true, account: DENNIS }), 'newgame'), { kind: 'enter' }).state;
+    expect(titleStep(armed, { kind: 'account', account: GUEST }).state.armed).toBe(false);
+  });
+
+  it('Given the reducer with an account, Then it never mutates the state it was given', () => {
+    const s = at(initialTitle({ hasSave: true, account: DENNIS }), 'account');
+    const frozen = JSON.stringify(s);
+    titleStep(s, { kind: 'enter' });
+    titleStep(s, { kind: 'account', account: GUEST });
+    expect(JSON.stringify(s)).toBe(frozen);
+  });
+});
+
+describe('Title.ts — the account effects (source)', () => {
+  const src = (): string => readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'Title.ts'), 'utf8');
+
+  it("Given the signin effect, Then Title navigates to SIGN_IN_PATH (the server's /api/auth/discord) — a full page load, not a fetch", () => {
+    const s = src();
+    expect(s).toMatch(/case 'signin'/);
+    expect(s).toMatch(/SIGN_IN_PATH/);
+    expect(s).toMatch(/location\.(assign\(|href\s*=)/);
+  });
+
+  it('Given the signout effect, Then Title runs runSignOut and feeds the result back as an account event (R53)', () => {
+    const s = src();
+    expect(s).toMatch(/case 'signout'/);
+    expect(s).toMatch(/runSignOut\(/);
+    expect(s).toMatch(/kind:\s*'account'/);
   });
 });

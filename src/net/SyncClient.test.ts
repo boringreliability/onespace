@@ -1162,3 +1162,152 @@ describe('Ruling R47 — an unreadable cloud says so', () => {
     expect(r.sync.status()).toBe('off');
   });
 });
+
+// =============================================================================
+//  v4 sub-plan 4, Task 6 (phase A) — what the UI needs from SyncClient
+//  (rulings R51, R53, R54). Assumed surface:
+//
+//   .identity(): { id: string; name: string } | null
+//      // the identity confirmed THIS session (the boot's me); null when not
+//      // confirmed (401, offline, reader, before boot) or after sign-out /
+//      // a refused switch (which logs out) / a deleted account.
+//   .signOut(): Promise<boolean>
+//      // POST logout (api.logout). true → identity null, no more PUTs, the
+//      // persisted sync state (the binding) and the store untouched; status as
+//      // a 401 boot would say it: 'reauth' while bound, else 'off'.
+//      // false (the request failed) → nothing changes.
+//   .deleteAccount(): Promise<boolean>
+//      // DELETE /api/account (api.deleteAccount). true → the sync state is
+//      // reset to a fresh one with the SAME deviceId (persisted), identity
+//      // null, no more PUTs, status 'off', the store untouched. false →
+//      // nothing changes. Without a confirmed identity: false, no request.
+// =============================================================================
+
+describe('Task 6 — SyncClient.identity() (R51)', () => {
+  it('Given a client before boot, Then identity() is null', () => {
+    expect(rig().sync.identity()).toBeNull();
+  });
+
+  it('Given a boot where me() answers B, Then identity() is B — confirmed this session', async () => {
+    const r = await signedIn();
+    expect(r.sync.identity()).toEqual({ id: ACCT_B.id, name: ACCT_B.name });
+  });
+
+  it.each<[string, Partial<FakeApi['reply']>]>([
+    ['401', { me: () => fail(401), getSave: () => fail(401) }],
+    ['offline', { me: () => fail('offline'), getSave: () => fail('offline') }],
+  ])('Given me() answers %s at boot, Then identity() is null (guest items)', async (_what, api) => {
+    const r = rig({ state: boundB(save({ revision: 7 })), api });
+    await r.sync.boot(save({ revision: 7 }));
+    expect(r.sync.identity()).toBeNull();
+  });
+
+  it('Given a reader tab, When boot, Then identity() is null and me() was never asked', async () => {
+    const r = rig({ writer: false });
+    await r.sync.boot(save());
+    expect(r.sync.identity()).toBeNull();
+    expect(r.api.calls).not.toContain('me');
+  });
+
+  it('Given me() never answers within the 3 s budget, Then identity() is null', async () => {
+    const r = rig({ api: { me: never, getSave: never } });
+    const p = r.sync.boot(save());
+    await settle(3_000);
+    await p;
+    expect(r.sync.identity()).toBeNull();
+  });
+
+  it('Given a refused switch (bound to A with unsynced progress, signed in as B), When boot, Then the client logged out and identity() is null', async () => {
+    const r = rig({ state: boundA(save({ revision: 7 })), api: { getSave: () => noSave() } });
+    const b = await r.sync.boot(save({ revision: 9 }));
+    expect(b.decision.kind).toBe('refuse-switch');
+    expect(r.api.calls).toContain('logout');
+    expect(r.sync.identity()).toBeNull();
+  });
+
+  it('Given me() answers B and the cloud save is unreadable, Then identity() is still B (the identity was confirmed; only sync is off)', async () => {
+    const r = rig({ state: boundB(save({ revision: 7 })), api: { getSave: () => cloudReply({ ...save({ revision: 9 }), format: 99 }) } });
+    await r.sync.boot(save({ revision: 9 }));
+    expect(r.sync.identity()).toEqual({ id: ACCT_B.id, name: ACCT_B.name });
+  });
+});
+
+describe('Task 6 — SyncClient.signOut() (R53)', () => {
+  it('Given signed in as B and in sync, When signOut succeeds, Then logout was POSTed, it answers true, identity() is null, the binding and the store are untouched, and no save is pushed again', async () => {
+    const r = await signedIn();
+    const before = r.storage.getItem(SYNC_KEY);
+    r.ts.calls.length = 0;
+    expect(await r.sync.signOut()).toBe(true);
+    expect(r.api.calls.filter((c) => c === 'logout')).toHaveLength(1);
+    expect(r.sync.identity()).toBeNull();
+    expect(r.storage.getItem(SYNC_KEY)).toBe(before);
+    expect(r.state()).toEqual(boundB(save({ revision: 7 })));
+    expect(r.ts.calls).toEqual([]);
+    r.sync.onStored(save({ revision: 8 }));
+    await settle(TEN_MIN);
+    expect(r.api.puts).toEqual([]);
+  });
+
+  it("Given signed in and bound to B, When signOut succeeds, Then status is 'reauth' — what the next boot (a 401 while bound) would say", async () => {
+    const r = await signedIn();
+    await r.sync.signOut();
+    expect(r.sync.status()).toBe('reauth');
+    expect(r.sync.statusText()).toBe(SYNC_REAUTH_TEXT);
+  });
+
+  it.each<[string, ReturnType<FakeApi['reply']['logout']>]>([
+    ['offline', fail('offline')],
+    ['a 500', fail(500)],
+    ['a timeout', fail('timeout')],
+  ])('Given the logout request fails (%s), When signOut, Then it answers false and nothing changes: still B, still synced, pushes go on', async (_what, reply) => {
+    const r = await signedIn({ logout: () => reply });
+    const before = r.storage.getItem(SYNC_KEY);
+    expect(await r.sync.signOut()).toBe(false);
+    expect(r.sync.identity()).toEqual({ id: ACCT_B.id, name: ACCT_B.name });
+    expect(r.sync.status()).toBe('synced');
+    expect(r.storage.getItem(SYNC_KEY)).toBe(before);
+    r.sync.onStored(save({ revision: 8 }));
+    await untilPut(r.api);
+    expect(r.api.puts[0]!.save).toEqual(save({ revision: 8 }));
+  });
+});
+
+describe('Task 6 — SyncClient.deleteAccount() (R54)', () => {
+  it("Given signed in as B, When deleteAccount succeeds, Then DELETE was sent, it answers true, the sync state is fresh with the SAME deviceId, identity() is null, status 'off', the store untouched, and nothing is pushed again", async () => {
+    const r = await signedIn();
+    r.ts.calls.length = 0;
+    const stored = await r.ts.current();
+    expect(await r.sync.deleteAccount()).toBe(true);
+    expect(r.api.calls.filter((c) => c === 'deleteAccount')).toHaveLength(1);
+    expect(r.state()).toEqual(syncState({ deviceId: DEVICE_ID }));
+    expect(r.sync.identity()).toBeNull();
+    expect(r.sync.status()).toBe('off');
+    expect(r.sync.statusText()).toBeNull();
+    expect(r.ts.calls).toEqual([]);
+    expect(await r.ts.current()).toEqual(stored);
+    r.sync.onStored(save({ revision: 8 }));
+    await settle(TEN_MIN);
+    expect(r.api.puts).toEqual([]);
+  });
+
+  it.each<[string, ReturnType<FakeApi['reply']['deleteAccount']>]>([
+    ['offline', fail('offline')],
+    ['a 500', fail(500)],
+    ['a 401', fail(401)],
+  ])('Given the delete request fails (%s), When deleteAccount, Then it answers false and nothing changes', async (_what, reply) => {
+    const r = await signedIn({ deleteAccount: () => reply });
+    const before = r.storage.getItem(SYNC_KEY);
+    r.ts.calls.length = 0;
+    expect(await r.sync.deleteAccount()).toBe(false);
+    expect(r.storage.getItem(SYNC_KEY)).toBe(before);
+    expect(r.sync.identity()).toEqual({ id: ACCT_B.id, name: ACCT_B.name });
+    expect(r.ts.calls).toEqual([]);
+  });
+
+  it('Given no identity confirmed this session (a 401 boot), When deleteAccount, Then it answers false and sends nothing', async () => {
+    const r = rig({ api: { me: () => fail(401), getSave: () => fail(401) } });
+    await r.sync.boot(save());
+    expect(await r.sync.deleteAccount()).toBe(false);
+    expect(r.api.calls).not.toContain('deleteAccount');
+  });
+});
