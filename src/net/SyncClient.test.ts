@@ -1753,7 +1753,7 @@ describe('Ruling R69 — resolve is persisted, retried once, and replayed verbat
     return r;
   }
 
-  it('Ruling R69 (I2): Given a resolve whose response was lost (the server committed r10), When the next boot runs, Then the IDENTICAL body is sent again (deep equal) before reconcile, the result is applied like a normal resolve, the pending entry is cleared and the boot is in sync', async () => {
+  it('Ruling R69 (I2), R75: Given a resolve whose response was lost (the server committed r10) and the local save still at the device revision (r9 = pendingResolve.device.revision), When the next boot runs, Then the IDENTICAL body is sent again (deep equal) before reconcile, the result is applied like a normal resolve, the pending entry is cleared and the boot is in sync', async () => {
     const result = save({ revision: 10, tank: 5_000 });
     const r1 = await lostResolve();
     const r = nextBoot(r1, { getSave: () => cloudReply(result), resolve: () => ok(200, { revision: 10, save: result }) });
@@ -1831,6 +1831,60 @@ describe('Ruling R69 — resolve is persisted, retried once, and replayed verbat
     await r.sync.boot(save({ revision: 9 }));
     expect(r.api.resolves).toEqual([]);
   });
+
+  // ---------------------------------------------------------------------------
+  // Addendum — Ruling R75: local progress made after a lost resolve is never discarded.
+
+  it('Ruling R75: Given a lost resolve (device r9) and the player played on to r11 locally, When the next boot replays the identical body and gets the result r10, Then the result is NOT written over r11 — nothing shelved or reset, the pending entry is cleared, L = the result head, and the boot is an ordinary conflict between r11 and the result (no PUT)', async () => {
+    const result = save({ revision: 10, tank: 5_000 });
+    const advanced = save({ revision: 11, tank: 4_000 });
+    const r1 = await lostResolve();
+    r1.sync.onStored(advanced);
+    await r1.ts.store.save(advanced);
+    const r = nextBoot(r1, { getSave: () => cloudReply(result), resolve: () => ok(200, { revision: 10, save: result }) });
+    const b = await r.sync.boot(advanced);
+    expect(r.api.resolves).toEqual([DEVICE_BODY()]);
+    expect(r.ts.calls).toEqual([]);
+    expect(r.ts.shelf.map((e) => e.raw)).not.toContainEqual(advanced);
+    expect(await r.ts.current()).toEqual(advanced);
+    expect(r.state().pendingResolve ?? null).toBeNull();
+    expect(r.state().lastSeenCloud).toEqual({ saveId: GAME_X, revision: 10 });
+    expect(b.decision).toEqual({ kind: 'conflict-same' });
+    expect(b.cloud).toEqual(result);
+    expect(r.state().conflict).toBe(true);
+    expect(r.sync.status()).toBe('conflict');
+    await settle(TEN_MIN);
+    expect(r.api.puts).toEqual([]);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Addendum — Ruling R76: the boot replay lives inside the shared 3 s boot budget.
+
+  it('Ruling R76: Given a pending resolve and a replay that never answers, When the next boot runs, Then boot ends at 3 000 ms — not before, not at 30 s — local-only, with the entry kept, the conflict flag kept and nothing written', async () => {
+    const r1 = await lostResolve();
+    const r = nextBoot(r1, { getSave: () => cloudReply(save({ revision: 10 })), resolve: never });
+    let b: { decision: { kind: string } } | null = null;
+    void r.sync.boot(save({ revision: 9 })).then((x) => (b = x));
+    await settle(2_999);
+    expect(r.api.resolves).toEqual([DEVICE_BODY()]);
+    expect(b).toBeNull();
+    await settle(1);
+    expect(b).not.toBeNull();
+    expect(b!.decision.kind).toBe('local-only');
+    expect(r.state().pendingResolve).toEqual(DEVICE_BODY());
+    expect(r.state().conflict).toBe(true);
+    expect(r.sync.status()).toBe('conflict');
+    expect(r.ts.calls).toEqual([]);
+  });
+
+  it('Ruling R76 (guard): Given a conflict, When the in-session resolve() answers only after 10 s, Then it still succeeds — the 3 s boot budget does not apply to resolve() (its call keeps 30 s, R70)', async () => {
+    const result = save({ revision: 10, tank: 5_000 });
+    const r = await conflictRig({ resolve: () => new Promise<ApiResult>((res) => setTimeout(() => res(ok(200, { revision: 10, save: result })), 10_000)) });
+    let out: unknown = null;
+    void r.sync.resolve('device').then((x) => (out = x));
+    await settle(10_000);
+    expect(out).toEqual({ ok: true, save: result });
+  });
 });
 
 describe('Ruling R71 — the unchosen cloud snapshot goes on the shelf', () => {
@@ -1861,5 +1915,56 @@ describe('Ruling R71 — the unchosen cloud snapshot goes on the shelf', () => {
     const shelf = r.ts.shelf.map((e) => e.raw);
     expect(shelf).toContainEqual(save({ revision: 9 }));
     expect(shelf).not.toContainEqual(cloud);
+  });
+});
+
+// =============================================================================
+//  Addendum — Ruling R74: a pending resolve that cannot be recorded is not
+//  sent (R69 protects nothing if the body was never persisted). A failed
+//  in-flight marker write does NOT block a PUT: an unrecorded PUT costs at
+//  worst a conflict the player chooses; an unsent PUT costs the sync itself.
+// =============================================================================
+
+/** A localStorage that refuses (quota) any write whose value contains `refuse`. */
+class RefusingStorage extends MemoryStorage {
+  refuse: string;
+  constructor(refuse: string, state: SyncState) {
+    super();
+    this.refuse = refuse;
+    super.setItem(SYNC_KEY, JSON.stringify(state));
+  }
+  override setItem(k: string, v: string): void {
+    if (String(v).includes(this.refuse)) throw new DOMException('quota exceeded', 'QuotaExceededError');
+    super.setItem(k, v);
+  }
+}
+
+describe('Ruling R74 — what happens when the sync state cannot be written', () => {
+  it("Ruling R74: Given a conflict and a sync state that cannot record the pending resolve (quota), When resolve('device'), Then NO POST is sent, it answers {ok: false, reason: 'offline'}, the conflict flag stays and nothing is written", async () => {
+    const storage = new RefusingStorage('"pendingResolve"', boundB(save({ revision: 7 })));
+    const r = rig({
+      storage,
+      api: { getSave: () => cloudReply(save({ revision: 8 })), resolve: () => ok(200, { revision: 10, save: save({ revision: 10 }) }) },
+    });
+    await r.ts.store.save(save({ revision: 9 }));
+    r.ts.calls.length = 0;
+    expect((await r.sync.boot(save({ revision: 9 }))).decision.kind).toBe('conflict-same');
+    expect(await r.sync.resolve('device')).toEqual({ ok: false, reason: 'offline' });
+    expect(r.api.resolves).toEqual([]);
+    expect((JSON.parse(storage.getItem(SYNC_KEY)!) as SyncState).conflict).toBe(true);
+    expect(r.sync.status()).toBe('conflict');
+    expect(r.ts.calls).toEqual([]);
+  });
+
+  it('Ruling R74 (deliberate difference): Given a sync state that cannot record the in-flight marker (quota), When the game saves r8, Then the PUT is still sent, and once acknowledged L = r8 is persisted', async () => {
+    const storage = new RefusingStorage('"inFlightPut"', boundB(save({ revision: 7 })));
+    const r = rig({ storage, api: { getSave: () => cloudReply(save({ revision: 7 })) } });
+    expect((await r.sync.boot(save({ revision: 7 }))).decision.kind).toBe('in-sync');
+    r.sync.onStored(save({ revision: 8 }));
+    await untilPut(r.api);
+    await settle(0);
+    expect(r.api.puts.map((p) => p.save.revision)).toEqual([8]);
+    expect((JSON.parse(storage.getItem(SYNC_KEY)!) as SyncState).lastSeenCloud).toEqual({ saveId: GAME_X, revision: 8 });
+    expect(r.sync.status()).toBe('synced');
   });
 });
