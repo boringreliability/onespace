@@ -2,7 +2,7 @@
  * v4 sub-plan 4, Task 6 (phase A) — the conflict screen (DESIGN-4 §5.3;
  * rulings R49, R55). Two saves diverged; the player keeps one. The pure
  * state, texts and the boot orchestration live in src/ui/conflictScreen.ts;
- * the DOM in src/ui/ConflictScreen.ts.
+ * the DOM in src/ui/ConflictOverlay.ts.
  *
  * Assumed surface (src/ui/conflictScreen.ts):
  *
@@ -257,8 +257,8 @@ describe('conflict screen — choosing (keys)', () => {
   });
 });
 
-describe('ConflictScreen.ts — the DOM captures the keys (source)', () => {
-  const src = (): string => readFileSync(join(SRC_DIR, 'ConflictScreen.ts'), 'utf8');
+describe('ConflictOverlay.ts — the DOM captures the keys (source)', () => {
+  const src = (): string => readFileSync(join(SRC_DIR, 'ConflictOverlay.ts'), 'utf8');
 
   it('Given the DOM module, Then it listens to keydown on window in the capture phase and stops every key from propagating while shown', () => {
     const s = src();

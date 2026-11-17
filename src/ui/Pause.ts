@@ -143,6 +143,8 @@ export class Pause implements GameModule {
   private syncLineEl: HTMLDivElement | null = null;
   private deleteBtn: HTMLButtonElement | null = null;
   private shownSyncLine: string | null = null;
+  /** R61: an activation key is auto-repeating (held down). */
+  private keyRepeating = false;
 
   constructor(opts: PauseOptions) {
     this.universe = opts.universe;
@@ -208,6 +210,13 @@ export class Pause implements GameModule {
     // phase, ahead of Input on window.
     const onKey = (ev: KeyboardEvent): void => {
       if (!this.state.open) return;
+      // R61: a held key auto-repeats, and a focused <button> takes a click per
+      // repeat — one long Enter on DELETE ACCOUNT armed AND confirmed it.
+      // Repeats never reach a button; the first press still does.
+      if (ev.code === 'Enter' || ev.code === 'NumpadEnter' || ev.code === 'Space') {
+        this.keyRepeating = ev.repeat;
+        if (ev.repeat) ev.preventDefault();
+      }
       if (ev.code === 'Escape') {
         ev.preventDefault();
         if (!ev.repeat) this.dispatch({ type: 'escKey', t: performance.now() });
@@ -217,6 +226,11 @@ export class Pause implements GameModule {
     };
     window.addEventListener('keydown', onKey, true);
     this.disposers.push(() => window.removeEventListener('keydown', onKey, true));
+    const onKeyUp = (ev: KeyboardEvent): void => {
+      if (ev.code === 'Enter' || ev.code === 'NumpadEnter' || ev.code === 'Space') this.keyRepeating = false;
+    };
+    window.addEventListener('keyup', onKeyUp, true);
+    this.disposers.push(() => window.removeEventListener('keyup', onKeyUp, true));
   }
 
   private overlayOpen(): boolean {
@@ -478,7 +492,9 @@ export class Pause implements GameModule {
     this.button(actions, 'SAVE', () => this.requestSave());
     this.returnBtn = this.button(actions, returnToOrbitLabel(false), () => this.dispatch({ type: 'returnToOrbit' }));
     // [v4-net] R54: two presses, as NEW GAME; any other button disarms it.
-    this.deleteBtn = this.button(actions, deleteAccountLabel(this.deleteState), () => this.deleteStep({ kind: 'press' }));
+    this.deleteBtn = this.button(actions, deleteAccountLabel(this.deleteState), () =>
+      this.deleteStep({ kind: 'press', repeat: this.keyRepeating }),
+    );
     this.deleteBtn.classList.add('is-danger');
 
     const foot = document.createElement('footer');
@@ -546,6 +562,10 @@ export class Pause implements GameModule {
       // Any other button disarms DELETE ACCOUNT (R54), as on the title.
       if (b !== this.deleteBtn) this.deleteStep({ kind: 'other' });
       fn();
+    });
+    // R62a: the pointer entering another item disarms it too, as NEW GAME's hover does.
+    b.addEventListener('pointerenter', () => {
+      if (b !== this.deleteBtn && this.deleteState.armed) this.deleteStep({ kind: 'other' });
     });
     parent.appendChild(b);
     return b;

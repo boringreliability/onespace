@@ -34,14 +34,22 @@ export function accountView(o: { reader: boolean; identity: { id: string; name: 
   return o.identity ? { kind: 'signed-in', name: o.identity.name } : { kind: 'guest' };
 }
 
-/** R52: at most DISPLAY_NAME_MAX characters (code points: a surrogate pair is never split). */
+/** R62b: control (Cc) and format (Cf) characters — bidi overrides, zero-width — never reach the screen. */
+const HIDDEN_CHARS = /[\p{Cc}\p{Cf}]/gu;
+
+/**
+ * R52/R62b: the name without control and format characters, then at most
+ * DISPLAY_NAME_MAX code points (a surrogate pair is never split).
+ */
 export function displayName(name: string): string {
-  const cps = Array.from(name);
-  return cps.length <= DISPLAY_NAME_MAX ? name : cps.slice(0, DISPLAY_NAME_MAX).join('');
+  const cps = Array.from(name.replace(HIDDEN_CHARS, ''));
+  return cps.slice(0, DISPLAY_NAME_MAX).join('');
 }
 
+/** `SIGNED IN AS <name>`; a name with nothing left to show reads `SIGNED IN`. */
 export function signedInText(name: string): string {
-  return `SIGNED IN AS ${displayName(name)}`;
+  const shown = displayName(name);
+  return shown ? `SIGNED IN AS ${shown}` : 'SIGNED IN';
 }
 
 /** The account line as one element, its text by textContent only (R52); null unless signed in. */

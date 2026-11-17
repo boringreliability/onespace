@@ -26,6 +26,8 @@ import {
 } from './conflictScreen';
 
 const STYLE_ID = 'os-conflict-style';
+/** R62c: the dialog is named by its title. */
+const TITLE_ID = 'os-conflict-title';
 
 export class ConflictOverlay {
   private state: ConflictState | null = null;
@@ -89,8 +91,10 @@ export class ConflictOverlay {
     root.className = 'os-conflict';
     root.setAttribute('role', 'dialog');
     root.setAttribute('aria-modal', 'true');
+    root.setAttribute('aria-labelledby', TITLE_ID);
 
     const title = d.createElement('div');
+    title.id = TITLE_ID;
     title.className = 'os-cf-title';
     title.textContent = CONFLICT_TITLE;
     root.appendChild(title);

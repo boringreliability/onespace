@@ -1,7 +1,7 @@
 /**
  * The conflict screen's state, texts and boot orchestration (v4 sub-plan 4,
  * Task 6; DESIGN-4 §5.3; rulings R49, R55, R58). Pure: the DOM lives in
- * ConflictScreen.ts.
+ * ConflictOverlay.ts.
  *
  * Two saves diverged; the player keeps one — THIS DEVICE or CLOUD. The
  * screen appears only at boot, before the game continues (R49), and cannot

@@ -119,7 +119,11 @@ export interface DeleteAccountState {
 
 export const DELETE_DISARMED: DeleteAccountState = Object.freeze({ armed: false });
 
-export type DeleteAccountEvent = { readonly kind: 'press' } | { readonly kind: 'other' } | { readonly kind: 'closed' };
+export type DeleteAccountEvent =
+  /** R61: `repeat` — an auto-repeated key; it never arms and never confirms. */
+  | { readonly kind: 'press'; readonly repeat?: boolean }
+  | { readonly kind: 'other' }
+  | { readonly kind: 'closed' };
 
 export type DeleteAccountEffect = { readonly kind: 'none' } | { readonly kind: 'deleteAccount'; readonly confirmed: boolean };
 
@@ -129,6 +133,7 @@ export function deleteAccountStep(
   e: DeleteAccountEvent,
 ): { state: DeleteAccountState; effect: DeleteAccountEffect } {
   if (e.kind !== 'press') return { state: DELETE_DISARMED, effect: { kind: 'none' } };
+  if (e.repeat === true) return { state: s, effect: { kind: 'none' } };
   const confirmed = s.armed;
   return { state: { armed: !confirmed }, effect: { kind: 'deleteAccount', confirmed } };
 }

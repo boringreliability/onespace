@@ -124,6 +124,12 @@ export class SyncClient {
   /** The cloud head seen at boot (or in a 409): what resolve says it saw. */
   private cloudHead: CloudHead | null = null;
   private reportedFatal = false;
+  /**
+   * R60: bumped when pushing halts for good (sign-out, deleted account). A
+   * request already in flight then answers into a session that has moved
+   * on: it must not touch status or the persisted state.
+   */
+  private epoch = 0;
 
   constructor(deps: SyncClientDeps) {
     this.d = deps;
@@ -423,9 +429,11 @@ export class SyncClient {
   private async pump(): Promise<void> {
     if (!this.queued || !this.pushing || this.inFlight) return;
     this.inFlight = true;
+    const epoch = this.epoch;
     try {
       if (this.needsIdentity) {
         const r = await this.d.api.me();
+        if (epoch !== this.epoch) return; // R60: signed out / deleted meanwhile
         if (!r.ok) {
           if (r.status === 401) return this.stop('reauth');
           return this.backoff(this.queued!);
@@ -445,6 +453,7 @@ export class SyncClient {
       this.st = 'pending';
       const base = this.state.lastSeenCloud;
       const r = await this.d.api.putSave({ deviceId: this.state.deviceId, base, save });
+      if (epoch !== this.epoch) return; // R60: signed out / deleted meanwhile
 
       if (r.ok) {
         const body = PutOkSchema.safeParse(r.body);
@@ -494,6 +503,7 @@ export class SyncClient {
 
   /** Stop pushing for the session: nothing queued, no timer. */
   private halt(): void {
+    this.epoch++;
     this.pushing = false;
     this.needsIdentity = false;
     this.queued = null;
