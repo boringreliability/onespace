@@ -1,7 +1,7 @@
 /**
  * Cloud save repository (v4 sub-plan 4, Task 4). One cloud save per account, optimistic
  * concurrency, a single archive slot. Every write runs in ONE transaction that first locks
- * the user's `users` row (`select … for update`): that row always exists, so even two first
+ * the user's `users` row (`select … for no key update`): that row always exists, so even two first
  * PUTs against an empty cloud (no `saves` row to lock yet) serialise and yield one winner.
  * Saves arrive already validated (`migrate`); this module trusts them.
  */

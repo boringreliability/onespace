@@ -174,20 +174,25 @@ export class SyncClient {
       return localOnly('reader');
     }
 
-    // One budget for both calls (they run in parallel).
+    // One budget for both calls (R30). R66: the save is asked for only once
+    // me() says who is signed in — a guest boot makes exactly one request.
     let cancelBudget: () => void = () => undefined;
     const budget = new Promise<'timeout'>((resolve) => {
       cancelBudget = this.d.schedule(() => resolve('timeout'), SYNC_TIMEOUT_MS);
     });
-    const meCall = this.d.api.me();
-    const saveCall = this.d.api.getSave();
-    const answered = await Promise.race([Promise.all([meCall, saveCall]), budget]);
+    const seen: { me: ApiResult | null } = { me: null };
+    const calls = (async (): Promise<[ApiResult, ApiResult | null]> => {
+      const m = await this.d.api.me();
+      seen.me = m;
+      if (!m.ok || !MeSchema.safeParse(m.body).success) return [m, null];
+      return [m, await this.d.api.getSave()];
+    })();
+    const answered = await Promise.race([calls, budget]);
     cancelBudget();
 
     if (answered === 'timeout') {
       // me() may still have answered in time.
-      const early = await Promise.race([meCall, Promise.resolve(null)]);
-      this.afterOffline(early);
+      this.afterOffline(seen.me);
       return localOnly('timeout');
     }
     const [meRes, saveRes] = answered;
@@ -197,13 +202,17 @@ export class SyncClient {
       this.st = this.state.accountId !== null ? 'reauth' : 'off';
       return { decision: { kind: 'guest' }, cloud: null, notice: null };
     }
-    if (isTimeout(meRes) || isTimeout(saveRes)) {
+    if (isTimeout(meRes) || (saveRes !== null && isTimeout(saveRes))) {
       this.afterOffline(meRes);
       return localOnly('timeout');
     }
     const me = meRes.ok ? MeSchema.safeParse(meRes.body) : null;
+    if (!me?.success || saveRes === null) {
+      this.afterOffline(meRes);
+      return localOnly('offline');
+    }
     const emptyCloud = !saveRes.ok && saveRes.status === 404 && NoSaveSchema.safeParse(saveRes.body).success;
-    if (!me?.success || (!saveRes.ok && !emptyCloud)) {
+    if (!saveRes.ok && !emptyCloud) {
       this.afterOffline(meRes);
       return localOnly('offline');
     }

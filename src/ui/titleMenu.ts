@@ -59,7 +59,8 @@ export function titleLabel(s: TitleState, item: TitleItem): string {
 export type TitleEvent =
   | { kind: 'up' }
   | { kind: 'down' }
-  | { kind: 'enter' }
+  /** R65: `repeat` — an auto-repeated key; it activates nothing. */
+  | { kind: 'enter'; repeat?: boolean }
   | { kind: 'click'; index: number }
   | { kind: 'seed'; text: string }
   /** [v4-net] The account changed (signed out, deleted): swap the account item. */
@@ -80,6 +81,8 @@ export interface TitleKeyInput {
   readonly metaKey?: boolean;
   readonly ctrlKey?: boolean;
   readonly altKey?: boolean;
+  /** R65: KeyboardEvent.repeat — a held key. */
+  readonly repeat?: boolean;
 }
 
 /**
@@ -96,9 +99,10 @@ export function titleKey(k: TitleKeyInput): { event: TitleEvent | null; preventD
       ? { kind: 'up' }
       : k.code === 'ArrowDown' || k.code === 'KeyS'
         ? { kind: 'down' }
-        : k.code === 'Enter' || k.code === 'Space'
+        : (k.code === 'Enter' || k.code === 'Space') && k.repeat !== true
           ? { kind: 'enter' }
           : null;
+  // R65: a held Enter/Space activates nothing (held arrows still move).
   return { event, preventDefault: true };
 }
 
@@ -138,6 +142,8 @@ export function titleStep(s: TitleState, e: TitleEvent): { state: TitleState; ef
     case 'down':
       return { state: { ...s, index: (s.index + 1) % n, armed: false }, effect: { kind: 'none' } };
     case 'enter':
+      // R65: an auto-repeat never arms, confirms or activates anything.
+      if (e.repeat === true) return { state: s, effect: { kind: 'none' } };
       return activate(s, s.index);
     case 'click':
       if (!Number.isInteger(e.index) || e.index < 0 || e.index >= n) return { state: s, effect: { kind: 'none' } };

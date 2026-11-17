@@ -6,6 +6,8 @@
  * a module, not here.
  */
 
+// R63: first, before any module that declares a Zod schema (CSP: no eval probe).
+import '@/core/zodConfig';
 import { Engine } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
 import { registerShaderChunks } from '@/shaders/chunks';

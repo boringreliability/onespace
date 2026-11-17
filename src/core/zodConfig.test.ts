@@ -36,8 +36,8 @@ const RealFunction = globalThis.Function;
 /** Count every use of the Function constructor (`new Function(...)` and `Function(...)`). */
 function countFunctionCalls(): { calls: () => number; restore: () => void } {
   let n = 0;
-  const counting = new Proxy(RealFunction, {
-    construct(target, args, newTarget) {
+  const counting: FunctionConstructor = new Proxy(RealFunction, {
+    construct(target, args, newTarget): object {
       n++;
       return Reflect.construct(target, args, newTarget === counting ? target : newTarget);
     },

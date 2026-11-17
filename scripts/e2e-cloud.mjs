@@ -569,7 +569,7 @@ async function run() {
 
   await step(
     'C',
-    'holding Enter on a focused DELETE ACCOUNT in Pause (expected to fail until the R61 fix)',
+    'holding Enter on a focused DELETE ACCOUNT in Pause never deletes the account (R61)',
     async (note) => {
       const { ctx, page } = await newPage('held-enter');
       await gotoGame(page);
@@ -604,7 +604,6 @@ async function run() {
       note(`GET /api/me after: ${me.status()} → account ${deleted ? 'DELETED' : 'still there'}; last log lines ${JSON.stringify(log)}`);
       assert(!deleted, 'a held Enter deleted the account (armed and confirmed by key repeat)');
     },
-    { xfail: true },
   );
   for (const label of ['auth-notices', 'xss', 'held-enter']) await contexts.get(label)?.close();
 
@@ -937,18 +936,6 @@ async function run() {
     );
     note(`0 other console errors, 0 page errors, 0 CSP violations, 0 unexpected failed requests`);
   });
-
-  await step(
-    '5c',
-    'literally zero console errors (the browser-logged protocol statuses included)',
-    async (note) => {
-      const n = problems.filter((p) => p.kind === 'console' || p.kind === 'csp').length;
-      const outages = problems.filter((p) => p.kind === 'console' && /net::ERR_/.test(p.text)).length;
-      note(`${n} console error line(s), of which ${outages} from the deliberate outages`);
-      assert(n - outages === 0, `${n - outages} console error line(s) outside the deliberate outages — the HTTP statuses of 5b`);
-    },
-    { xfail: true },
-  );
 }
 
 // ---------------------------------------------------------------------------

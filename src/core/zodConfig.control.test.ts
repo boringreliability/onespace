@@ -21,8 +21,8 @@ afterEach(() => {
 describe('Ruling R63 — control: Zod with its defaults probes eval', () => {
   it('Given no jitless config, When the save schema is built and the golden save parsed, Then the Function constructor is called (the probe the CSP reports)', async () => {
     let n = 0;
-    const counting = new Proxy(RealFunction, {
-      construct(target, args, newTarget) {
+    const counting: FunctionConstructor = new Proxy(RealFunction, {
+      construct(target, args, newTarget): object {
         n++;
         return Reflect.construct(target, args, newTarget === counting ? target : newTarget);
       },

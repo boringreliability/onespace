@@ -231,6 +231,18 @@ export class Pause implements GameModule {
     };
     window.addEventListener('keyup', onKeyUp, true);
     this.disposers.push(() => window.removeEventListener('keyup', onKeyUp, true));
+    // R67: a keyup that never arrives (blur, alt-tab mid-press) must not leave
+    // the flag set — a later mouse click on DELETE ACCOUNT is a real press.
+    const onBlur = (): void => {
+      this.keyRepeating = false;
+    };
+    window.addEventListener('blur', onBlur);
+    this.disposers.push(() => window.removeEventListener('blur', onBlur));
+    const onPointerDown = (): void => {
+      this.keyRepeating = false;
+    };
+    window.addEventListener('pointerdown', onPointerDown, true);
+    this.disposers.push(() => window.removeEventListener('pointerdown', onPointerDown, true));
   }
 
   private overlayOpen(): boolean {

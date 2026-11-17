@@ -987,8 +987,8 @@ describe('Ruling R40 — the newest save is the one sent', () => {
     const me = deferred();
     r.api.reply.me = () => me.promise;
     r.sync.onStored(save({ revision: 8 }));
-    for (let t = 0; t <= 5_100 && !r.api.calls.slice(2).includes('me'); t += 100) await settle(100);
-    expect(r.api.calls.slice(2)).toContain('me');
+    for (let t = 0; t <= 5_100 && !r.api.calls.slice(1).includes('me'); t += 100) await settle(100);
+    expect(r.api.calls.slice(1)).toContain('me');
     r.sync.onStored(save({ revision: 9 }));
     me.settle(ok(200, { ...ACCT_B }));
     await settle(TEN_MIN);
