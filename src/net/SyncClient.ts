@@ -134,6 +134,11 @@ export class SyncClient {
     return this.st;
   }
 
+  /** R51: the identity confirmed THIS session (the boot's me); null when not confirmed. */
+  identity(): { id: string; name: string } | null {
+    return this.me ? { id: this.me.id, name: this.me.name } : null;
+  }
+
   statusText(): string | null {
     switch (this.st) {
       case 'offline':
@@ -202,6 +207,8 @@ export class SyncClient {
       const c = cloudSave(saveRes.ok ? saveRes.body : null);
       if (!c) {
         // Review Focus 4: an unreadable cloud is no cloud, and nothing is pushed over it.
+        // The identity itself was confirmed (R51): the menus show it.
+        this.me = me.data;
         this.pushing = false;
         this.st = 'off';
         return { ...localOnly('unreadable'), notice: SYNC_UNREADABLE_TEXT };
@@ -211,7 +218,8 @@ export class SyncClient {
     }
 
     this.me = me.data;
-    const sameContent = local !== null && cloud !== null && rawKey(local) === rawKey(cloud);
+    const localKey = local !== null ? rawKey(local) : null;
+    const sameContent = localKey !== null && cloud !== null && localKey === rawKey(cloud);
     const decision = reconcile({
       local,
       cloud,
@@ -269,6 +277,7 @@ export class SyncClient {
 
       case 'refuse-switch':
         await this.d.api.logout();
+        this.me = null;
         this.pushing = false;
         this.st = 'off';
         return out(decision.message);
@@ -478,6 +487,51 @@ export class SyncClient {
       this.inFlight = false;
       this.kick();
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Account (Task 6; R53, R54, R56)
+
+  /** Stop pushing for the session: nothing queued, no timer. */
+  private halt(): void {
+    this.pushing = false;
+    this.needsIdentity = false;
+    this.queued = null;
+    this.holdAtOrBelow = null;
+    this.cancelTimer?.();
+    this.cancelTimer = null;
+    this.backingOff = false;
+  }
+
+  /**
+   * R53/R56: sign out. The server forgets the session; the local save and
+   * the binding stay as they are (the next sign-in as the same account
+   * syncs on). A voluntary sign-out is not a reauth: status 'off'.
+   */
+  async signOut(): Promise<boolean> {
+    const r = await this.d.api.logout();
+    if (!r.ok) return false;
+    this.me = null;
+    this.halt();
+    this.st = 'off';
+    return true;
+  }
+
+  /**
+   * R54: delete the account (server: user, saves, sessions). The device's
+   * sync state starts over with the same deviceId; the local save is kept.
+   */
+  async deleteAccount(): Promise<boolean> {
+    if (!this.me) return false;
+    const r = await this.d.api.deleteAccount();
+    if (!r.ok) return false;
+    this.me = null;
+    this.halt();
+    this.state = { deviceId: this.state.deviceId, accountId: null, accountName: null, lastSeenCloud: null, conflict: false };
+    this.persist();
+    this.cloudHead = null;
+    this.st = 'off';
+    return true;
   }
 
   // ---------------------------------------------------------------------------

@@ -7,6 +7,9 @@
  * keydown just after a lock-loss open is ignored.
  */
 
+import type { SyncStatus } from '@/net/SyncClient';
+import { signedInText, type AccountView } from './accountMenu';
+
 /** A keydown this soon after the pause opened is the same Esc, not a second one. */
 export const ESC_DEBOUNCE_MS = 350;
 
@@ -99,4 +102,79 @@ export function pauseStep(state: PauseState, event: PauseEvent, ctx: PauseContex
       if (!state.open) return same;
       return { state, effect: 'save' };
   }
+}
+
+// =============================================================================
+// [v4-net] Task 6 — the account in the pause sheet (R51, R54, R57) and the
+// sync status under the account line.
+// =============================================================================
+
+export const DELETE_ACCOUNT_TEXT = 'DELETE ACCOUNT';
+export const DELETE_ACCOUNT_CONFIRM_TEXT = 'DELETE ACCOUNT — PRESS AGAIN TO CONFIRM';
+
+export interface DeleteAccountState {
+  /** DELETE ACCOUNT was pressed once; the next press confirms. */
+  readonly armed: boolean;
+}
+
+export const DELETE_DISARMED: DeleteAccountState = Object.freeze({ armed: false });
+
+export type DeleteAccountEvent = { readonly kind: 'press' } | { readonly kind: 'other' } | { readonly kind: 'closed' };
+
+export type DeleteAccountEffect = { readonly kind: 'none' } | { readonly kind: 'deleteAccount'; readonly confirmed: boolean };
+
+/** Two presses, as NEW GAME on the title: any other button, or the sheet closing, disarms. */
+export function deleteAccountStep(
+  s: DeleteAccountState,
+  e: DeleteAccountEvent,
+): { state: DeleteAccountState; effect: DeleteAccountEffect } {
+  if (e.kind !== 'press') return { state: DELETE_DISARMED, effect: { kind: 'none' } };
+  const confirmed = s.armed;
+  return { state: { armed: !confirmed }, effect: { kind: 'deleteAccount', confirmed } };
+}
+
+export function deleteAccountLabel(s: DeleteAccountState): string {
+  return s.armed ? DELETE_ACCOUNT_CONFIRM_TEXT : DELETE_ACCOUNT_TEXT;
+}
+
+export interface PauseAccountView {
+  readonly line: string | null;
+  readonly syncLine: string | null;
+  readonly deleteAccount: boolean;
+}
+
+/**
+ * What the sheet shows of the account. Signed in: the account line, the
+ * sync status under it, DELETE ACCOUNT. A guest or a reader tab: nothing
+ * (R57) — and the sheet never offers sign-in (the title does).
+ */
+export function pauseAccountView(account: AccountView, syncText: string | null): PauseAccountView {
+  if (account.kind !== 'signed-in') return { line: null, syncLine: null, deleteAccount: false };
+  return { line: signedInText(account.name), syncLine: syncText, deleteAccount: true };
+}
+
+export interface SyncNoticeWatch {
+  /** The status text last logged (or reported at boot); null when there is none to repeat. */
+  readonly lastText: string | null;
+}
+
+/** The boot's status: already in the boot notices, so it is not logged again. */
+export function initialSyncNotice(_status: SyncStatus, text: string | null): SyncNoticeWatch {
+  return { lastText: text };
+}
+
+/**
+ * A status change logs its text once. A retry in flight ('pending') is not a
+ * change; a status without text (synced, off) clears the watch, so the next
+ * outage is logged again.
+ */
+export function syncNoticeStep(
+  w: SyncNoticeWatch,
+  status: SyncStatus,
+  text: string | null,
+): { watch: SyncNoticeWatch; notice: string | null } {
+  if (status === 'pending') return { watch: w, notice: null };
+  if (text === null) return { watch: w.lastText === null ? w : { lastText: null }, notice: null };
+  if (text === w.lastText) return { watch: w, notice: null };
+  return { watch: { lastText: text }, notice: text };
 }

@@ -9,6 +9,7 @@
  */
 
 import { loadForBootResult } from '@/save/bootLoad';
+import type { SaveV1 } from '@/save/schema';
 import type { SaveStore } from '@/save/store';
 import type { Wal } from '@/save/wal';
 
@@ -22,10 +23,17 @@ export interface BootSyncDeps {
   readonly writer: boolean;
 }
 
-export async function runBootSync(d: BootSyncDeps): Promise<BootSync> {
+/** The boot's sync result, with the local save it was given (the conflict screen's THIS DEVICE card). */
+export interface BootSyncResult extends BootSync {
+  readonly local: SaveV1 | null;
+}
+
+export async function runBootSync(d: BootSyncDeps): Promise<BootSyncResult> {
   const { load, storeAvailable } = await loadForBootResult(d.store, d.wal, { writer: d.writer });
   // R25 I2: a store that failed at boot is never written this session, and the
   // WAL may be the only copy of the game — sync must not replace or reset it.
-  if (!storeAvailable) return { decision: { kind: 'local-only', reason: 'offline' }, cloud: null, notice: null };
-  return d.sync.boot(load.save, { localDirty: load.walApplied === true });
+  if (!storeAvailable) return { decision: { kind: 'local-only', reason: 'offline' }, cloud: null, notice: null, local: null };
+  const local = load.save;
+  const b = await d.sync.boot(local, { localDirty: load.walApplied === true });
+  return { ...b, local };
 }

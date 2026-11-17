@@ -1,10 +1,16 @@
 /** The title screen's menu as a pure reducer. DOM lives in Title.ts. */
 
+import { SIGN_IN_TEXT, SIGN_OUT_TEXT, signedInText, type AccountView } from './accountMenu';
+
 /** v3's menu: no save to continue. */
 export const TITLE_ITEMS = ['undock', 'yard', 'settings'] as const;
 /** [v4-save] With a save: CONTINUE first, NEW GAME behind a confirmation. */
 export const TITLE_ITEMS_WITH_SAVE = ['continue', 'newgame', 'yard', 'settings'] as const;
-export type TitleItem = (typeof TITLE_ITEMS)[number] | (typeof TITLE_ITEMS_WITH_SAVE)[number];
+/**
+ * [v4-net] Task 6: the account's item, last — 'signin' for a guest, 'account'
+ * (SIGN OUT) when signed in, none in a reader tab (R51).
+ */
+export type TitleItem = (typeof TITLE_ITEMS)[number] | (typeof TITLE_ITEMS_WITH_SAVE)[number] | 'signin' | 'account';
 
 export const NEW_GAME_CONFIRM_TEXT = 'NEW GAME — PRESS AGAIN TO OVERWRITE';
 
@@ -14,7 +20,11 @@ const LABELS: Record<TitleItem, string> = {
   undock: 'UNDOCK',
   yard: 'THE YARD',
   settings: 'SETTINGS',
+  signin: SIGN_IN_TEXT,
+  account: SIGN_OUT_TEXT,
 };
+
+const HIDDEN: AccountView = { kind: 'hidden' };
 
 export interface TitleState {
   readonly index: number;
@@ -23,10 +33,22 @@ export interface TitleState {
   readonly items: readonly TitleItem[];
   /** NEW GAME was pressed once; the next press confirms. */
   readonly armed: boolean;
+  /** [v4-net] What the menu shows of the account (hidden: no account items). */
+  readonly account: AccountView;
+  /** Whether a save is loaded (the menu's first items). */
+  readonly hasSave: boolean;
 }
 
-export function titleItems(hasSave: boolean): readonly TitleItem[] {
-  return hasSave ? TITLE_ITEMS_WITH_SAVE : TITLE_ITEMS;
+export function titleItems(hasSave: boolean, account: AccountView = HIDDEN): readonly TitleItem[] {
+  const base = hasSave ? TITLE_ITEMS_WITH_SAVE : TITLE_ITEMS;
+  if (account.kind === 'guest') return [...base, 'signin'];
+  if (account.kind === 'signed-in') return [...base, 'account'];
+  return base;
+}
+
+/** The line above the menu when signed in: SIGNED IN AS <name> (R52: truncated). */
+export function titleAccountLine(s: TitleState): string | null {
+  return s.account.kind === 'signed-in' ? signedInText(s.account.name) : null;
 }
 
 /** The label an item shows in this state (NEW GAME asks for its second press). */
@@ -39,7 +61,9 @@ export type TitleEvent =
   | { kind: 'down' }
   | { kind: 'enter' }
   | { kind: 'click'; index: number }
-  | { kind: 'seed'; text: string };
+  | { kind: 'seed'; text: string }
+  /** [v4-net] The account changed (signed out, deleted): swap the account item. */
+  | { kind: 'account'; account: AccountView };
 
 export type TitleEffect =
   | { kind: 'none' }
@@ -47,7 +71,9 @@ export type TitleEffect =
   | { kind: 'settings' }
   | { kind: 'reseed'; seed: number }
   | { kind: 'continue' }
-  | { kind: 'newgame'; confirmed: boolean };
+  | { kind: 'newgame'; confirmed: boolean }
+  | { kind: 'signin' }
+  | { kind: 'signout' };
 
 export interface TitleKeyInput {
   readonly code: string;
@@ -76,8 +102,10 @@ export function titleKey(k: TitleKeyInput): { event: TitleEvent | null; preventD
   return { event, preventDefault: true };
 }
 
-export function initialTitle(opts: { hasSave?: boolean } = {}): TitleState {
-  return { index: 0, seedError: null, items: titleItems(opts.hasSave === true), armed: false };
+export function initialTitle(opts: { hasSave?: boolean; account?: AccountView } = {}): TitleState {
+  const hasSave = opts.hasSave === true;
+  const account = opts.account ?? HIDDEN;
+  return { index: 0, seedError: null, items: titleItems(hasSave, account), armed: false, account, hasSave };
 }
 
 /** Hex, optional 0x, 1-8 digits, surrounding whitespace allowed. */
@@ -97,6 +125,8 @@ function activate(s: TitleState, index: number): { state: TitleState; effect: Ti
   if (item === 'continue') return { state, effect: { kind: 'continue' } };
   if (item === 'undock') return { state, effect: { kind: 'go', mode: 'flight' } };
   if (item === 'yard') return { state, effect: { kind: 'go', mode: 'yard' } };
+  if (item === 'signin') return { state, effect: { kind: 'signin' } };
+  if (item === 'account') return { state, effect: { kind: 'signout' } };
   return { state, effect: { kind: 'settings' } };
 }
 
@@ -118,6 +148,11 @@ export function titleStep(s: TitleState, e: TitleEvent): { state: TitleState; ef
         return { state: { ...s, seedError: 'A SEED IS 1-8 HEX DIGITS', armed: false }, effect: { kind: 'none' } };
       }
       return { state: { ...s, seedError: null, armed: false }, effect: { kind: 'reseed', seed } };
+    }
+    case 'account': {
+      const items = titleItems(s.hasSave, e.account);
+      const index = Math.min(s.index, items.length - 1);
+      return { state: { ...s, account: e.account, items, index, armed: false }, effect: { kind: 'none' } };
     }
   }
 }

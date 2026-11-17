@@ -19,13 +19,24 @@ import { shotOwnsScene } from '@/game/Shots';
 import type { Universe } from '@/game/Universe';
 import type { RecoveryCut } from '@/game/RecoveryCut';
 import {
+  DELETE_DISARMED,
   PAUSE_CLOSED,
+  deleteAccountLabel,
+  deleteAccountStep,
+  initialSyncNotice,
+  pauseAccountView,
   pauseContextFor,
   pauseStep,
   returnToOrbitLabel,
+  syncNoticeStep,
+  type DeleteAccountEvent,
+  type DeleteAccountState,
   type PauseEvent,
   type PauseState,
+  type SyncNoticeWatch,
 } from '@/ui/pauseState';
+import { renderAccountLine, runDeleteAccount, type AccountView } from '@/ui/accountMenu';
+import type { SyncClient } from '@/net/SyncClient';
 import {
   SENSITIVITY_MAX,
   SENSITIVITY_MIN,
@@ -56,7 +67,18 @@ export interface PauseOptions {
   readonly input?: { setStickSettings(s: StickSettings): void } | null;
   /** [v4-save] SAVE: the game's one writer (SaveGame). Absent: the button does nothing. */
   readonly save?: { saveNow(reason: 'manual'): Promise<boolean> } | null;
+  /**
+   * [v4-net] Task 6: the cloud sync — its status sits under the account line
+   * and a change is logged once; DELETE ACCOUNT goes through it (R54).
+   */
+  readonly sync?: (Pick<SyncClient, 'status' | 'statusText'> & Partial<Pick<SyncClient, 'deleteAccount'>>) | null;
+  /** [v4-net] The account the sheet shows (R51, R57); omitted = none. */
+  readonly account?: AccountView;
+  /** [v4-net] The account changed here (deleted): the title follows. */
+  readonly onAccount?: (account: AccountView) => void;
 }
+
+type PauseSync = NonNullable<PauseOptions['sync']>;
 
 const CONTROLS: ReadonlyArray<readonly [string, string]> = [
   ['MOUSE · ARROWS', 'PITCH AND YAW'],
@@ -110,12 +132,38 @@ export class Pause implements GameModule {
   private readonly input: { setStickSettings(s: StickSettings): void } | null;
   private readonly save: { saveNow(reason: 'manual'): Promise<boolean> } | null;
 
+  // [v4-net] Task 6
+  private readonly sync: PauseSync | null;
+  private readonly onAccount: ((account: AccountView) => void) | null;
+  private account: AccountView;
+  private syncWatch: SyncNoticeWatch;
+  private deleteState: DeleteAccountState = DELETE_DISARMED;
+  private deleting = false;
+  private accountBox: HTMLDivElement | null = null;
+  private syncLineEl: HTMLDivElement | null = null;
+  private deleteBtn: HTMLButtonElement | null = null;
+  private shownSyncLine: string | null = null;
+
   constructor(opts: PauseOptions) {
     this.universe = opts.universe;
     this.recovery = opts.recovery;
     this.warp = opts.warp;
     this.input = opts.input ?? null;
     this.save = opts.save ?? null;
+    this.sync = opts.sync ?? null;
+    this.onAccount = opts.onAccount ?? null;
+    this.account = opts.account ?? { kind: 'hidden' };
+    // The boot's status is already in the boot notices: only changes are logged.
+    this.syncWatch = this.sync
+      ? initialSyncNotice(this.sync.status(), this.sync.statusText())
+      : initialSyncNotice('off', null);
+  }
+
+  /** [v4-net] The account changed (signed out on the title). */
+  setAccount(account: AccountView): void {
+    this.account = account;
+    this.deleteState = DELETE_DISARMED;
+    this.renderAccount();
   }
 
   /** [v4-save] The SAVE button: saves when the sheet is up (SaveGame logs SAVED / SAVE FAILED). */
@@ -199,6 +247,8 @@ export class Pause implements GameModule {
     if (r.effect === 'respawn') this.recovery.request('requested');
     if (r.effect === 'save') void this.save?.saveNow('manual');
     if (this.state.open !== was) {
+      // Closing the sheet disarms DELETE ACCOUNT, as leaving NEW GAME does.
+      if (!this.state.open) this.deleteStep({ kind: 'closed' });
       bus.emit('log', { text: this.state.open ? 'PAUSED' : 'RESUMED', tone: 'normal' });
       if (this.state.open) this.syncSettings();
     }
@@ -217,7 +267,75 @@ export class Pause implements GameModule {
     }
   }
 
+  // ------------------------------------------------------------ account
+
+  private deleteStep(e: DeleteAccountEvent): void {
+    const r = deleteAccountStep(this.deleteState, e);
+    this.deleteState = r.state;
+    if (r.effect.kind === 'deleteAccount' && r.effect.confirmed) void this.deleteAccount();
+    if (this.deleteBtn) this.deleteBtn.textContent = deleteAccountLabel(this.deleteState);
+  }
+
+  private async deleteAccount(): Promise<void> {
+    const sync = this.sync;
+    if (this.deleting || !sync?.deleteAccount) return;
+    this.deleting = true;
+    try {
+      const r = await runDeleteAccount({ deleteAccount: () => sync.deleteAccount!() }, this.account);
+      if (r.notice) bus.emit('log', { text: r.notice, tone: 'warn' });
+      if (r.account !== this.account) {
+        this.account = r.account;
+        this.renderAccount();
+        this.onAccount?.(r.account);
+      }
+    } finally {
+      this.deleting = false;
+    }
+  }
+
+  /** The account line, the sync line under it, DELETE ACCOUNT — or none of them (R57). */
+  private renderAccount(): void {
+    const view = pauseAccountView(this.account, this.sync?.statusText() ?? null);
+    if (this.accountBox) {
+      this.accountBox.replaceChildren();
+      // R52: the name by textContent only.
+      const line = renderAccountLine(document, this.account);
+      if (line) {
+        line.classList.add('os-pz-account-line');
+        this.accountBox.appendChild(line);
+      }
+      const sync = document.createElement('div');
+      sync.className = 'os-pz-sync';
+      sync.textContent = view.syncLine ?? '';
+      this.accountBox.appendChild(sync);
+      this.syncLineEl = sync;
+      this.shownSyncLine = view.syncLine;
+      this.accountBox.hidden = view.line === null;
+    }
+    if (this.deleteBtn) {
+      this.deleteBtn.hidden = !view.deleteAccount;
+      this.deleteBtn.textContent = deleteAccountLabel(this.deleteState);
+    }
+  }
+
+  /** A sync status change: logged once (R56: a status without text logs nothing), and the line follows. */
+  private watchSync(): void {
+    const sync = this.sync;
+    if (!sync) return;
+    const text = sync.statusText();
+    const r = syncNoticeStep(this.syncWatch, sync.status(), text);
+    this.syncWatch = r.watch;
+    if (r.notice) bus.emit('log', { text: r.notice, tone: 'warn' });
+    const line = pauseAccountView(this.account, text).syncLine;
+    if (this.syncLineEl && line !== this.shownSyncLine) {
+      this.shownSyncLine = line;
+      this.syncLineEl.textContent = line ?? '';
+    }
+  }
+
   update(dt: number, ctx: EngineContext): void {
+    this.watchSync();
+
     // Esc with the pointer free arrives as a key, through Input as usual.
     if (!this.state.open && ctx.input.pressed('pause')) {
       this.dispatch({ type: 'escKey', t: performance.now() });
@@ -259,6 +377,11 @@ export class Pause implements GameModule {
     title.className = 'os-pz-title';
     title.textContent = 'PAUSED';
     sheet.appendChild(title);
+
+    // [v4-net] The account line and the sync status under it (signed in only).
+    this.accountBox = document.createElement('div');
+    this.accountBox.className = 'os-pz-account';
+    sheet.appendChild(this.accountBox);
 
     // Controls. Built with textContent throughout — nothing here is HTML.
     const list = document.createElement('dl');
@@ -354,6 +477,9 @@ export class Pause implements GameModule {
     resume.classList.add('is-primary');
     this.button(actions, 'SAVE', () => this.requestSave());
     this.returnBtn = this.button(actions, returnToOrbitLabel(false), () => this.dispatch({ type: 'returnToOrbit' }));
+    // [v4-net] R54: two presses, as NEW GAME; any other button disarms it.
+    this.deleteBtn = this.button(actions, deleteAccountLabel(this.deleteState), () => this.deleteStep({ kind: 'press' }));
+    this.deleteBtn.classList.add('is-danger');
 
     const foot = document.createElement('footer');
     foot.className = 'os-pz-foot';
@@ -362,6 +488,7 @@ export class Pause implements GameModule {
 
     host.appendChild(root);
     this.root = root;
+    this.renderAccount();
     this.syncSettings();
 
     // Keep the inputs in step with whatever is stored, without re-querying.
@@ -416,6 +543,8 @@ export class Pause implements GameModule {
     b.textContent = label;
     b.addEventListener('click', (e) => {
       e.stopPropagation();
+      // Any other button disarms DELETE ACCOUNT (R54), as on the title.
+      if (b !== this.deleteBtn) this.deleteStep({ kind: 'other' });
       fn();
     });
     parent.appendChild(b);
@@ -492,5 +621,10 @@ const PAUSE_CSS = /* css */ `
 }
 .os-pz-btn:hover, .os-pz-btn:focus-visible { border-color: var(--amber); color: var(--amber); outline: none; }
 .os-pz-btn.is-primary { color: var(--amber); background: rgba(255,180,84,0.05); }
+.os-pz-account { margin: -8px 0 14px; font-size: 10px; letter-spacing: 0.12em; display: grid; gap: 3px; }
+.os-pz-account[hidden], .os-pz-btn[hidden] { display: none; }
+.os-pz-account-line { color: #a7b0b5; }
+.os-pz-sync { color: var(--amber); opacity: 0.85; min-height: 1em; }
+.os-pz-btn.is-danger:hover, .os-pz-btn.is-danger:focus-visible { border-color: #ff5f56; color: #ff5f56; }
 .os-pz-foot { margin-top: 14px; color: #6a727a; font-size: 10px; letter-spacing: 0.08em; }
 `;

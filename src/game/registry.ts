@@ -78,6 +78,10 @@ import { decideBoot, logBeforeWorld, restartAfterRestoreFail } from '@/save/boot
 import { createApi } from '@/net/api';
 import { runBootSync } from '@/net/bootSync';
 import { SyncClient } from '@/net/SyncClient';
+import { accountView, authReturn, type AccountView } from '@/ui/accountMenu';
+import { settleBootConflict } from '@/ui/conflictScreen';
+import { ConflictOverlay } from '@/ui/ConflictOverlay';
+import { bodyNameResolver } from './bodyNames';
 import type { SaveStore } from '@/save/store';
 import type { GameEvents } from '@/core/EventBus';
 // -----------------------------------------------------------------------------
@@ -311,6 +315,8 @@ export interface BootState {
   readonly storeAvailable: boolean;
   /** v4 sub-plan 4, Task 5: the cloud sync — SaveGame tells it of every durable save. */
   readonly sync: SyncClient;
+  /** v4 sub-plan 4, Task 6: what the menus show of the account (R51). */
+  readonly account: AccountView;
 }
 
 /** localStorage, or null where the browser refuses it. */
@@ -355,6 +361,25 @@ export async function loadBoot(): Promise<BootState> {
     uuid: () => crypto.randomUUID(),
   });
   const synced = await runBootSync({ sync, store, wal, writer: lock.writer });
+  // [v4-net] Task 6, R49: a conflict is chosen here, before the game goes on —
+  // the chosen save is in the store when decideBoot reads it.
+  const conflict = await settleBootConflict({
+    boot: synced,
+    sync,
+    choose: (view) => new ConflictOverlay().show(view),
+    nowMs: () => Date.now(),
+    // R55/R58: names are generated only if a card asks for one.
+    bodyName: bodyNameResolver([synced.local, synced.cloud]),
+  });
+  // R50: back from Discord with ?auth=…: its notice, and the parameter leaves the URL.
+  const auth = authReturn(window.location.href);
+  if (auth.href !== null) {
+    try {
+      window.history.replaceState(window.history.state, '', auth.href);
+    } catch {
+      // a URL that cannot be rewritten keeps its parameter; the notice still shows
+    }
+  }
   const d = await decideBoot({
     search: window.location.search,
     store,
@@ -367,8 +392,12 @@ export async function loadBoot(): Promise<BootState> {
       window.history.replaceState(window.history.state, '', u.toString());
     },
   });
-  const syncNotices = [synced.notice, sync.statusText()].filter((t): t is string => t !== null);
-  return { ...d, notices: [...syncNotices, ...d.notices], store, lock, sync };
+  const status = sync.statusText();
+  const syncNotices = [auth.notice, synced.notice, ...conflict.notices, status].filter(
+    (t, i, all): t is string => t !== null && all.indexOf(t) === i,
+  );
+  const account = accountView({ reader: !lock.writer, identity: sync.identity() });
+  return { ...d, notices: [...syncNotices, ...d.notices], store, lock, sync, account };
 }
 
 export async function registerModules(engine: Engine, progress: ProgressFn, boot: BootState): Promise<void> {
@@ -502,6 +531,8 @@ export async function registerModules(engine: Engine, progress: ProgressFn, boot
   let saveGame: SaveGame | null = null;
   const critical = (used: GameEvents['emergency:used']): void => saveGame?.critical(used);
   const recovery = new RecoveryCut(universe, shipLog, critical);
+  // [v4-net] The title is made last; the pause sheet reaches it through this.
+  let title: Title | null = null;
   await engine.add(recovery);
   const pause = new Pause({
     universe,
@@ -509,6 +540,10 @@ export async function registerModules(engine: Engine, progress: ProgressFn, boot
     warp,
     input: engine.input,
     save: { saveNow: (reason) => saveGame?.saveNow(reason) ?? Promise.resolve(false) },
+    // [v4-net] Task 6: the account line, the sync status, DELETE ACCOUNT.
+    sync: boot.sync,
+    account: boot.account,
+    onAccount: (account) => title?.setAccount(account),
   });
   await engine.add(pause);
   // [v4-fuel] the emergency exit on an empty tank; its line rides NAV ADVISORY.
@@ -629,7 +664,15 @@ export async function registerModules(engine: Engine, progress: ProgressFn, boot
   // writers: its lateUpdate overrides the flight rig (see game/Photo.ts).
   await engine.add(new Photo(engine, postfx));
   await engine.add(new DevOverlay(engine, parseRoute(window.location.search).dev === true));
-  await engine.add(new Title({ universeSeed: universe.seed, hasSave, onContinue: continueGame }));
+  title = new Title({
+    universeSeed: universe.seed,
+    hasSave,
+    onContinue: continueGame,
+    account: boot.account,
+    sync: boot.sync,
+    onAccount: (account) => pause.setAccount(account),
+  });
+  await engine.add(title);
 
   registerShot({
     name: 'game-opening',

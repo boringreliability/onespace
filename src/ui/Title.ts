@@ -15,6 +15,8 @@ import { activeShotName } from '@/game/Shots';
 import { bus } from '@/core/EventBus';
 import { newGameSearch } from '@/core/Route';
 import { issueNewGameNonce } from '@/save/newGameNonce';
+import type { SyncClient } from '@/net/SyncClient';
+import { SIGN_IN_PATH, renderAccountLine, runSignOut, type AccountView } from './accountMenu';
 import { initialTitle, titleKey, titleLabel, titleStep, type TitleEffect, type TitleEvent, type TitleState } from './titleMenu';
 
 /** [v4-save] Task 6: what the title knows of the save, and what CONTINUE does. */
@@ -24,6 +26,12 @@ export interface TitleOptions {
   readonly hasSave?: boolean;
   /** Called on CONTINUE before flight starts (SaveGame.continueFrom). */
   readonly onContinue?: () => void;
+  /** [v4-net] Task 6: the account the menu shows (R51); omitted = none (no account items). */
+  readonly account?: AccountView;
+  /** [v4-net] SIGN OUT (R53). */
+  readonly sync?: Pick<SyncClient, 'signOut'> | null;
+  /** [v4-net] The account changed here (signed out): the pause sheet follows. */
+  readonly onAccount?: (account: AccountView) => void;
 }
 
 export class Title implements GameModule {
@@ -35,6 +43,9 @@ export class Title implements GameModule {
   private settings: HTMLDivElement | null = null;
   private seedInput: HTMLInputElement | null = null;
   private seedError: HTMLDivElement | null = null;
+  private menu: HTMLDivElement | null = null;
+  private accountSlot: HTMLDivElement | null = null;
+  private signingOut = false;
   private canvas: HTMLCanvasElement | null = null;
   private shown = false;
 
@@ -42,7 +53,7 @@ export class Title implements GameModule {
 
   constructor(private readonly opts: TitleOptions) {
     this.universeSeed = opts.universeSeed;
-    this.state = initialTitle({ hasSave: opts.hasSave === true });
+    this.state = initialTitle({ hasSave: opts.hasSave === true, account: opts.account });
   }
 
   init(ctx: EngineContext): void {
@@ -53,6 +64,7 @@ export class Title implements GameModule {
     root.innerHTML = `
       <div class="os-title-name">O N E S P A C E</div>
       <div class="os-title-sub">a procedurally generated noir odyssey</div>
+      <div class="os-title-account"></div>
       <div class="os-title-menu"></div>
       <div class="os-title-settings" hidden>
         <label>QUALITY <select class="os-title-tier"></select></label>
@@ -66,19 +78,9 @@ export class Title implements GameModule {
     style.textContent = CSS;
     root.appendChild(style);
 
-    const menu = root.querySelector('.os-title-menu') as HTMLDivElement;
-    this.state.items.forEach((item, i) => {
-      const b = document.createElement('button');
-      b.textContent = titleLabel(this.state, item);
-      b.addEventListener('click', () => this.dispatch({ kind: 'click', index: i }));
-      b.addEventListener('mouseenter', () => {
-        // Moving to another item disarms NEW GAME, as the keys do.
-        if (this.state.index !== i) this.state = { ...this.state, index: i, armed: false };
-        this.render();
-      });
-      menu.appendChild(b);
-      this.items.push(b);
-    });
+    this.menu = root.querySelector('.os-title-menu') as HTMLDivElement;
+    this.accountSlot = root.querySelector('.os-title-account') as HTMLDivElement;
+    this.buildItems();
 
     this.settings = root.querySelector('.os-title-settings');
     const tier = root.querySelector('.os-title-tier') as HTMLSelectElement;
@@ -108,6 +110,39 @@ export class Title implements GameModule {
     host.appendChild(root);
     this.root = root;
     window.addEventListener('keydown', this.onKey, true);
+    this.render();
+  }
+
+  /** The menu's buttons and the account line, (re)built for the current items. */
+  private buildItems(): void {
+    const menu = this.menu;
+    if (!menu) return;
+    for (const b of this.items) b.remove();
+    this.items = [];
+    this.state.items.forEach((item, i) => {
+      const b = document.createElement('button');
+      b.textContent = titleLabel(this.state, item);
+      b.addEventListener('click', () => this.dispatch({ kind: 'click', index: i }));
+      b.addEventListener('mouseenter', () => {
+        // Moving to another item disarms NEW GAME, as the keys do.
+        if (this.state.index !== i) this.state = { ...this.state, index: i, armed: false };
+        this.render();
+      });
+      menu.appendChild(b);
+      this.items.push(b);
+    });
+    if (this.accountSlot) {
+      // R52: the Discord name only ever as textContent (renderAccountLine).
+      this.accountSlot.replaceChildren();
+      const line = renderAccountLine(document, this.state.account);
+      if (line) this.accountSlot.appendChild(line);
+    }
+  }
+
+  /** [v4-net] The account changed (here or in the pause sheet). */
+  setAccount(account: AccountView): void {
+    this.state = titleStep(this.state, { kind: 'account', account }).state;
+    this.buildItems();
     this.render();
   }
 
@@ -154,6 +189,14 @@ export class Title implements GameModule {
       case 'settings':
         if (this.settings) this.settings.hidden = !this.settings.hidden;
         return;
+      case 'signin':
+        // A full-page navigation to the server's OAuth start (never a popup):
+        // Discord sends the player back to /?auth=… (accountMenu.authReturn).
+        window.location.assign(SIGN_IN_PATH);
+        return;
+      case 'signout':
+        void this.signOut();
+        return;
       case 'reseed': {
         const u = new URL(window.location.href);
         u.searchParams.set('seed', effect.seed.toString(16));
@@ -162,6 +205,23 @@ export class Title implements GameModule {
       }
       case 'none':
         return;
+    }
+  }
+
+  private async signOut(): Promise<void> {
+    if (this.signingOut || !this.opts.sync) return;
+    this.signingOut = true;
+    try {
+      const r = await runSignOut(this.opts.sync, this.state.account);
+      if (r.notice) bus.emit('log', { text: r.notice, tone: 'warn' });
+      if (r.account !== this.state.account) {
+        this.state = titleStep(this.state, { kind: 'account', account: r.account }).state;
+        this.buildItems();
+        this.render();
+        this.opts.onAccount?.(r.account);
+      }
+    } finally {
+      this.signingOut = false;
     }
   }
 
@@ -223,6 +283,7 @@ const CSS = /* css */ `
 .os-title-name { font-size: 1.6rem; letter-spacing: 0.6em; color: #ffd49a;
   text-shadow: 0 0 6px rgba(255,180,84,0.5), 0 0 30px rgba(255,180,84,0.15); }
 .os-title-sub { font-size: 0.68rem; letter-spacing: 0.35em; text-transform: uppercase; margin-bottom: 2rem; }
+.os-title-account { min-height: 1em; font-size: 0.62rem; letter-spacing: 0.25em; color: #7d858d; margin-top: -1.4rem; }
 .os-title-menu { display: flex; flex-direction: column; gap: 0.5rem; align-items: center; }
 .os-title-menu button { all: unset; cursor: pointer; font-size: 0.85rem; letter-spacing: 0.3em;
   padding: 0.2rem 1rem; color: #a8bac6; transition: color 0.25s ease, text-shadow 0.25s ease; }
