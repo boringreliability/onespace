@@ -348,4 +348,11 @@ describe('cardSummary — the conflict screen', () => {
     expect(c.savedAtWallMs).toBe(1_800_000_123_456);
     expect(c.systemName).toBe('Kesh');
   });
+
+  it('Given a capacity of 0 kg (capacity loss 1) or less, Then tankFrac is 0, never NaN, Infinity or negative', () => {
+    const s = save({ tank: 5_000 });
+    expect(cardSummary(s, 0).tankFrac).toBe(0);
+    expect(cardSummary(s, -1).tankFrac).toBe(0);
+    expect(cardSummary(save({ tank: 0 }), 0).tankFrac).toBe(0);
+  });
 });

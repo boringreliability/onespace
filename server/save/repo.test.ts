@@ -238,6 +238,17 @@ describe('putSave', () => {
     expect(await getHead(t.sql, a)).toEqual({ saveId: SAVE_X, revision: 5, save: s });
     expect(await n('actions', a)).toBe(N_ACTIONS);
   });
+
+  it('Given two users whose heads share saveId and revision but differ in content, When one puts its own save again, Then unchanged, and the other user save is a conflict (the body comparison is scoped to the user)', async () => {
+    const a = await user('a');
+    const b = await user('b');
+    const sa = mk({ revision: 3, tank: 12_000 });
+    const sb = mk({ revision: 3, tank: 5_000 });
+    await putSave(t.sql, a, { deviceId: DEV_A, base: null, save: sa });
+    await putSave(t.sql, b, { deviceId: DEV_B, base: null, save: sb });
+    expect(await putSave(t.sql, b, { deviceId: DEV_B, base: head(sb), save: sb })).toEqual({ kind: 'unchanged', revision: 3 });
+    expect(await putSave(t.sql, b, { deviceId: DEV_B, base: head(sb), save: sa })).toEqual({ kind: 'conflict', cloud: { revision: 3, save: sb } });
+  });
 });
 
 describe('resolveSave', () => {
@@ -393,6 +404,28 @@ describe('resolveSave', () => {
     expect(rs[0]!.revision).toBe(rs[1]!.revision);
     expect(rs[0]!.save).toEqual(rs[1]!.save);
     expect(rs[0]!.save.ship.propellant.massKg).toBe(8_000);
+  });
+
+  it('Given the client saw another game at the head revision number (cloud Y r6, head X r6), When resolve, Then conflict and nothing changes', async () => {
+    const a = await user('a');
+    const { base, device, cloudHead } = await diverged(a);
+    const before = { head: await getHead(t.sql, a), revs: await n('save_revisions', a) };
+    const r = await resolveSave(t.sql, a, { deviceId: DEV_B, keep: 'device', device, base: head(base), cloud: { saveId: SAVE_Y, revision: cloudHead.revision } });
+    expect(r.kind).toBe('conflict');
+    expect(await getHead(t.sql, a)).toEqual(before.head);
+    expect(await n('save_revisions', a)).toBe(before.revs);
+  });
+
+  it('Given two users with a head, When one resolves different games with keep "cloud", Then only that user head gets the resolve key', async () => {
+    const a = await user('a');
+    const b = await user('b');
+    const x = mk({ revision: 3 });
+    await putSave(t.sql, a, { deviceId: DEV_A, base: null, save: x });
+    await putSave(t.sql, b, { deviceId: DEV_B, base: null, save: x });
+    await resolveSave(t.sql, a, { deviceId: DEV_A, keep: 'cloud', device: mk({ saveId: SAVE_Y }), base: head(x), cloud: head(x) });
+    const keys = await t.sql<{ user_id: string; resolve_key: string | null }[]>`select user_id, resolve_key from saves`;
+    expect(keys.find((k: { user_id: string }) => k.user_id === a)!.resolve_key).toBe(`cloud:${SAVE_Y}:1:${SAVE_X}:3`);
+    expect(keys.find((k: { user_id: string }) => k.user_id === b)!.resolve_key).toBeNull();
   });
 });
 

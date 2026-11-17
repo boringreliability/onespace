@@ -106,6 +106,13 @@ describe('sessionUser', () => {
     });
   });
 
+  describe('given a session at its exact expiry instant', () => {
+    it('when looked up at exactly 30 days, then it returns null (expires_at is exclusive)', async () => {
+      const token = await createSession(t.sql, userId, NOW);
+      expect(await sessionUser(t.sql, token, NOW + 30 * DAY)).toBeNull();
+    });
+  });
+
   describe('given an expired session', () => {
     it('when looked up after the 30 days, then it returns null', async () => {
       const token = await createSession(t.sql, userId, NOW);

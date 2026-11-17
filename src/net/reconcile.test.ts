@@ -170,6 +170,19 @@ describe('reconcile — signed in as the bound account', () => {
     expect(kind({ local: save({ revision: 7 }), cloud: save({ revision: 7 }), state: boundTo(me, null), me })).toBe('conflict-same');
   });
 
+  it("Given another device started NEW GAME that sits at the SAME revision number as L (cloud Y r7, local = L X r7), Then 'use-cloud' — a new saveId is ahead whatever its revision", () => {
+    expect(kind({ local: save({ revision: 7 }), cloud: save({ saveId: GAME_Y, revision: 7 }), state: boundTo(me, L), me })).toBe(
+      'use-cloud',
+    );
+  });
+
+  it("Ruling R37: Given the cloud moved to the SAME revision as local on the same game with other content (local r7 behind L r9, cloud r7), Then 'conflict-same' — an equal revision is not strictly newer", () => {
+    const L9 = save({ revision: 9 });
+    expect(kind({ local: save({ revision: 7, tank: 100 }), cloud: save({ revision: 7, tank: 9_000 }), state: boundTo(me, L9), me })).toBe(
+      'conflict-same',
+    );
+  });
+
   it('Given the persisted state after a mid-game 409 (conflict: true, L unchanged at r7), local r12 and the cloud r9, When the game reloads, Then a conflict decision', () => {
     const state = boundTo(me, L, { conflict: true });
     expect(kind({ local: save({ revision: 12 }), cloud: save({ revision: 9 }), state, me })).toBe('conflict-same');
@@ -215,6 +228,10 @@ describe('reconcile — a guest save or a fresh device (state.accountId = null)'
     ).toBe('conflict-same');
   });
 
+  it("Given a guest save of the cloud's game at an OLDER revision (local r7, cloud r8), Then 'conflict-same' — a guest save is never silently replaced by the cloud", () => {
+    expect(kind({ local: save({ revision: 7 }), cloud: save({ revision: 8 }), state: syncState(), me })).toBe('conflict-same');
+  });
+
   it("Given a guest save of the cloud's game at another revision, Then 'conflict-same'", () => {
     expect(kind({ local: save({ revision: 8 }), cloud: save({ revision: 7 }), state: syncState(), me })).toBe('conflict-same');
   });
@@ -227,6 +244,11 @@ describe('reconcile — the local save is bound to another account (§5.4)', () 
   it('Given a save bound to A with unsynced progress (local r9, L r7) and B signed in, Then refuse-switch with the verbatim text naming A', () => {
     const d = rc({ local: save({ revision: 9 }), cloud: null, state: boundTo(ACCT_A, L), me });
     expect(d).toEqual({ kind: 'refuse-switch', message: 'UNSYNCED PROGRESS FOR Ava — SIGN IN AS Ava ONCE ONLINE TO SYNC' });
+  });
+
+  it('Given a save bound to A with unsynced progress but no stored account name and B signed in, Then the refuse-switch text names A by id', () => {
+    const d = rc({ local: save({ revision: 9 }), cloud: null, state: boundTo(ACCT_A, L, { accountName: null }), me });
+    expect(d).toEqual({ kind: 'refuse-switch', message: `UNSYNCED PROGRESS FOR ${ACCT_A.id} — SIGN IN AS ${ACCT_A.id} ONCE ONLINE TO SYNC` });
   });
 
   it("Given a save bound to A that never reached A's cloud (L = null) and B signed in, Then 'refuse-switch'", () => {
