@@ -13,7 +13,8 @@
     "test": "vitest run",
     "test:server": "vitest run -c vitest.server.config.ts",
     "test:watch": "vitest",
-    "verify": "npm run typecheck && npm test && node scripts/gen-smoke.mjs && node scripts/ship-smoke.mjs"
+    "e2e:cloud": "node scripts/e2e-cloud.mjs",
+    "verify":"npm run typecheck && npm test && node scripts/gen-smoke.mjs && node scripts/ship-smoke.mjs"
   },
   "dependencies": {
     "@hono/node-server": "^2.1.8",
