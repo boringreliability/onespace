@@ -397,3 +397,43 @@ describe('Ruling R72 — the refuse-switch text passes the name through displayN
     expect((d as { message: string }).message).not.toMatch(/[‮​\n]/u);
   });
 });
+
+// =============================================================================
+//  Addendum 2 — Ruling R79: the R75 conflict survives a reboot. The sync state
+//  carries `unmergedCloud?: { saveId, revision }` (the head of a resolve result
+//  that was NOT applied over a local save that had advanced). Bound to me,
+//  while it is set and the cloud is that save or a newer revision of the same
+//  game, the decision is conflict-same — never push-local — even though L
+//  equals the cloud head. The rule lives in reconcile (it reads state).
+// =============================================================================
+
+describe('Ruling R79 — an unmerged cloud keeps the conflict', () => {
+  const me = ACCT_B;
+  const L10 = save({ revision: 10 });
+  const unmerged = (o: Partial<SyncState> = {}): SyncState =>
+    boundTo(me, L10, { conflict: true, unmergedCloud: { saveId: GAME_X, revision: 10 }, ...o });
+
+  it("Ruling R79: Given unmergedCloud = r10 = L = the cloud head and local r11, Then 'conflict-same' (not push-local)", () => {
+    expect(kind({ local: save({ revision: 11, tank: 4_000 }), cloud: save({ revision: 10, tank: 5_000 }), state: unmerged(), me })).toBe('conflict-same');
+  });
+
+  it("Ruling R79: Given the same, but the persisted conflict flag already cleared, Then still 'conflict-same' — unmergedCloud alone carries the rule", () => {
+    expect(kind({ local: save({ revision: 11, tank: 4_000 }), cloud: save({ revision: 10, tank: 5_000 }), state: unmerged({ conflict: false }), me })).toBe('conflict-same');
+  });
+
+  it("Ruling R79 (guard): Given unmergedCloud = r10 and the cloud moved on to r12 on the same game, Then 'conflict-same'", () => {
+    expect(kind({ local: save({ revision: 11, tank: 4_000 }), cloud: save({ revision: 12 }), state: unmerged(), me })).toBe('conflict-same');
+  });
+
+  it("Ruling R79 (guard): Given the R75 state WITHOUT unmergedCloud, Then 'push-local' — the rule is keyed on the field", () => {
+    expect(kind({ local: save({ revision: 11, tank: 4_000 }), cloud: save({ revision: 10, tank: 5_000 }), state: boundTo(me, L10), me })).toBe('push-local');
+  });
+
+  it("Ruling R79 (guard): Given unmergedCloud and local identical to the cloud, Then 'in-sync' (R43 still first)", () => {
+    expect(kind({ local: save({ revision: 10 }), cloud: save({ revision: 10 }), state: unmerged(), me, sameContent: true })).toBe('in-sync');
+  });
+
+  it("Ruling R79 (guard): Given unmergedCloud and no local save, Then 'use-cloud' (R41)", () => {
+    expect(kind({ local: null, cloud: save({ revision: 10 }), state: unmerged(), me })).toBe('use-cloud');
+  });
+});

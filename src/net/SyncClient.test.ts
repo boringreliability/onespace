@@ -1885,6 +1885,118 @@ describe('Ruling R69 — resolve is persisted, retried once, and replayed verbat
     await settle(10_000);
     expect(out).toEqual({ ok: true, save: result });
   });
+
+  // ---------------------------------------------------------------------------
+  // Addendum 2 — Ruling R79: the R75 conflict survives a reboot (sync state
+  // `unmergedCloud: { saveId, revision }` = the result head; reconcile reads it).
+
+  /** Sessions 1–2: a lost resolve (device r9), the player plays on to r11, the next boot is the R75 conflict. */
+  async function r75Boot(result: SaveV1, advanced: SaveV1): Promise<Rig> {
+    const r1 = await lostResolve();
+    r1.sync.onStored(advanced);
+    await r1.ts.store.save(advanced);
+    const r2 = nextBoot(r1, { getSave: () => cloudReply(result), resolve: () => ok(200, { revision: result.revision, save: result }) });
+    expect((await r2.sync.boot(advanced)).decision).toEqual({ kind: 'conflict-same' });
+    return r2;
+  }
+
+  it.each(['device', 'cloud'] as const)(
+    "Ruling R79: Given the R75 conflict (local r11, result r10 = L), When the game reloads with nothing changed, Then conflict-same again and zero PUTs; When resolve('%s') then succeeds, Then unmergedCloud is gone and a later boot behaves normally (local r13 over cloud r12 is push-local)",
+    async (keep) => {
+      const result = save({ revision: 10, tank: 5_000 });
+      const advanced = save({ revision: 11, tank: 4_000 });
+      const r2 = await r75Boot(result, advanced);
+      expect(r2.state().unmergedCloud).toEqual({ saveId: GAME_X, revision: 10 });
+      expect(r2.state().lastSeenCloud).toEqual({ saveId: GAME_X, revision: 10 });
+
+      // Reload: nothing changed — the cloud is still exactly L.
+      const resolved = save({ revision: 12, tank: 3_500 });
+      const r3 = nextBoot(r2, { getSave: () => cloudReply(result), resolve: () => ok(200, { revision: 12, save: resolved }) });
+      const b3 = await r3.sync.boot(advanced);
+      expect(b3.decision).toEqual({ kind: 'conflict-same' });
+      expect(b3.cloud).toEqual(result);
+      expect(r3.sync.status()).toBe('conflict');
+      r3.sync.onStored(save({ revision: 12, tank: 3_900 }));
+      await settle(TEN_MIN);
+      expect(r3.api.puts).toEqual([]);
+
+      // The player chooses; the resolve is acknowledged.
+      expect((await r3.sync.resolve(keep)).ok).toBe(true);
+      expect(r3.state().unmergedCloud ?? null).toBeNull();
+      expect(r3.state().conflict).toBe(false);
+
+      // A later boot: the cloud holds the resolved r12, the player has played on to r13 — normal rules: push-local, PUT r13.
+      const r4 = nextBoot(r3, { getSave: () => cloudReply(resolved) });
+      expect((await r4.sync.boot(save({ revision: 13, tank: 3_400 }))).decision).toEqual({ kind: 'push-local' });
+      await settle(PUSH_MIN_INTERVAL_MS);
+      expect(r4.api.puts.map((p) => [p.base, p.save.revision])).toEqual([[{ saveId: GAME_X, revision: 12 }, 13]]);
+    },
+  );
+
+  it('Ruling R79: Given the R75 conflict persisted and the local save gone (no local), When the next boot takes the cloud save (use-cloud), Then unmergedCloud is cleared', async () => {
+    const result = save({ revision: 10, tank: 5_000 });
+    const r2 = await r75Boot(result, save({ revision: 11, tank: 4_000 }));
+    const r3 = nextBoot(r2, { getSave: () => cloudReply(result) });
+    expect((await r3.sync.boot(null)).decision).toEqual({ kind: 'use-cloud' });
+    expect(r3.state().unmergedCloud ?? null).toBeNull();
+  });
+
+  it.each(['offline', 'timeout'] as const)(
+    'Ruling R79 (guard, R46): Given the R75 conflict persisted, When the next boot cannot reach the cloud (%s), Then status conflict and no PUT for the session, and unmergedCloud is kept',
+    async (how) => {
+      const r2 = await r75Boot(save({ revision: 10, tank: 5_000 }), save({ revision: 11, tank: 4_000 }));
+      const r3 = nextBoot(r2, how === 'offline' ? { me: () => fail('offline'), getSave: () => fail('offline') } : { me: never, getSave: never });
+      const done = r3.sync.boot(save({ revision: 11, tank: 4_000 }));
+      if (how === 'timeout') await settle(3_000);
+      expect((await done).decision.kind).toBe('local-only');
+      expect(r3.sync.status()).toBe('conflict');
+      r3.api.reply.me = () => ok(200, { ...ACCT_B });
+      r3.sync.onStored(save({ revision: 12 }));
+      await settle(TEN_MIN);
+      expect(r3.api.puts).toEqual([]);
+      expect(r3.state().unmergedCloud).toEqual({ saveId: GAME_X, revision: 10 });
+    },
+  );
+
+  // ---------------------------------------------------------------------------
+  // Addendum 2 — Ruling R80: a replay that answers after the boot budget changes nothing mid-session.
+
+  it.each<[string, ApiResult]>([
+    ['200 with the result', ok(200, { revision: 10, save: save({ revision: 10, tank: 5_000 }) })],
+    ['a 500', fail(500)],
+    ['a 409', fail(409, { body: { cloud: { revision: 11, save: save({ revision: 11 }) } } })],
+  ])(
+    'Ruling R80: Given the boot replay outlived the 3 s budget (boot went local-only), When it answers %s afterwards, Then store, sync state, status and L are untouched and pendingResolve is still there — and the next boot replays the identical body',
+    async (_what, late) => {
+      const r1 = await lostResolve();
+      const answer = deferred();
+      const r = nextBoot(r1, { getSave: () => cloudReply(save({ revision: 10 })), resolve: () => answer.promise });
+      const done = r.sync.boot(save({ revision: 9 }));
+      await settle(3_000);
+      expect((await done).decision.kind).toBe('local-only');
+      const stateBefore = r.storage.getItem(SYNC_KEY);
+      const storeBefore = await r.ts.current();
+      const statusBefore = r.sync.status();
+      r.ts.calls.length = 0;
+
+      answer.settle(late);
+      await settle(0);
+      await settle(TEN_MIN);
+      expect(r.storage.getItem(SYNC_KEY)).toBe(stateBefore);
+      expect(r.state().pendingResolve).toEqual(DEVICE_BODY());
+      expect(r.state().lastSeenCloud).toEqual({ saveId: GAME_X, revision: 7 });
+      expect(r.state().conflict).toBe(true);
+      expect(await r.ts.current()).toEqual(storeBefore);
+      expect(r.ts.calls).toEqual([]);
+      expect(r.sync.status()).toBe(statusBefore);
+      expect(r.api.puts).toEqual([]);
+
+      const result = save({ revision: 10, tank: 5_000 });
+      const next = nextBoot(r, { getSave: () => cloudReply(result), resolve: () => ok(200, { revision: 10, save: result }) });
+      await next.sync.boot(save({ revision: 9 }));
+      expect(next.api.resolves).toEqual([DEVICE_BODY()]);
+    },
+  );
 });
 
 describe('Ruling R71 — the unchosen cloud snapshot goes on the shelf', () => {
@@ -1940,7 +2052,9 @@ class RefusingStorage extends MemoryStorage {
 }
 
 describe('Ruling R74 — what happens when the sync state cannot be written', () => {
-  it("Ruling R74: Given a conflict and a sync state that cannot record the pending resolve (quota), When resolve('device'), Then NO POST is sent, it answers {ok: false, reason: 'offline'}, the conflict flag stays and nothing is written", async () => {
+  // CHANGED by Ruling R78 (addendum 2): narrowed to persistent storage in use (the state was read from it) that refuses the
+  // write; was "Given a conflict and a sync state that cannot record the pending resolve (quota)…". Assertions unchanged.
+  it("Ruling R74/R78: Given a conflict, persistent storage in use (the sync state was read from it) and that storage refusing to record the pending resolve (quota), When resolve('device'), Then NO POST is sent, it answers {ok: false, reason: 'offline'}, the conflict flag stays and nothing is written", async () => {
     const storage = new RefusingStorage('"pendingResolve"', boundB(save({ revision: 7 })));
     const r = rig({
       storage,
@@ -1966,5 +2080,37 @@ describe('Ruling R74 — what happens when the sync state cannot be written', ()
     expect(r.api.puts.map((p) => p.save.revision)).toEqual([8]);
     expect((JSON.parse(storage.getItem(SYNC_KEY)!) as SyncState).lastSeenCloud).toEqual({ saveId: GAME_X, revision: 8 });
     expect(r.sync.status()).toBe('synced');
+  });
+});
+
+// =============================================================================
+//  Addendum 2 — Ruling R78: R74 blocks resolve only when persistent storage is
+//  in use and refuses the write. In memory mode — no storage, or the private-
+//  mode path where the state could not even be read (R32: sync works in
+//  memory) — resolve() proceeds and sends the POST unrecorded, as today.
+// =============================================================================
+
+describe('Ruling R78 — memory mode resolves unrecorded', () => {
+  it.each<[string, StorageLike | null]>([
+    ['no storage at all (null)', null],
+    ['private mode (every storage call throws)', new ThrowingStorage()],
+  ])("Ruling R78 (guard): Given %s and a guest save in conflict with B's cloud, When resolve('device'), Then the POST IS sent and the result is applied", async (_what, storage) => {
+    const local = save({ revision: 7 });
+    const api = fakeApi({ getSave: () => cloudReply(save({ saveId: GAME_Y, revision: 3 })), resolve: () => ok(200, { revision: 7, save: local }) });
+    const ts = testStore();
+    const sync = new SyncClient({
+      api,
+      storage,
+      isWriter: () => true,
+      schedule: timerSchedule,
+      store: ts.store,
+      wal: recordingWal(new MemoryStorage(), ts.calls),
+      uuid: () => DEVICE_ID,
+    });
+    await ts.store.save(local);
+    expect((await sync.boot(local)).decision.kind).toBe('conflict-different');
+    expect(await sync.resolve('device')).toEqual({ ok: true, save: local });
+    expect(api.resolves).toHaveLength(1);
+    expect(sync.status()).toBe('synced');
   });
 });

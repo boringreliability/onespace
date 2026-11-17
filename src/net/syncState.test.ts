@@ -189,3 +189,17 @@ describe('syncState — the in-flight marker and the pending resolve (R68, R69)'
     expect(uuid).not.toHaveBeenCalled();
   });
 });
+
+describe('syncState — the unmerged cloud head (R79)', () => {
+  it('Ruling R79: Given a state with unmergedCloud, When written and read back, Then it survives exactly (and an old state without it parses — pinned above)', () => {
+    const storage = new MemoryStorage();
+    const s = {
+      ...syncState({ accountId: ACCT_A.id, accountName: ACCT_A.name, lastSeenCloud: { saveId: GAME_X, revision: 10 }, conflict: true }),
+      unmergedCloud: { saveId: GAME_X, revision: 10 },
+    };
+    expect(writeSyncState(storage, s)).toBe(true);
+    const uuid = vi.fn(() => DEVICE_ID_2);
+    expect(readSyncState(storage, uuid)).toEqual(s);
+    expect(uuid).not.toHaveBeenCalled();
+  });
+});
