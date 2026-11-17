@@ -490,3 +490,17 @@ describe('settleBootConflict — R49 end to end (real SyncClient, store, decideB
     expect(r.sync.status()).toBe('conflict');
   });
 });
+
+// Task 6 fix round 1 — R62c: the dialog is named by its title.
+describe('Ruling R62c — ConflictOverlay.ts labels its dialog (source)', () => {
+  it('Ruling R62c: Given the role=dialog element, Then it has aria-labelledby pointing at the title element, which carries that id', () => {
+    const s = readFileSync(join(SRC_DIR, 'ConflictOverlay.ts'), 'utf8');
+    expect(s).toMatch(/setAttribute\(\s*'role',\s*'dialog'\s*\)/);
+    const m = /setAttribute\(\s*'aria-labelledby',\s*([^)]+)\)/.exec(s);
+    expect(m, 'aria-labelledby is set').not.toBeNull();
+    const ref = m![1]!.trim();
+    // The title element gets the same id: `title.id = <ref>` (a constant or a literal).
+    const assigned = new RegExp(`title\\.id\\s*=\\s*${ref.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`);
+    expect(s).toMatch(assigned);
+  });
+});

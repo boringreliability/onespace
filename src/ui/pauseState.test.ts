@@ -383,3 +383,69 @@ describe('v4-net Task 6 — Pause.ts wires the account (source)', () => {
     expect(s).toMatch(/syncNoticeStep\(/);
   });
 });
+
+// =============================================================================
+// Task 6 fix round 1 — R61: an auto-repeated key never arms and never
+// confirms DELETE ACCOUNT (the press event carries `repeat`); R62a: the
+// pointer entering another item disarms it, as on the title.
+// =============================================================================
+
+describe('Ruling R61 — a held key never arms or confirms DELETE ACCOUNT', () => {
+  it('Ruling R61: Given disarmed, When a repeated press arrives, Then the state is unchanged and there is no effect', () => {
+    const r = deleteAccountStep(DELETE_DISARMED, { kind: 'press', repeat: true });
+    expect(r.state).toEqual(DELETE_DISARMED);
+    expect(r.effect).toEqual({ kind: 'none' });
+  });
+
+  it('Ruling R61: Given armed, When a repeated press arrives, Then it stays armed and nothing is confirmed', () => {
+    const armed = deleteAccountStep(DELETE_DISARMED, { kind: 'press' }).state;
+    const r = deleteAccountStep(armed, { kind: 'press', repeat: true });
+    expect(r.state).toEqual({ armed: true });
+    expect(r.effect).toEqual({ kind: 'none' });
+  });
+
+  it('Ruling R61: Given a confirmed delete that failed (disarmed again), When Enter is held (repeated presses), Then it stays disarmed and no further delete is asked for', () => {
+    let s = deleteAccountStep(DELETE_DISARMED, { kind: 'press' }).state;
+    const confirm = deleteAccountStep(s, { kind: 'press' });
+    expect(confirm.effect).toEqual({ kind: 'deleteAccount', confirmed: true });
+    s = confirm.state; // the delete failed: a notice, nothing changed
+    expect(s.armed).toBe(false);
+    const effects: unknown[] = [];
+    for (let i = 0; i < 6; i++) {
+      const r = deleteAccountStep(s, { kind: 'press', repeat: true });
+      effects.push(r.effect);
+      s = r.state;
+    }
+    expect(s.armed).toBe(false);
+    expect(effects.every((e) => (e as { kind: string }).kind === 'none')).toBe(true);
+  });
+
+  it('Ruling R61: Given a non-repeated press (repeat false or absent), Then it arms as before', () => {
+    expect(deleteAccountStep(DELETE_DISARMED, { kind: 'press', repeat: false }).effect).toEqual({ kind: 'deleteAccount', confirmed: false });
+  });
+
+  it('Ruling R61: Given Pause.ts, Then its key handler suppresses repeated Enter / NumpadEnter / Space (preventDefault), so a held key cannot click a focused button again', () => {
+    const s = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'Pause.ts'), 'utf8');
+    expect(s).toMatch(/'NumpadEnter'/);
+    expect(s).toMatch(/'Enter'/);
+    expect(s).toMatch(/'Space'/);
+    const i = s.indexOf("'NumpadEnter'");
+    const near = s.slice(Math.max(0, i - 300), i + 300);
+    expect(near).toMatch(/\.repeat\b/);
+    expect(near).toMatch(/preventDefault\(\)/);
+  });
+});
+
+describe('Ruling R62a — the pointer entering another item disarms DELETE ACCOUNT', () => {
+  it('Ruling R62a: Given armed, When the pointer enters another item (an other event), Then it is disarmed', () => {
+    const armed = deleteAccountStep(DELETE_DISARMED, { kind: 'press' }).state;
+    const r = deleteAccountStep(armed, { kind: 'other' });
+    expect(r.state.armed).toBe(false);
+    expect(deleteAccountLabel(r.state)).toBe('DELETE ACCOUNT');
+  });
+
+  it('Ruling R62a: Given Pause.ts, Then the other buttons wire mouseenter/pointerenter to the other event', () => {
+    const s = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'Pause.ts'), 'utf8');
+    expect(s).toMatch(/addEventListener\(\s*'(mouseenter|pointerenter)'[\s\S]{0,240}kind:\s*'other'/);
+  });
+});

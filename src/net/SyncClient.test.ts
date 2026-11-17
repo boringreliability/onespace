@@ -1311,3 +1311,93 @@ describe('Task 6 — SyncClient.deleteAccount() (R54)', () => {
     expect(r.api.calls).not.toContain('deleteAccount');
   });
 });
+
+// =============================================================================
+//  Task 6 fix round 1 — Ruling R60: a request in flight when signOut() or
+//  deleteAccount() succeeded changes nothing when it answers later: status
+//  stays 'off' (no text), the persisted state is what sign-out/delete left,
+//  no retry, and no PUT is ever sent again this session.
+// =============================================================================
+
+describe('Ruling R60 — a late PUT after sign-out / delete changes nothing', () => {
+  type Action = 'signOut' | 'deleteAccount';
+  type Answer = Parameters<ReturnType<typeof deferred>['settle']>[0];
+  /** What the persisted state must be after the action (and after the late answer). */
+  const after = (action: Action): SyncState => (action === 'signOut' ? boundB(save({ revision: 7 })) : syncState({ deviceId: DEVICE_ID }));
+
+  /** Signed in as B, in sync at r7; r8 stored and its PUT in flight (unanswered). */
+  async function putInFlight(): Promise<{ r: Rig; answer: (a: Answer) => Promise<void> }> {
+    const d = deferred();
+    const r = await signedIn({ putSave: () => d.promise });
+    r.sync.onStored(save({ revision: 8 }));
+    await untilPut(r.api);
+    expect(r.api.puts).toHaveLength(1);
+    return {
+      r,
+      answer: async (a) => {
+        d.settle(a);
+        await settle(0);
+      },
+    };
+  }
+
+  const cases: Array<[string, Answer]> = [
+    ['200', ok(200, { revision: 8 })],
+    ['401', fail(401)],
+    ['500', fail(500)],
+    ['a timeout', fail('timeout')],
+    ['409', fail(409, { body: { cloud: { revision: 9, save: save({ revision: 9 }) } } })],
+  ];
+
+  for (const action of ['signOut', 'deleteAccount'] as const) {
+    it.each(cases)(
+      `Ruling R60: Given a PUT in flight, When ${action}() succeeds and the PUT then answers %s, Then status stays 'off' with no text, the persisted state is what ${action} left, and no retry is scheduled`,
+      async (_what, reply) => {
+        const { r, answer } = await putInFlight();
+        expect(await r.sync[action]()).toBe(true);
+        await answer(reply);
+        expect(r.sync.status()).toBe('off');
+        expect(r.sync.statusText()).toBeNull();
+        expect(r.state()).toEqual(after(action));
+        expect(r.state().conflict).toBe(false);
+        await settle(TEN_MIN);
+        expect(r.api.puts).toHaveLength(1);
+        expect(r.sync.status()).toBe('off');
+      },
+    );
+
+    it(`Ruling R60: Given ${action}() succeeded while a PUT was in flight, When the game stores again afterwards, Then no PUT is ever sent again this session`, async () => {
+      const { r, answer } = await putInFlight();
+      await r.sync[action]();
+      await answer(ok(200, { revision: 8 }));
+      r.sync.onStored(save({ revision: 9 }));
+      await settle(TEN_MIN);
+      r.sync.onStored(save({ revision: 10 }));
+      await settle(TEN_MIN);
+      expect(r.api.puts).toHaveLength(1);
+    });
+  }
+
+  it("Ruling R60: Given an offline boot bound to B and an identity check (me()) in flight, When signOut() succeeds and me() then answers B, Then identity() stays null, status 'off', and nothing is pushed", async () => {
+    const me = deferred();
+    let n = 0;
+    const r = rig({
+      state: boundB(save({ revision: 7 })),
+      api: { me: () => (n++ === 0 ? fail('offline') : me.promise), getSave: () => fail('offline') },
+    });
+    await r.sync.boot(save({ revision: 7 }));
+    r.sync.onStored(save({ revision: 8 }));
+    for (let t = 0; t <= 5_100 && r.api.calls.filter((c) => c === 'me').length < 2; t += 100) await settle(100);
+    expect(r.api.calls.filter((c) => c === 'me')).toHaveLength(2);
+    expect(await r.sync.signOut()).toBe(true);
+    me.settle(ok(200, { ...ACCT_B }));
+    await settle(0);
+    expect(r.sync.identity()).toBeNull();
+    expect(r.sync.status()).toBe('off');
+    expect(r.sync.statusText()).toBeNull();
+    expect(r.state()).toEqual(boundB(save({ revision: 7 })));
+    r.sync.onStored(save({ revision: 9 }));
+    await settle(TEN_MIN);
+    expect(r.api.puts).toEqual([]);
+  });
+});

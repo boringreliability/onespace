@@ -331,3 +331,50 @@ describe('sign out and delete account — end to end with the real SyncClient (R
     expect(r.ts.calls).toEqual([]);
   });
 });
+
+// =============================================================================
+// Task 6 fix round 1 — R62b: displayName removes every \p{Cc} and \p{Cf}
+// character (controls, bidi overrides such as U+202E, zero-width) BEFORE it
+// truncates to 32 code points. A name that is empty after that reads as the
+// fallback `SIGNED IN` (signedInText; phase A proposal: the existing prefix
+// without " AS").
+// =============================================================================
+
+describe('Ruling R62b — control and format characters leave the Discord name', () => {
+  it.each([
+    ['a bidi override (U+202E)', 'Den‮nis'],
+    ['a zero-width space (U+200B)', 'Den​nis'],
+    ['a zero-width joiner (U+200D)', 'Den‍nis'],
+    ['a BOM (U+FEFF)', '﻿Dennis'],
+    ['a BEL control (U+0007)', 'Den\u0007nis'],
+    ['a newline and a tab', 'Den\nni\ts'],
+    ['a DEL and a C1 control (U+007F, U+0085)', 'Den\u007Fni\u0085s'],
+    ['bidi isolates (U+2066, U+2069)', '⁦Dennis⁩'],
+  ])('Ruling R62b: Given a name with %s, Then it is shown as Dennis', (_what, name) => {
+    expect(displayName(name)).toBe('Dennis');
+    expect(signedInText(name)).toBe('SIGNED IN AS Dennis');
+  });
+
+  it('Ruling R62b: Given 40 × "a" + U+200B, Then the format characters go FIRST and 32 a\'s are shown (not 16)', () => {
+    expect(displayName('a​'.repeat(40))).toBe('a'.repeat(32));
+  });
+
+  it('Ruling R62b: Given a name of only control and format characters, Then the account line reads SIGNED IN', () => {
+    expect(displayName('‮​\u0007')).toBe('');
+    expect(signedInText('‮​\u0007')).toBe('SIGNED IN');
+    expect(signedInText('')).toBe('SIGNED IN');
+  });
+
+  it('Ruling R62b: Given such a name, When the account line is rendered, Then its text is SIGNED IN (still by textContent)', () => {
+    const made: Array<{ textContent: string }> = [];
+    const doc = {
+      createElement: () => {
+        const el = { textContent: '', className: '', classList: { add: () => undefined } };
+        made.push(el);
+        return el;
+      },
+    } as unknown as Pick<Document, 'createElement'>;
+    renderAccountLine(doc, { kind: 'signed-in', name: '‮​' });
+    expect(made.map((e) => e.textContent)).toEqual(['SIGNED IN']);
+  });
+});
