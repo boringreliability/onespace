@@ -4,6 +4,7 @@ dist-server/
 review/
 .DS_Store
 *.log
+.env
 
 # scratch harnesses agents leave behind
 atmo-check.*

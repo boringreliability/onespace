@@ -4,6 +4,11 @@ export type Membership =
   | { ok: true; id: string; name: string }
   | { ok: false; reason: 'not-member' | 'no-role' };
 
+export type MemberLookup =
+  | { ok: true; id: string; name: string }
+  | { ok: false; reason: 'not-member' }
+  | { ok: false; reason: 'no-role'; discordId: string };
+
 export const DISCORD_AUTHORIZE_URL = 'https://discord.com/oauth2/authorize';
 export const DISCORD_TOKEN_URL = 'https://discord.com/api/oauth2/token';
 export const DISCORD_SCOPE = 'identify guilds.members.read';
@@ -18,6 +23,20 @@ export async function checkMembership(
   guildId: string,
   roleId: string,
 ): Promise<Membership> {
+  const m = await lookupMember(fetchFn, accessToken, guildId, roleId);
+  return m.ok || m.reason === 'not-member' ? m : { ok: false, reason: 'no-role' };
+}
+
+/**
+ * checkMembership, but a "no-role" answer keeps the Discord user id: a de-invited user's
+ * sessions are deleted by it (R72). Same throwing rules as checkMembership.
+ */
+export async function lookupMember(
+  fetchFn: typeof fetch,
+  accessToken: string,
+  guildId: string,
+  roleId: string,
+): Promise<MemberLookup> {
   const res = await fetchFn(`https://discord.com/api/users/@me/guilds/${encodeURIComponent(guildId)}/member`, {
     method: 'GET',
     headers: { Authorization: `Bearer ${accessToken}` },
@@ -32,7 +51,7 @@ export async function checkMembership(
   if (!u || typeof u.id !== 'string' || typeof u.username !== 'string' || !Array.isArray(body.roles)) {
     throw new Error('Discord member lookup returned an unexpected body');
   }
-  if (!body.roles.includes(roleId)) return { ok: false, reason: 'no-role' };
+  if (!body.roles.includes(roleId)) return { ok: false, reason: 'no-role', discordId: u.id };
   const name = typeof u.global_name === 'string' && u.global_name ? u.global_name : u.username;
   return { ok: true, id: u.id, name };
 }

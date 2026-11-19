@@ -7,7 +7,7 @@ import type { Sql } from 'postgres';
 import type { Config } from '../config';
 import { ipKey } from '../clientIp';
 import { rateLimiter } from '../rateLimit';
-import { checkMembership, DISCORD_AUTHORIZE_URL, DISCORD_SCOPE, exchangeCode } from './discord';
+import { DISCORD_AUTHORIZE_URL, DISCORD_SCOPE, exchangeCode, lookupMember } from './discord';
 import {
   clearSessionCookie,
   createSession,
@@ -111,11 +111,21 @@ export function authRoutes(deps: AuthDeps): Hono<{ Variables: AuthVariables }> {
         redirectUri,
         verifier,
       });
-      member = await checkMembership(deps.fetch, accessToken, config.discord.guildId, config.discord.roleId);
+      member = await lookupMember(deps.fetch, accessToken, config.discord.guildId, config.discord.roleId);
     } catch {
       return fail();
     }
-    if (!member.ok) return c.redirect('/?auth=not-invited', 302);
+    if (!member.ok) {
+      if (member.reason === 'no-role') {
+        // R72: the role was taken away — a de-invited user keeps no 30-day door.
+        try {
+          await sql`delete from sessions where user_id in (select id from users where discord_id = ${member.discordId})`;
+        } catch (err) {
+          console.error('deleting a de-invited user\'s sessions failed:', err instanceof Error ? err.message : err);
+        }
+      }
+      return c.redirect('/?auth=not-invited', 302);
+    }
 
     try {
       const userId = await upsertUser(member.id, member.name);

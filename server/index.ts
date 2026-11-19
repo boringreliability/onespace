@@ -4,6 +4,7 @@ import { createApp } from './app';
 import { ConfigError, loadConfig } from './config';
 import { createDb } from './db';
 import { migrate } from './migrate';
+import { shutdown } from './shutdown';
 
 async function main() {
   const config = loadConfig(process.env);
@@ -14,9 +15,11 @@ async function main() {
   const server = serve({ fetch: app.fetch, port: config.port }, (info) => {
     console.log(`oneSpace server listening on :${info.port}`);
   });
+  let stopping = false;
   const stop = () => {
-    server.close();
-    void sql.end({ timeout: 5 }).then(() => process.exit(0));
+    if (stopping) return;
+    stopping = true;
+    void shutdown({ server, sql, exit: (code) => process.exit(code) });
   };
   process.on('SIGTERM', stop);
   process.on('SIGINT', stop);

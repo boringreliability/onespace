@@ -11,9 +11,11 @@
  *
  * ok = a 2xx status. A non-2xx result carries the parsed JSON body (or null)
  * and, for a 429, Retry-After in seconds. Every call is same-origin; every
- * non-GET sends Content-Type application/json. A call gets `timeoutMs`
- * (SYNC_TIMEOUT_MS) for the whole exchange — headers AND body — then it is
- * aborted and answers 'timeout'; a fetch that rejects answers 'offline'.
+ * non-GET sends Content-Type application/json. A call gets a budget for the
+ * whole exchange — headers AND body — then it is aborted and answers
+ * 'timeout'; a fetch that rejects answers 'offline'. R70: the uploads
+ * (putSave, resolve) get SYNC_WRITE_TIMEOUT_MS; every other call gets
+ * `timeoutMs` (SYNC_TIMEOUT_MS), which the boot budget already bounds.
  * Never throws. Bodies are returned as `unknown`: callers validate them.
  */
 
@@ -22,6 +24,8 @@ import type { SaveV1 } from '@/save/schema';
 import type { CloudHead } from './syncState';
 
 export const SYNC_TIMEOUT_MS = 3_000;
+/** R70: a save near the size ceiling needs more than 3 s on a slow uplink. */
+export const SYNC_WRITE_TIMEOUT_MS = 30_000;
 
 export type ApiResult<T = unknown> =
   | { ok: true; status: number; body: T }
@@ -52,8 +56,10 @@ export interface Api {
 
 export interface ApiDeps {
   readonly fetch: typeof fetch;
-  /** The budget of one call; default SYNC_TIMEOUT_MS. */
+  /** The budget of one read/logout/delete call; default SYNC_TIMEOUT_MS. */
   readonly timeoutMs?: number;
+  /** The budget of one upload (putSave, resolve); default SYNC_WRITE_TIMEOUT_MS. */
+  readonly writeTimeoutMs?: number;
 }
 
 const BASE = '/api';
@@ -76,8 +82,9 @@ function retryAfter(res: Response): number | null {
 
 export function createApi(deps: ApiDeps): Api {
   const timeoutMs = deps.timeoutMs ?? SYNC_TIMEOUT_MS;
+  const writeTimeoutMs = deps.writeTimeoutMs ?? SYNC_WRITE_TIMEOUT_MS;
 
-  async function call(method: string, path: string, body?: unknown): Promise<ApiResult> {
+  async function call(method: string, path: string, body?: unknown, budgetMs: number = timeoutMs): Promise<ApiResult> {
     const ctrl = new AbortController();
     const timedOut: ApiResult = { ok: false, status: 'timeout' };
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -85,7 +92,7 @@ export function createApi(deps: ApiDeps): Api {
       timer = setTimeout(() => {
         ctrl.abort();
         resolve(timedOut);
-      }, timeoutMs);
+      }, budgetMs);
     });
 
     const exchange = (async (): Promise<ApiResult> => {
@@ -123,9 +130,14 @@ export function createApi(deps: ApiDeps): Api {
   return {
     me: () => call('GET', '/me'),
     getSave: () => call('GET', '/save'),
-    putSave: (b) => call('PUT', '/save', { deviceId: b.deviceId, base: b.base, save: b.save }),
+    putSave: (b) => call('PUT', '/save', { deviceId: b.deviceId, base: b.base, save: b.save }, writeTimeoutMs),
     resolve: (b) =>
-      call('POST', '/save/resolve', { deviceId: b.deviceId, keep: b.keep, device: b.device, base: b.base, cloud: b.cloud }),
+      call(
+        'POST',
+        '/save/resolve',
+        { deviceId: b.deviceId, keep: b.keep, device: b.device, base: b.base, cloud: b.cloud },
+        writeTimeoutMs,
+      ),
     logout: () => call('POST', '/auth/logout'),
     deleteAccount: () => call('DELETE', '/account'),
   };

@@ -8,7 +8,11 @@
  * textContent, and shown truncated to DISPLAY_NAME_MAX characters.
  */
 
+import { displayName } from '@/net/displayName';
 import type { SyncClient } from '@/net/SyncClient';
+
+// R77: the name rule lives in net (the sync code needs it too); re-exported for the menus and their tests.
+export { DISPLAY_NAME_MAX, displayName } from '@/net/displayName';
 
 /** server/auth/routes.ts `GET /auth/discord`, mounted under /api (server/app.ts). */
 export const SIGN_IN_PATH = '/api/auth/discord';
@@ -19,7 +23,6 @@ export const NOT_INVITED_TEXT = 'NOT INVITED — PLAYING AS GUEST';
 export const SIGN_IN_FAILED_TEXT = 'SIGN-IN FAILED — PLAYING AS GUEST';
 export const SIGN_OUT_FAILED_TEXT = 'SIGN OUT FAILED — STILL SIGNED IN';
 export const DELETE_FAILED_TEXT = 'DELETE ACCOUNT FAILED — NOTHING CHANGED';
-export const DISPLAY_NAME_MAX = 32;
 
 /**
  * What the menus show of the account (R51):
@@ -32,18 +35,6 @@ export type AccountView = { kind: 'hidden' } | { kind: 'guest' } | { kind: 'sign
 export function accountView(o: { reader: boolean; identity: { id: string; name: string } | null }): AccountView {
   if (o.reader) return { kind: 'hidden' };
   return o.identity ? { kind: 'signed-in', name: o.identity.name } : { kind: 'guest' };
-}
-
-/** R62b: control (Cc) and format (Cf) characters — bidi overrides, zero-width — never reach the screen. */
-const HIDDEN_CHARS = /[\p{Cc}\p{Cf}]/gu;
-
-/**
- * R52/R62b: the name without control and format characters, then at most
- * DISPLAY_NAME_MAX code points (a surrogate pair is never split).
- */
-export function displayName(name: string): string {
-  const cps = Array.from(name.replace(HIDDEN_CHARS, ''));
-  return cps.slice(0, DISPLAY_NAME_MAX).join('');
 }
 
 /** `SIGNED IN AS <name>`; a name with nothing left to show reads `SIGNED IN`. */

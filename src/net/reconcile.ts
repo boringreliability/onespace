@@ -15,12 +15,15 @@
  *    with other content is conflict-same; another game conflict-different.
  *  - Bound to me: local ahead of L, cloud ahead of L, or both (a conflict).
  *    R37: a cloud that moved on the SAME game but is not strictly newer than
- *    local is a conflict, never a silent step back.
+ *    local is a conflict, never a silent step back. R79: while
+ *    state.unmergedCloud is set and the cloud is that save (or newer), a
+ *    conflict.
  */
 
 import { sameGame } from '@/save/conflict';
 import type { SaveV1 } from '@/save/schema';
 
+import { displayName } from './displayName';
 import type { SyncState } from './syncState';
 
 export type Decision =
@@ -49,6 +52,9 @@ export function unsyncedProgressText(name: string): string {
   return `UNSYNCED PROGRESS FOR ${name} — SIGN IN AS ${name} ONCE ONLINE TO SYNC`;
 }
 
+/** R72: a stored name is shown through displayName(); with none (or nothing left to show), the account id. */
+const boundName = (name: string | null, id: string): string => (name !== null && displayName(name)) || id;
+
 const conflict = (a: SaveV1, b: SaveV1): Decision => ({ kind: sameGame(a, b) ? 'conflict-same' : 'conflict-different' });
 
 export function reconcile(input: ReconcileInput): Decision {
@@ -64,7 +70,7 @@ export function reconcile(input: ReconcileInput): Decision {
     local !== null && (L === null || local.saveId !== L.saveId || local.revision > L.revision || dirty);
 
   if (state.accountId !== null && state.accountId !== me.id) {
-    if (localAhead) return { kind: 'refuse-switch', message: unsyncedProgressText(state.accountName ?? state.accountId) };
+    if (localAhead) return { kind: 'refuse-switch', message: unsyncedProgressText(boundName(state.accountName, state.accountId)) };
     return { kind: 'switch-account' };
   }
 
@@ -78,6 +84,10 @@ export function reconcile(input: ReconcileInput): Decision {
 
   // Bound to me. A local save and an empty cloud: the cloud needs it.
   if (cloud === null) return { kind: local === null ? 'in-sync' : 'push-local' };
+  // R79: a resolve result that was not applied over a local save that had advanced (R75) is
+  // still a choice to make while the cloud holds it (or a newer revision of it) — never push over it.
+  const U = state.unmergedCloud;
+  if (U && cloud.saveId === U.saveId && cloud.revision >= U.revision) return conflict(local!, cloud);
   const cloudAhead = cloud !== null && (L === null || cloud.saveId !== L.saveId || cloud.revision !== L.revision);
   if (!localAhead && !cloudAhead) return { kind: 'in-sync' };
   if (localAhead && !cloudAhead) return { kind: 'push-local' };

@@ -17,6 +17,8 @@ export const CSP =
   "font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; " +
   "frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
 
+export const HSTS = 'max-age=31536000; includeSubDomains';
+
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -43,7 +45,7 @@ export type AppDeps = {
   now?: () => number;
   fetch?: typeof fetch;
   staticRoot?: string;
-  /** Client IP for rate limiting. Default: x-forwarded-for first hop in production, else the socket address. */
+  /** Client IP for rate limiting. Default: the right-most x-forwarded-for hop in production, else the socket address. */
   clientIp?: (c: Context) => string;
 };
 
@@ -58,6 +60,8 @@ export function createApp(deps: AppDeps): Hono {
     c.res.headers.set('X-Content-Type-Options', 'nosniff');
     c.res.headers.set('Referrer-Policy', 'same-origin');
     c.res.headers.set('Content-Security-Policy', CSP);
+    // Production only: local development runs on plain http.
+    if (config.production) c.res.headers.set('Strict-Transport-Security', HSTS);
   });
 
   // CSRF: every non-safe method must come from our own origin.

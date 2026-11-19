@@ -49,6 +49,17 @@ const EnvSchema = z.object({
   ONESPACE_TEST_LOGIN: z.string().optional(),
 });
 
+const LOCALHOST_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+
+/** True for an http(s) origin on localhost, 127.0.0.1 or [::1] (any port). */
+function isLocalhostOrigin(value: string): boolean {
+  try {
+    return LOCALHOST_HOSTS.has(new URL(value).hostname);
+  } catch {
+    return false;
+  }
+}
+
 export function loadConfig(env: Record<string, string | undefined>): Config {
   const parsed = EnvSchema.safeParse(env);
   if (!parsed.success) {
@@ -61,6 +72,10 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
   const production = e.NODE_ENV === 'production';
   const testLogin = e.ONESPACE_TEST_LOGIN === '1';
   if (production && testLogin) throw new ConfigError('ONESPACE_TEST_LOGIN is not allowed in production');
+  // R72: NODE_ENV alone must not be what keeps the test login shut on a deployed host.
+  if (testLogin && !isLocalhostOrigin(e.PUBLIC_ORIGIN)) {
+    throw new ConfigError('ONESPACE_TEST_LOGIN needs a localhost PUBLIC_ORIGIN (localhost, 127.0.0.1 or [::1])');
+  }
 
   return {
     databaseUrl: e.DATABASE_URL,
