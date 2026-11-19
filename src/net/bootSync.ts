@@ -5,7 +5,10 @@
  * merged) and handed to `sync.boot`, with whether WAL entries were merged on
  * top (R36: paid progress the cloud has never seen). When this resolves,
  * boot's effects are in the store, so `decideBoot` reads the save sync
- * chose. A cloud that does not answer costs at most SYNC_TIMEOUT_MS.
+ * chose. A cloud that does not answer costs at most SYNC_TIMEOUT_MS — except
+ * (R83) with a pending resolve to replay: then me() (within SYNC_TIMEOUT_MS),
+ * the replay (SYNC_WRITE_TIMEOUT_MS) and the getSave after it
+ * (SYNC_TIMEOUT_MS) can cost up to about 36 s.
  */
 
 import { loadForBootResult } from '@/save/bootLoad';

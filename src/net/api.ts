@@ -5,7 +5,7 @@
  *   GET  /api/me              200 {id, name} | 401
  *   GET  /api/save            200 {revision, save} | 404 {error:'no-save'}
  *   PUT  /api/save            200 {revision} | 409 {cloud:{revision, save}} | 400 | 413 | 429
- *   POST /api/save/resolve    200 {revision, save} | 409 {cloud:{revision, save}}
+ *   POST /api/save/resolve    200 {revision, save} | 409 {cloud:{revision, save}, resolvedAs?:{saveId, revision}}
  *   POST /api/auth/logout     204
  *   DELETE /api/account       204
  *
@@ -19,6 +19,8 @@
  * Never throws. Bodies are returned as `unknown`: callers validate them.
  */
 
+import * as z from 'zod';
+
 import type { SaveV1 } from '@/save/schema';
 
 import type { CloudHead } from './syncState';
@@ -26,6 +28,19 @@ import type { CloudHead } from './syncState';
 export const SYNC_TIMEOUT_MS = 3_000;
 /** R70: a save near the size ceiling needs more than 3 s on a slow uplink. */
 export const SYNC_WRITE_TIMEOUT_MS = 30_000;
+
+/**
+ * A 409 body (PUT and resolve). R84: a replayed resolve whose key sits on an
+ * earlier revision row also names that revision (`resolvedAs`); an older
+ * server sends none, and a malformed one is treated as absent.
+ */
+export const ConflictBodySchema = z.object({
+  cloud: z.object({ revision: z.number().int().min(0), save: z.unknown() }),
+  resolvedAs: z
+    .object({ saveId: z.uuid(), revision: z.number().int().min(0) })
+    .optional()
+    .catch(undefined),
+});
 
 export type ApiResult<T = unknown> =
   | { ok: true; status: number; body: T }

@@ -22,7 +22,7 @@ export type PutResult =
 
 export type ResolveResult =
   | { kind: 'resolved' | 'replayed'; revision: number; save: SaveV1 }
-  | { kind: 'conflict'; cloud: { revision: number; save: SaveV1 } };
+  | { kind: 'conflict'; cloud: { revision: number; save: SaveV1 }; resolvedAs?: { saveId: string; revision: number } };
 
 /** The user row vanished (account deleted) before the write took its lock. */
 export class UserGoneError extends Error {
@@ -81,10 +81,13 @@ async function storeHead(
     on conflict (user_id) do update
       set save_id = excluded.save_id, revision = excluded.revision, body = excluded.body,
           updated_at = excluded.updated_at, resolve_key = excluded.resolve_key`;
+  // R84: a resolve stamps its key on the result's revision row too (a row that already exists included).
   await tx`
-    insert into save_revisions (user_id, save_id, revision, digest)
-    values (${userId}, ${save.saveId}, ${save.revision}, ${json(tx, shipDigest(save))}::jsonb)
-    on conflict (user_id, save_id, revision) do nothing`;
+    insert into save_revisions (user_id, save_id, revision, digest, resolve_key)
+    values (${userId}, ${save.saveId}, ${save.revision}, ${json(tx, shipDigest(save))}::jsonb, ${resolveKey})
+    on conflict (user_id, save_id, revision) ${
+      resolveKey === null ? tx`do nothing` : tx`do update set resolve_key = excluded.resolve_key`
+    }`;
   if (save.actions.length > 0) {
     await tx`
       insert into actions (user_id, save_id, device_id, seq, entry)
@@ -151,7 +154,17 @@ export async function resolveSave(
     }
     if (head.resolve_key === key) return { kind: 'replayed', revision: head.revision, save: head.body };
     const sawHead = cloud !== null && cloud.saveId === head.save_id && cloud.revision === head.revision;
-    if (!sawHead) return { kind: 'conflict', cloud: cloudOf(head) };
+    if (!sawHead) {
+      // R84: committed before another device moved the head on — name the revision it became.
+      // Matched on (session user, key) alone: the head may since be another game.
+      const [hit] = await tx<{ save_id: string; revision: number }[]>`
+        select save_id, revision from save_revisions
+        where user_id = ${userId} and resolve_key = ${key}
+        order by revision desc limit 1`;
+      return hit
+        ? { kind: 'conflict', cloud: cloudOf(head), resolvedAs: { saveId: hit.save_id, revision: hit.revision } }
+        : { kind: 'conflict', cloud: cloudOf(head) };
+    }
 
     if (sameGame(head.body, device)) {
       if (Math.max(head.revision, device.revision) >= INT4_MAX) throw new RevisionOverflowError();
@@ -174,6 +187,9 @@ export async function resolveSave(
       return { kind: 'resolved', revision: device.revision, save: device };
     }
     await tx`update saves set resolve_key = ${key} where user_id = ${userId}`;
+    await tx`
+      update save_revisions set resolve_key = ${key}
+      where user_id = ${userId} and save_id = ${head.save_id} and revision = ${head.revision}`;
     return { kind: 'resolved', revision: head.revision, save: head.body };
   });
 }

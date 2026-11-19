@@ -5,11 +5,13 @@
  * changes local saving.
  *
  * Boot (`boot`): me(), then (R69) the replay of a pending resolve, then
- * getSave() — one after the other (R66), under ONE 3 s budget — then
- * `reconcile`, then that decision's effects — applied before boot resolves,
- * so `decideBoot` reads the save sync chose. A request answering after the
- * budget changes nothing (R80). A reader tab never syncs; an unreadable
- * cloud save (format 99, invalid) syncs nothing all session.
+ * getSave() — one after the other (R66), under ONE 3 s budget; R83: a
+ * replay gets its own SYNC_WRITE_TIMEOUT_MS from when it is sent, and the
+ * getSave after it a fresh 3 s — then `reconcile`, then that decision's
+ * effects — applied before boot resolves, so `decideBoot` reads the save
+ * sync chose. A request answering after the boot ended changes nothing
+ * (R80). A reader tab never syncs; an unreadable cloud save (format 99,
+ * invalid) syncs nothing all session.
  *
  * Replacing the local save (use-cloud, switch-account, a resolved conflict)
  * — R35, in this order:
@@ -46,7 +48,7 @@ import type { SaveV1 } from '@/save/schema';
 import { STORE_TIMEOUT_MS, rawKey, withTimeout, type SaveStore } from '@/save/store';
 import type { Wal } from '@/save/wal';
 
-import { SYNC_TIMEOUT_MS, type Api, type ApiResult, type ResolveBody } from './api';
+import { ConflictBodySchema, SYNC_TIMEOUT_MS, SYNC_WRITE_TIMEOUT_MS, type Api, type ApiResult, type ResolveBody } from './api';
 import { reconcile, type Decision } from './reconcile';
 import {
   SYNC_STATE_KEY,
@@ -97,7 +99,6 @@ export interface SyncClientDeps {
 const MeSchema = z.object({ id: z.string().min(1), name: z.string() });
 const CloudBodySchema = z.object({ revision: z.number().int().min(0), save: z.unknown() });
 const PutOkSchema = z.object({ revision: z.number().int().min(0) });
-const ConflictBodySchema = z.object({ cloud: CloudBodySchema });
 const NoSaveSchema = z.object({ error: z.literal('no-save') });
 
 type Me = z.infer<typeof MeSchema>;
@@ -252,17 +253,30 @@ export class SyncClient {
       return localOnly('reader');
     }
 
-    // One budget for every call (R30, R76). R66: the save is asked for only
+    // One 3 s budget for every call (R30). R66: the save is asked for only
     // once me() says who is signed in — a guest boot makes exactly one
     // request. R69: a pending resolve is replayed before the save is read.
-    // The calls only fetch: every effect happens below, after the race, so a
-    // call answering after the budget changes nothing (R80).
-    let cancelBudget: () => void = () => undefined;
-    const budget = new Promise<'timeout'>((resolve) => {
-      cancelBudget = this.d.schedule(() => resolve('timeout'), SYNC_TIMEOUT_MS);
-    });
-    const seen: { me: ApiResult | null } = { me: null };
+    // R83: the replay gets its own SYNC_WRITE_TIMEOUT_MS from when it is
+    // sent, and the getSave after it a fresh SYNC_TIMEOUT_MS; a boot without
+    // a replay keeps the one 3 s budget. The calls only fetch: every effect
+    // happens below, after the race, so a call answering after the boot
+    // ended changes nothing (R80).
     let bootOver = false;
+    let endBoot: (v: 'timeout') => void = () => undefined;
+    const budget = new Promise<'timeout'>((resolve) => {
+      endBoot = resolve;
+    });
+    const arm = (ms: number): (() => void) =>
+      this.d.schedule(() => {
+        bootOver = true; // at once: no call is sent after the end, even before the race settles
+        endBoot('timeout');
+      }, ms);
+    let cancelBudget = arm(SYNC_TIMEOUT_MS);
+    const rearm = (ms: number): void => {
+      cancelBudget();
+      cancelBudget = arm(ms);
+    };
+    const seen: { me: ApiResult | null; replay: Replay | null } = { me: null, replay: null };
     const calls = (async (): Promise<[ApiResult, ApiResult | null, Replay | null]> => {
       const m = await this.d.api.me();
       seen.me = m;
@@ -271,9 +285,14 @@ export class SyncClient {
       let replay: Replay | null = null;
       const pending = this.replayable(who.data);
       if (pending) {
-        replay = { body: pending, res: await this.d.api.resolve(pending) };
+        rearm(SYNC_WRITE_TIMEOUT_MS);
+        const res = await this.d.api.resolve(pending);
+        if (bootOver) return [m, null, null];
+        replay = { body: pending, res };
+        seen.replay = replay;
         // Unanswered: the body stays pending; boot goes on local (the conflict holds, R46).
-        if (bootOver || (!replay.res.ok && resolveRetryable(replay.res.status))) return [m, null, replay];
+        if (!replay.res.ok && resolveRetryable(replay.res.status)) return [m, null, replay];
+        rearm(SYNC_TIMEOUT_MS);
       }
       return [m, await this.d.api.getSave(), replay];
     })();
@@ -282,7 +301,13 @@ export class SyncClient {
     bootOver = true;
 
     if (answered === 'timeout') {
-      // me() may still have answered in time.
+      // me() may still have answered in time — and R83: a replay that answered in time is
+      // applied even when the getSave after it did not.
+      const who = seen.me?.ok ? MeSchema.safeParse(seen.me.body) : null;
+      if (who?.success && seen.replay) {
+        const r = await this.applyReplay(seen.replay, local, who.data, opts.localDirty === true);
+        if (typeof r === 'object' && r !== null) this.latest = r;
+      }
       this.afterOffline(seen.me);
       return localOnly('timeout');
     }
@@ -295,6 +320,8 @@ export class SyncClient {
     }
     const me = meRes.ok ? MeSchema.safeParse(meRes.body) : null;
     let dirty = opts.localDirty === true;
+    /** R85: the replay was committed before another device moved on, and the local save holds nothing past it. */
+    let takeCloud = false;
     // R69: the replay answered within the budget — its effect first, whatever getSave got.
     if (me?.success && replay) {
       const r = await this.applyReplay(replay, local, me.data, dirty);
@@ -302,7 +329,8 @@ export class SyncClient {
         this.afterOffline(meRes);
         return localOnly(isTimeout(replay.res) ? 'timeout' : 'offline');
       }
-      if (r !== 'kept') {
+      if (r === 'take-cloud') takeCloud = true;
+      else if (r !== 'kept') {
         // The result replaced the local save (the WAL was reset with it).
         local = r;
         this.latest = r;
@@ -343,16 +371,21 @@ export class SyncClient {
     this.me = me.data;
     const localKey = local !== null ? rawKey(local) : null;
     const sameContent = localKey !== null && cloud !== null && localKey === rawKey(cloud);
-    const decision = reconcile({
-      local,
-      cloud,
-      state: this.state,
-      me: me.data,
-      localDirty: dirty,
-      sameContent,
-    });
+    // R85: the player's choice is already inside the cloud — take it; the local save is shelved
+    // as a save replaced by a resolve result is.
+    const shelveLocal = takeCloud && cloud !== null && !sameContent;
+    const decision: Decision = shelveLocal
+      ? { kind: 'use-cloud' }
+      : reconcile({
+          local,
+          cloud,
+          state: this.state,
+          me: me.data,
+          localDirty: dirty,
+          sameContent,
+        });
     try {
-      return await this.apply(decision, local, cloud, me.data, dirty);
+      return await this.apply(decision, local, cloud, me.data, dirty, shelveLocal);
     } catch {
       // A store that failed the replacement keeps the old local save (one transaction).
       this.pushing = false;
@@ -372,13 +405,33 @@ export class SyncClient {
   /**
    * R69/R75: the boot's replay answered in time. Returns the result save when
    * it replaced the local save, 'kept' when the local save stays (refused, or
-   * R75: the local save advanced past the replayed device save), or
-   * 'unanswered' when the body stays pending.
+   * R75: the local save advanced past the replayed device save),
+   * 'unanswered' when the body stays pending, or (R85) 'take-cloud' when the
+   * server says the body was committed as `resolvedAs` and the cloud has
+   * moved on since, with the local save not advanced past the device save.
    */
-  private async applyReplay(replay: Replay, local: SaveV1 | null, me: Me, dirty: boolean): Promise<SaveV1 | 'kept' | 'unanswered'> {
+  private async applyReplay(
+    replay: Replay,
+    local: SaveV1 | null,
+    me: Me,
+    dirty: boolean,
+  ): Promise<SaveV1 | 'kept' | 'unanswered' | 'take-cloud'> {
     const { body, res } = replay;
     if (!res.ok) {
       if (resolveRetryable(res.status)) return 'unanswered';
+      // R85: committed as `resolvedAs`, then another device moved the cloud on. L = resolvedAs
+      // (the merge base of any next choice: nothing is deducted twice).
+      const resolvedAs = res.status === 409 ? ConflictBodySchema.safeParse(res.body).data?.resolvedAs : undefined;
+      if (resolvedAs) {
+        if (advancedPast(local, body.device, dirty)) {
+          // The local save holds progress past the choice: a conflict, kept across reboots (R79).
+          this.keepUnmerged(resolvedAs);
+          return 'kept';
+        }
+        this.state = { ...without(this.state, 'pendingResolve', 'pendingResolveFor'), lastSeenCloud: resolvedAs };
+        this.persist();
+        return 'take-cloud';
+      }
       // A definitive refusal (409, 400, …): nothing was committed — the boot decides afresh.
       this.state = without(this.state, 'pendingResolve', 'pendingResolveFor');
       this.persist();
@@ -464,7 +517,14 @@ export class SyncClient {
     this.needsIdentity = true;
   }
 
-  private async apply(decision: Decision, local: SaveV1 | null, cloud: SaveV1 | null, me: Me, dirty: boolean): Promise<BootSync> {
+  private async apply(
+    decision: Decision,
+    local: SaveV1 | null,
+    cloud: SaveV1 | null,
+    me: Me,
+    dirty: boolean,
+    shelveLocal = false,
+  ): Promise<BootSync> {
     const out = (notice: string | null = null): BootSync => ({ decision, cloud, notice });
     // R79: once device and cloud agree again, nothing is left unmerged.
     const bind = (L: CloudHead | null): void => {
@@ -493,7 +553,7 @@ export class SyncClient {
 
       case 'use-cloud': {
         const c = cloud!;
-        await this.replaceLocal([local && local.saveId !== c.saveId ? local : null], c);
+        await this.replaceLocal([local && (shelveLocal || local.saveId !== c.saveId) ? local : null], c);
         bind(head(c));
         this.state.conflict = false;
         this.persist();
@@ -789,7 +849,11 @@ export class SyncClient {
     if (!r.ok) {
       if (resolveRetryable(r.status)) return { ok: false, reason: 'offline' }; // the body stays pending
       // A definitive answer: nothing was committed; the next choice is a new one.
+      // R86: unless a 409 names the revision this body was committed as (another device moved on
+      // since): that is the base of the next choice, so nothing is deducted twice.
+      const resolvedAs = r.status === 409 ? ConflictBodySchema.safeParse(r.body).data?.resolvedAs : undefined;
       this.state = without(this.state, 'pendingResolve', 'pendingResolveFor');
+      if (resolvedAs) this.state.lastSeenCloud = resolvedAs;
       this.persist();
       if (r.status === 401) {
         this.st = 'reauth';
