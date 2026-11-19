@@ -2114,3 +2114,161 @@ describe('Ruling R78 — memory mode resolves unrecorded', () => {
     expect(sync.status()).toBe('synced');
   });
 });
+
+// =============================================================================
+//  Addendum 3 — pins for what the final fix (bca7005) added beyond its brief.
+//  These characterise reviewed behaviour and PASS on that code.
+// =============================================================================
+
+/** A conflict whose resolve answers were lost (both POSTs timed out): the body is pending. */
+async function pendingConflict(): Promise<Rig> {
+  const r = await conflictRig({ resolve: () => fail('timeout') });
+  expect(await r.sync.resolve('device')).toEqual({ ok: false, reason: 'offline' });
+  return r;
+}
+
+/** The next boot of the same device (same store, WAL and sync state), a new client. */
+function rebootOf(prev: Rig, api: Partial<FakeApi['reply']>, state: SyncState = prev.state()): Rig {
+  const r = rig({ state, ts: prev.ts, walStorage: prev.walStorage, api });
+  r.ts.calls.length = 0;
+  return r;
+}
+
+describe('Pin — pendingResolveFor: the account a pending resolve was sent as', () => {
+  it('Pin: Given resolve("device") as B, When the POST is sent, Then pendingResolveFor = B\'s id is already persisted together with pendingResolve', async () => {
+    let seen: Record<string, unknown> | null = null;
+    const r: Rig = await conflictRig({
+      resolve: () => {
+        seen = rawState(r);
+        return fail('timeout');
+      },
+    });
+    await r.sync.resolve('device');
+    expect(seen).toMatchObject({ pendingResolve: DEVICE_BODY(), pendingResolveFor: ACCT_B.id });
+    expect(r.state().pendingResolveFor).toBe(ACCT_B.id);
+  });
+
+  it('Pin: Given a lost resolve sent as B, When the next boot is B, Then the body is replayed (the field set by a real resolve, not by hand)', async () => {
+    const r1 = await pendingConflict();
+    expect(r1.state().pendingResolveFor).toBe(ACCT_B.id);
+    const result = save({ revision: 10, tank: 5_000 });
+    const r = rebootOf(r1, { getSave: () => cloudReply(result), resolve: () => ok(200, { revision: 10, save: result }) });
+    await r.sync.boot(save({ revision: 9 }));
+    expect(r.api.resolves).toEqual([DEVICE_BODY()]);
+  });
+
+  it('Pin: Given an UNBOUND (guest) save whose pending resolve was sent as B, When the next boot is A, Then no replay POST — and the pending entry (for B) is KEPT', async () => {
+    const body: ResolveBody = { ...DEVICE_BODY(), base: null };
+    const state = syncState({ conflict: true, pendingResolve: body, pendingResolveFor: ACCT_B.id });
+    const r = rig({ state, api: { me: () => ok(200, { ...ACCT_A }), getSave: () => cloudReply(save({ revision: 8 })), resolve: () => ok(200, { revision: 10, save: save({ revision: 10 }) }) } });
+    await r.ts.store.save(save({ revision: 9 }));
+    await r.sync.boot(save({ revision: 9 }));
+    expect(r.api.resolves).toEqual([]);
+    expect(r.state()).toMatchObject({ pendingResolve: body, pendingResolveFor: ACCT_B.id });
+  });
+
+  it('Pin: Given a save bound to B (synced, local = L) with a pending resolve for B, When A signs in, Then no replay POST, switch-account — and the pending entry is DROPPED with B\'s state', async () => {
+    const state = boundB(save({ revision: 9 }), { conflict: true, pendingResolve: DEVICE_BODY(), pendingResolveFor: ACCT_B.id });
+    const r = rig({ state, api: { me: () => ok(200, { ...ACCT_A }), getSave: () => noSave(), resolve: () => ok(200, { revision: 10, save: save({ revision: 10 }) }) } });
+    await r.ts.store.save(save({ revision: 9 }));
+    expect((await r.sync.boot(save({ revision: 9 }))).decision).toEqual({ kind: 'switch-account' });
+    expect(r.api.resolves).toEqual([]);
+    expect(r.state().pendingResolve ?? null).toBeNull();
+    expect(r.state().pendingResolveFor ?? null).toBeNull();
+  });
+
+  it('Pin: Given an OLD sync state bound to B with pendingResolve but no pendingResolveFor, When B boots, Then it IS replayed (the bound account stands in)', async () => {
+    const result = save({ revision: 10, tank: 5_000 });
+    const state = boundB(save({ revision: 7 }), { conflict: true, pendingResolve: DEVICE_BODY() });
+    const r = rig({ state, api: { getSave: () => cloudReply(result), resolve: () => ok(200, { revision: 10, save: result }) } });
+    await r.ts.store.save(save({ revision: 9 }));
+    await r.sync.boot(save({ revision: 9 }));
+    expect(r.api.resolves).toEqual([DEVICE_BODY()]);
+    expect(await r.ts.current()).toEqual(result);
+  });
+
+  it('Pin: Given an OLD UNBOUND sync state with pendingResolve but no pendingResolveFor, When B boots, Then it is NOT replayed (no account to vouch for it)', async () => {
+    const state = syncState({ conflict: true, pendingResolve: { ...DEVICE_BODY(), base: null } });
+    const r = rig({ state, api: { getSave: () => cloudReply(save({ revision: 8 })), resolve: () => ok(200, { revision: 10, save: save({ revision: 10 }) }) } });
+    await r.sync.boot(save({ revision: 9 }));
+    expect(r.api.resolves).toEqual([]);
+  });
+});
+
+describe('Pin — R75 in session: resolve() with a pending body', () => {
+  it.each(['device', 'cloud'] as const)(
+    'Pin: Given a pending body (keep device, device r9), When resolve("%s") is called again in the same session, Then THAT body is re-sent verbatim',
+    async (keep) => {
+      const r = await pendingConflict();
+      r.api.reply.resolve = () => ok(200, { revision: 10, save: save({ revision: 10, tank: 5_000 }) });
+      await r.sync.resolve(keep);
+      expect(r.api.resolves).toHaveLength(3);
+      expect(r.api.resolves[2]).toEqual(DEVICE_BODY());
+    },
+  );
+
+  it('Pin: Given a pending body for device r9 and the game has stored r11 since, When the re-sent resolve commits r10, Then the result is NOT applied: "moved" with the result as cloud, store untouched, nothing shelved, and the state is the boot R75 state (unmergedCloud = L = r10, pending cleared, conflict kept)', async () => {
+    const result = save({ revision: 10, tank: 5_000 });
+    const advanced = save({ revision: 11, tank: 4_000 });
+    const r = await pendingConflict();
+    r.sync.onStored(advanced);
+    await r.ts.store.save(advanced);
+    r.ts.calls.length = 0;
+    const shelfBefore = r.ts.shelf.length;
+    r.api.reply.resolve = () => ok(200, { revision: 10, save: result });
+    expect(await r.sync.resolve('cloud')).toEqual({ ok: false, reason: 'moved', cloud: result });
+    expect(r.api.resolves[2]).toEqual(DEVICE_BODY());
+    expect(r.ts.calls).toEqual([]);
+    expect(r.ts.shelf).toHaveLength(shelfBefore);
+    expect(await r.ts.current()).toEqual(advanced);
+    expect(r.state().unmergedCloud).toEqual({ saveId: GAME_X, revision: 10 });
+    expect(r.state().lastSeenCloud).toEqual({ saveId: GAME_X, revision: 10 });
+    expect(r.state().pendingResolve ?? null).toBeNull();
+    expect(r.state().pendingResolveFor ?? null).toBeNull();
+    expect(r.state().conflict).toBe(true);
+    expect(r.sync.status()).toBe('conflict');
+  });
+
+  it('Pin: Given a pending body for device r9 and the game has NOT advanced, When the re-sent resolve commits r10, Then the result is applied normally', async () => {
+    const result = save({ revision: 10, tank: 5_000 });
+    const r = await pendingConflict();
+    r.api.reply.resolve = () => ok(200, { revision: 10, save: result });
+    expect(await r.sync.resolve('cloud')).toEqual({ ok: true, save: result });
+    expect(await r.ts.current()).toEqual(result);
+    expect(r.state()).toMatchObject({ lastSeenCloud: { saveId: GAME_X, revision: 10 }, conflict: false });
+    expect(r.state().pendingResolve ?? null).toBeNull();
+    expect(r.state().unmergedCloud ?? null).toBeNull();
+    expect(r.sync.status()).toBe('synced');
+  });
+});
+
+describe('Pin — unmergedCloud is cleared by agreeing boot decisions, kept by a conflict', () => {
+  const U = { saveId: GAME_X, revision: 10 };
+
+  it('Pin: Given unmergedCloud = r10 = L and local identical to the cloud r10, When boot, Then in-sync and unmergedCloud is cleared', async () => {
+    const r = rig({ state: boundB(save({ revision: 10 }), { conflict: true, unmergedCloud: U }), api: { getSave: () => cloudReply(save({ revision: 10 })) } });
+    expect((await r.sync.boot(save({ revision: 10 }))).decision).toEqual({ kind: 'in-sync' });
+    expect(r.state().unmergedCloud ?? null).toBeNull();
+  });
+
+  it('Pin: Given an unbound save with unmergedCloud (a guest resolve kept unmerged) and an EMPTY cloud, When boot, Then adopt and unmergedCloud is cleared', async () => {
+    const r = rig({ state: syncState({ conflict: true, lastSeenCloud: U, unmergedCloud: U }), api: { getSave: noSave } });
+    expect((await r.sync.boot(save({ revision: 11 }))).decision).toEqual({ kind: 'adopt' });
+    expect(r.state().unmergedCloud ?? null).toBeNull();
+  });
+
+  it('Pin: Given bound to B with unmergedCloud = r10 = L, local r11, and the cloud now EMPTY (a reachable push-local), When boot, Then push-local, unmergedCloud and the conflict flag are cleared, and r11 is PUT', async () => {
+    const r = rig({ state: boundB(save({ revision: 10 }), { conflict: true, unmergedCloud: U }), api: { getSave: noSave } });
+    expect((await r.sync.boot(save({ revision: 11 }))).decision).toEqual({ kind: 'push-local' });
+    expect(r.state().unmergedCloud ?? null).toBeNull();
+    expect(r.state().conflict).toBe(false);
+    await settle(PUSH_MIN_INTERVAL_MS);
+    expect(r.api.puts.map((p) => p.save.revision)).toEqual([11]);
+  });
+
+  it('Pin: Given bound to B with unmergedCloud = r10 = L = the cloud, local r11, When boot, Then conflict-same and unmergedCloud is KEPT', async () => {
+    const r = rig({ state: boundB(save({ revision: 10 }), { conflict: true, unmergedCloud: U }), api: { getSave: () => cloudReply(save({ revision: 10, tank: 5_000 })) } });
+    expect((await r.sync.boot(save({ revision: 11, tank: 4_000 }))).decision).toEqual({ kind: 'conflict-same' });
+    expect(r.state().unmergedCloud).toEqual(U);
+  });
+});

@@ -203,3 +203,28 @@ describe('syncState — the unmerged cloud head (R79)', () => {
     expect(uuid).not.toHaveBeenCalled();
   });
 });
+
+describe('syncState — pendingResolveFor (pin, bca7005)', () => {
+  it('Pin: Given a state with pendingResolve and pendingResolveFor, When written and read back, Then both survive exactly', () => {
+    const storage = new MemoryStorage();
+    const s = {
+      ...syncState({ accountId: ACCT_A.id, accountName: ACCT_A.name, lastSeenCloud: { saveId: GAME_X, revision: 7 }, conflict: true }),
+      pendingResolve: { deviceId: DEVICE_ID, keep: 'device' as const, device: save({ revision: 9 }), base: null, cloud: null },
+      pendingResolveFor: ACCT_A.id,
+    };
+    expect(writeSyncState(storage, s)).toBe(true);
+    const uuid = vi.fn(() => DEVICE_ID_2);
+    expect(readSyncState(storage, uuid)).toEqual(s);
+    expect(uuid).not.toHaveBeenCalled();
+  });
+
+  it('Pin: Given a state with pendingResolve but WITHOUT pendingResolveFor (older writer), When read, Then it parses unchanged', () => {
+    const storage = new MemoryStorage();
+    const s = {
+      ...syncState({ accountId: ACCT_A.id, accountName: ACCT_A.name, conflict: true }),
+      pendingResolve: { deviceId: DEVICE_ID, keep: 'cloud' as const, device: save({ revision: 9 }), base: null, cloud: null },
+    };
+    stored(storage, s);
+    expect(readSyncState(storage, () => DEVICE_ID_2)).toStrictEqual(s);
+  });
+});
