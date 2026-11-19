@@ -720,6 +720,20 @@ describe('Ruling R84 — POST /api/save/resolve names the revision a replayed re
     },
   );
 
+  it('Ruling R84: Given A resolved X into r7 and the head has since moved to ANOTHER game (the other device started a new game Y, X archived), When A replays the identical body, Then 409 with the head Y and resolvedAs naming the OLD game\'s revision X r7 — the lookup matches (session user, key), not the head\'s game', async () => {
+    const a = await mkUser('a');
+    const { base, device, cloudHead } = await diverged(a);
+    const r1 = (await (await resolve(a, 'device', device, head(base), cloudHead, DEV_B)).json()) as { revision: number; save: SaveV1 };
+    const y = mk({ saveId: SAVE_Y, revision: 1, tank: 15_000 });
+    expect((await put(a, y, head(r1.save), DEV_A)).status).toBe(200);
+    expect((await archiveRows(a.id))[0]).toMatchObject({ save_id: SAVE_X, revision: r1.revision });
+    const before = await snapshot(a.id);
+    const res = await resolve(a, 'device', device, head(base), cloudHead, DEV_B);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ cloud: { revision: 1, save: y }, resolvedAs: { saveId: SAVE_X, revision: r1.revision } });
+    expect(await snapshot(a.id)).toEqual(before);
+  });
+
   it('Ruling R84 (guard): Given a resolve that was never committed (its key is on no row) and a moved cloud, When it arrives, Then 409 with exactly { cloud } — no resolvedAs field at all', async () => {
     const a = await mkUser('a');
     const { base, device } = await diverged(a);

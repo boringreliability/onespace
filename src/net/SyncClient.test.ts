@@ -2455,6 +2455,27 @@ describe('Ruling R84 — a replay answered 409 with resolvedAs', () => {
     expect(r.api.resolves[3]).toEqual({ deviceId: DEVICE_ID, keep: 'device', device: aR11, base: R10, cloud: { saveId: GAME_X, revision: 11 } });
   });
 
+  it('Ruling R84 (in session, NOT advanced): Given a pending body and the game still at the device save r9, When the re-sent resolve answers 409 with resolvedAs r10, Then the same as the advanced case — "moved" with the cloud r11, L = r10, entry and pendingResolveFor cleared, store untouched, nothing shelved, no PUT, conflict flag and status conflict kept (the cloud is taken only by the next choice or the next boot)', async () => {
+    const r = await pendingConflict();
+    r.ts.calls.length = 0;
+    const shelfBefore = r.ts.shelf.length;
+    const storeBefore = await r.ts.current();
+    r.api.reply.resolve = () => moved409(R10);
+    expect(await r.sync.resolve('device')).toEqual({ ok: false, reason: 'moved', cloud: bR11 });
+    expect(r.api.resolves[2]).toEqual(DEVICE_BODY());
+    expect(r.state().lastSeenCloud).toEqual(R10);
+    expect(r.state().pendingResolve ?? null).toBeNull();
+    expect(r.state().pendingResolveFor ?? null).toBeNull();
+    expect(r.ts.calls).toEqual([]);
+    expect(r.ts.shelf).toHaveLength(shelfBefore);
+    expect(await r.ts.current()).toEqual(storeBefore);
+    expect(r.state().conflict).toBe(true);
+    expect(r.sync.status()).toBe('conflict');
+    r.sync.onStored(save({ revision: 10, tank: 10_000 }));
+    await settle(TEN_MIN);
+    expect(r.api.puts).toEqual([]);
+  });
+
   it.each<[string, unknown]>([
     ['without resolvedAs (an older server)', undefined],
     ['with a malformed resolvedAs ({saveId: "x", revision: -1})', { saveId: 'x', revision: -1 }],
