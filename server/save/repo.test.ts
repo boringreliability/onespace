@@ -360,7 +360,9 @@ describe('resolveSave', () => {
     expect(await n('save_revisions', a)).toBe(revs);
   });
 
-  it('Given a resolved game moved on by a put, When the same resolve repeats, Then conflict with the current head, nothing changes', async () => {
+  // CHANGED by Ruling R84 (D51b): the key of the first resolve is now found on its result's revision row (r7), so the
+  // conflict names it; was toEqual({ kind: 'conflict', cloud: { revision: 8, save: next } }) and the title without "naming r7".
+  it('Given a resolved game moved on by a put, When the same resolve repeats, Then conflict with the current head naming the revision it resolved as (r7), nothing changes', async () => {
     const a = await user('a');
     const { base, device, cloudHead } = await diverged(a);
     const input = { deviceId: DEV_B, keep: 'device' as const, device, base: head(base), cloud: cloudHead };
@@ -368,7 +370,7 @@ describe('resolveSave', () => {
     const next = mk({ revision: 8, tank: 7_000 });
     await putSave(t.sql, a, { deviceId: DEV_A, base: head(first.save), save: next });
     const before = await n('save_revisions', a);
-    expect(await resolveSave(t.sql, a, input)).toEqual({ kind: 'conflict', cloud: { revision: 8, save: next } });
+    expect(await resolveSave(t.sql, a, input)).toEqual({ kind: 'conflict', cloud: { revision: 8, save: next }, resolvedAs: { saveId: SAVE_X, revision: 7 } });
     expect(await n('save_revisions', a)).toBe(before);
   });
 
@@ -429,6 +431,114 @@ describe('resolveSave', () => {
   });
 });
 
+// ---- Ruling R84 (D51b): a replay is recognised after another device moved on ----
+//
+// Pinned (phase B):
+//   migration 003_revision_resolve_key.sql: `save_revisions.resolve_key text` (nullable)
+//   a successful resolve writes its key on the result's save_revisions row AND on the head, in one transaction
+//   resolveSave → { kind: 'conflict'; cloud: { revision, save }; resolvedAs?: { saveId: string; revision: number } }
+//     resolvedAs = the revision row of THIS user that holds the key, when the head does not hold it;
+//     absent when the key is found nowhere.
+
+const revKey = async (userId: string, saveId: string, revision: number) =>
+  (
+    await t.sql<{ resolve_key: string | null }[]>`
+      select resolve_key from save_revisions where user_id = ${userId} and save_id = ${saveId} and revision = ${revision}`
+  )[0]?.resolve_key;
+const headKey = async (userId: string) =>
+  (await t.sql<{ resolve_key: string | null }[]>`select resolve_key from saves where user_id = ${userId}`)[0]?.resolve_key;
+
+describe('Ruling R84 — the resolve key is stamped on the result revision row', () => {
+  it('Ruling R84: Given a diverged same game, When keep "device" resolves to r7, Then the r7 revision row AND the head both hold the key', async () => {
+    const a = await user('a');
+    const base = mk({ revision: 5, tank: 12_000 });
+    await putSave(t.sql, a, { deviceId: DEV_A, base: null, save: base });
+    const cloud = mk({ revision: 6, tank: 9_000 });
+    await putSave(t.sql, a, { deviceId: DEV_A, base: head(base), save: cloud });
+    const r = await resolveSave(t.sql, a, { deviceId: DEV_B, keep: 'device', device: mk({ revision: 6, tank: 11_000 }), base: head(base), cloud: head(cloud) });
+    expect(r).toMatchObject({ kind: 'resolved', revision: 7 });
+    const key = `device:${SAVE_X}:6:${SAVE_X}:6`;
+    expect(await revKey(a, SAVE_X, 7)).toBe(key);
+    expect(await headKey(a)).toBe(key);
+    expect(await revKey(a, SAVE_X, 5)).toBeNull();
+    expect(await revKey(a, SAVE_X, 6)).toBeNull();
+  });
+
+  it('Ruling R84: Given different games and keep "device", Then the device game row (Y r1) holds the key', async () => {
+    const a = await user('a');
+    const x = mk({ revision: 3 });
+    await putSave(t.sql, a, { deviceId: DEV_A, base: null, save: x });
+    await resolveSave(t.sql, a, { deviceId: DEV_A, keep: 'device', device: mk({ saveId: SAVE_Y, revision: 1 }), base: head(x), cloud: head(x) });
+    expect(await revKey(a, SAVE_Y, 1)).toBe(`device:${SAVE_Y}:1:${SAVE_X}:3`);
+  });
+
+  it('Ruling R84: Given different games and keep "cloud" (the head stays, its revision row already exists), Then that EXISTING row (X r3) gets the key too — and no row is added', async () => {
+    const a = await user('a');
+    const x = mk({ revision: 3 });
+    await putSave(t.sql, a, { deviceId: DEV_A, base: null, save: x });
+    await resolveSave(t.sql, a, { deviceId: DEV_A, keep: 'cloud', device: mk({ saveId: SAVE_Y, revision: 1 }), base: head(x), cloud: head(x) });
+    expect(await revKey(a, SAVE_X, 3)).toBe(`cloud:${SAVE_Y}:1:${SAVE_X}:3`);
+    expect(await n('save_revisions', a)).toBe(1);
+  });
+
+  it('Ruling R84: Given an empty cloud (R27), When resolve stores the device save, Then its row holds the key', async () => {
+    const a = await user('a');
+    await resolveSave(t.sql, a, { deviceId: DEV_A, keep: 'device', device: mk({ revision: 2 }), base: null, cloud: null });
+    expect(await revKey(a, SAVE_X, 2)).toBe(`device:${SAVE_X}:2:none`);
+  });
+
+  it('Ruling R84: Given a resolved head, When a later PUT moves the head on, Then the head key is NULL, the PUT row has none, and the resolved row KEEPS its key', async () => {
+    const a = await user('a');
+    const base = mk({ revision: 5, tank: 12_000 });
+    await putSave(t.sql, a, { deviceId: DEV_A, base: null, save: base });
+    const cloud = mk({ revision: 6, tank: 9_000 });
+    await putSave(t.sql, a, { deviceId: DEV_A, base: head(base), save: cloud });
+    const r = await resolveSave(t.sql, a, { deviceId: DEV_B, keep: 'device', device: mk({ revision: 6, tank: 11_000 }), base: head(base), cloud: head(cloud) });
+    if (r.kind === 'conflict') throw new Error('unexpected conflict');
+    await putSave(t.sql, a, { deviceId: DEV_A, base: head(r.save), save: mk({ revision: 8, tank: 7_000 }) });
+    expect(await headKey(a)).toBeNull();
+    expect(await revKey(a, SAVE_X, 8)).toBeNull();
+    expect(await revKey(a, SAVE_X, 7)).toBe(`device:${SAVE_X}:6:${SAVE_X}:6`);
+  });
+});
+
+describe('Ruling R84 — a replay whose key is on an earlier revision row', () => {
+  /** r5 (12000) → cloud r6 (9000); device r6 (11000) resolved keep "device" → r7 (8000); another device PUTs r8 (7000). */
+  async function resolvedThenMoved(a: string) {
+    const base = mk({ revision: 5, tank: 12_000 });
+    await putSave(t.sql, a, { deviceId: DEV_A, base: null, save: base });
+    const cloud = mk({ revision: 6, tank: 9_000 });
+    await putSave(t.sql, a, { deviceId: DEV_A, base: head(base), save: cloud });
+    const input = { deviceId: DEV_B, keep: 'device' as const, device: mk({ revision: 6, tank: 11_000 }), base: head(base), cloud: head(cloud) };
+    const first = await resolveSave(t.sql, a, input);
+    if (first.kind === 'conflict') throw new Error('unexpected conflict');
+    const next = mk({ revision: 8, tank: 7_000 });
+    await putSave(t.sql, a, { deviceId: DEV_A, base: head(first.save), save: next });
+    return { input, first, next };
+  }
+
+  it('Ruling R84: Given the replay of a committed resolve after another device moved the head on (r8), When it arrives, Then conflict with the head r8 and resolvedAs = { saveId, revision: 7 }; the head, the rows and the keys are unchanged', async () => {
+    const a = await user('a');
+    const { input, next } = await resolvedThenMoved(a);
+    const before = { head: await getHead(t.sql, a), revs: await n('save_revisions', a), headKey: await headKey(a) };
+    expect(await resolveSave(t.sql, a, input)).toEqual({
+      kind: 'conflict',
+      cloud: { revision: 8, save: next },
+      resolvedAs: { saveId: SAVE_X, revision: 7 },
+    });
+    expect({ head: await getHead(t.sql, a), revs: await n('save_revisions', a), headKey: await headKey(a) }).toEqual(before);
+  });
+
+  it('Ruling R84 (guard): Given a resolve whose key is on NO row (never committed) and a head that moved, When it arrives, Then conflict exactly as today — no resolvedAs', async () => {
+    const a = await user('a');
+    const { input } = await resolvedThenMoved(a);
+    const other = { ...input, device: mk({ revision: 6, tank: 10_500 }), cloud: { saveId: SAVE_X, revision: 5 } };
+    const r = await resolveSave(t.sql, a, other);
+    expect(r.kind).toBe('conflict');
+    expect((r as { resolvedAs?: unknown }).resolvedAs).toBeUndefined();
+  });
+});
+
 describe('deleteAccount', () => {
   it('Given a full account and another user, When deleteAccount, Then every table has zero rows for it and the other user is untouched', async () => {
     const a = await user('a');
@@ -446,6 +556,16 @@ describe('deleteAccount', () => {
     expect((await t.sql`select 1 from users where id = ${a}`).length).toBe(0);
     expect({ saves: await n('saves', b), actions: await n('actions', b), revisions: await n('save_revisions', b) }).toEqual(bRows);
     expect((await t.sql`select 1 from users where id = ${b}`).length).toBe(1);
+  });
+
+  it('Ruling R84 (guard): Given an account whose revision rows hold resolve keys, When deleteAccount, Then no save_revisions row of it is left', async () => {
+    const a = await user('a');
+    const x = mk({ revision: 3 });
+    await putSave(t.sql, a, { deviceId: DEV_A, base: null, save: x });
+    await resolveSave(t.sql, a, { deviceId: DEV_A, keep: 'cloud', device: mk({ saveId: SAVE_Y, revision: 1 }), base: head(x), cloud: head(x) });
+    await deleteAccount(t.sql, a);
+    expect(await n('save_revisions', a)).toBe(0);
+    expect(await n('saves', a)).toBe(0);
   });
 
   it('Given an unknown user id, When deleteAccount, Then it resolves without error', async () => {

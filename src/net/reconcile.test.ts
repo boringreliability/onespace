@@ -437,3 +437,23 @@ describe('Ruling R79 — an unmerged cloud keeps the conflict', () => {
     expect(kind({ local: null, cloud: save({ revision: 10 }), state: unmerged(), me })).toBe('use-cloud');
   });
 });
+
+// =============================================================================
+//  D51 follow-up — Ruling R84: after a replay answered 409 with resolvedAs, the
+//  client sets L = resolvedAs (r10) and reconciles against the cloud head (r11)
+//  as usual. What today's reconcile decides from that state (these PASS today;
+//  they keep the rule from moving under SyncClient):
+// =============================================================================
+
+describe('Ruling R84 — reconcile with L = resolvedAs', () => {
+  const me = ACCT_B;
+  const atR10 = boundTo(me, save({ revision: 10 }), { conflict: true });
+
+  it("Ruling R84 (guard): Given L = r10, the cloud r11 and the local save still at the device revision r9, Then 'use-cloud' (r11 descends from r10, which already holds r9)", () => {
+    expect(kind({ local: save({ revision: 9 }), cloud: save({ revision: 11, tank: 7_500 }), state: atR10, me })).toBe('use-cloud');
+  });
+
+  it("Ruling R84 (guard): Given L = r10, the cloud r11 and a local save played on to r11 (other content), Then 'conflict-same'", () => {
+    expect(kind({ local: save({ revision: 11, tank: 9_500 }), cloud: save({ revision: 11, tank: 7_500 }), state: atR10, me })).toBe('conflict-same');
+  });
+});

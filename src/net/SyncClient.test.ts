@@ -1859,13 +1859,15 @@ describe('Ruling R69 — resolve is persisted, retried once, and replayed verbat
 
   // ---------------------------------------------------------------------------
   // Addendum — Ruling R76: the boot replay lives inside the shared 3 s boot budget.
+  // REPLACED by Ruling R83 (D51a): the replay gets its own SYNC_WRITE_TIMEOUT_MS (30 s) from the moment it is sent.
 
-  it('Ruling R76: Given a pending resolve and a replay that never answers, When the next boot runs, Then boot ends at 3 000 ms — not before, not at 30 s — local-only, with the entry kept, the conflict flag kept and nothing written', async () => {
+  // CHANGED by Ruling R83: was "Ruling R76: … Then boot ends at 3 000 ms — not before, not at 30 s — …" and settle(2_999).
+  it('Ruling R83 (replaces R76): Given a pending resolve and a replay that never answers, When the next boot runs, Then boot ends at 30 000 ms after the replay was sent — not before, not at 3 s — local-only, with the entry kept, the conflict flag kept and nothing written', async () => {
     const r1 = await lostResolve();
     const r = nextBoot(r1, { getSave: () => cloudReply(save({ revision: 10 })), resolve: never });
     let b: { decision: { kind: string } } | null = null;
     void r.sync.boot(save({ revision: 9 })).then((x) => (b = x));
-    await settle(2_999);
+    await settle(29_999);
     expect(r.api.resolves).toEqual([DEVICE_BODY()]);
     expect(b).toBeNull();
     await settle(1);
@@ -1960,19 +1962,21 @@ describe('Ruling R69 — resolve is persisted, retried once, and replayed verbat
 
   // ---------------------------------------------------------------------------
   // Addendum 2 — Ruling R80: a replay that answers after the boot budget changes nothing mid-session.
+  // R83: the budget it outlives is now the replay's own 30 s, not the shared 3 s.
 
+  // CHANGED by Ruling R83: was "…outlived the 3 s budget…" and settle(3_000) — under R83 the boot is still waiting at 3 s.
   it.each<[string, ApiResult]>([
     ['200 with the result', ok(200, { revision: 10, save: save({ revision: 10, tank: 5_000 }) })],
     ['a 500', fail(500)],
     ['a 409', fail(409, { body: { cloud: { revision: 11, save: save({ revision: 11 }) } } })],
   ])(
-    'Ruling R80: Given the boot replay outlived the 3 s budget (boot went local-only), When it answers %s afterwards, Then store, sync state, status and L are untouched and pendingResolve is still there — and the next boot replays the identical body',
+    'Ruling R80: Given the boot replay outlived its 30 s budget (R83; boot went local-only), When it answers %s afterwards, Then store, sync state, status and L are untouched and pendingResolve is still there — and the next boot replays the identical body',
     async (_what, late) => {
       const r1 = await lostResolve();
       const answer = deferred();
       const r = nextBoot(r1, { getSave: () => cloudReply(save({ revision: 10 })), resolve: () => answer.promise });
       const done = r.sync.boot(save({ revision: 9 }));
-      await settle(3_000);
+      await settle(30_000);
       expect((await done).decision.kind).toBe('local-only');
       const stateBefore = r.storage.getItem(SYNC_KEY);
       const storeBefore = await r.ts.current();
@@ -1997,6 +2001,85 @@ describe('Ruling R69 — resolve is persisted, retried once, and replayed verbat
       expect(next.api.resolves).toEqual([DEVICE_BODY()]);
     },
   );
+
+  // ---------------------------------------------------------------------------
+  // D51 follow-up — Ruling R83 (D51a): the boot replay gets time to finish.
+  //   With a pending resolve and `me` confirming its account inside the 3 s budget, the replay gets its own
+  //   SYNC_WRITE_TIMEOUT_MS (30 000 ms) counted from when it is sent. The getSave that follows a replay that
+  //   answered gets a FRESH SYNC_TIMEOUT_MS (3 000 ms) from when it is sent (choice: the remaining 3 s budget
+  //   is usually spent by then). Every boot without a pending resolve keeps the one 3 s budget.
+
+  /** A reply that arrives `ms` after the call. */
+  const replyAfter = (ms: number, reply: ApiResult) => (): Promise<ApiResult> => new Promise<ApiResult>((res) => setTimeout(() => res(reply), ms));
+
+  it('Ruling R83: Given a pending resolve and a replay that answers only after 10 s, When the next boot runs, Then the boot waits for it — the result is applied and the boot is in sync (not local-only)', async () => {
+    const result = save({ revision: 10, tank: 5_000 });
+    const r1 = await lostResolve();
+    const r = nextBoot(r1, { getSave: () => cloudReply(result), resolve: replyAfter(10_000, ok(200, { revision: 10, save: result })) });
+    let b: { decision: { kind: string } } | null = null;
+    void r.sync.boot(save({ revision: 9 })).then((x) => (b = x));
+    await settle(3_000);
+    expect(b).toBeNull();
+    await settle(7_000);
+    expect(b).not.toBeNull();
+    expect(b!.decision).toEqual({ kind: 'in-sync' });
+    expect(r.api.resolves).toEqual([DEVICE_BODY()]);
+    expect(await r.ts.current()).toEqual(result);
+    expect(r.state()).toMatchObject({ lastSeenCloud: { saveId: GAME_X, revision: 10 }, conflict: false });
+    expect(r.state().pendingResolve ?? null).toBeNull();
+    expect(r.sync.status()).toBe('synced');
+  });
+
+  it.each([1_000, 2_900])(
+    'Ruling R83: Given me() answers at %i ms (inside the 3 s budget) and the replay then never answers, When the next boot runs, Then boot ends exactly 30 000 ms after me() — not a millisecond before — local-only/timeout, entry and conflict flag kept, nothing written, no getSave',
+    async (meAt) => {
+      const r1 = await lostResolve();
+      const r = nextBoot(r1, { me: replyAfter(meAt, ok(200, { ...ACCT_B })), getSave: () => cloudReply(save({ revision: 10 })), resolve: never });
+      let b: unknown = null;
+      void r.sync.boot(save({ revision: 9 })).then((x) => (b = x));
+      await settle(meAt + 29_999);
+      expect(r.api.resolves).toEqual([DEVICE_BODY()]);
+      expect(b).toBeNull();
+      await settle(1);
+      expect(b).toEqual({ decision: { kind: 'local-only', reason: 'timeout' }, cloud: null, notice: null });
+      expect(r.state().pendingResolve).toEqual(DEVICE_BODY());
+      expect(r.state().conflict).toBe(true);
+      expect(r.sync.status()).toBe('conflict');
+      expect(r.ts.calls).toEqual([]);
+      expect(r.api.calls).not.toContain('getSave');
+    },
+  );
+
+  it('Ruling R83 (choice: a fresh 3 s for getSave): Given a replay that commits after 10 s and a getSave that never answers, When the next boot runs, Then boot ends at 13 000 ms — not at 12 999 — as local-only/timeout, with the replayed result applied (store = r10, L = r10, entry cleared)', async () => {
+    const result = save({ revision: 10, tank: 5_000 });
+    const r1 = await lostResolve();
+    const r = nextBoot(r1, { getSave: never, resolve: replyAfter(10_000, ok(200, { revision: 10, save: result })) });
+    let b: unknown = null;
+    void r.sync.boot(save({ revision: 9 })).then((x) => (b = x));
+    await settle(12_999);
+    expect(r.api.calls).toContain('getSave');
+    expect(b).toBeNull();
+    await settle(1);
+    expect(b).toEqual({ decision: { kind: 'local-only', reason: 'timeout' }, cloud: null, notice: null });
+    expect(await r.ts.current()).toEqual(result);
+    expect(r.state().lastSeenCloud).toEqual({ saveId: GAME_X, revision: 10 });
+    expect(r.state().pendingResolve ?? null).toBeNull();
+  });
+
+  it('Ruling R83 (guard): Given a pending resolve and a me() that answers only at 3.5 s (after the 3 s budget), When the next boot runs, Then boot ends at 3 000 ms as local-only/timeout and NO replay is ever sent — the entry stays for the next boot', async () => {
+    const r1 = await lostResolve();
+    const r = nextBoot(r1, { me: replyAfter(3_500, ok(200, { ...ACCT_B })), getSave: () => cloudReply(save({ revision: 10 })), resolve: () => ok(200, { revision: 10, save: save({ revision: 10 }) }) });
+    let b: { decision: unknown } | null = null;
+    void r.sync.boot(save({ revision: 9 })).then((x) => (b = x));
+    await settle(2_999);
+    expect(b).toBeNull();
+    await settle(1);
+    expect(b!.decision).toEqual({ kind: 'local-only', reason: 'timeout' });
+    await settle(TEN_MIN);
+    expect(r.api.resolves).toEqual([]);
+    expect(r.state().pendingResolve).toEqual(DEVICE_BODY());
+    expect(r.ts.calls).toEqual([]);
+  });
 });
 
 describe('Ruling R71 — the unchosen cloud snapshot goes on the shelf', () => {
@@ -2271,4 +2354,119 @@ describe('Pin — unmergedCloud is cleared by agreeing boot decisions, kept by a
     expect((await r.sync.boot(save({ revision: 11, tank: 4_000 }))).decision).toEqual({ kind: 'conflict-same' });
     expect(r.state().unmergedCloud).toEqual(U);
   });
+});
+
+// =============================================================================
+//  D51 follow-up — Ruling R84 (D51b): a replay is recognised even after another
+//  device moved on. The server answers a replayed resolve whose key sits on an
+//  earlier revision row with 409 { cloud, resolvedAs: { saveId, revision } }.
+//  The client then: L := resolvedAs, pendingResolve / pendingResolveFor cleared,
+//  and reconciles against the cloud head as usual —
+//   - the local save NOT advanced past pendingResolve.device → use-cloud (the
+//     local save is shelved, as a save replaced by a resolve result is);
+//   - advanced → an ordinary conflict whose later resolve sends base = resolvedAs.
+//  A 409 without resolvedAs (an older server) → exactly as before.
+//
+//  Story (conflictRig): L r7, cloud r8, local r9; the resolve committed r10
+//  (answer lost); another device took r10 and pushed r11.
+// =============================================================================
+
+describe('Ruling R84 — a replay answered 409 with resolvedAs', () => {
+  const R10 = { saveId: GAME_X, revision: 10 };
+  const bR11 = save({ revision: 11, tank: 7_500 });
+  const moved409 = (resolvedAs?: unknown): ApiResult =>
+    fail(409, { body: { cloud: { revision: 11, save: bR11 }, ...(resolvedAs === undefined ? {} : { resolvedAs }) } });
+
+  it('Ruling R84: Given the local save still at the device revision (r9), When the boot replay answers 409 with resolvedAs r10 and the cloud is r11, Then use-cloud — r9 is shelved first (R35 order), the store holds r11, L = r11, the entry is cleared, no conflict, synced', async () => {
+    const r1 = await pendingConflict();
+    const r = rebootOf(r1, { getSave: () => cloudReply(bR11), resolve: () => moved409(R10) });
+    const b = await r.sync.boot(save({ revision: 9 }));
+    expect(r.api.resolves).toEqual([DEVICE_BODY()]);
+    expect(b.decision).toEqual({ kind: 'use-cloud' });
+    expect(r.ts.calls).toEqual([`keep:${GAME_X}:9`, 'wal:reset', `replace:${GAME_X}:11`]);
+    expect(r.ts.shelf.map((e) => e.raw)).toContainEqual(save({ revision: 9 }));
+    expect(await r.ts.current()).toEqual(bR11);
+    expect(r.state()).toMatchObject({ lastSeenCloud: { saveId: GAME_X, revision: 11 }, conflict: false });
+    expect(r.state().pendingResolve ?? null).toBeNull();
+    expect(r.state().pendingResolveFor ?? null).toBeNull();
+    expect(r.sync.status()).toBe('synced');
+    await settle(TEN_MIN);
+    expect(r.api.puts).toEqual([]);
+  });
+
+  it('Ruling R84: Given the player played on to r11 locally, When the boot replay answers 409 with resolvedAs r10 and the cloud is r11 (another body), Then an ordinary conflict — nothing written, L = r10, entry cleared, no PUT — and the resolve the player then makes sends base = r10 (never r7: no double deduction)', async () => {
+    const aR11 = save({ revision: 11, tank: 9_500 });
+    const r1 = await pendingConflict();
+    await r1.ts.store.save(aR11);
+    const r = rebootOf(r1, { getSave: () => cloudReply(bR11), resolve: () => moved409(R10) });
+    const b = await r.sync.boot(aR11);
+    expect(b.decision).toEqual({ kind: 'conflict-same' });
+    expect(b.cloud).toEqual(bR11);
+    expect(r.ts.calls).toEqual([]);
+    expect(await r.ts.current()).toEqual(aR11);
+    expect(r.state().lastSeenCloud).toEqual(R10);
+    expect(r.state().pendingResolve ?? null).toBeNull();
+    expect(r.state().pendingResolveFor ?? null).toBeNull();
+    expect(r.state().conflict).toBe(true);
+    expect(r.sync.status()).toBe('conflict');
+    await settle(TEN_MIN);
+    expect(r.api.puts).toEqual([]);
+
+    r.api.reply.resolve = () => ok(200, { revision: 12, save: save({ revision: 12, tank: 9_000 }) });
+    expect((await r.sync.resolve('device')).ok).toBe(true);
+    expect(r.api.resolves[1]).toEqual({ deviceId: DEVICE_ID, keep: 'device', device: aR11, base: R10, cloud: { saveId: GAME_X, revision: 11 } });
+  });
+
+  it('Ruling R84: Given the player saved ONCE past the device save (local r10 — the same number as resolvedAs, other content), When the boot replay answers 409 with resolvedAs r10, Then still a conflict (never use-cloud over that progress) with L = r10; and a reload with nothing changed is a conflict again, store untouched, no PUT', async () => {
+    const aR10 = save({ revision: 10, tank: 10_500 });
+    const r1 = await pendingConflict();
+    await r1.ts.store.save(aR10);
+    const r = rebootOf(r1, { getSave: () => cloudReply(bR11), resolve: () => moved409(R10) });
+    expect((await r.sync.boot(aR10)).decision).toEqual({ kind: 'conflict-same' });
+    expect(r.ts.calls).toEqual([]);
+    expect(r.state().lastSeenCloud).toEqual(R10);
+    expect(r.state().pendingResolve ?? null).toBeNull();
+
+    const r2 = rebootOf(r, { getSave: () => cloudReply(bR11) });
+    expect((await r2.sync.boot(aR10)).decision).toEqual({ kind: 'conflict-same' });
+    expect(r2.ts.calls).toEqual([]);
+    expect(await r2.ts.current()).toEqual(aR10);
+    await settle(TEN_MIN);
+    expect(r2.api.puts).toEqual([]);
+  });
+
+  it('Ruling R84 (in session): Given a pending body and the game has stored r11 since, When the re-sent resolve answers 409 with resolvedAs r10, Then "moved" with the cloud r11, L = r10, the entry cleared, store untouched — and the next choice sends base = r10', async () => {
+    const aR11 = save({ revision: 11, tank: 9_500 });
+    const r = await pendingConflict();
+    r.sync.onStored(aR11);
+    await r.ts.store.save(aR11);
+    r.ts.calls.length = 0;
+    r.api.reply.resolve = () => moved409(R10);
+    expect(await r.sync.resolve('device')).toEqual({ ok: false, reason: 'moved', cloud: bR11 });
+    expect(r.api.resolves[2]).toEqual(DEVICE_BODY());
+    expect(r.ts.calls).toEqual([]);
+    expect(r.state().lastSeenCloud).toEqual(R10);
+    expect(r.state().pendingResolve ?? null).toBeNull();
+    expect(r.state().pendingResolveFor ?? null).toBeNull();
+    expect(r.state().conflict).toBe(true);
+
+    r.api.reply.resolve = () => ok(200, { revision: 12, save: save({ revision: 12, tank: 9_000 }) });
+    expect((await r.sync.resolve('device')).ok).toBe(true);
+    expect(r.api.resolves[3]).toEqual({ deviceId: DEVICE_ID, keep: 'device', device: aR11, base: R10, cloud: { saveId: GAME_X, revision: 11 } });
+  });
+
+  it.each<[string, unknown]>([
+    ['without resolvedAs (an older server)', undefined],
+    ['with a malformed resolvedAs ({saveId: "x", revision: -1})', { saveId: 'x', revision: -1 }],
+  ])(
+    'Ruling R84 (guard): Given the boot replay answers 409 %s, Then exactly today\'s behaviour — entry cleared, L stays r7, conflict-same against the cloud r11',
+    async (_what, resolvedAs) => {
+      const r1 = await pendingConflict();
+      const r = rebootOf(r1, { getSave: () => cloudReply(bR11), resolve: () => moved409(resolvedAs) });
+      expect((await r.sync.boot(save({ revision: 9 }))).decision).toEqual({ kind: 'conflict-same' });
+      expect(r.state().lastSeenCloud).toEqual({ saveId: GAME_X, revision: 7 });
+      expect(r.state().pendingResolve ?? null).toBeNull();
+      expect(r.ts.calls).toEqual([]);
+    },
+  );
 });
