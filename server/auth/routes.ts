@@ -1,0 +1,167 @@
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { getConnInfo } from '@hono/node-server/conninfo';
+import { Hono, type Context } from 'hono';
+import { getCookie, setCookie } from 'hono/cookie';
+import type { Sql } from 'postgres';
+
+import type { Config } from '../config';
+import { ipKey } from '../clientIp';
+import { rateLimiter } from '../rateLimit';
+import { DISCORD_AUTHORIZE_URL, DISCORD_SCOPE, exchangeCode, lookupMember } from './discord';
+import {
+  clearSessionCookie,
+  createSession,
+  deleteSession,
+  requireUser,
+  sessionToken,
+  setSessionCookie,
+  type AuthVariables,
+} from './session';
+
+export const OAUTH_COOKIE = '__Host-onespace_oauth';
+const OAUTH_TTL_S = 600;
+const LOGIN_LIMIT = 20;
+const LOGIN_WINDOW_MS = 60_000;
+
+export type AuthDeps = {
+  config: Config;
+  sql: Sql;
+  now: () => number;
+  fetch: typeof fetch;
+  clientIp?: (c: Context) => string;
+};
+
+/** Production sits behind Railway's proxy: right-most x-forwarded-for entry. Otherwise the socket address. */
+export function defaultClientIp(config: Config): (c: Context) => string {
+  return (c) => {
+    if (config.production) {
+      // Railway's edge appends the real client address: trust only the right-most entry.
+      const last = c.req.header('x-forwarded-for')?.split(',').pop()?.trim();
+      if (last) return ipKey(last);
+    }
+    try {
+      return ipKey(getConnInfo(c).remote.address ?? '');
+    } catch {
+      return 'unknown';
+    }
+  };
+}
+
+const oauthCookieOpts = { httpOnly: true, secure: true, sameSite: 'Lax', path: '/' } as const;
+
+export function authRoutes(deps: AuthDeps): Hono<{ Variables: AuthVariables }> {
+  const { config, sql, now } = deps;
+  const clientIp = deps.clientIp ?? defaultClientIp(config);
+  const redirectUri = `${config.publicOrigin}/api/auth/discord/callback`;
+  const app = new Hono<{ Variables: AuthVariables }>();
+
+  // One shared budget per client IP across all three login routes.
+  const limit = rateLimiter({ limit: LOGIN_LIMIT, windowMs: LOGIN_WINDOW_MS, key: clientIp, now });
+  app.use('/auth/discord', limit);
+  app.use('/auth/discord/callback', limit);
+  app.use('/test/login', limit);
+
+  const upsertUser = async (discordId: string, name: string): Promise<string> => {
+    const [row] = await sql<{ id: string }[]>`
+      insert into users (discord_id, name) values (${discordId}, ${name})
+      on conflict (discord_id) do update set name = excluded.name
+      returning id`;
+    return row!.id;
+  };
+
+  app.get('/auth/discord', (c) => {
+    const state = randomBytes(32).toString('base64url');
+    const verifier = randomBytes(32).toString('base64url');
+    const challenge = createHash('sha256').update(verifier).digest('base64url');
+    setCookie(c, OAUTH_COOKIE, `${state}.${verifier}`, { ...oauthCookieOpts, maxAge: OAUTH_TTL_S });
+    const url = new URL(DISCORD_AUTHORIZE_URL);
+    url.search = new URLSearchParams({
+      response_type: 'code',
+      client_id: config.discord.clientId,
+      redirect_uri: redirectUri,
+      scope: DISCORD_SCOPE,
+      state,
+      code_challenge: challenge,
+      code_challenge_method: 'S256',
+    }).toString();
+    return c.redirect(url.toString(), 302);
+  });
+
+  app.get('/auth/discord/callback', async (c) => {
+    const raw = getCookie(c, OAUTH_COOKIE);
+    // Single-use: cleared on every outcome.
+    setCookie(c, OAUTH_COOKIE, '', { ...oauthCookieOpts, maxAge: 0 });
+    const fail = () => c.redirect('/?auth=error', 302);
+
+    const parts = raw?.split('.') ?? [];
+    const [cookieState, verifier] = parts;
+    const state = c.req.query('state');
+    const code = c.req.query('code');
+    if (parts.length !== 2 || !cookieState || !verifier || !state || !code || c.req.query('error')) return fail();
+    const a = Buffer.from(cookieState);
+    const b = Buffer.from(state);
+    if (a.length !== b.length || !timingSafeEqual(a, b)) return fail();
+
+    let member;
+    try {
+      const accessToken = await exchangeCode(deps.fetch, {
+        clientId: config.discord.clientId,
+        clientSecret: config.discord.clientSecret,
+        code,
+        redirectUri,
+        verifier,
+      });
+      member = await lookupMember(deps.fetch, accessToken, config.discord.guildId, config.discord.roleId);
+    } catch {
+      return fail();
+    }
+    if (!member.ok) {
+      if (member.reason === 'no-role') {
+        // R72: the role was taken away — a de-invited user keeps no 30-day door.
+        try {
+          await sql`delete from sessions where user_id in (select id from users where discord_id = ${member.discordId})`;
+        } catch (err) {
+          console.error('deleting a de-invited user\'s sessions failed:', err instanceof Error ? err.message : err);
+        }
+      }
+      return c.redirect('/?auth=not-invited', 302);
+    }
+
+    try {
+      const userId = await upsertUser(member.id, member.name);
+      setSessionCookie(c, await createSession(sql, userId, now()));
+    } catch (err) {
+      console.error('login failed after Discord check:', err instanceof Error ? err.message : err);
+      return fail();
+    }
+    return c.redirect('/?auth=ok', 302);
+  });
+
+  app.get('/me', requireUser(sql, now), (c) => c.json(c.var.user));
+
+  app.post('/auth/logout', async (c) => {
+    const token = sessionToken(c);
+    if (token) await deleteSession(sql, token);
+    clearSessionCookie(c);
+    return c.body(null, 204);
+  });
+
+  if (config.testLogin && !config.production) {
+    app.post('/test/login', async (c) => {
+      const body = await c.req.json().catch(() => null);
+      const raw = (body as { name?: unknown } | null)?.name;
+      const name = typeof raw === 'string' ? raw.trim() : '';
+      if (name.length < 1 || name.length > 64 || /\p{Cc}/u.test(name)) return c.json({ error: 'bad_request' }, 400);
+      try {
+        const id = await upsertUser(`test:${name}`, name);
+        setSessionCookie(c, await createSession(sql, id, now()));
+        return c.json({ id, name });
+      } catch (err) {
+        console.error('test login failed:', err instanceof Error ? err.message : err);
+        return c.json({ error: 'internal' }, 500);
+      }
+    });
+  }
+
+  return app;
+}

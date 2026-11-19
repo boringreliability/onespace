@@ -92,6 +92,19 @@ describe('recording', () => {
     expect(log.byKind('world').length).toBe(0);
   });
 
+  it("Given a scan:complete with kind 'asteroid' (v4 sub-plan 2), Then it is filed once as a note under scan:<ast id>, not as a world or a contact", () => {
+    const log = open();
+    const rock: ScanResult = { targetId: 'ast:s1:398:4', name: 'asteroid 398-4', lines: ['ice ...... 4 200 kg'], kind: 'asteroid' };
+    bus.emit('scan:complete', rock);
+    bus.emit('scan:complete', rock);
+    const notes = log.byKind('note');
+    expect(notes.length).toBe(1);
+    expect(notes[0]!.key).toBe('scan:ast:s1:398:4');
+    expect(notes[0]!.visits).toBe(2);
+    expect(log.byKind('world').length).toBe(0);
+    expect(log.byKind('contact').length).toBe(0);
+  });
+
   it('treats a scan with no kind as a world', () => {
     // The showroom fixtures predate the field. They must not become contacts.
     const log = open();
@@ -231,5 +244,191 @@ describe('lifecycle', () => {
     log.dispose();
     bus.emit('scan:complete', scan('p1', 'Ghent'));
     expect(log.all()).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Final whole-branch review, I3(a) — living assays. An asteroid's note is an
+// assay, and an assay goes stale as the rock is mined: a re-scan REPLACES the
+// body (keys `scan:ast:…`), keeps the first `at`, counts the visit, and is not
+// announced as a new discovery. Every other kind keeps its first body.
+// ---------------------------------------------------------------------------
+
+describe('re-scanning an asteroid updates its assay (final review I3a)', () => {
+  const rock = (left: number): ScanResult => ({
+    targetId: 'ast:s1:398:4',
+    name: 'asteroid 398-4',
+    lines: [`ice ...... 4 200 kg · ${left} left`],
+    kind: 'asteroid',
+  });
+
+  /** Every "LOGGED — …" line the log announces while `fn` runs. */
+  function announced(fn: () => void): string[] {
+    const texts: string[] = [];
+    const off = bus.on('log', ({ text }) => {
+      if (text.startsWith('LOGGED —')) texts.push(text);
+    });
+    fn();
+    off();
+    return texts;
+  }
+
+  it('Given an asteroid scanned, then mined and scanned again, Then its one note carries the NEW body, the FIRST at, and visits 2', () => {
+    const log = open();
+    log.update(100);
+    bus.emit('scan:complete', rock(4_200));
+    const at = log.byKind('note')[0]!.at;
+    log.update(3_600);
+    bus.emit('scan:complete', rock(2_200));
+    const notes = log.byKind('note');
+    expect(notes).toHaveLength(1);
+    expect(notes[0]!.key).toBe('scan:ast:s1:398:4');
+    expect(notes[0]!.body).toEqual(['ice ...... 4 200 kg · 2200 left']);
+    expect(notes[0]!.at).toBe(at);
+    expect(notes[0]!.visits).toBe(2);
+  });
+
+  it('Given an asteroid re-scanned, Then only the first scan announces "LOGGED —"', () => {
+    open();
+    const texts = announced(() => {
+      bus.emit('scan:complete', rock(4_200));
+      bus.emit('scan:complete', rock(2_200));
+      bus.emit('scan:complete', rock(200));
+    });
+    expect(texts).toEqual(['LOGGED — ASTEROID 398-4']);
+  });
+
+  it('Given an asteroid re-scanned, Then the new body is what a reload finds', () => {
+    const log = open();
+    bus.emit('scan:complete', rock(4_200));
+    bus.emit('scan:complete', rock(2_200));
+    log.dispose();
+    const again = open();
+    const note = again.byKind('note').find((e) => e.key === 'scan:ast:s1:398:4');
+    expect(note?.body).toEqual(['ice ...... 4 200 kg · 2200 left']);
+    expect(note?.visits).toBe(2);
+  });
+
+  it('Given an asteroid re-scanned, Then its note keeps its place in the log (not moved to the top)', () => {
+    const log = open();
+    bus.emit('scan:complete', rock(4_200));
+    bus.emit('scan:complete', scan('p1', 'Ghent'));
+    bus.emit('scan:complete', rock(2_200));
+    expect(log.all().map((e) => e.key)).toEqual(['scan:p1', 'scan:ast:s1:398:4']);
+  });
+
+  it('Given a world scanned twice with different lines, Then it keeps its FIRST body (only asteroid assays are replaced)', () => {
+    const log = open();
+    bus.emit('scan:complete', { targetId: 'p1', name: 'Ghent', lines: ['class .......... rocky'] });
+    bus.emit('scan:complete', { targetId: 'p1', name: 'Ghent', lines: ['class .......... ocean'] });
+    const world = log.byKind('world')[0]!;
+    expect(world.body).toEqual(['class .......... rocky']);
+    expect(world.visits).toBe(2);
+  });
+
+  it('Given a hull scanned twice with different lines, Then it keeps its FIRST body', () => {
+    const log = open();
+    bus.emit('scan:complete', { targetId: 'h1', name: 'kestrel', lines: ['hauler'], kind: 'vessel' });
+    bus.emit('scan:complete', { targetId: 'h1', name: 'kestrel', lines: ['courier'], kind: 'vessel' });
+    expect(log.byKind('contact')[0]!.body).toEqual(['hauler']);
+  });
+});
+
+describe('v4 save — export / import, sink and the legacy key', () => {
+  const KEY = 'onespace.log.v1';
+
+  /** A log with an arrival, a world and a landing (visited twice), and some mission time. */
+  function played(): ShipLog {
+    const log = open();
+    bus.emit('system:entered', { system: system('s1', 'Fyss') });
+    log.update(1234.5);
+    bus.emit('scan:complete', scan('p1', 'Remit 31'));
+    bus.emit('planet:landed', { planet: planet('p1', 'Remit 31') });
+    bus.emit('planet:landed', { planet: planet('p1', 'Remit 31') });
+    return log;
+  }
+
+  it('Given a played log, When exportState → importState into a fresh log, Then the state is identical', () => {
+    const a = played();
+    const s = a.exportState();
+    expect(s.time).toBeCloseTo(1234.5, 9);
+    expect(s.entries).toHaveLength(3);
+    a.dispose();
+
+    store.map.clear();
+    const b = open();
+    b.importState(s);
+    expect(b.exportState()).toEqual(s);
+    expect(b.all()).toEqual(a.all());
+    expect(b.summary()).toEqual(a.summary());
+  });
+
+  it('Given an import, Then no log event is sent (no LOGGED line for what was already logged)', () => {
+    const s = played().exportState();
+    bus.clear();
+    store.map.clear();
+    const lines: string[] = [];
+    bus.on('log', ({ text }) => lines.push(text));
+    const b = open();
+    b.importState(s);
+    expect(lines).toEqual([]);
+  });
+
+  it('Given an imported log, When the same world is landed on again, Then it is a revisit (visits++), not a new entry', () => {
+    const s = played().exportState();
+    bus.clear();
+    store.map.clear();
+    const b = open();
+    b.importState(s);
+    bus.emit('planet:landed', { planet: planet('p1', 'Remit 31') });
+    const landings = b.byKind('landing');
+    expect(landings).toHaveLength(1);
+    expect(landings[0]!.visits).toBe(3);
+  });
+
+  it('Given an export, Then it is a copy: recording afterwards does not change it', () => {
+    const log = played();
+    const s = log.exportState();
+    bus.emit('system:entered', { system: system('s2', 'Ost') });
+    expect(s.entries).toHaveLength(3);
+  });
+
+  it('Given a sink, When the log records, upserts or clears, Then every write goes to the sink and localStorage is untouched', () => {
+    const log = open();
+    const writes: Array<{ time: number; entries: readonly unknown[] }> = [];
+    log.setSink((state) => writes.push(state));
+    bus.emit('system:entered', { system: system('s1', 'Fyss') });
+    bus.emit('scan:complete', { targetId: 'ast:x', name: 'rock', lines: ['ice 3 t'], kind: 'asteroid' });
+    bus.emit('scan:complete', { targetId: 'ast:x', name: 'rock', lines: ['ice 1 t'], kind: 'asteroid' });
+    log.clear();
+    expect(store.map.has(KEY)).toBe(false);
+    expect(writes.length).toBeGreaterThanOrEqual(4);
+    expect(writes[0]!.entries).toHaveLength(1);
+    expect(writes.at(-1)!.entries).toHaveLength(0);
+  });
+
+  it('Given a sink, When an import happens, Then localStorage is still untouched', () => {
+    const s = played().exportState();
+    bus.clear();
+    store.map.clear();
+    const b = open();
+    b.setSink(() => undefined);
+    b.importState(s);
+    bus.emit('system:entered', { system: system('s9', 'Nine') });
+    expect(store.map.has(KEY)).toBe(false);
+  });
+
+  it('Given the sink is removed (null), When the log records, Then it writes to localStorage again', () => {
+    const log = open();
+    log.setSink(() => undefined);
+    log.setSink(null);
+    bus.emit('system:entered', { system: system('s1', 'Fyss') });
+    expect(store.map.has(KEY)).toBe(true);
+  });
+});
+
+describe('R25 M2 — dead code', () => {
+  it('Given ShipLog, Then legacyState is gone: the boot reads the legacy key itself (bootLoad readLegacyLog)', () => {
+    expect('legacyState' in ShipLog.prototype).toBe(false);
   });
 });

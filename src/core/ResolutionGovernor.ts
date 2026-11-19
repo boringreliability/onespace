@@ -50,10 +50,37 @@ export const GOVERNOR_DEFAULTS: GovernorConfig = {
   maxDownStep: 0.15,
   upStep: 0.05,
   windowMs: 500,
-  upCooldownMs: 3000,
+  upCooldownMs: 5000, // [v3-T1] was 3000; matches GOVERNOR_UP_STABLE_MS
   spikeMs: 250,
   spikeRunLimit: 3,
 };
+
+// --- [v3-T1] hysteresis ------------------------------------------------------
+// Every step reallocates the post stack's targets and costs a 56-67 ms frame
+// (8 of 8 steps during an auto-land, docs/v3/PLAN.md §1). Steps are therefore
+// rationed: never closer than 2 s, rises only after 5 s of steady fast frames,
+// and no rise at all while the autopilot or cruise is flying.
+
+export const GOVERNOR_MIN_STEP_INTERVAL_MS = 2000;
+export const GOVERNOR_UP_STABLE_MS = 5000;
+
+export interface GovernorStepQuery {
+  readonly direction: 'up' | 'down';
+  /** Wall time since the last change of scale, ms (Infinity if none). */
+  readonly sinceLastStepMs: number;
+  /** Wall time the frame rate has been continuously under the up threshold, ms. */
+  readonly stableMs: number;
+  /** True while the autopilot or cruise is active: rises wait. */
+  readonly holdUp: boolean;
+}
+
+/** May the governor take the step it wants? */
+export function governorShouldStep(q: GovernorStepQuery): boolean {
+  if (!(q.sinceLastStepMs >= GOVERNOR_MIN_STEP_INTERVAL_MS)) return false;
+  if (q.direction === 'down') return true;
+  return !q.holdUp && q.stableMs >= GOVERNOR_UP_STABLE_MS;
+}
+// --- [/v3-T1] ------------------------------------------------------------------
 
 export class ResolutionGovernor {
   readonly config: GovernorConfig;
@@ -65,6 +92,12 @@ export class ResolutionGovernor {
   private spikeRun = 0;
   /** Window average that triggered the last drop; null after any rise. */
   private avgAtLastDrop: number | null = null;
+  /** [v3-T1] Wall time since the last change of scale, ms. */
+  private sinceStepMs = Infinity;
+  /** [v3-T1] Wall time of consecutive windows under the up threshold, ms. */
+  private stableMs = 0;
+  /** [v3-T1] Longest frame in the current window, ms. */
+  private windowMax = 0;
 
   constructor(config: Partial<GovernorConfig> = {}) {
     this.config = { ...GOVERNOR_DEFAULTS, ...config };
@@ -72,9 +105,11 @@ export class ResolutionGovernor {
   }
 
   /** Feed one frame interval in ms. Returns true when `scale` changed. */
-  sample(frameMs: number): boolean {
+  sample(frameMs: number, holdUp = false): boolean {
     const c = this.config;
     if (!Number.isFinite(frameMs) || frameMs <= 0) return false;
+    // [v3-T1] Real wall time, before any spike clamp: a 400 ms frame is 400 ms.
+    this.sinceStepMs += frameMs;
     if (frameMs > c.spikeMs) {
       // A lone long interval is a hitch. A run of them is a 3 fps GPU: v2.0
       // dropped every one and so held full scale on the slowest machines.
@@ -86,10 +121,17 @@ export class ResolutionGovernor {
 
     this.windowSum += frameMs;
     this.windowCount++;
+    if (frameMs > this.windowMax) this.windowMax = frameMs;
     this.sinceDropMs += frameMs;
     if (this.windowSum < c.windowMs) return false;
 
     const avg = this.windowSum / this.windowCount;
+    // [v3-T1] Stability is counted in whole windows under the up threshold
+    // that held no frame of real load (> 2.5 × target; a lone vsync miss at
+    // 2 × target is not load, or a machine that misses one would never rise).
+    if (avg < c.targetMs * c.upRatio && this.windowMax <= c.targetMs * 2.5) this.stableMs += this.windowSum;
+    else this.stableMs = 0;
+    this.windowMax = 0;
     this.windowSum = 0;
     this.windowCount = 0;
 
@@ -109,16 +151,23 @@ export class ResolutionGovernor {
       // up); a machine at 5 fps is better served blurry than unplayable.
       const futile =
         prev !== null && avg <= c.targetMs * 2.5 && Math.abs(avg - prev) < prev * 0.05;
-      if (!futile) {
+      if (!futile && governorShouldStep(this.query('down', holdUp))) {
         const ideal = this.scale * Math.sqrt(c.targetMs / avg);
         next = Math.max(ideal, this.scale - c.maxDownStep);
       }
-    } else if (avg < c.targetMs * c.upRatio && this.sinceDropMs >= c.upCooldownMs) {
+    } else if (
+      avg < c.targetMs * c.upRatio &&
+      this.sinceDropMs >= c.upCooldownMs &&
+      governorShouldStep(this.query('up', holdUp))
+    ) {
       next = this.scale + c.upStep;
     }
 
     next = Math.min(c.maxScale, Math.max(c.minScale, next));
     if (Math.abs(next - this.scale) < 1e-6) return false;
+    this.sinceStepMs = 0;
+    // A rise re-enters load; the next one has to earn its 5 s again.
+    this.stableMs = 0;
     if (next < this.scale) {
       this.sinceDropMs = 0;
       this.avgAtLastDrop = avg;
@@ -127,5 +176,21 @@ export class ResolutionGovernor {
     }
     this.scale = next;
     return true;
+  }
+
+  private readonly q: { direction: 'up' | 'down'; sinceLastStepMs: number; stableMs: number; holdUp: boolean } = {
+    direction: 'down',
+    sinceLastStepMs: 0,
+    stableMs: 0,
+    holdUp: false,
+  };
+
+  private query(direction: 'up' | 'down', holdUp: boolean): GovernorStepQuery {
+    const q = this.q;
+    q.direction = direction;
+    q.sinceLastStepMs = this.sinceStepMs;
+    q.stableMs = this.stableMs;
+    q.holdUp = holdUp;
+    return q;
   }
 }

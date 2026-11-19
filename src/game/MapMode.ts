@@ -21,10 +21,12 @@ import type { Vec3 } from '@/gen/types';
 
 import { GalaxyView, registerGalaxyViewShots } from '@/render/GalaxyView';
 import { MutableViewState } from '@/render/ViewState';
-import { StarMap, registerStarMapShots, type GalaxyViewAdapter } from '@/ui/StarMap';
+import { StarMap, registerStarMapShots, systemDetailsOf, type GalaxyViewAdapter } from '@/ui/StarMap';
 import type { Warp } from '@/ship/Warp';
 import type { Universe } from '@/game/Universe';
 import { activeShotName, shotOwnsScene } from '@/game/Shots';
+import { isOriginJump, paidJump } from '@/game/jumpPayment'; // [v4-fuel]
+import { JUMP_NO_SELECTION_HINT } from '@/game/jumpKey';
 
 /**
  * Radius of the neighbourhood the chart samples, in light years, and the range
@@ -131,15 +133,15 @@ export class MapMode implements GameModule {
     this.publishOrigin();
     // Without a details provider the info panel has nothing to say about a
     // contact; generating the system on hover is cheap and deterministic.
+    this.ui.setPropellantSource(() => this.universe.flight.propellant); // [v4-fuel]
     this.ui.setDetailsProvider((id) => {
       const stub = this.charted.find((c) => c.id === id);
       if (!stub) return null;
       const sys = generateSystem(this.universe.galaxy, stub);
       return {
+        ...systemDetailsOf(sys), // [v4-mining] spectral class, planet count, BELT
         id: sys.id,
         name: sys.name,
-        spectralClass: sys.stars[0]!.spectralClass,
-        planetCount: sys.planets.length,
         blurb: sys.blurb,
       };
     });
@@ -263,15 +265,30 @@ export class MapMode implements GameModule {
       bus.emit('log', { text: `NO CHART FIX ON ${name.toUpperCase()}`, tone: 'warn' });
       return;
     }
-    if (this.open) this.toggle();
-
-    try {
-      await this.warp.engage({ name: stub.name, positionLy: stub.position });
-    } catch {
-      // A cancelled jump is a normal outcome, not an error.
-      bus.emit('log', { text: 'JUMP ABORTED', tone: 'warn' });
+    // [v4-fuel] I2: the system the ship is in is no jump target (Enter on the
+    // origin used to pay the 4 % floor). Refused before the chart closes, so
+    // the pilot stays on the chart to pick another system.
+    const originId = this.universe.system.id;
+    if (isOriginJump(systemId, originId)) {
+      bus.emit('log', { text: JUMP_NO_SELECTION_HINT, tone: 'normal' });
       return;
     }
+    if (this.open) this.toggle();
+
+    // [v4-fuel] Paid in full before the drive engages, or not at all; refunded
+    // if the warp rejects. paidJump owns the jump's log lines. A hull without
+    // a tank jumps free (v3 behaviour).
+    const sys = this.universe.system.position;
+    const outcome = await paidJump({
+      tank: this.universe.flight.propellant,
+      distanceLy: Math.hypot(stub.position[0] - sys[0], stub.position[1] - sys[1], stub.position[2] - sys[2]),
+      name: stub.name,
+      warpIdle: this.warp.phase === 'idle',
+      systemId,
+      originId,
+      engage: () => this.warp.engage({ name: stub.name, positionLy: stub.position }),
+    });
+    if (outcome !== 'jumped') return;
 
     this.universe.enterSystem(generateSystem(this.universe.galaxy, stub), ctx);
   }

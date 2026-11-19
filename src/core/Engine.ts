@@ -24,6 +24,9 @@ import { ResolutionGovernor } from './ResolutionGovernor';
 import { modes, type Mode } from './Modes';
 import { moduleDt, tickModules } from './tick';
 import { parseDevParams } from './Route';
+import { ENGINE_MAX_DT } from './substeps';
+import { governorHoldUp } from './flightActivity';
+import { ResizeLatch } from './resizeLatch';
 
 export interface EngineContext {
   readonly renderer: WebGLRenderer;
@@ -98,6 +101,12 @@ export class Engine {
   private governor = new ResolutionGovernor();
   private lastStepAt = 0;
   private avgWallMs = 16.7;
+  /**
+   * [v3-T1] A governor step resizes the drawing buffer, which clears it. Held
+   * here and applied at the start of the next frame, never between a render
+   * and the browser presenting it (that was a black frame per step).
+   */
+  private readonly resizeLatch = new ResizeLatch();
   /** `?dpr=` override; replaces the tier's cap when set. */
   private dprCap: number | null = null;
 
@@ -216,8 +225,13 @@ export class Engine {
     const wallMs = this.lastStepAt > 0 ? t0 - this.lastStepAt : 0;
     this.lastStepAt = t0;
 
+    // [v3-T1] A pending resolution change lands before anything is drawn.
+    if (this.resizeLatch.takeBeforeRender()) this.applySize();
+
     // Clamp dt: a background tab or a long GC pause must not teleport the ship.
-    const realDt = Math.min(this.clock.getDelta(), 1 / 15);
+    // [v3-T1] The clamp is shared with FlightModel's substep budget
+    // (core/substeps.ts) so no clamped frame ever loses ship time.
+    const realDt = Math.min(this.clock.getDelta(), ENGINE_MAX_DT);
     const dt = this.fixedDt ?? realDt;
     this.elapsed += dt;
     this.frame++;
@@ -273,8 +287,13 @@ export class Engine {
    * call `resumeRealtime()` to hand time back to the wall clock.
    */
   simulate(seconds: number, fixedDt = 1 / 60): Promise<void> {
-    this.fixedDt = fixedDt;
-    const remaining = Math.max(1, Math.ceil(seconds / fixedDt));
+    // [review-v3a] Never a step longer than the engine's clamp: FlightModel's
+    // substep budget only covers that (core/substeps.ts), so `simulate(s, 0.1)`
+    // dropped ship time every frame while the world went the full step — the
+    // v2 hop, in the harness. A longer request runs as more, shorter frames.
+    const h = Math.min(fixedDt, ENGINE_MAX_DT);
+    this.fixedDt = h;
+    const remaining = Math.max(1, Math.ceil(seconds / h));
     return new Promise<void>((resolve) => {
       this.frameWaiters.push({ remaining, resolve });
     });
@@ -322,10 +341,15 @@ export class Engine {
    * visible than dropping frames, so this is the first lever we pull.
    */
   private adaptResolution(wallMs: number): void {
-    if (!this.governor.sample(wallMs)) return;
+    // [v3-T1] No rise while the autopilot or cruise is flying: each step
+    // reallocates the post stack and costs a 56-67 ms frame.
+    // [review-v3a] Only where flight runs: the Yard froze the flags.
+    if (!this.governor.sample(wallMs, governorHoldUp(modes.base))) return;
     this.resolutionScale = this.governor.scale;
     config.dynamicResolution = this.resolutionScale;
-    this.applySize();
+    // [v3-T1] Not applySize() here: this runs after render(), and resizing
+    // the canvas clears what the browser is about to present.
+    this.resizeLatch.request();
   }
 
   private pixelRatioCap(q: QualitySettings): number {

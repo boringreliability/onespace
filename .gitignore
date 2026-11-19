@@ -1,8 +1,10 @@
 node_modules
 dist/
+dist-server/
 review/
 .DS_Store
 *.log
+.env
 
 # scratch harnesses agents leave behind
 atmo-check.*
@@ -10,3 +12,6 @@ scripts/.probe.mjs
 
 # git worktrees created by Claude Code sessions
 .claude/worktrees/
+
+# superpowers SDD scratch (ledger, briefs, review packages)
+.superpowers/

@@ -52,7 +52,7 @@ import {
 import type { EngineContext, GameModule } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
 import { modes, type BaseMode, type Mode } from '@/core/Modes';
-import { parseRoute, serializeRoute } from '@/core/Route';
+import { parseRoute, seeInFlightSearch, serializeRoute } from '@/core/Route';
 import { tryFactionById } from '@/gen/ships/families';
 import type { ShipParams } from '@/gen/ships/blueprint';
 import { shipGen } from '@/gen/ships/shipGenClient';
@@ -121,6 +121,8 @@ export interface YardOptions {
   readonly audio?: { setEngine(throttle: number, boost: number): void };
   /** A jump or a recovery cut is running: the Yard does not open mid-sequence. */
   readonly busy?: () => boolean;
+  /** v3 T4: SEE IN FLIGHT — called once flight has the scene back. */
+  readonly onSeeInFlight?: (params: ShipParams) => void;
 }
 
 type Phase = 'idle' | 'out' | 'settle' | 'in' | 'leaving';
@@ -172,6 +174,9 @@ export class Yard implements GameModule {
   private readonly actions: YardAction[] = [];
   private fitRequested = false;
   private exitQueued = false;
+  // v3 T4: SEE IN FLIGHT
+  private readonly onSeeInFlight: ((params: ShipParams) => void) | null;
+  private flyPending = false;
   /** Frame the scale reference at the next swap instead of the view. */
   private scaleFramePending = false;
   /** The pending cut is the first one after entering (snaps the lens). */
@@ -213,6 +218,7 @@ export class Yard implements GameModule {
     this.clock = opts.clock;
     this.audio = opts.audio;
     this.busy = opts.busy ?? (() => false);
+    this.onSeeInFlight = opts.onSeeInFlight ?? null;
     const route = parseRoute(window.location.search);
     this.sel = selectionFromRoute(route.ship);
     this.stale = route.staleGeneration === true;
@@ -372,10 +378,21 @@ export class Yard implements GameModule {
           // gone with this change). Queued as a microtask, the change lands
           // after this frame's render and before the next frame's tick.
           this.exitQueued = true;
-          const back = modes.can(this.cameFrom) ? this.cameFrom : 'flight';
+          // v3 T4: SEE IN FLIGHT always lands in flight, whatever came before.
+          const fly = this.flyPending;
+          this.flyPending = false;
+          const back = fly ? 'flight' : modes.can(this.cameFrom) ? this.cameFrom : 'flight';
+          const params = toShipParams(this.sel);
+          const routeShip = toRouteShip(this.sel);
           queueMicrotask(() => {
             this.exitQueued = false;
             if (modes.base === 'yard' && modes.can(back)) modes.go(back);
+            if (fly && modes.base === 'flight') {
+              // After leave() cleared the yard's fields: the URL now names
+              // the companion, so a reload or a shared link flies it again.
+              this.replaceSearch(seeInFlightSearch(window.location.search, routeShip));
+              this.onSeeInFlight?.(params);
+            }
           });
         }
         break;
@@ -488,6 +505,10 @@ export class Yard implements GameModule {
         this.copyLink();
         break;
       case 'exit':
+        this.requestExit();
+        break;
+      case 'fly':
+        this.flyPending = true;
         this.requestExit();
         break;
     }
@@ -671,6 +692,15 @@ export class Yard implements GameModule {
   // -------------------------------------------------------------------------
   // URL and link
   // -------------------------------------------------------------------------
+
+  private replaceSearch(search: string): void {
+    if (search === window.location.search) return;
+    try {
+      window.history.replaceState(window.history.state, '', `${window.location.pathname}${search}${window.location.hash}`);
+    } catch {
+      /* sandboxed frames may refuse */
+    }
+  }
 
   private writeUrl(sel: YardSelection | null): void {
     const search = withYardRoute(window.location.search, sel);

@@ -56,6 +56,18 @@ export const MODULE_MODES: Readonly<Record<string, readonly Mode[]>> = {
   // v2 phase 4.
   autopilot: PILOTING,
   'time-compression': PILOTING,
+  // v4 sub-plan 1: the emergency exit (keys only in flight; never mid-chart).
+  emergency: ['flight'],
+  // v4 sub-plan 2: the belt's queries follow the flight (Targeting reads them).
+  belt: FLIGHT,
+  // v4 sub-plan 2: B/U/N only in flight (never mid-chart); leaving flight aborts.
+  mining: ['flight'],
+  // v4 sub-plan 3: SaveGame's TICK (the interval and the gapped landing / mine /
+  // system triggers) runs only while piloting. The event-driven saves are not
+  // gated by this table: hidden, pagehide and SAVE also write in the Yard (the
+  // tank stays attached, R14), and leaving flight/map for the Yard or the title
+  // flushes one ('leave'). SaveGame itself refuses the title and a hull without a tank.
+  save: PILOTING,
 };
 
 /**

@@ -18,13 +18,12 @@ import type { Universe } from '@/game/Universe';
 import type { RecoveryCut } from '@/game/RecoveryCut';
 import type { Pause } from '@/ui/Pause';
 import {
-  HINT_TEXT,
+  advisoryText,
   loadHintCounts,
+  recordCargoAction,
   recordUse,
   saveHintCounts,
-  selectHint,
   type HintCounts,
-  type HintId,
   type KeyValueStore,
   type RetirableHintId,
 } from '@/ui/hintRules';
@@ -39,6 +38,13 @@ export interface HintsOptions {
   readonly pause: Pause;
   readonly recovery: RecoveryCut;
   readonly warp: { readonly phase: string };
+  /**
+   * [v4-fuel] The emergency exit's line ("EMERGENCY · H", or its menu). When
+   * set it outranks every lesson: a dry tank is not a tutorial moment.
+   */
+  readonly emergency?: { readonly line: string | null };
+  /** [v4-mining] Whether an asteroid is targeted within mining range. */
+  readonly mining?: { readonly asteroidInRange: boolean };
 }
 
 function storage(): KeyValueStore | null {
@@ -60,7 +66,8 @@ export class Hints implements GameModule {
 
   private el: HTMLDivElement | null = null;
   private textEl: HTMLSpanElement | null = null;
-  private shown: HintId | null = null;
+  /** The text on the line (a hint's, or the emergency line). */
+  private shown: string | null = null;
   private opacity = 0;
   private lastOpacity = -1;
   private disposers: Array<() => void> = [];
@@ -99,6 +106,13 @@ export class Hints implements GameModule {
       bus.on('target:changed', ({ id }) => {
         this.hasTarget = id !== null;
       }),
+      // [v4-mining] a completed mine counts towards retiring the 'mine' hint.
+      bus.on('cargo:action', (e) => {
+        const next = recordCargoAction(this.counts, e);
+        if (next === this.counts) return;
+        this.counts = next;
+        saveHintCounts(storage(), this.counts);
+      }),
       // A new system means the old target is gone.
       bus.on('system:entered', () => {
         this.hasTarget = false;
@@ -127,9 +141,12 @@ export class Hints implements GameModule {
     this.wasPaused = pause.isOpen;
 
     const codexOpen = document.querySelector('.os-codex.is-live') !== null;
-    const want = shotOwnsScene()
+    // [v4-fuel] R16: the emergency line is `Emergency.line`, null unless
+    // `emergencyMayAct` holds — the same gate its keys use — so the line and
+    // the keys cannot disagree. `advisoryText` ranks it above every lesson.
+    const wantText = shotOwnsScene()
       ? null
-      : selectHint(
+      : advisoryText(
           {
             inFlight: modes.current === 'flight',
             pointerLocked: input.pointerLocked,
@@ -138,17 +155,19 @@ export class Hints implements GameModule {
             busy: warp.phase !== 'idle' || recovery.active,
             hasTarget: this.hasTarget,
             cruising: universe.flight.cruising,
+            asteroidInRange: this.opts.mining?.asteroidInRange ?? false,
           },
           this.counts,
+          this.opts.emergency?.line ?? null,
         );
 
     // Fade out, swap while invisible, fade in. A changed hint never cuts.
-    const goal = want !== null && want === this.shown ? 1 : 0;
+    const goal = wantText !== null && wantText === this.shown ? 1 : 0;
     this.opacity += (goal - this.opacity) * Math.min(1, dt / FADE);
     if (Math.abs(goal - this.opacity) < 0.002) this.opacity = goal;
-    if (this.opacity < SWAP_AT && want !== this.shown) {
-      this.shown = want;
-      if (this.textEl) this.textEl.textContent = want ? HINT_TEXT[want] : '';
+    if (this.opacity < SWAP_AT && wantText !== this.shown) {
+      this.shown = wantText;
+      if (this.textEl) this.textEl.textContent = wantText ?? '';
     }
 
     if (this.el && Math.abs(this.opacity - this.lastOpacity) > 0.002) {

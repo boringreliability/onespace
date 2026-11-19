@@ -51,10 +51,40 @@ import { Audio } from '@/audio/Audio';
 import { Photo } from '@/game/Photo';
 import { DevOverlay } from '@/ui/DevOverlay';
 import { Title } from '@/ui/Title';
-import { parseRoute } from '@/core/Route';
+import { companionShip, parseRoute, type BootPlan, type Route } from '@/core/Route';
+// -- v3 T4: dust, drive field, audio feed, formation, SEE IN FLIGHT -----------
+import { Dust } from '@/render/Dust';
+import { FlightSense } from '@/game/FlightSense';
+import { Belt } from '@/game/Belt'; // [v4-mining]
+import { WorldState } from '@/game/worldState'; // [v4-mining]
+import { Asteroids } from '@/render/Asteroids'; // [v4-mining]
+import { selectionFromRoute, toShipParams } from '@/game/showroom/catalog';
+// -----------------------------------------------------------------------------
 import { RecoveryCut } from '@/game/RecoveryCut';
 import { Pause } from '@/ui/Pause';
 import { Hints } from '@/ui/Hints';
+import { Emergency } from '@/game/Emergency'; // [v4-fuel]
+import { Mining } from '@/game/Mining'; // [v4-mining]
+// -- v4 sub-plan 3: the save -----------------------------------------------------
+import { SaveGame } from '@/game/SaveGame';
+import { ActionJournal } from '@/save/actionJournal';
+import { idbStore } from '@/save/idbStore';
+import { memoryStore } from '@/save/memoryStore';
+import { wal } from '@/save/wal';
+import { acquireWriterLock, type WriterLock } from '@/save/writerLock';
+import { applySave } from '@/save/capture';
+import { universeOptionsFor, type BootLoad } from '@/save/bootLoad';
+import { decideBoot, logBeforeWorld, restartAfterRestoreFail } from '@/save/boot';
+import { createApi } from '@/net/api';
+import { runBootSync } from '@/net/bootSync';
+import { SyncClient } from '@/net/SyncClient';
+import { accountView, authReturn, type AccountView } from '@/ui/accountMenu';
+import { settleBootConflict } from '@/ui/conflictScreen';
+import { ConflictOverlay } from '@/ui/ConflictOverlay';
+import { bodyNameResolver } from './bodyNames';
+import type { SaveStore } from '@/save/store';
+import type { GameEvents } from '@/core/EventBus';
+// -----------------------------------------------------------------------------
 import { Warp, registerWarpShots } from '@/ship/Warp';
 import { registerCameraShots } from '@/ship/CameraRig';
 import { registerShipShots } from '@/ship/Ship';
@@ -270,19 +300,128 @@ class ReviewGuard implements GameModule {
   }
 }
 
-export async function registerModules(engine: Engine, progress: ProgressFn): Promise<void> {
+/** [v4-save] Task 6: what the boot found, decided before any module exists. */
+export interface BootState {
+  readonly route: Route;
+  readonly plan: BootPlan;
+  readonly load: BootLoad;
+  readonly store: SaveStore;
+  readonly lock: WriterLock;
+  /** NEW GAME over a save: the new game's first save goes above this revision. */
+  readonly afterRevision: number;
+  /** Log lines for the player, shown once the HUD is up. */
+  readonly notices: readonly string[];
+  /** R25 I2: false when the store failed or hung at boot — the session never writes it. */
+  readonly storeAvailable: boolean;
+  /** v4 sub-plan 4, Task 5: the cloud sync — SaveGame tells it of every durable save. */
+  readonly sync: SyncClient;
+  /** v4 sub-plan 4, Task 6: what the menus show of the account (R51). */
+  readonly account: AccountView;
+}
+
+/** localStorage, or null where the browser refuses it. */
+function localStore(): Storage | null {
+  try {
+    return window.localStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** sessionStorage, or null where the browser refuses it. */
+function sessionStore(): Storage | null {
+  try {
+    return window.sessionStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * [v4-save] Task 6: load the latest save before the world is built — the
+ * decisions live in `decideBoot` (src/save/boot.ts, node-tested): newest valid
+ * save, WAL merged; `?new=1` only with NEW GAME's one-time nonce (R17); `new`
+ * and `nonce` leave the URL before any module exists; only the writer writes.
+ */
+export async function loadBoot(): Promise<BootState> {
+  const store = typeof indexedDB === 'undefined' ? memoryStore() : idbStore();
+  const lock = await acquireWriterLock();
+  // [v4-net] Task 5: sync with the cloud first (≤ 3 s); its effects are in the
+  // store before decideBoot reads it.
+  const sync = new SyncClient({
+    api: createApi({ fetch: (input, init) => fetch(input, init) }),
+    storage: localStore(),
+    isWriter: () => lock.writer,
+    schedule: (fn, ms) => {
+      const id = setTimeout(fn, ms);
+      return () => clearTimeout(id);
+    },
+    store,
+    wal,
+    uuid: () => crypto.randomUUID(),
+  });
+  const synced = await runBootSync({ sync, store, wal, writer: lock.writer });
+  // [v4-net] Task 6, R49: a conflict is chosen here, before the game goes on —
+  // the chosen save is in the store when decideBoot reads it.
+  const conflict = await settleBootConflict({
+    boot: synced,
+    sync,
+    choose: (view) => new ConflictOverlay().show(view),
+    nowMs: () => Date.now(),
+    // R55/R58: names are generated only if a card asks for one.
+    bodyName: bodyNameResolver([synced.local, synced.cloud]),
+  });
+  // R50: back from Discord with ?auth=…: its notice, and the parameter leaves the URL.
+  const auth = authReturn(window.location.href);
+  if (auth.href !== null) {
+    try {
+      window.history.replaceState(window.history.state, '', auth.href);
+    } catch {
+      // a URL that cannot be rewritten keeps its parameter; the notice still shows
+    }
+  }
+  const d = await decideBoot({
+    search: window.location.search,
+    store,
+    wal,
+    lock,
+    session: sessionStore(),
+    replaceSearch: (search) => {
+      const u = new URL(window.location.href);
+      u.search = search;
+      window.history.replaceState(window.history.state, '', u.toString());
+    },
+  });
+  const status = sync.statusText();
+  const syncNotices = [auth.notice, synced.notice, ...conflict.notices, status].filter(
+    (t, i, all): t is string => t !== null && all.indexOf(t) === i,
+  );
+  const account = accountView({ reader: !lock.writer, identity: sync.identity() });
+  return { ...d, notices: [...syncNotices, ...d.notices], store, lock, sync, account };
+}
+
+export async function registerModules(engine: Engine, progress: ProgressFn, boot: BootState): Promise<void> {
   progress(0.03, 'opening the log');
   // First, ahead of Universe. `Universe.init()` calls `enterSystem`, which
   // emits `system:entered` — so a log registered after it would miss the
   // opening system every single session, silently, forever. The log depends on
   // nothing but the bus, so putting it first costs nothing and closes the seam.
   const shipLog = new ShipLog();
+  // [v4-save] The save owns the log from here: no more writes to the legacy
+  // key (it stays as a backup). Before the world exists the log is the NEW
+  // game's (the legacy one imported once, or empty); a continued save's own
+  // log comes with applySave below, so a failed restore leaves none of it.
+  shipLog.setSink(() => undefined);
+  const continued = boot.plan.start === 'continue' ? boot.load.save : null;
+  shipLog.importState(logBeforeWorld(boot.load));
   await engine.add(shipLog);
 
   progress(0.05, 'seeding universe');
   // `?seed=` picks the universe (whitelisted hex, core/Route.ts).
-  const route = parseRoute(window.location.search);
-  const universe = new Universe(route.universeSeed !== undefined ? { seed: route.universeSeed } : {});
+  // [v4-save] A save boots straight into its own universe and place, so the
+  // start system never flashes past.
+  const route = boot.route;
+  const universe = new Universe(universeOptionsFor(route, continued));
   await engine.add(universe);
 
   progress(0.35, 'mapping the sky');
@@ -310,15 +449,42 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   // The procedural fleet, in the universe rather than the showroom.
   const traffic = new Traffic(universe);
   await engine.add(traffic);
+  // -- v3 T4: `?mode=flight&ship=…` (generation-pinned) flies that hull beside
+  // you; the Yard's SEE IN FLIGHT button does the same in-session.
+  {
+    const companion = companionShip(route);
+    if (companion) traffic.setCompanion(toShipParams(selectionFromRoute(companion)));
+  }
+  // Orbital dust, after Traffic and Pilot so it sees this frame's camera.
+  await engine.add(new Dust({ universe, warping: () => warp.phase !== 'idle' }));
+  // ---------------------------------------------------------------------------
 
   progress(0.845, 'priming the cruise drive');
   // After Universe, whose `nearestGapKm` is its speed limit.
-  await engine.add(new Cruise({ universe }));
+  // [v3-t5] kept in a const so Instruments can read the drive's phase (and
+  // v3 T4's FlightSense, its field).
+  // [v4-mining] The belt as game state: depletion (P2, in memory) and the
+  // field/asteroid queries. Before Cruise (R21: it flies to `field:` targets)
+  // and before Targeting, which resolves its targets.
+  // [v4-save] The action log (P3): every named action from here on. A mine
+  // reaches it through WorldState's onMined hook (both halves together), an
+  // emergency exit through SaveGame's critical hook (R2).
+  const journal = new ActionJournal({ wallMs: () => Date.now(), orbitSeconds: () => universe.orbitSeconds });
+  const worldState = new WorldState({
+    orbitSeconds: () => universe.orbitSeconds,
+    wallMs: () => Date.now(),
+    onMined: (e) => journal.noteMined(e),
+  });
+  const belt = new Belt({ universe, worldState });
+  await engine.add(belt);
+  const cruise = new Cruise({ universe, belt });
+  await engine.add(cruise);
   // [v2-p4] L: auto-land / auto-orbit. After Pilot (it overwrites the command
   // Pilot copied from the stick) and after Cruise (which also reads L).
   // Time compression after both: it judges this frame's command and autopilot.
-  const autopilot = new AutoPilot({ universe, warp });
+  const autopilot = new AutoPilot({ universe, warp, cruise, belt }); // [v3-t3] cruise: the L queue; [v4-mining] belt: L parks at a rock
   await engine.add(autopilot);
+  universe.beforeSlice = (h) => autopilot.sliceStep(h); // [v3-t3] flies per sim slice
   await engine.add(new TimeControl({ universe, warp, autopilot, hud }));
   // [/v2-p4]
 
@@ -328,10 +494,19 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   // Targeting before Scanner: the array scans the nav target. After Pilot, so
   // the camera it projects through has already moved this frame; Instruments
   // likewise, and its altitude replaces the sphere one Pilot just published.
-  const targeting = new Targeting({ universe, traffic, hud });
+  // [v4-mining] The rocks themselves: after the Belt (its memo is current) and
+  // after Universe (the origin has already rebased this frame).
+  await engine.add(new Asteroids({ belt, universe }));
+  const targeting = new Targeting({ universe, traffic, hud, belt });
   await engine.add(targeting);
-  await engine.add(new Instruments({ universe, hud }));
-  await engine.add(new Scanner({ universe, traffic, targeting }));
+  // -- v3 T4: drive field → sky, silent events → audio, K formation ----------
+  const flightSense = new FlightSense({ universe, cruise, traffic, targeting, audio, sky, belt });
+  await engine.add(flightSense);
+  // ---------------------------------------------------------------------------
+  // [v3-t5] cruise + targeting: the throttle block's cruise readout and ETA.
+  // [v4-mining] fieldFrame + belt: VEL and the markers relative to a belt field.
+  await engine.add(new Instruments({ universe, hud, cruise, targeting, fieldFrame: flightSense, belt }));
+  await engine.add(new Scanner({ universe, traffic, targeting, belt }));
   const codex = new Codex({ log: shipLog });
   await engine.add(codex);
   registerCodexShots(codex, universe, shipLog);
@@ -351,11 +526,79 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   // J reads the galaxy chart's selection; the chart only exists from here on.
   pilot.attachJump(map.ui, warp);
   progress(0.865, 'arming the recovery beacon');
-  const recovery = new RecoveryCut(universe);
+  // [v4-save] The one writer, made below once Emergency and Mining exist; the
+  // paying code paths reach it through this late-bound hook (R2).
+  let saveGame: SaveGame | null = null;
+  const critical = (used: GameEvents['emergency:used']): void => saveGame?.critical(used);
+  const recovery = new RecoveryCut(universe, shipLog, critical);
+  // [v4-net] The title is made last; the pause sheet reaches it through this.
+  let title: Title | null = null;
   await engine.add(recovery);
-  const pause = new Pause({ universe, recovery, warp, input: engine.input });
+  const pause = new Pause({
+    universe,
+    recovery,
+    warp,
+    input: engine.input,
+    save: { saveNow: (reason) => saveGame?.saveNow(reason) ?? Promise.resolve(false) },
+    // [v4-net] Task 6: the account line, the sync status, DELETE ACCOUNT.
+    sync: boot.sync,
+    account: boot.account,
+    onAccount: (account) => title?.setAccount(account),
+  });
   await engine.add(pause);
-  await engine.add(new Hints({ universe, pause, recovery, warp }));
+  // [v4-fuel] the emergency exit on an empty tank; its line rides NAV ADVISORY.
+  const emergency = new Emergency({ universe, recovery, warp, log: shipLog, critical });
+  await engine.add(emergency);
+  // [v4-mining] B/U/N. After Belt and Targeting (this frame's target and rock),
+  // Cruise and the emergency exit; its in-range flag drives the 'mine' hint.
+  const mining = new Mining({ universe, belt, worldState, targeting, cruise, warp });
+  await engine.add(mining);
+  // [v4-save] After Emergency and Mining: one writing tab (navigator.locks),
+  // IndexedDB (memory where it is missing), the WAL on localStorage.
+  progress(0.87, 'opening the logbook vault');
+  saveGame = new SaveGame({
+    world: { universe, worldState, shipLog, emergency, journal, cruise, input: engine.input },
+    store: boot.store,
+    wal,
+    lock: boot.lock,
+    page: { document, window },
+    storeAvailable: boot.storeAvailable,
+    onStored: (s) => boot.sync.onStored(s),
+  });
+  await engine.add(saveGame);
+  // The same world, for applySave: what the save holds goes back into these.
+  const saveWorld = { universe, worldState, shipLog, emergency, journal, cruise, input: engine.input };
+  // [v4-save] Task 6: put the save back and continue it — before flight starts,
+  // so revisions go on and nothing the boot queued saves the opening world.
+  const notices: string[] = [...boot.notices];
+  let hasSave = false;
+  // R25 M1: the Universe was built in the save's place — do not place the ship
+  // (and enter the system) a second time.
+  if (continued && !universe.restoreFailed && applySave(saveWorld, continued, { universeRestored: true })) {
+    saveGame.continueFrom(continued);
+    hasSave = true;
+  } else if (continued) {
+    // The saved place cannot be found: a new start, above the kept old game.
+    // The log already is the new start's (logBeforeWorld + its arrival).
+    const r = await restartAfterRestoreFail({
+      store: boot.store,
+      wal,
+      lock: boot.lock,
+      load: boot.load,
+      storeAvailable: boot.storeAvailable,
+    });
+    notices.push(...r.notices);
+    saveGame.startNew(r.afterRevision);
+  } else {
+    saveGame.startNew(boot.afterRevision);
+  }
+  // CONTINUE from the title: drop whatever the title time queued. Only while
+  // nothing has been saved since the boot (a Yard visit may have saved already,
+  // and its drained actions must not be dropped).
+  const continueGame = (): void => {
+    if (hasSave && continued && saveGame?.revision === continued.revision) saveGame.continueFrom(continued);
+  };
+  await engine.add(new Hints({ universe, pause, recovery, warp, emergency, mining }));
   // --- end track D -------------------------------------------------------------
 
   progress(0.88, 'assembling gallery');
@@ -386,6 +629,8 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
     // review-p2: Y mid-jump froze the tunnel; Y mid-recovery hung its black
     // veil (z 40) over the whole Yard.
     busy: () => warp.phase !== 'idle' || recovery.active,
+    // v3 T4: SEE IN FLIGHT.
+    onSeeInFlight: (params) => traffic.setCompanion(params),
   });
   await engine.add(yard);
   // ---------------------------------------------------------------------------
@@ -419,7 +664,15 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   // writers: its lateUpdate overrides the flight rig (see game/Photo.ts).
   await engine.add(new Photo(engine, postfx));
   await engine.add(new DevOverlay(engine, parseRoute(window.location.search).dev === true));
-  await engine.add(new Title(universe.seed));
+  title = new Title({
+    universeSeed: universe.seed,
+    hasSave,
+    onContinue: continueGame,
+    account: boot.account,
+    sync: boot.sync,
+    onAccount: (account) => pause.setAccount(account),
+  });
+  await engine.add(title);
 
   registerShot({
     name: 'game-opening',
@@ -448,5 +701,6 @@ export async function registerModules(engine: Engine, progress: ProgressFn): Pro
   // ---------------------------------------------------------------------------
 
   bus.emit('log', { text: 'ALL SYSTEMS NOMINAL', tone: 'good' });
+  for (const text of notices) bus.emit('log', { text, tone: 'warn' });
   progress(1, 'systems nominal');
 }

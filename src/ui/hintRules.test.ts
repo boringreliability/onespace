@@ -10,6 +10,9 @@
 
 import { describe, expect, it } from 'vitest';
 
+import { MINING_KEYS } from '@/core/Input';
+import type { CargoAction, CargoResult } from '@/ship/cargo';
+
 import {
   HINT_COUNTS_KEY,
   HINT_RETIRE_AFTER,
@@ -18,6 +21,7 @@ import {
   type HintState,
   isRetired,
   loadHintCounts,
+  recordCargoAction,
   recordUse,
   saveHintCounts,
   selectHint,
@@ -103,7 +107,7 @@ describe('review-p1: hints outside flight and pinned constants', () => {
   });
 
   it('Given the retirement limits, Then they are fly 3 and every other hint 2 (pinned, not read back)', () => {
-    expect(HINT_RETIRE_AFTER).toEqual({ fly: 3, cruise: 2, scan: 2, chart: 2, pause: 2 });
+    expect(HINT_RETIRE_AFTER).toEqual({ fly: 3, cruise: 2, scan: 2, chart: 2, pause: 2, mine: 2 });
   });
 
   it('Given fly used twice, Then fly is still advised; three times, Then it is not', () => {
@@ -208,5 +212,70 @@ describe('persistence — localStorage, defensively', () => {
     expect(loadHintCounts(s)).toEqual({ fly: 2 });
     s.setItem(HINT_COUNTS_KEY, '[1,2,3]');
     expect(loadHintCounts(s)).toEqual({});
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v4 sub-plan 2, Task 5 — the 'mine' hint. It appears the first time an
+// asteroid is targeted within mining range, and retires after 2 COMPLETED
+// mines (a refused or aborted B does not count).
+// ---------------------------------------------------------------------------
+
+describe("the 'mine' hint", () => {
+  const ok = (kind: CargoAction['kind'], good: boolean): { action: CargoAction; result: CargoResult } => ({
+    action:
+      kind === 'mine' ? { kind: 'mine', asteroidId: 'ast:x:0:1', resource: 'ice', kg: 2_000 } : ({ kind } as CargoAction),
+    result: { ok: good, kgIn: good ? 2_000 : 0, kgOut: 0, fuelKg: 0, restoredFrac: 0 },
+  });
+
+  it('Given its text, Then it names the mine key: "B — MINE"', () => {
+    const label = MINING_KEYS.mine.replace(/^Key/, '');
+    expect(HINT_TEXT.mine).toBe(`${label} — MINE`);
+  });
+
+  it('Given an asteroid targeted in range, Then the hint is mine — ahead of every lesson, even for a new pilot', () => {
+    expect(selectHint({ ...base, hasTarget: true, asteroidInRange: true }, none)).toBe('mine');
+    expect(selectHint({ ...base, hasTarget: true, asteroidInRange: true }, { fly: 3 })).toBe('mine');
+  });
+
+  it('Given no asteroid in range (or the field omitted), Then mine is never advised', () => {
+    expect(selectHint({ ...base, hasTarget: true, asteroidInRange: false }, allUsed)).toBeNull();
+    expect(selectHint({ ...base, hasTarget: true }, allUsed)).toBeNull();
+    expect(selectHint({ ...base, asteroidInRange: false }, none)).toBe('fly');
+  });
+
+  it('Given the pointer free, an overlay, pause or a jump, Then those win over mine as they do over every lesson', () => {
+    const s = { ...base, hasTarget: true, asteroidInRange: true };
+    expect(selectHint({ ...s, pointerLocked: false }, none)).toBe('click');
+    expect(selectHint({ ...s, overlayOpen: true }, none)).toBeNull();
+    expect(selectHint({ ...s, paused: true }, none)).toBeNull();
+    expect(selectHint({ ...s, busy: true }, none)).toBeNull();
+  });
+
+  it('Given 1 completed mine, Then it is still advised; 2, Then it retires', () => {
+    const s = { ...base, hasTarget: true, asteroidInRange: true };
+    expect(selectHint(s, { ...allUsed, mine: 1 })).toBe('mine');
+    expect(isRetired({ mine: 2 }, 'mine')).toBe(true);
+    expect(selectHint(s, { ...allUsed, mine: 2 })).toBeNull();
+  });
+
+  it('Given cargo:action events, Then only a SUCCESSFUL mine counts towards retirement', () => {
+    let c: HintCounts = {};
+    c = recordCargoAction(c, ok('mine', true));
+    expect(c.mine).toBe(1);
+    const same = recordCargoAction(c, ok('mine', false));
+    expect(same).toBe(c); // a refused mine: untouched, same object
+    expect(recordCargoAction(c, ok('refine', true))).toBe(c);
+    expect(recordCargoAction(c, ok('repair', true))).toBe(c);
+    c = recordCargoAction(c, ok('mine', true));
+    expect(c.mine).toBe(2);
+    expect(isRetired(c, 'mine')).toBe(true);
+  });
+
+  it('Given saved counts with mine, When reloaded, Then mine round-trips like every other hint', () => {
+    let saved = '';
+    const store = { getItem: () => saved, setItem: (_k: string, v: string) => void (saved = v) };
+    saveHintCounts(store, { mine: 2, fly: 3 });
+    expect(loadHintCounts(store)).toEqual({ mine: 2, fly: 3 });
   });
 });

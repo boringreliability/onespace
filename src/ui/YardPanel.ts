@@ -32,7 +32,9 @@ export type YardAction =
   | { readonly kind: 'view'; readonly id: YardView }
   | { readonly kind: 'silhouette' | 'scale' }
   | { readonly kind: 'backdrop'; readonly id: YardBackdrop }
-  | { readonly kind: 'link' | 'exit' };
+  | { readonly kind: 'link' | 'exit' }
+  // v3 T4: SEE IN FLIGHT — spawn this hull beside you in flight.
+  | { readonly kind: 'fly' };
 
 export interface YardPanelState {
   readonly selection: YardSelection;
@@ -125,7 +127,11 @@ export class YardPanel {
     const esc = el('button', 'os-yd-btn', 'esc');
     esc.title = 'Leave the yard';
     esc.addEventListener('click', () => this.onAction({ kind: 'exit' }));
-    head.append(link, esc);
+    // v3 T4 (PLAN G): SEE IN FLIGHT.
+    const fly = el('button', 'os-yd-btn', 'see in flight');
+    fly.title = 'Leave the yard with this hull alongside you, in orbit';
+    fly.addEventListener('click', () => this.onAction({ kind: 'fly' }));
+    head.append(fly, link, esc);
 
     // -- controls ---------------------------------------------------------
     const ctl = el('aside', 'os-yd-ctl');

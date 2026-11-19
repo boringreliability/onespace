@@ -20,11 +20,13 @@ import { Vector3 } from 'three';
 
 import type { EngineContext, GameModule } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
-import { planetScan } from '@/gen/scan';
+import { asteroidScan, planetScan } from '@/gen/scan';
 import type { ScanResult } from '@/gen/types';
 import type { Traffic } from '@/game/Traffic';
 import type { Universe, UniverseBody } from '@/game/Universe';
-import { chooseScanTarget, type ScanBody } from '@/game/scanChoice';
+import { beltTargetName, type Belt } from '@/game/Belt';
+import { ASTEROID_SCAN_RANGE_KM, asteroidInScanRange, chooseScanTarget, type ScanBody } from '@/game/scanChoice';
+import { FIELD_RADIUS_KM, type Resource } from '@/gen/belt';
 import { bodyTargetId } from '@/game/targets';
 
 /** Seconds the array takes to resolve a target. Long enough to feel worked for. */
@@ -38,6 +40,8 @@ export interface ScannerOptions {
   readonly traffic?: Traffic | null;
   /** The nav target, if targeting is wired. Read only. */
   readonly targeting?: { readonly targetId: string | null } | null;
+  /** [v4-mining] Asteroid targets are assayed through it. Absent: v3 behaviour. */
+  readonly belt?: Pick<Belt, 'asteroidSpec' | 'asteroidWorld' | 'remainingKg' | 'fieldWorld'> | null;
 }
 
 export class Scanner implements GameModule {
@@ -46,6 +50,7 @@ export class Scanner implements GameModule {
   private readonly universe: Universe;
   private readonly traffic: Traffic | null;
   private readonly targeting: { readonly targetId: string | null } | null;
+  private readonly belt: NonNullable<ScannerOptions['belt']> | null;
 
   /** Non-null while a sweep is running. */
   private pending: ScanResult | null = null;
@@ -61,6 +66,7 @@ export class Scanner implements GameModule {
     this.universe = opts.universe;
     this.traffic = opts.traffic ?? null;
     this.targeting = opts.targeting ?? null;
+    this.belt = opts.belt ?? null;
   }
 
   update(dt: number, ctx: EngineContext): void {
@@ -118,10 +124,32 @@ export class Scanner implements GameModule {
     }
 
     const targetId = this.targeting?.targetId ?? null;
+    // [v4-mining] A belt field is not scanned as a whole (R23): beyond the
+    // array's reach it is named; within it, the pilot is pointed at a rock.
+    if (targetId !== null && this.belt && targetId.startsWith('field:')) {
+      const at = new Vector3();
+      if (this.belt.fieldWorld(targetId, at)) {
+        const edgeKm = at.distanceTo(ship) - FIELD_RADIUS_KM;
+        const name = beltTargetName(targetId, this.universe.system?.name) ?? targetId;
+        bus.emit('log', {
+          text: edgeKm > ASTEROID_SCAN_RANGE_KM ? `${name.toUpperCase()} BEYOND ARRAY RANGE` : 'TAB TO TARGET A ROCK',
+          tone: 'warn',
+        });
+        this.outOfRangeReported = true;
+        return null;
+      }
+    }
     let target: { id: string; inRange: boolean } | null = null;
+    let asteroid = false;
     if (targetId !== null) {
       const tb = byId.get(targetId);
-      if (tb) {
+      const astWorld = new Vector3();
+      if (!tb && this.belt && targetId.startsWith('ast:') && this.belt.asteroidWorld(targetId, astWorld)) {
+        // [v4-mining] An asteroid answers only to the array's short reach.
+        asteroid = true;
+        const rKm = this.belt.asteroidSpec(targetId)?.radiusKm ?? 0;
+        target = { id: targetId, inRange: asteroidInScanRange(astWorld.distanceTo(ship) - rKm) };
+      } else if (tb) {
         target = { id: targetId, inRange: bodies.find((x) => x.id === targetId)!.inRange };
       } else if (this.traffic) {
         // A targeted hull answers its transponder at any range.
@@ -140,15 +168,28 @@ export class Scanner implements GameModule {
     if (choice.kind === 'out-of-range') {
       const b = byId.get(choice.id);
       bus.emit('log', {
-        text: `${(b?.spec.name ?? choice.id).toUpperCase()} BEYOND ARRAY RANGE`,
+        text: `${(b?.spec.name ?? beltTargetName(choice.id, this.universe.system?.name) ?? choice.id).toUpperCase()} BEYOND ARRAY RANGE`,
         tone: 'warn',
       });
       this.outOfRangeReported = true;
       return null;
     }
+    if (asteroid && choice.id === targetId) return this.assay(choice.id);
     const b = byId.get(choice.id);
     if (b) return this.cached(b.spec.id, () => planetScan(b.spec));
     return this.cached(choice.id, () => this.traffic?.scan(choice.id) ?? null);
+  }
+
+  /**
+   * [v4-mining] An asteroid's assay. Never cached: what is left changes as it
+   * is mined, and a stale "remaining" would be a lie the pilot acts on.
+   */
+  private assay(id: string): ScanResult | null {
+    const a = this.belt?.asteroidSpec(id);
+    if (!a || !this.belt) return null;
+    const left = { ice: 0, metal: 0, silicate: 0, rare: 0 } as Record<Resource, number>;
+    for (const r of ['ice', 'metal', 'silicate', 'rare'] as const) left[r] = this.belt.remainingKg(id, r);
+    return asteroidScan(id, beltTargetName(id) ?? id, a, left);
   }
 
   /** Set when `pick()` already explained itself, so update() stays quiet. */

@@ -23,9 +23,11 @@
 import type { EngineContext, GameModule } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
 import { registerShot } from '@/game/Shots';
-import type { SpectralClass, Vec3 } from '@/gen/types';
+import type { SpectralClass, StarSystemSpec, Vec3 } from '@/gen/types';
 import { hashSeed, Rng } from '@/math/rng';
 import { jumpEstimateSeconds } from '@/ship/warpTimeline';
+import type { Propellant } from '@/ship/propellant';
+import { jumpPropellantRow } from '@/ship/travelCost'; // [v4-fuel]
 
 // ---------------------------------------------------------------------------
 // Public interface
@@ -61,6 +63,26 @@ export interface SystemDetails {
   /** 0..1 — drives the "settled / picked over" annotation. */
   readonly civilisation?: number;
   readonly note?: string;
+  /** [v4-mining] The system has an asteroid belt; the PLANETS cell says so. */
+  readonly belt?: boolean;
+}
+
+/**
+ * [v4-mining] What the info panel knows about a generated system. MapMode's
+ * details provider (which already generates the system) returns this.
+ */
+export function systemDetailsOf(sys: StarSystemSpec): SystemDetails {
+  return {
+    spectralClass: sys.stars[0]?.spectralClass,
+    planetCount: sys.planets.length,
+    belt: sys.hasAsteroidBelt,
+  };
+}
+
+/** [v4-mining] The PLANETS cell: the count, plus BELT where there is one; `--` when unknown. */
+export function planetsCell(det: SystemDetails | null): string {
+  if (!det || det.planetCount === undefined) return '--';
+  return det.belt ? `${det.planetCount} · BELT` : String(det.planetCount);
 }
 
 export type SystemDetailsProvider = (systemId: string) => SystemDetails | null;
@@ -294,6 +316,34 @@ export class StarMap implements GameModule {
     this.details = fn;
     this.lastInfoKey = '';
     this.lastConfirmKey = '';
+  }
+
+  /** [v4-fuel] The tank a jump is paid from; null hides the price (a hull without one). */
+  private propellantSource: (() => Propellant | null) | null = null;
+  setPropellantSource(fn: (() => Propellant | null) | null): void {
+    this.propellantSource = fn;
+    this.lastInfoKey = '';
+    this.lastConfirmKey = '';
+  }
+
+  /** [v4-fuel] Writes the PROPELLANT cell for a jump of `distanceLy`, tone included. */
+  private setFuelVal(bag: Record<string, HTMLDivElement>, distanceLy: number, isOrigin: boolean): void {
+    const el = bag['fuel'];
+    if (!el) return;
+    const cell = jumpCostCell(this.propellantSource?.() ?? null, distanceLy, isOrigin);
+    if (el.textContent !== cell.text) el.textContent = cell.text;
+    el.classList.toggle('is-warn', cell.warn);
+  }
+
+  /**
+   * Cache-key part that changes when the tank's answer for `distanceLy` could:
+   * affordability, and the shown share, which moves with the current capacity (I3).
+   */
+  private fuelKey(distanceLy: number): string {
+    const p = this.propellantSource?.() ?? null;
+    if (!p) return '-';
+    const row = jumpPropellantRow(p, distanceLy);
+    return `${row.affordable}|${row.text}`;
   }
 
   /** Tell the chart where the ship is, so distances mean something. */
@@ -1058,7 +1108,7 @@ export class StarMap implements GameModule {
 
     if (this.infoEl) {
       this.infoEl.classList.toggle('is-on', !!e);
-      const key = e ? `${e.id}|${e.distanceLy.toFixed(3)}|${e.temperature}` : '';
+      const key = e ? `${e.id}|${e.distanceLy.toFixed(3)}|${e.temperature}|${this.fuelKey(e.distanceLy)}` : '';
       if (key !== this.lastInfoKey) {
         this.lastInfoKey = key;
         if (e) {
@@ -1071,11 +1121,7 @@ export class StarMap implements GameModule {
             'lum',
             e.luminosity >= 0.01 ? `${e.luminosity.toFixed(2)} L☉` : e.luminosity.toExponential(1),
           );
-          this.setVal(
-            this.infoVals,
-            'planets',
-            det?.planetCount === undefined ? '--' : String(det.planetCount),
-          );
+          this.setVal(this.infoVals, 'planets', planetsCell(det)); // [v4-mining] lists BELT
           this.setVal(
             this.infoVals,
             'dist',
@@ -1086,6 +1132,7 @@ export class StarMap implements GameModule {
             'jump',
             e.id === this.originId ? '--' : formatDuration(this.jumpSeconds(e.distanceLy)),
           );
+          this.setFuelVal(this.infoVals, e.distanceLy, e.id === this.originId);
           this.setVal(this.infoVals, 'note', det?.note ?? civNote(det?.civilisation));
         }
       }
@@ -1094,7 +1141,7 @@ export class StarMap implements GameModule {
     const sel = this.selectedId ? this.findEntry(this.selectedId) : null;
     if (this.confirmEl) {
       this.confirmEl.classList.toggle('is-on', !!sel);
-      const key = sel ? `${sel.id}|${sel.distanceLy.toFixed(3)}` : '';
+      const key = sel ? `${sel.id}|${sel.distanceLy.toFixed(3)}|${this.fuelKey(sel.distanceLy)}` : '';
       if (key !== this.lastConfirmKey) {
         this.lastConfirmKey = key;
         if (sel) {
@@ -1103,6 +1150,7 @@ export class StarMap implements GameModule {
           this.setVal(this.confirmVals, 'from', this.originLabel);
           this.setVal(this.confirmVals, 'dist', formatLy(sel.distanceLy));
           this.setVal(this.confirmVals, 'eta', formatDuration(this.jumpSeconds(sel.distanceLy)));
+          this.setFuelVal(this.confirmVals, sel.distanceLy, sel.id === this.originId);
           this.setVal(
             this.confirmVals,
             'class',
@@ -1195,7 +1243,11 @@ export class StarMap implements GameModule {
       name: sel.name,
       distanceLy: sel.distanceLy,
     });
-    bus.emit('log', { text: `JUMP AUTHORISED — ${sel.name}`, tone: 'good' });
+    // [v4-fuel] JUMP AUTHORISED (or the refusal) is logged by paidJump, the one
+    // place the tank is judged — it has already paid by the time we return.
+    // I2: MapMode refuses the origin (and says so); the chart stays open for
+    // the pilot to pick another system.
+    if (sel.id === this.originId) return;
     this.setOpen(false);
   }
 
@@ -1422,6 +1474,21 @@ export class StarMap implements GameModule {
 
 /** MK boundaries, in kelvin. Derived from the adapter's temperature — the
  *  chart never invents a class it was not given a temperature for. */
+/**
+ * [v4-fuel] The PROPELLANT cell of the info row and the confirm column: the
+ * jump's price, warning-toned when the tank cannot pay it; `--` for the origin
+ * system or a hull without a tank.
+ */
+export function jumpCostCell(
+  p: Propellant | null,
+  distanceLy: number,
+  isOrigin: boolean,
+): { text: string; warn: boolean } {
+  if (!p || isOrigin) return { text: '--', warn: false };
+  const row = jumpPropellantRow(p, distanceLy);
+  return { text: row.text, warn: row.tone === 'warn' };
+}
+
 export function spectralFromTemperature(k: number): SpectralClass {
   if (k >= 30000) return 'O';
   if (k >= 10000) return 'B';
@@ -1540,6 +1607,7 @@ const STARMAP_HTML = /* html */ `
   <div class="row"><span>PLANETS</span><div data-v="planets">--</div></div>
   <div class="row"><span>RANGE</span><div data-v="dist">--</div></div>
   <div class="row"><span>JUMP EST</span><div data-v="jump">--</div></div>
+  <div class="row"><span>JUMP COST</span><div data-v="fuel">--</div></div>
   <div class="note" data-v="note">--</div>
 </div>
 
@@ -1550,6 +1618,7 @@ const STARMAP_HTML = /* html */ `
     <div class="col"><span>FROM</span><div data-v="from">--</div></div>
     <div class="col"><span>RANGE</span><div data-v="dist">--</div></div>
     <div class="col"><span>JUMP EST</span><div data-v="eta">--</div></div>
+    <div class="col"><span>COST</span><div data-v="fuel">--</div></div>
     <div class="col"><span>CLASS</span><div data-v="class">--</div></div>
   </div>
   <div class="acts"><b>[ENTER]</b> ENGAGE JUMP<i></i><b>[ESC]</b> CANCEL</div>
@@ -1778,6 +1847,7 @@ html.os-map-recede canvas#gl {
 }
 .os-sm-info .row span { color: var(--dim); font-size: 9px; letter-spacing: 0.24em; }
 .os-sm-info .row div { color: #dfe7ec; }
+.os-sm-info .row div.is-warn, .os-sm-confirm .col div.is-warn { color: var(--warn); }
 .os-sm-info .note {
   margin-top: 12px; font-size: 9px; letter-spacing: 0.2em; color: var(--cyan); opacity: 0.75;
 }

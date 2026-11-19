@@ -10,6 +10,26 @@ npm install
 npm run dev          # http://127.0.0.1:5173
 ```
 
+### Local development with the cloud save
+
+The game runs without a server (guest, local saves only). To sign in and sync,
+run the API server beside Vite; Vite proxies `/api` to `127.0.0.1:8790`.
+Node 24 or newer.
+
+```bash
+docker compose up -d db                          # Postgres on 127.0.0.1:5432
+cp .env.example .env                             # then fill in the Discord values
+node scripts/build-server.mjs                    # server/ -> dist-server/
+node --env-file=.env dist-server/index.mjs       # migrates, then listens on :8790
+npm run dev                                      # in another terminal
+```
+
+`PUBLIC_ORIGIN` must equal the Vite origin exactly (`http://127.0.0.1:5173`):
+every write is refused unless its `Origin` header matches, and the Discord
+redirect URL (`<PUBLIC_ORIGIN>/api/auth/discord/callback`) must be registered
+in the Discord application. Rebuild the server after changing `server/`.
+Server tests: `docker compose up -d db-test`, then `npm run test:server`.
+
 ## Controls
 
 **Click the canvas first.** Steering is on the mouse and needs pointer capture;

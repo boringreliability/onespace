@@ -40,6 +40,12 @@ export interface LogEntry {
   visits: number;
 }
 
+/** [v4-save] What a save keeps of the log. */
+export interface LogState {
+  readonly time: number;
+  readonly entries: readonly LogEntry[];
+}
+
 export interface LogSummary {
   readonly systems: number;
   readonly worlds: number;
@@ -60,6 +66,9 @@ function stamp(seconds: number): string {
   const m = Math.floor((seconds % 3600) / 60);
   return `${String(d).padStart(3, '0')}·${String(h).padStart(2, '0')}${String(m).padStart(2, '0')}`;
 }
+
+/** Keys whose body a revisit replaces (`upsert`): asteroid assays. */
+const ASSAY_PREFIX = 'scan:ast:';
 
 export class ShipLog implements GameModule {
   readonly name = 'log';
@@ -97,13 +106,18 @@ export class ShipLog implements GameModule {
       bus.on('scan:complete', (scan) => {
         // `kind` is optional on ScanResult because the showroom fixtures predate
         // the log. Absent means a world, which is what the field defaults to.
-        this.record({
+        // [v4-mining] An asteroid's assay goes stale as it is mined: a re-scan
+        // replaces its body (final review I3a). Everything else keeps its first.
+        const entry: Omit<LogEntry, 'at' | 'visits'> = {
           key: `scan:${scan.targetId}`,
-          kind: scan.kind === 'vessel' ? 'contact' : 'world',
+          // [v4-mining] An asteroid assay is a note: neither a world nor a contact.
+          kind: scan.kind === 'vessel' ? 'contact' : scan.kind === 'asteroid' ? 'note' : 'world',
           system: this.currentSystem,
           title: scan.name,
           body: scan.lines,
-        });
+        };
+        if (scan.kind === 'asteroid') this.upsert(entry);
+        else this.record(entry);
       }),
 
       bus.on('planet:landed', ({ planet }) => {
@@ -157,6 +171,25 @@ export class ShipLog implements GameModule {
     this.save();
   }
 
+  /**
+   * As `record`, but a revisit REPLACES the body — for an asteroid assay
+   * (keys `scan:ast:…`), whose numbers change as the rock is mined. The first
+   * `at` and the entry's place are kept, the visit is counted, and nothing is
+   * announced (it is not a new discovery). Any other key: plain `record`.
+   */
+  upsert(e: Omit<LogEntry, 'at' | 'visits'>): void {
+    const existing = this.index.get(e.key);
+    if (!existing || !e.key.startsWith(ASSAY_PREFIX)) {
+      this.record(e);
+      return;
+    }
+    const i = this.entries.indexOf(existing);
+    const entry: LogEntry = { ...existing, body: [...e.body], visits: existing.visits + 1 };
+    if (i >= 0) this.entries[i] = entry;
+    this.index.set(entry.key, entry);
+    this.save();
+  }
+
   /** Newest first, which is the order a log is read in. */
   all(): readonly LogEntry[] {
     return [...this.entries].reverse();
@@ -194,7 +227,39 @@ export class ShipLog implements GameModule {
   // Persistence
   // -------------------------------------------------------------------------
 
+  /** [v4-save] The log as a save holds it. A copy: later records do not change it. */
+  exportState(): LogState {
+    return { time: this.time, entries: this.entries.map((e) => ({ ...e, body: [...e.body] })) };
+  }
+
+  /**
+   * [v4-save] Replace the log with a saved one. Silent: what was logged was
+   * announced when it happened, so nothing is emitted here. The state is
+   * written through (to the sink, if any) so storage and memory agree.
+   */
+  importState(s: LogState): void {
+    this.time = Number.isFinite(s.time) ? s.time : 0;
+    this.entries = s.entries.slice(-MAX_ENTRIES).map((e) => ({ ...e, body: [...e.body] }));
+    this.index.clear();
+    for (const e of this.entries) this.index.set(e.key, e);
+    this.save();
+  }
+
+  /**
+   * [v4-save] With a sink, every write goes to it instead of localStorage
+   * (the save game owns persistence then). `null` goes back to localStorage.
+   */
+  setSink(sink: ((state: LogState) => void) | null): void {
+    this.sink = sink;
+  }
+
+  private sink: ((state: LogState) => void) | null = null;
+
   private save(): void {
+    if (this.sink) {
+      this.sink(this.exportState());
+      return;
+    }
     try {
       localStorage.setItem(
         STORAGE_KEY,

@@ -3,8 +3,10 @@
  * without a camera, a bus or a universe.
  *
  * Shared contract with every other module: there is ONE current target. Its id
- * is `body:<spec.name>` for a planet or moon and the blueprint id for a vessel,
- * and it travels on the existing `target:changed` bus event.
+ * is `body:<spec.name>` for a planet or moon, the blueprint id for a vessel,
+ * and [v4-mining] `field:<systemId>:<k>` / `ast:<systemId>:<k>:<n>` for a belt
+ * field or asteroid (resolved through game/Belt.ts). It travels on the
+ * existing `target:changed` bus event.
  */
 
 /** Plain 3-vector; `three`'s Vector3 satisfies it. */
@@ -147,7 +149,19 @@ export function etaSeconds(rangeKm: number, closingKmS: number): number | null {
   return Math.max(0, rangeKm) / closingKmS;
 }
 
-/** Range to a body's surface (radius > 0) or a vessel's centre (radius 0). */
+/**
+ * The target box's ETA (review-v3b): the straight-line one in sublight
+ * flight; none under cruise, whose speed is not constant — the drive's own
+ * readout (game/cruiseReadout.ts) owns the arrival time then.
+ */
+export function targetEtaSeconds(rangeKm: number, closingKmS: number, cruising: boolean): number | null {
+  return cruising ? null : etaSeconds(rangeKm, closingKmS);
+}
+
+/**
+ * Range to a body's or asteroid's surface (radius > 0), a field's edge
+ * (radius FIELD_RADIUS_KM) or a vessel's centre (radius 0).
+ */
 export function targetRangeKm(centreKm: number, radiusKm: number): number {
   return Math.max(0, centreKm - radiusKm);
 }

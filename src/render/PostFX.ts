@@ -67,6 +67,7 @@ import {
 } from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { FullScreenQuad, Pass } from 'three/addons/postprocessing/Pass.js';
+import { drawPostQuad } from './postQuad';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 
 import type { QualitySettings } from '@/core/Config';
@@ -74,6 +75,8 @@ import type { EngineContext, RenderPipeline } from '@/core/Engine';
 import { Rng } from '@/math/rng';
 import { activeShot, registerShot } from '@/game/Shots';
 import { registerShaderChunks } from '@/shaders/chunks';
+import { motionJumped } from './motionJump';
+import { MAX_MOTION_EXCLUSIONS, motionExclusionBuffer } from './motionExclusion'; // v3 T4
 
 // ---------------------------------------------------------------------------
 // Shared GLSL
@@ -194,6 +197,8 @@ class SceneSpacePass extends Pass {
         /** x: world radius (km), y: bias, z: intensity, w: far fade (km). */
         uAo: { value: new Vector4(0.05, 0.04, 0.9, 60) },
         uTexel: { value: new Vector2(1 / 1920, 1 / 1080) },
+        // v3 T4: render-space spheres left sharp (render/motionExclusion.ts).
+        uExclude: { value: motionExclusionBuffer },
       },
       vertexShader: FS_VERT,
       fragmentShader: /* glsl */ `
@@ -208,6 +213,7 @@ class SceneSpacePass extends Pass {
         uniform vec3 uMotion;
         uniform vec4 uAo;
         uniform vec2 uTexel;
+        uniform vec4 uExclude[${MAX_MOTION_EXCLUSIONS}]; // v3 T4
         varying vec2 vUv;
 
         float viewDist(vec2 uv) {
@@ -249,6 +255,14 @@ class SceneSpacePass extends Pass {
             vec2 vel = (vUv - prevUv) * uMotion.x;
             float near = smoothstep(uMotion.z * 0.5, uMotion.z * 2.0, w);
             vel *= near;
+            // --- v3 T4: per-object exclusion (traffic) ------------------------
+            // A co-orbiting hull moves with the ship, not with the ground the
+            // blur is referenced to; inside its sphere the pixel stays sharp.
+            for (int k = 0; k < ${MAX_MOTION_EXCLUSIONS}; k++) {
+              vec4 ex = uExclude[k];
+              if (ex.w > 0.0) vel *= smoothstep(ex.w * 0.85, ex.w, distance(world.xyz, ex.xyz));
+            }
+            // --- end v3 T4 ----------------------------------------------------
             float len = length(vel);
             if (len > uMotion.y) vel *= uMotion.y / len;
             if (len > 1e-5) {
@@ -316,8 +330,8 @@ class SceneSpacePass extends Pass {
     // loop — which is exactly why this pass may only ever run once.
     u.tDepth.value = readBuffer.depthTexture;
     this.quad.material = this.material;
-    renderer.setRenderTarget(this.renderToScreen ? null : writeBuffer);
-    this.quad.render(renderer);
+    // Never through a depth clear: see render/postQuad.ts.
+    drawPostQuad(renderer, this.renderToScreen ? null : writeBuffer, () => this.quad.render(renderer));
   }
 
   dispose(): void {
@@ -1086,8 +1100,8 @@ class GradePass extends Pass {
   render(renderer: WebGLRenderer, writeBuffer: WebGLRenderTarget, readBuffer: WebGLRenderTarget): void {
     this.material.uniforms.tDiffuse.value = readBuffer.texture;
     this.quad.material = this.material;
-    renderer.setRenderTarget(this.renderToScreen ? null : writeBuffer);
-    this.quad.render(renderer);
+    // Never through a depth clear: see render/postQuad.ts.
+    drawPostQuad(renderer, this.renderToScreen ? null : writeBuffer, () => this.quad.render(renderer));
   }
 
   dispose(): void {
@@ -1213,8 +1227,8 @@ class FinalPass extends Pass {
   render(renderer: WebGLRenderer, writeBuffer: WebGLRenderTarget, readBuffer: WebGLRenderTarget): void {
     this.material.uniforms.tDiffuse.value = readBuffer.texture;
     this.quad.material = this.material;
-    renderer.setRenderTarget(this.renderToScreen ? null : writeBuffer);
-    this.quad.render(renderer);
+    // Never through a depth clear: see render/postQuad.ts.
+    drawPostQuad(renderer, this.renderToScreen ? null : writeBuffer, () => this.quad.render(renderer));
   }
 
   dispose(): void {
@@ -1489,7 +1503,7 @@ export class PostFX implements RenderPipeline {
 
     this.finalPass.material.uniforms.uTime.value = this.elapsed;
 
-    if (this.scenePass) this.updateSceneSpaceUniforms(ctx);
+    if (this.scenePass) this.updateSceneSpaceUniforms(ctx, dt);
 
     // Keep the shot rig out of everyone else's frames — see registerPostFXShots.
     // It is also rebuilt here if a pipeline swap (a quality-tier change) tore it
@@ -1518,7 +1532,7 @@ export class PostFX implements RenderPipeline {
       this.composer.readBuffer !== sceneTarget ? sceneTarget.depthTexture : null;
   }
 
-  private updateSceneSpaceUniforms(ctx: EngineContext): void {
+  private updateSceneSpaceUniforms(ctx: EngineContext, dt: number): void {
     const pass = this.scenePass;
     if (!pass) return;
     const u = pass.material.uniforms;
@@ -1545,9 +1559,12 @@ export class PostFX implements RenderPipeline {
     const rebased = ctx.origin.version !== this.prevOriginVersion;
     // Measured against the ground under the ship, not render space: a landed
     // camera sweeps ~1 km per frame through render space without moving at all.
-    const jumped =
-      this.refScratch.copy(this.camWorldPos).sub(this.prevCamWorldPos).sub(motionReference).lengthSq() >
-      25 * 25;
+    // [v3-T1] A speed, not 25 km per frame: the same flight was motion at
+    // 30 fps and a cut at 144 (render/motionJump.ts).
+    const jumped = motionJumped(
+      this.refScratch.copy(this.camWorldPos).sub(this.prevCamWorldPos).sub(motionReference).length(),
+      dt,
+    );
     motion.x = this.hasPrevFrame && !rebased && !jumped ? MOTION_SHUTTER : 0;
 
     // A point at X now was at X - d a frame ago, so reproject through

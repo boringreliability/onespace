@@ -49,7 +49,35 @@ export type ActionName =
   | 'flightAssist'
   // [v2-p4] time compression steps (game/TimeCompression.ts)
   | 'timeSlower'
-  | 'timeFaster';
+  | 'timeFaster'
+  // [v4-fuel] the emergency exit (game/Emergency.ts)
+  | 'emergency'
+  | 'emergencyCannibalize'
+  | 'emergencyBeacon'
+  | 'emergencyCannibalizeCargo'
+  // [v4-mining] mine, refine, repair (game/Mining.ts)
+  | 'mine'
+  | 'refine'
+  | 'repair';
+
+/**
+ * [v4-fuel] The emergency exit's keys: `open` offers the choice on an empty
+ * tank, then `cannibalize` / `beacon` pick. H, 1 and 2 were free.
+ */
+export const EMERGENCY_KEYS = {
+  open: 'KeyH',
+  cannibalize: 'Digit1',
+  beacon: 'Digit2',
+  /** [v4-mining] Burn the hold (≥ 1 000 kg). 3 was free (Emergency.test.ts scans raw handlers). */
+  cannibalizeCargo: 'Digit3',
+} as const;
+
+/**
+ * [v4-mining] Mine (B), refine (U), repair (N). Not Y (R17): Yard.ts reads Y
+ * raw in flight to enter the Yard. B, U and N are read nowhere else
+ * (Mining.test.ts scans the raw handlers).
+ */
+export const MINING_KEYS = { mine: 'KeyB', refine: 'KeyU', repair: 'KeyN' } as const;
 
 const KEY_ACTIONS: Record<string, ActionName> = {
   ShiftLeft: 'boost',
@@ -70,7 +98,68 @@ const KEY_ACTIONS: Record<string, ActionName> = {
   // [v2-p4] `,` / `.` step time compression 1× / 10× / 100× (the KSP keys).
   Comma: 'timeSlower',
   Period: 'timeFaster',
+  // [v4-fuel]
+  [EMERGENCY_KEYS.open]: 'emergency',
+  [EMERGENCY_KEYS.cannibalize]: 'emergencyCannibalize',
+  [EMERGENCY_KEYS.beacon]: 'emergencyBeacon',
+  [EMERGENCY_KEYS.cannibalizeCargo]: 'emergencyCannibalizeCargo',
+  // [v4-mining]
+  [MINING_KEYS.mine]: 'mine',
+  [MINING_KEYS.refine]: 'refine',
+  [MINING_KEYS.repair]: 'repair',
 };
+
+/** The action a key code is bound to, if any. */
+export function actionForKey(code: string): ActionName | undefined {
+  return Object.prototype.hasOwnProperty.call(KEY_ACTIONS, code) ? KEY_ACTIONS[code] : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// [v3-T2] Key-axis ramps (PLAN phase B)
+// ---------------------------------------------------------------------------
+
+export interface KeyRamp {
+  /** Seconds for a full 0 → 1 stroke. */
+  readonly upSeconds: number;
+  /** Seconds for a full 1 → 0 stroke. */
+  readonly downSeconds: number;
+}
+
+/**
+ * Under the rate-command plant a key that steps 0 → 1 is an α_max kick on
+ * every tap; 0.15 s up takes the edge off without feeling soft, and 0.08 s
+ * down keeps the release sharp (it costs ~1.4° of glide from full pitch).
+ */
+export const KEY_RAMP: KeyRamp = { upSeconds: 0.15, downSeconds: 0.08 };
+
+/**
+ * Move a key axis towards `target`, linear in time: towards zero at the down
+ * rate, away from it at the up rate. A reversal is split at zero, so the
+ * result is exactly the same however `dt` is sliced. Pure.
+ */
+export function rampAxis(current: number, target: number, dt: number, ramp: KeyRamp = KEY_RAMP): number {
+  if (!Number.isFinite(current)) current = 0;
+  if (!(dt > 0) || !Number.isFinite(dt)) return current;
+  let v = current;
+  let left = dt;
+  // Phase 1: shrinking |v| (towards zero, or towards a smaller target on the same side).
+  const sameSide = v === 0 || target === 0 || Math.sign(v) === Math.sign(target);
+  const downTo = sameSide && Math.abs(target) < Math.abs(v) ? target : sameSide ? v : 0;
+  if (downTo !== v) {
+    const need = (Math.abs(v - downTo) * ramp.downSeconds);
+    if (left >= need) {
+      v = downTo;
+      left -= need;
+    } else {
+      return v - Math.sign(v - downTo) * (left / ramp.downSeconds);
+    }
+  }
+  if (v === target) return v;
+  // Phase 2: growing |v| towards the target.
+  const step = left / ramp.upSeconds;
+  const dist = target - v;
+  return Math.abs(dist) <= step ? target : v + Math.sign(dist) * step;
+}
 
 export class Input {
   readonly axes: InputAxes = {
@@ -100,6 +189,10 @@ export class Input {
   private keys = new Set<string>();
   private pressedThisFrame = new Set<ActionName>();
   private targetThrottle = 0;
+  /** [v3-T2] Ramped key contributions (pitch, yaw, roll). */
+  private keyPitch = 0;
+  private keyYaw = 0;
+  private keyRoll = 0;
   private disposers: Array<() => void> = [];
 
   constructor(private element: HTMLElement) {
@@ -235,20 +328,28 @@ export class Input {
     this.stick.update(dt);
 
     // Signs as before the stick: mouse-up (screen -y) is nose-up and
-    // mouse-right is a NEGATIVE yaw axis, matching ArrowRight; FlightModel's
-    // yawAxisSign turns that into a right turn.
+    // mouse-right is a NEGATIVE yaw axis, matching ArrowRight (and E is a
+    // negative roll axis). That is the opposite of the sign documented on
+    // `InputAxes`, but it is also what the body frame wants: negative ω.y is a
+    // right turn, so FlightModel's yawAxisSign (+1) passes it through. CameraRig
+    // reads these axes raw too, so do not flip them here alone.
     const sx = this.stick.axis.x;
     const sy = this.stick.axis.y;
     const mousePitch = this.settings.invertY ? sy : -sy;
     const mouseYaw = -sx;
 
+    // [v3-T2] Keys ramp (see `rampAxis`); the mouse does not — the hand is
+    // already its own ramp, and a held deflection must read exactly.
     const keyPitch = (this.isDown('ArrowUp') ? 1 : 0) - (this.isDown('ArrowDown') ? 1 : 0);
     const keyYaw = (this.isDown('ArrowLeft') ? 1 : 0) - (this.isDown('ArrowRight') ? 1 : 0);
     const keyRoll = (this.isDown('KeyQ') ? 1 : 0) - (this.isDown('KeyE') ? 1 : 0);
+    this.keyPitch = rampAxis(this.keyPitch, keyPitch, dt);
+    this.keyYaw = rampAxis(this.keyYaw, keyYaw, dt);
+    this.keyRoll = rampAxis(this.keyRoll, keyRoll, dt);
 
-    a.pitch = clamp(mousePitch + keyPitch, -1, 1);
-    a.yaw = clamp(mouseYaw + keyYaw, -1, 1);
-    a.roll = clamp(keyRoll, -1, 1);
+    a.pitch = clamp(mousePitch + this.keyPitch, -1, 1);
+    a.yaw = clamp(mouseYaw + this.keyYaw, -1, 1);
+    a.roll = clamp(this.keyRoll, -1, 1);
 
     a.strafeX = (this.isDown('KeyD') ? 1 : 0) - (this.isDown('KeyA') ? 1 : 0);
     a.strafeY = (this.isDown('KeyR') ? 1 : 0) - (this.isDown('KeyF') ? 1 : 0);

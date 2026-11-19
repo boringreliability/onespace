@@ -211,3 +211,44 @@ describe('aiming at the limb, so arrival is tangential', () => {
     expect(along).toBeLessThan(Math.cos(80 * DEG));
   });
 });
+
+// ---------------------------------------------------------------------------
+// [v3-T2] gains re-derived for the rate-command plant (attitudeHold on).
+// ---------------------------------------------------------------------------
+
+describe('[v3-T2] steering against the rate-command plant', () => {
+  it('Given a target 90° above the nose, When hands-off, Then the nose is within 1° inside 4.5 s (35°/s ⇒ 2.6 s of slew plus the round-off)', () => {
+    const fm = ship(true);
+    const target = new Vector3(0, 1e6, 0);
+    for (let i = 0; i < 4.5 * 60; i++) frame(fm, target, HANDS_OFF);
+    expect(noseErrorRad(fm, target)).toBeLessThan(1 * DEG);
+  });
+
+  it('Given a target 90° above the nose, Then the pitch error never overshoots past 1°', () => {
+    const fm = ship(true);
+    const target = new Vector3(0, 1e6, 0);
+    let lowest = Infinity;
+    for (let i = 0; i < 10 * 60; i++) {
+      frame(fm, target, HANDS_OFF);
+      lowest = Math.min(lowest, signedPitchError(fm, target));
+    }
+    expect(lowest).toBeGreaterThan(-1 * DEG);
+  });
+
+  it('Given a large error, Then the steering asks for the full rate (it uses the authority the pilot has)', () => {
+    const fm = ship(true);
+    const target = new Vector3(0, 1e6, 0);
+    fm.command.pitch = 0;
+    fm.command.yaw = 0;
+    fm.command.roll = 0;
+    steerToward(fm, target);
+    expect(fm.command.pitch).toBe(1);
+  });
+
+  it('Given the nose settled on a target, Then the hull rate is under 0.2°/s (no limit cycle against the rate loop)', () => {
+    const fm = ship(true);
+    const target = new Vector3(3e5, 7e5, 1e5);
+    for (let i = 0; i < 8 * 60; i++) frame(fm, target, HANDS_OFF);
+    expect(fm.angularVelocity.length()).toBeLessThan(0.2 * DEG);
+  });
+});

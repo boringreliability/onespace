@@ -32,4 +32,20 @@ describe('publishSceneDepth', () => {
     publishSceneDepth([{ atmosphere: s }], null);
     expect(s.depth).toBeNull();
   });
+
+  it('Given a world with both an atmosphere and a cloud deck, When depth is published, Then the deck gets it too — inside the deck there is no depth test, and without it cloud behind the hull is drawn over the hull', () => {
+    const atmo = shell();
+    const deck = shell();
+    const d = new Texture();
+    publishSceneDepth([{ atmosphere: atmo, clouds: deck }, { atmosphere: null, clouds: null }], d);
+    expect(atmo.depth).toBe(d);
+    expect(deck.depth).toBe(d);
+  });
+
+  it('Given a deck holding last frame\'s depth, When the pipeline withdraws it, Then the deck lets go as well (a stale attachment is a feedback loop on the next swap)', () => {
+    const deck = shell();
+    publishSceneDepth([{ atmosphere: null, clouds: deck }], new Texture());
+    publishSceneDepth([{ atmosphere: null, clouds: deck }], null);
+    expect(deck.depth).toBeNull();
+  });
 });

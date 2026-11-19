@@ -49,12 +49,14 @@ import {
   BackSide,
   ClampToEdgeWrapping,
   Color,
+  DataTexture,
   FrontSide,
   Group,
   HalfFloatType,
   LinearFilter,
   Matrix3,
   Mesh,
+  NearestFilter,
   NoBlending,
   NoColorSpace,
   NormalBlending,
@@ -266,9 +268,14 @@ const SHELL_VS = /* glsl */ `
 #include <common>
 #include <logdepthbuf_pars_vertex>
 varying vec3 vLocal;
+varying vec3 vView;
 void main() {
   vLocal = position;
-  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  // View-space position: its angle to the camera axis turns the log-depth
+  // buffer's axial distance into a distance along this ray (as Atmosphere.ts).
+  vView = mv.xyz;
+  gl_Position = projectionMatrix * mv;
   #include <logdepthbuf_vertex>
 }
 `;
@@ -301,9 +308,36 @@ uniform float uLightStepLen;
 uniform int   uMaxSteps;
 uniform int   uLightSteps;
 
+// Scene depth (see setDepthTexture). The previous frame's, from the composer's
+// idle buffer — the same texture every atmosphere shell reads this frame.
+uniform sampler2D uDepthTex;
+uniform vec2  uDepthTexel;   // 1 / full-resolution depth size
+uniform vec2  uMarchRes;     // size of the buffer this march writes into
+uniform float uLogFar;       // log2(camera.far + 1)
+uniform float uHasDepth;
+
 #define LIGHT_GROWTH 1.7
 
 varying vec3 vLocal;
+varying vec3 vView;
+
+/**
+ * The nearest scene depth under this march pixel. The march runs at a fraction
+ * of full resolution, so one of its pixels covers a block of depth texels; on a
+ * silhouette that block holds both the hull and whatever lies behind it. Taking
+ * the *nearest* keeps the hull clean of the cloud behind it, at the price of a
+ * sub-pixel sliver of clearer air just outside the silhouette — the opposite
+ * choice paints a rim of cloud onto the hull, which is the bug this fixes.
+ */
+float cl_sceneDepth() {
+  vec2 uv = gl_FragCoord.xy / uMarchRes;
+  vec2 h = 0.5 * uDepthTexel;
+  float d = texture2D(uDepthTex, uv + vec2(-h.x, -h.y)).x;
+  d = min(d, texture2D(uDepthTex, uv + vec2( h.x, -h.y)).x);
+  d = min(d, texture2D(uDepthTex, uv + vec2(-h.x,  h.y)).x);
+  d = min(d, texture2D(uDepthTex, uv + vec2( h.x,  h.y)).x);
+  return d;
+}
 
 /** Henyey-Greenstein normalised so isotropic == 1. */
 float cl_phase(float c, float g) { return os_phaseMie(c, g) * 12.5663706; }
@@ -474,6 +508,24 @@ void main() {
   bool hitPlanet = (tP.x <= tP.y) && (tP.y > 0.0);
   if (hitPlanet) t1 = min(t1, max(tP.x, 0.0));
 
+  // Anything the scene drew — the hull, a mountain, a passing ship — ends the
+  // ray too. Inside the shell the composite cannot depth-test (its front faces
+  // are behind the camera), so without this every cloud *behind* the hull is
+  // painted over it: at 600 m under a deck the ship vanished into the cloud it
+  // was in front of (v3 playtest). Log depth, decoded as Atmosphere.ts at_span.
+  if (uHasDepth > 0.5) {
+    float d = cl_sceneDepth();
+    // 1.0 is the cleared far value: nothing was drawn, the ray runs on.
+    if (d < 0.999999) {
+      float w = exp2(d * uLogFar) - 1.0;
+      t1 = min(t1, w / max(-normalize(vView).z, 1e-4));
+    }
+  }
+  if (t1 <= t0) {
+    gl_FragColor = vec4(0.0);
+    return;
+  }
+
   // Everything below the cloud base is vacuum; jump the gap analytically
   // instead of spending samples in it. A limb ray crosses the deck twice and
   // therefore produces two segments.
@@ -516,10 +568,10 @@ void main() {
 /**
  * Composite. Drawn with the same shell geometry, so it depth-tests against the
  * scene exactly where the march ran. The upsample is a plain bilinear fetch:
- * the cloud field has no depth discontinuity of its own, and the only edge in
- * the buffer is the planet silhouette, which the shell geometry already ends
- * at. A depth-aware filter would need a scene depth texture, which the renderer
- * contract does not hand out.
+ * the cloud field has no depth discontinuity of its own, and the only edges in
+ * the buffer are the planet silhouette, which the shell geometry already ends
+ * at, and the scene-depth clip, which the march resolves conservatively (see
+ * cl_sceneDepth) so its half-resolution edge never lands on the hull.
  */
 const COMPOSITE_FS = /* glsl */ `
 #include <common>
@@ -727,6 +779,10 @@ export class CloudRenderer {
   private readonly u: Uniforms;
   private readonly cu: Uniforms;
 
+  /** Bound when no scene depth is: an unbound sampler renders black on some vendors. */
+  private readonly blankDepth: DataTexture;
+  private readonly depthTexel = new Vector2(1, 1);
+
   // Preallocated scratch. Nothing in update() allocates.
   private readonly rot = new Matrix3();
   private readonly advect = new Vector3();
@@ -866,7 +922,26 @@ export class CloudRenderer {
       uLightStepLen: { value: this.layer * 0.3 },
       uMaxSteps: { value: 40 },
       uLightSteps: { value: 4 },
+      uDepthTex: { value: null },
+      uDepthTexel: { value: this.depthTexel },
+      uMarchRes: { value: this.rtSize },
+      uLogFar: { value: 1 },
+      uHasDepth: { value: 0 },
     };
+
+    this.blankDepth = new DataTexture(
+      new Uint8Array([255, 255, 255, 255]),
+      1,
+      1,
+      RGBAFormat,
+      UnsignedByteType,
+    );
+    this.blankDepth.name = 'clouds:no-depth';
+    this.blankDepth.minFilter = NearestFilter;
+    this.blankDepth.magFilter = NearestFilter;
+    this.blankDepth.colorSpace = NoColorSpace;
+    this.blankDepth.needsUpdate = true;
+    this.u.uDepthTex!.value = this.blankDepth;
 
     this.cu = {
       uCloudTex: { value: this.cloudRT.texture },
@@ -999,6 +1074,24 @@ export class CloudRenderer {
     return this.baked && !this.disposed ? this.shadowRT.texture : null;
   }
 
+  /**
+   * Scene depth for the march, under the same rules as
+   * `AtmosphereRenderer.setDepthTexture` — full drawing-buffer resolution,
+   * logarithmic, and never the attachment currently bound for writing, so it
+   * must be re-published every frame the deck is drawn (game/sceneDepth.ts).
+   * The march runs inside `update()`, before the scene render, so it reads the
+   * previous frame's depth; on a hull that moves with the camera that is exact
+   * to well under a pixel.
+   *
+   * With it, the deck ends at whatever the scene drew: inside the shell, where
+   * the composite cannot depth-test, it is the only thing keeping cloud behind
+   * the hull off the hull. Pass `null` for the analytic planet clip alone.
+   */
+  setDepthTexture(depth: Texture | null): void {
+    this.u.uDepthTex!.value = depth ?? this.blankDepth;
+    this.u.uHasDepth!.value = depth ? 1 : 0;
+  }
+
   update(dt: number, ctx: EngineContext, view: ViewState): void {
     // Freed GPU handles must not be re-bound: a renderer that keeps drawing
     // after dispose() is a use-after-free, not a graceful degradation.
@@ -1044,6 +1137,8 @@ export class CloudRenderer {
 
     // --- render target sizing ----------------------------------------------
     ctx.renderer.getDrawingBufferSize(this.bufSize);
+    this.depthTexel.set(1 / Math.max(this.bufSize.x, 1), 1 / Math.max(this.bufSize.y, 1));
+    u.uLogFar!.value = Math.log2(ctx.camera.far + 1);
     const scale = Math.min(1, Math.max(0.25, this.resolutionScale));
     const rtW = Math.max(2, Math.round(this.bufSize.x * scale));
     const rtH = Math.max(2, Math.round(this.bufSize.y * scale));
@@ -1127,8 +1222,8 @@ export class CloudRenderer {
     u.uInside.value = closeIn ? 1 : 0;
     // Outside: front faces, depth-tested, so nearer geometry occludes us
     // correctly. Inside: the front faces are behind the camera, so we take the
-    // back wall and lean on the analytic planet clip instead of the depth
-    // buffer. Wire a scene depth texture in here if the pipeline ever grows one.
+    // back wall, which cannot depth-test; the march then ends each ray at the
+    // scene depth instead (setDepthTexture), and at the analytic planet without.
     this.marchMaterial.side = inside ? BackSide : FrontSide;
     this.compositeMaterial.side = this.marchMaterial.side;
     this.compositeMaterial.depthTest = !inside;
@@ -1191,6 +1286,8 @@ export class CloudRenderer {
     this.cloudRT.dispose();
     this.weatherRT.dispose();
     this.shadowRT.dispose();
+    this.blankDepth.dispose();
+    this.u.uDepthTex!.value = null;
     this.marchScene.remove(this.marchMesh);
     this.weatherScene.remove(this.weatherQuad);
     this.shadowScene.remove(this.shadowQuad);

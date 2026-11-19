@@ -1026,56 +1026,10 @@ void main() {
   // the hole is two pixels wide, i.e. it does nothing.
   col *= mix(1.0, smoothstep(core * 0.55, core * 1.15, r), uDark);
 
-  // Ghosts: internal reflections land on the line through the frame centre.
-  // The palette is rationed to the project's two hues — amber glow and
-  // steel-blue — rather than one tint per element. Five differently-coloured
-  // discs is a lens-flare preset, not an art direction.
-  //
-  // A ghost is an out-of-focus image of the *iris*, so it is a polygon with as
-  // many sides as the lens has blades, it is brighter towards its rim than at
-  // its centre, its three channels focus at slightly different radii, and it
-  // carries every scratch and dust mote on the glass. The previous version was
-  // a flat fill with a hard shoulder, which is why the review read the two
-  // large ones as smudges or a render bug rather than as optics.
-  const int GHOSTS = 5;
-  float ks[GHOSTS];
-  ks[0] = -0.32; ks[1] = -0.68; ks[2] = 0.47; ks[3] = -1.12; ks[4] = 0.26;
-  float szs[GHOSTS];
-  szs[0] = 0.075; szs[1] = 0.130; szs[2] = 0.055; szs[3] = 0.185; szs[4] = 0.038;
-  float warm[GHOSTS];
-  warm[0] = 0.0; warm[1] = 1.0; warm[2] = 0.15; warm[3] = 0.85; warm[4] = 1.0;
-  const vec3 GHOST_COOL = vec3(0.52, 0.70, 1.00);
-  const vec3 GHOST_WARM = vec3(1.00, 0.74, 0.40);
-  const float BLADES = 7.0;
-  const float SEG = 6.2831853 / BLADES;
-  for (int i = 0; i < GHOSTS; i++) {
-    vec2 gp = uStar * ks[i];
-    vec2 gd = (q - gp) / szs[i];
-    float gr = length(gd);
-    if (gr > 1.45) continue;
-    // Boundary radius of a regular BLADES-gon with unit apothem, at this angle.
-    // Each ghost sees the iris at its own roll so they are not clones.
-    float ga = atan(gd.y, gd.x) + float(i) * 1.13;
-    float bnd = 1.0 / max(cos(mod(ga, SEG) - SEG * 0.5), 0.35);
-    // Per-channel focus: the three images of the aperture do not land on the
-    // same radius, which is where a ghost's colour fringe comes from.
-    vec3 k3 = vec3(gr / (bnd * 1.045), gr / bnd, gr / (bnd * 0.955));
-    // Interior ramp — an aperture image is dimmest in the middle and piles up
-    // against the blades. Never a plateau.
-    vec3 body = (1.0 - smoothstep(vec3(0.80), vec3(1.0), k3))
-              * (0.22 + 0.78 * smoothstep(vec3(0.0), vec3(0.72), k3));
-    // Squared by multiplication, not pow(): pow() with a negative base is
-    // undefined in GLSL ES and this argument is negative over the whole inside
-    // of the ghost.
-    vec3 dr = (k3 - 0.93) / 0.11;
-    vec3 rim = exp(-dr * dr) * 0.9;
-    // Dust and coating scratches on the element that made the reflection.
-    float grime = 0.45 + 0.55 * (os_snoise(vec3(gd * 2.6, float(i) * 9.0)) * 0.5 + 0.5);
-    grime *= 0.70 + 0.30 * (os_snoise(vec3(gd * 11.0, float(i) * 3.0 + 40.0)) * 0.5 + 0.5);
-    // Roughly 60% of the old amplitude: a ghost sells the intensity of the
-    // source by being *there*, not by being readable.
-    col += mix(GHOST_COOL, GHOST_WARM, warm[i]) * grime * (body * 0.0065 + rim * 0.0055);
-  }
+  // No lens ghosts (owner, 2026-11-11). A ghost sits on the line from the star
+  // through the frame centre, so it swims as the camera turns and the drive
+  // field and motion blur warp it like scenery — it read as an object in space
+  // you could not reach. Everything left is centred on the star itself.
 
   col *= gate * off * emit;
   // Vignette the whole thing so the corners never carry flare.

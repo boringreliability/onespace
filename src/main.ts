@@ -6,12 +6,13 @@
  * a module, not here.
  */
 
+// R63: first, before any module that declares a Zod schema (CSP: no eval probe).
+import '@/core/zodConfig';
 import { Engine } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
 import { registerShaderChunks } from '@/shaders/chunks';
 import { clearShot, setShot, shotList, shotNames } from '@/game/Shots';
 import { modes } from '@/core/Modes';
-import { parseRoute } from '@/core/Route';
 
 const boot = {
   el: document.getElementById('boot') as HTMLDivElement,
@@ -48,9 +49,16 @@ async function main(): Promise<void> {
 
   // Modules are registered here as they land. Order is dependency order:
   // world state, then generation-driven renderers, then ship, then UI/post.
-  const { registerModules } = await import('@/game/registry');
-  await registerModules(engine, (progress, status) =>
-    bus.emit('boot:progress', { progress: 0.1 + progress * 0.85, status }),
+  const { loadBoot, registerModules } = await import('@/game/registry');
+  // [v4-save] The latest save, before anything is built: IndexedDB plus the
+  // WAL, newest valid, migrated (src/save/bootLoad.ts).
+  boot.set(0.12, 'reading the logbook vault');
+  // `new` and `nonce` leave the URL inside (decideBoot): a reload continues.
+  const saved = await loadBoot();
+  await registerModules(
+    engine,
+    (progress, status) => bus.emit('boot:progress', { progress: 0.1 + progress * 0.85, status }),
+    saved,
   );
 
   // Link every program the opening scene needs while the boot veil is still
@@ -60,14 +68,12 @@ async function main(): Promise<void> {
   await engine.prewarm();
 
   boot.set(1, 'ready');
-  // Boot into the title unless a link names a mode (?mode=flight skips it,
-  // ?mode=yard opens the Yard). `map` and `review` are not boot targets for a
-  // player — the chart and shots are entered from flight — so they fall back
-  // to the title.
-  const route = parseRoute(window.location.search);
-  for (const w of route.warnings) console.warn(`route: ${w}`);
-  const bootMode = route.mode === 'flight' || route.mode === 'yard' ? route.mode : 'title';
-  modes.go(bootMode);
+  // Boot into the title unless a link names a mode (?mode=flight skips it —
+  // continuing the save if there is one — ?mode=yard opens the Yard). `map`
+  // and `review` are not boot targets for a player, so they fall back to the
+  // title (core/Route.ts bootPlan).
+  for (const w of saved.route.warnings) console.warn(`route: ${w}`);
+  modes.go(saved.plan.mode);
   engine.start();
   bus.emit('boot:done');
   setTimeout(() => boot.hide(), 400);

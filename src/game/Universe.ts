@@ -36,6 +36,7 @@ import { generateSystem } from '@/gen/system';
 import { orbitalPosition, orbitalVelocity } from '@/gen/orbit';
 
 import { MutableViewState } from '@/render/ViewState';
+import { keyLightAt } from '@/render/keyLight';
 import { PlanetRenderer } from '@/render/Planet';
 import { CloudRenderer } from '@/render/Clouds';
 import { RingRenderer } from '@/render/Rings';
@@ -46,6 +47,7 @@ import { publishSceneDepth } from '@/game/sceneDepth';
 import { referenceDisplacement } from '@/render/motionReference';
 import { planStreaming, type StreamCandidate } from '@/game/streaming';
 import { simSlices } from '@/game/timeCompression'; // [v2-p4]
+import { openSpaceArrivalAttitude } from '@/ship/arrivalFraming'; // [v3-T4]
 import { circularOrbitState, insideStar, openingAttitude, progradeAttitude, starRadiusKm } from '@/game/recovery';
 
 import {
@@ -57,6 +59,8 @@ import {
   soiRadius,
   type ParentBody,
 } from '@/ship/FlightModel';
+import { EXHAUST_VELOCITY_KMS, PROBE_TANK_CAPACITY_KG, Propellant, START_FILL } from '@/ship/propellant'; // [v4-fuel]
+import { CARGO_CAPACITY_KG, Cargo } from '@/ship/cargo'; // [v4-mining]
 
 /**
  * Orbits run at 1:1 with the ship.
@@ -126,6 +130,31 @@ export interface UniverseOptions {
   readonly seed?: number;
   /** Skip generating a ship and flight model (used by isolated review shots). */
   readonly headless?: boolean;
+  /**
+   * [v4-save] Boot straight into a saved place: `init` enters this system
+   * instead of choosing a start, so the start system never flashes past. If
+   * the system cannot be found, `init` falls back to a new start and sets
+   * `restoreFailed`.
+   */
+  readonly restore?: UniverseRestore;
+}
+
+type Vec3Tuple = readonly [number, number, number];
+
+/** [v4-save] Where the player is, as a save holds it (SaveV1.player plus the orbit clock). */
+export interface UniverseRestore {
+  readonly system: { readonly id: string; readonly seed: number; readonly name: string; readonly positionLy: Vec3Tuple };
+  readonly orbitSeconds: number;
+  /** The body the ship's state is relative to; null = the star. */
+  readonly parentId: string | null;
+  readonly flight: {
+    readonly position: Vec3Tuple;
+    readonly velocity: Vec3Tuple;
+    /** [x, y, z, w] */
+    readonly orientation: readonly [number, number, number, number];
+    readonly grounded: boolean;
+  };
+  readonly flightAssist: boolean;
 }
 
 
@@ -162,6 +191,9 @@ export class Universe implements GameModule {
 
   readonly flight = new FlightModel(DEFAULT_SHIP_CONFIG);
 
+  /** [v4-mining] The probe's hold. Its mass is handed to the flight model every update. */
+  readonly cargo = new Cargo(CARGO_CAPACITY_KG);
+
   /** Simulated orbital time in seconds. Advances at ORBIT_TIME_SCALE. */
   private orbitTime = 0;
 
@@ -192,6 +224,12 @@ export class Universe implements GameModule {
    */
   simRate = 1;
   private readonly slices = { count: 0, slice: 0 };
+  /**
+   * [v3-t3] Called before each sim slice is integrated, with its length.
+   * The autopilot flies here (registry wires `AutoPilot.sliceStep`), so at
+   * 10× it writes a fresh command every slice instead of one per frame.
+   */
+  beforeSlice: ((h: number) => void) | null = null;
   /**
    * Simulated seconds the last update advanced: dt × simRate within the
    * per-frame budget, 0 while paused, frozen or under a shot. Traffic runs
@@ -234,11 +272,19 @@ export class Universe implements GameModule {
   /** The star does not move in its own system's frame. Never written. */
   private readonly starVelocity = new Vector3();
   private starFrame: ParentBody = { position: this.starWorld, velocity: this.starVelocity, mu: 0 };
+
+  /** [v4-save] The primary's µ, km³/s² — a save outside every SOI orbits the star. */
+  get starMu(): number {
+    return this.starFrame.mu;
+  }
   private readonly orbitScratch = { x: 0, y: 0, z: 0 };
   private readonly velScratch = { x: 0, y: 0, z: 0 };
 
   constructor(private readonly options: UniverseOptions = {}) {
     this.seed = options.seed ?? DEFAULT_UNIVERSE_SEED;
+    // [v4-fuel] The probe carries its tank, opening at START_FILL [v4-mining]:
+    // the belt is where the rest comes from.
+    this.flight.attachPropellant(new Propellant(PROBE_TANK_CAPACITY_KG, START_FILL), EXHAUST_VELOCITY_KMS);
   }
 
   // -------------------------------------------------------------------------
@@ -248,13 +294,94 @@ export class Universe implements GameModule {
   init(ctx: EngineContext): void {
     ctx.scene.add(this.root);
 
+    this.ctx = ctx;
     this.galaxy = generateGalaxy(this.seed);
     bus.emit('galaxy:entered', { galaxy: this.galaxy });
+
+    // [v4-save] CONTINUE: straight into the saved system — no start system first.
+    const restore = this.options.restore;
+    if (restore) {
+      const spec = this.findRestoreSystem(restore);
+      if (spec) {
+        this.applyRestore(spec, restore, ctx);
+        return;
+      }
+      this.restoreFailed = true;
+    }
 
     // Start somewhere with something to look at: sample the arm at a third of
     // the disc radius, where star formation put the interesting neighbours.
     const start = this.pickStartSystem();
     this.enterSystem(start, ctx);
+  }
+
+  // -------------------------------------------------------------------------
+  // [v4-save] Restore
+  // -------------------------------------------------------------------------
+
+  /** Set by `init` when the `restore` option named a place that could not be found. */
+  restoreFailed = false;
+
+  private ctx: EngineContext | null = null;
+
+  /**
+   * Put the player back where a save says. The system is re-found from its
+   * position (its id is the match), then entered, the clock set, the ship
+   * parented and placed. Returns false — and changes nothing — when the
+   * system or the parent body cannot be found.
+   */
+  restoreState(r: UniverseRestore): boolean {
+    const ctx = this.ctx;
+    if (!ctx || !this.galaxy) return false;
+    const spec = this.findRestoreSystem(r);
+    if (!spec) return false;
+    this.applyRestore(spec, r, ctx);
+    return true;
+  }
+
+  /** Set the orbit clock and place every body for it. */
+  setOrbitSeconds(t: number): void {
+    this.orbitTime = Number.isFinite(t) && t >= 0 ? t : 0;
+    this.updateOrbits();
+  }
+
+  /**
+   * Parent the ship to body `id` (null = the star) WITHOUT converting its
+   * state — a restore is about to overwrite it. Unknown id: the star.
+   */
+  restoreParent(id: string | null): void {
+    this.setShipParent(id === null ? null : this.bodyById(id));
+    this.syncGroundSampler();
+  }
+
+  /** The saved system, generated — or null if it is not where the save says, or its parent body is missing. */
+  private findRestoreSystem(r: UniverseRestore): StarSystemSpec | null {
+    const p = r.system.positionLy;
+    if (!p.every((x) => Number.isFinite(x))) return null;
+    const stub = sampleSystemsNear(this.galaxy, [p[0], p[1], p[2]], 1, 8).find((s) => s.id === r.system.id);
+    if (!stub) return null;
+    const spec = generateSystem(this.galaxy, stub);
+    if (r.parentId !== null) {
+      const id = r.parentId;
+      const found = spec.planets.some((pl) => pl.id === id || pl.moons.some((m) => m.id === id));
+      if (!found) return null;
+    }
+    return spec;
+  }
+
+  private applyRestore(spec: StarSystemSpec, r: UniverseRestore, ctx: EngineContext): void {
+    this.enterSystem(spec, ctx);
+    this.setOrbitSeconds(r.orbitSeconds);
+    // Parent (and its ground sampler) first: clearing a sampler clears grounded.
+    this.restoreParent(r.parentId);
+    const f = r.flight;
+    this.flight.restoreState({
+      position: new Vector3(f.position[0], f.position[1], f.position[2]),
+      velocity: new Vector3(f.velocity[0], f.velocity[1], f.velocity[2]),
+      orientation: new Quaternion(f.orientation[0], f.orientation[1], f.orientation[2], f.orientation[3]),
+      grounded: f.grounded,
+    });
+    this.flight.flightAssist = r.flightAssist;
   }
 
   /**
@@ -404,7 +531,15 @@ export class Universe implements GameModule {
     const target = this.pickHeroBody();
     if (!target) {
       this.setShipParent(null);
-      this.flight.teleport(new Vector3(0, 0, 6 * AU));
+      // [v3-T4] arrival framing (PLAN E6): a system with no world used to put
+      // the nose dead on the star, which the chase camera then hid exactly
+      // behind the hull — 20 s of empty sky, measured. Hold the star in frame
+      // above the hull instead; there is no orbit, so no prograde to keep.
+      this.tmpA.set(0, 0, 6 * AU);
+      this.tmpB.copy(this.tmpA).multiplyScalar(-1).normalize();
+      openSpaceArrivalAttitude(this.tmpB, this.arrivalQuat);
+      this.flight.teleport(this.tmpA, this.tmpB.set(0, 0, 0), this.arrivalQuat);
+      // [/v3-T4]
       return;
     }
     // The world we arrive at becomes the parent, so everything below is stated
@@ -506,6 +641,10 @@ export class Universe implements GameModule {
 
   update(dt: number, ctx: EngineContext): void {
     this.simulatedSeconds = 0;
+    // [v4-mining] The hold's mass, every update — frozen, paused and shot
+    // frames included: a jettison from a menu must be felt on the first
+    // frame back, and the sync costs nothing.
+    this.flight.extraMassKg = this.cargo.totalKg;
     // A review shot has placed its own fixtures and camera; touching the scene
     // now would undo all of it before the frame is captured.
     if (shotOwnsScene()) {
@@ -551,6 +690,17 @@ export class Universe implements GameModule {
     this.simulatedSeconds = this.slices.count * this.slices.slice;
     for (let i = 0; i < this.slices.count; i++) {
       const h = this.slices.slice;
+      // [v4-mining] Guidance runs at the START of its slice: the world (orbit
+      // clock, every body and belt rock) as the ship's state has it, then
+      // both advance by h. Advancing the clock first showed the guidance a
+      // world one slice ahead of the ship (~0.5 km at a belt field's speed).
+      if (!this.options.headless) {
+        // [v3-t3] per-slice air and guidance: at 10× a frame is several
+        // slices, and both used to be one frame stale for all of them.
+        if (this.slices.count > 1) this.refreshAtmosphere();
+        this.beforeSlice?.(h);
+        // [/v3-t3]
+      }
       this.orbitTime += h * ORBIT_TIME_SCALE;
       this.updateOrbits();
       if (!this.options.headless) {
@@ -571,6 +721,10 @@ export class Universe implements GameModule {
     // Rebase before computing render positions so everything shifts together.
     ctx.origin.rebaseIfNeeded(ctx.origin.toRender(this.camWorld, this.tmpA), this.tmpB);
 
+    // [v4-save] Distances first, in their own step: streaming, the altimeter,
+    // `nearest` and a save all read them, so they must not depend on the
+    // renderer steps having run (node tests stub those).
+    this.measureBodies();
     this.streamRenderers(ctx);
     this.updateBodies(dt, ctx);
     this.updateStar(dt, ctx);
@@ -703,16 +857,19 @@ export class Universe implements GameModule {
     });
   }
 
+  /** Each body's squared distance from the camera (the ship's eye), km². */
+  private measureBodies(): void {
+    for (const b of this.bodies) {
+      b.distanceSq = this.camWorld.distanceToSquared(b.world);
+    }
+  }
+
   /**
    * Decide which bodies get renderers. Sorted by distance, the closest few get
    * full geometry; the rest are released. This is what keeps a system with
    * eleven planets and twenty moons inside the draw-call budget.
    */
   private streamRenderers(ctx: EngineContext): void {
-    for (const b of this.bodies) {
-      b.distanceSq = this.camWorld.distanceToSquared(b.world);
-    }
-
     // Acquire at 60 radii, release at 75 — see game/streaming.ts for why the
     // two thresholds differ. The candidate array is reused across frames.
     const cands = this.streamCandidates;
@@ -871,12 +1028,13 @@ export class Universe implements GameModule {
       this.tmpB.copy(this.camWorld).sub(b.world).applyQuaternion(this.spinInv);
       this.sunDir.copy(b.world).multiplyScalar(-1).normalize().applyQuaternion(this.spinInv);
 
-      // Inverse-square falloff so a planet at 30 AU is genuinely dim. Into a
-      // per-body colour: scaling the shared one in place compounded every
-      // earlier body's irradiance into the next (a moon after its planet got
-      // both).
-      const auDist = b.world.length() / AU;
-      const irradiance = primary.luminosity / Math.max(auDist * auDist, 1e-6);
+      // Inverse-square falloff, compressed below a knee (render/keyLight.ts)
+      // so an outer world is dim but lit — raw, Fyss VIII at 3.55 AU got
+      // 1/1300 of the opening world's light and drew as a black disc. The
+      // player's hull and traffic take the same key light. Into a per-body
+      // colour: scaling the shared one in place compounded every earlier
+      // body's irradiance into the next (a moon after its planet got both).
+      const irradiance = keyLightAt(primary.luminosity, b.world.length());
       this.bodySun.setRGB(
         this.sunColor.r * irradiance,
         this.sunColor.g * irradiance,
@@ -893,6 +1051,8 @@ export class Universe implements GameModule {
       );
 
       b.planet.update(dt, ctx, b.view);
+      // Before update(): the deck renders its march there, not in the scene pass.
+      b.clouds?.setDepthTexture(sceneDepth);
       b.clouds?.update(dt, ctx, b.view);
       b.rings?.update(dt, ctx, b.view);
       if (b.atmosphere) {
@@ -1004,6 +1164,11 @@ export class Universe implements GameModule {
     // whose frame the ship's velocity is already expressed in. Taking it from
     // `nearest` would let a moon you are flying past brake you against a
     // planet's atmosphere.
+    this.refreshAtmosphere();
+  }
+
+  /** Hand the flight model the parent's air density at the ship (see above). */
+  private refreshAtmosphere(): void {
     const air = this.shipParent?.spec.atmosphere;
     if (air) {
       const altitude = this.flight.position.length() - this.shipParent!.spec.radius;

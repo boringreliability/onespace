@@ -34,14 +34,30 @@ import type { EngineContext } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
 import { registerShot } from '@/game/Shots';
 import { composeLandedFrame, LANDED_CLEARANCE, type LandedFramingInput } from '@/ship/landedFraming';
+// [v3-T1]
+import {
+  blendSeconds,
+  chaseLagOffset,
+  constrainAimToFrame,
+  limitAnchorVelocity,
+  lowPassVec,
+  sphericalLerp,
+} from '@/ship/cameraMath';
+import { shakeNoise } from '@/ship/cameraShake';
+import { fovPolicy, type FovInput } from '@/ship/fovPolicy';
 
 export type CameraMode = 'cockpit' | 'chase' | 'cinematic' | 'orbit';
 
 /** The order `cycleMode()` walks. Chase first: it is the default flight view. */
 const MODE_ORDER: readonly CameraMode[] = ['chase', 'cockpit', 'orbit', 'cinematic'];
 
-/** Radians the chase aim may deviate from the nose towards the velocity. ~11 deg. */
-const MAX_VELOCITY_AIM_ANGLE = 0.19;
+/**
+ * Radians the chase aim may deviate from the nose towards the velocity. ~3 deg.
+ * [v3-T1] Was 0.19 (~11 deg): in orbit the velocity sits 30 deg above a nose
+ * pitched at the world, and the deviation lifted the view off the planet —
+ * the opening frame only held the limb because the fov was 78 deg.
+ */
+const MAX_VELOCITY_AIM_ANGLE = 0.05;
 
 /**
  * Floor on the orbit camera's elevation while a local vertical is known, in
@@ -197,40 +213,6 @@ class Pose {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Noise for shake
-// ---------------------------------------------------------------------------
-
-/** Cheap 1-D hash. Adequate for shake; never used for world generation. */
-function hash1(n: number): number {
-  const s = Math.sin(n * 127.1 + 311.7) * 43758.5453123;
-  return s - Math.floor(s);
-}
-
-/** Smoothed value noise in -1..1. */
-function valueNoise1(x: number, seed: number): number {
-  const o = seed * 57.31;
-  const i = Math.floor(x + o);
-  const f = x + o - i;
-  const u = f * f * (3 - 2 * f);
-  const a = hash1(i);
-  const b = hash1(i + 1);
-  return (a + (b - a) * u) * 2 - 1;
-}
-
-/**
- * Three octaves at deliberately irrational frequency ratios. A shake built from
- * sines — or from octaves at exact powers of two — beats audibly and reads as a
- * machine wobble; these never come back into phase.
- */
-function shakeNoise(t: number, seed: number): number {
-  return (
-    valueNoise1(t * 11.0, seed) * 0.62 +
-    valueNoise1(t * 23.7, seed + 7) * 0.26 +
-    valueNoise1(t * 51.3, seed + 19) * 0.12
-  );
-}
-
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
 }
@@ -260,23 +242,53 @@ export class CameraRig {
   chaseDamping = 1.0;
 
   /**
-   * Orientation runs slower than position — this ratio is the whole reason a
-   * chase cam feels like a gimballed drone rather than a stick welded to the
-   * hull. Below ~0.6 it starts to feel seasick.
+   * [v3-T1] Natural frequency of the aim spring, Hz. v2 ran it at 0.44 Hz with
+   * no feed-forward, so the aim lagged ~33 deg in a full turn and the ship left
+   * 45 % of the screen height. The spring now follows the hull's turn rate
+   * (feed-forward) and only smooths what is left.
    */
-  chaseOrientationLagRatio = 0.42;
+  chaseAimFrequency = 0.7;
 
-  /** Damping ratio of the aim spring. Slightly over-damped: aim never rings. */
-  chaseOrientationDamping = 1.15;
+  /** Damping ratio of the aim spring. Critical: aim never rings. */
+  chaseOrientationDamping = 1.0;
 
   /** How slowly camera roll follows hull roll. Slowest system in the rig. */
   chaseRollLagRatio = 0.26;
 
-  /** Follow offset in ship-local space, km. +Z is behind (three.js looks -Z). */
-  readonly chaseOffset = new Vector3(0, 0.0085, 0.052);
+  /**
+   * Follow offset in ship-local space, km. +Z is behind (three.js looks -Z).
+   * [v3-T1] 2 m higher than v2: at the narrower D0 fov the hull sits in the
+   * lower third with the world below it in the opening frame.
+   */
+  readonly chaseOffset = new Vector3(0, 0.0105, 0.052);
 
-  /** Hard ceiling on trailing distance, km, so the ship never leaves frame. */
-  chaseMaxLag = 0.045;
+  /**
+   * [v3-T1] Soft ceiling on the trail from proper acceleration, km (tanh, so
+   * there is no knee to toggle across). Replaces v2's hard 45 m clamp.
+   */
+  chaseLagMax = 0.016;
+  /** [v3-T1] Low-pass on the proper acceleration that drives the trail, s. */
+  chaseAccelTau = 0.15;
+  /** [v3-T1] Soft ceiling on the rotational trail of the follower spring, km. */
+  chaseSwingMax = 0.012;
+  /**
+   * [v3-T1] Largest change of the anchor's (ship-relative) velocity that is
+   * motion, km/s². A full-rate pitch onset is ~0.13; an attitude snap is ~100.
+   */
+  chaseAnchorAccelMax = 1.5;
+  /**
+   * [v3-T1] Hull turn rate beyond which a change of attitude is a snap, rad/s.
+   * Above any flown rate: the autopilot at auto-10× turns the hull ~4 rad/s
+   * of REAL time (measured), and treating that as snaps re-seated every
+   * frame. A one-frame 30 deg snap at 60 fps is 31 rad/s.
+   */
+  attitudeSnapRate = 8;
+  /** [v3-T1] Blend length of an automatic reseat, s. */
+  reseatSeconds = 0.5;
+  /** [v3-T1] Keep the hull inside this fraction of the half-frame (soft from 2/3 of it). */
+  chaseFrameMargin = 0.6;
+  /** [v3-T1] Extra pitch of the aim, radians; + looks up (the hull sinks in frame). */
+  chaseAimPitchBias = 0.02;
 
   /** How far ahead of the ship the camera aims, km. Puts the nose low in frame. */
   chaseLookAhead = 0.28;
@@ -353,18 +365,11 @@ export class CameraRig {
   /** Limit on the pilot's pitch on top of the composition, radians. */
   landedPitchLimit = 0.35;
 
-  // --- tuning: fov breathing ----------------------------------------------
+  // --- tuning: fov (D0, ship/fovPolicy.ts) -------------------------------
 
-  /** Base and wide-open vertical fov, degrees, for the flight views. */
-  fovBase = 62;
-  fovWide = 78;
-  /** Cockpit sits closer to the glass, so it runs wider. */
-  cockpitFovBase = 68;
-  cockpitFovWide = 84;
   /**
-   * Speed at which the fov is ~63% of the way open. A saturating curve is used
-   * rather than a clamped ratio so the effect degrades gracefully whether the
-   * ship is doing 0.2 km/s in orbit or 400 km/s across a system.
+   * Speed at which the velocity-aim blend is ~63 % in. [v3-T1] Speed no
+   * longer touches the fov — that breathes from thrust and cruise only.
    */
   speedReference = 1.2;
   /** Approximate settle time of the fov ease, seconds. */
@@ -378,8 +383,6 @@ export class CameraRig {
   shakeRotation = 0.021;
   /** Roll shake is deliberately larger — it is what sells a hull under load. */
   shakeRollScale = 1.6;
-  /** Acceleration (km/s^2) at which the continuous thrust rumble is at full. */
-  shakeAccelReference = 0.35;
   /** Ceiling on the continuous component so thrust never masks a real impact. */
   shakeThrustCeiling = 0.3;
 
@@ -387,6 +390,10 @@ export class CameraRig {
 
   /** Mode cross-fade duration, seconds. Never cut. */
   transitionSeconds = 0.6;
+  /** [v3-T1] Liftoff (landed → flight view): at least this long... */
+  liftoffMinSeconds = 1.5;
+  /** [v3-T1] ...and never turning faster than this, rad/s. v2: 512 deg/s. */
+  liftoffMaxTurnRate = Math.PI / 2;
 
   /** When true the rig consumes the `toggleCamera` action itself. */
   handleToggleKey = true;
@@ -404,12 +411,26 @@ export class CameraRig {
 
   private readonly initialFov: number;
 
-  // chase state (render space)
-  private readonly chasePos = new Vector3();
-  private readonly chaseVel = new Vector3();
-  private readonly chaseAnchor = new Vector3();
-  private readonly chaseAnchorPrev = new Vector3();
-  private readonly chaseAnchorVel = new Vector3();
+  // chase state — [v3-T1] SHIP-RELATIVE (world axes, origin at the hull).
+  // Nothing the ship's position does — lost time, a cruise drop, a rebase,
+  // 15,000 km/s — can reach the chase; only the hull's attitude and its proper
+  // acceleration move the lens.
+  /** The follow offset rotated into world axes. */
+  private readonly anchorRel = new Vector3();
+  private readonly anchorRelPrev = new Vector3();
+  /** Its velocity, limited (limitAnchorVelocity). */
+  private readonly anchorRelVel = new Vector3();
+  /** Spring deviation of the lens from the anchor, and its velocity. */
+  private readonly chaseR = new Vector3();
+  private readonly chaseRelVel = new Vector3();
+  /** Trail from filtered proper acceleration. */
+  private readonly lagOff = new Vector3();
+  /** Lens position relative to the hull this frame. */
+  private readonly camRel = new Vector3();
+  private readonly anchorLimit = { vel: new Vector3(), teleport: new Vector3(), jumped: false };
+  /** Hull turn rate, world axes, rad/s (finite difference of attitude). */
+  private readonly omega = new Vector3();
+  private readonly qPrev = new Quaternion();
   private readonly chaseAim = new Vector3(0, 0, -1);
   private readonly chaseAimVel = new Vector3();
   private readonly chaseUp = new Vector3(0, 1, 0);
@@ -480,10 +501,43 @@ export class CameraRig {
   private cinematicRadius = 0.03;
 
   // derived per-frame values
-  private readonly prevShipVel = new Vector3();
-  private readonly accel = new Vector3();
-  private readonly accelSmooth = new Vector3();
   private speedEase = 0;
+
+  // [v3-T1] motion inputs (setMotion) and what is derived from them
+  private readonly motionAccel = new Vector3();
+  private thrustFrac = 0;
+  private cruiseSpool = 0;
+  /** Proper acceleration, low-passed (chaseAccelTau). */
+  private readonly accelF = new Vector3();
+  private fovChase = 57;
+  private fovCockpit = 57;
+  private fovSeeded = false;
+  private readonly fovIn: { -readonly [K in keyof FovInput]: FovInput[K] } = {
+    aspect: 16 / 9,
+    thrustFrac: 0,
+    cruiseSpool: 0,
+    mode: 'chase',
+  };
+  /** Smoothed frame rate, for band-limiting the shake. */
+  private frameHz = 60;
+
+  // [v3-T1] blended reseat
+  private reseatT = 1;
+  private reseatDur = 0.5;
+  private reseatPending = -1;
+  private readonly reseatRel = new Vector3();
+  private readonly reseatQuat = new Quaternion();
+  /** Last frame's output before shake, relative to the hull. */
+  private readonly lastOutRel = new Vector3();
+  private readonly lastOutQuat = new Quaternion();
+  private lastOutSet = false;
+  private readonly lastShipPos = new Vector3();
+  private snapAim = false;
+
+  // [v3-T1] mode blend length and liftoff turn clamp
+  private blendDur = 0.6;
+  private landedReleaseSeconds = 0.6;
+  private turnClamp = false;
 
   // shake
   private impulseTrauma = 0;
@@ -519,7 +573,6 @@ export class CameraRig {
 
   constructor(readonly camera: PerspectiveCamera) {
     this.initialFov = camera.fov;
-    this.fovBase = camera.fov;
     this.poseOut.fov = camera.fov;
 
     // Anything that hits the hull asks for shake over the bus rather than
@@ -587,6 +640,23 @@ export class CameraRig {
     } else {
       this.blendFrom = this.mode_;
       this.blendT = 0;
+      this.blendDur = this.transitionSeconds;
+      // [v3-T1] Liftoff: leaving a composed landed frame for a flight view. The
+      // two poses can be 180 deg apart round the hull; a 0.6 s fade turned at
+      // 512 deg/s. Long enough to stay under liftoffMaxTurnRate, measured on
+      // last frame's poses (both are hull-relative, so they are current).
+      if (this.landedHold && this.landedReleaseT === 0 && mode !== 'orbit' && this.initialised) {
+        const a = this.poseFor(this.blendFrom);
+        const b = this.poseFor(mode);
+        const turn = a.quaternion.angleTo(b.quaternion);
+        const swing = this.tmpA
+          .copy(a.position)
+          .sub(this.lastShipPos)
+          .angleTo(this.tmpB.copy(b.position).sub(this.lastShipPos));
+        this.blendDur = blendSeconds(Math.max(turn, swing), this.liftoffMinSeconds, this.liftoffMaxTurnRate);
+        this.landedReleaseSeconds = this.blendDur;
+        this.turnClamp = true;
+      }
     }
 
     this.mode_ = mode;
@@ -637,6 +707,7 @@ export class CameraRig {
       this.landedReleaseT = 1;
       this.landedSeeded = false;
     }
+    this.landedReleaseSeconds = this.transitionSeconds;
     this.landedSource = source;
   }
 
@@ -664,6 +735,36 @@ export class CameraRig {
     this.cinematicTime = 0;
   }
 
+  // --- [v3-T1] motion inputs --------------------------------------------------
+
+  /**
+   * What the hull feels this frame: PROPER acceleration (km/s², world axes,
+   * gravity excluded — FlightModel.properAccel), engine output 0..1 and the
+   * cruise spool 0..1. Lag, cockpit nudge, shake and FOV breathing are driven
+   * from these, never from differencing positions. Call before `update()`.
+   */
+  setMotion(properAccel: Vector3, thrustFrac: number, cruiseSpool: number): void {
+    if (Number.isFinite(properAccel.x + properAccel.y + properAccel.z)) this.motionAccel.copy(properAccel);
+    this.thrustFrac = clamp(Number.isFinite(thrustFrac) ? thrustFrac : 0, 0, 1);
+    this.cruiseSpool = clamp(Number.isFinite(cruiseSpool) ? cruiseSpool : 0, 0, 1);
+  }
+
+  /** Current shake trauma 0..1 (diagnostics and tests). */
+  get trauma(): number {
+    return clamp(this.impulseTrauma + this.thrustTrauma, 0, 1);
+  }
+
+  /**
+   * Blended reseat: carry the camera to its settled pose for the current
+   * attitude, blending the view across `seconds` so nothing cuts. For
+   * discontinuities someone knows about (an attitude snap, an insertion).
+   */
+  reseat(seconds = 0.5): void {
+    this.reseatPending = Math.max(seconds, 1e-3);
+  }
+
+  // --- [/v3-T1] -------------------------------------------------------------
+
   /** Drop all smoothing and snap to the ship next frame — use after a warp. */
   reset(): void {
     this.initialised = false;
@@ -687,7 +788,7 @@ export class CameraRig {
     if (this.handleToggleKey && ctx.input.pressed('toggleCamera')) this.cycleMode();
 
     if (!this.initialised) {
-      this.snapTo(shipPosition, shipOrientation, shipVelocity);
+      this.snapTo(shipPosition, shipOrientation);
       this.initialised = true;
     }
 
@@ -695,11 +796,10 @@ export class CameraRig {
     this.time += step;
     this.cinematicTime += step;
 
-    // A warp or a scale change teleports the ship. Chasing that across a spring
-    // would take minutes and look like a bug, so re-seat instead.
-    if (this.chasePos.distanceToSquared(shipPosition) > 2500) {
-      this.snapTo(shipPosition, shipOrientation, shipVelocity);
-    }
+    // [v3-T1] v2 re-seated here whenever the lens was 50 km from the ship — a
+    // threshold per FRAME, so it fired at 30 fps and not at 144. The chase is
+    // hull-relative now and needs no such guard; discontinuities of attitude
+    // are detected and blended in stepChase().
 
     this.updateDerived(step, shipVelocity);
     this.stepChase(step, shipPosition, shipOrientation, shipVelocity);
@@ -711,17 +811,84 @@ export class CameraRig {
     // of springs each — so a transition is a plain interpolation with no state
     // to warm up and no direction it cannot be reversed in.
     if (this.blendT < 1) {
-      this.blendT = Math.min(1, this.blendT + step / Math.max(this.transitionSeconds, 1e-3));
+      this.blendT = Math.min(1, this.blendT + step / Math.max(this.blendDur, 1e-3));
     }
     const to = this.poseFor(this.mode_);
     if (this.blendT >= 1) {
       this.poseOut.copy(to);
     } else {
-      this.poseOut.lerpFrom(this.poseFor(this.blendFrom), to, smootherstep(this.blendT));
+      // [v3-T1] Round the hull in spherical coordinates, not through it.
+      this.blendAboutShip(this.poseFor(this.blendFrom), to, smootherstep(this.blendT), shipPosition);
     }
+
+    // [review-v3a] A reseat re-frames the CHASE. stepChase detects snaps in
+    // every mode, and in the cockpit (an eye bolted to the hull) or the orbit
+    // view the blend held last frame's WORLD attitude: after a 90° snap the
+    // cockpit looked 90° off the nose and swung back over 0.5 s.
+    if (this.reseatT < 1 && this.mode_ !== 'chase') this.reseatT = 1;
+
+    // [v3-T1] Blended reseat: from where the lens was to where it now belongs.
+    if (this.reseatT < 1) {
+      this.reseatT = Math.min(1, this.reseatT + step / this.reseatDur);
+      const k = smootherstep(this.reseatT);
+      const rel = this.tmpA.copy(this.poseOut.position).sub(shipPosition);
+      sphericalLerp(this.tmpB, this.reseatRel, rel, k);
+      this.poseOut.position.copy(shipPosition).add(this.tmpB);
+      this.tmpQ.copy(this.reseatQuat).slerp(this.poseOut.quaternion, k);
+      this.poseOut.quaternion.copy(this.tmpQ);
+    }
+
+    // [v3-T1] Whatever a blend does, the hull stays in the picture: a reseat
+    // slerps world orientations while the position swings on a sphere, and
+    // across a large arc the two disagree (measured: 78 deg off the hull
+    // after an auto-10x flip). The chase pose itself is already framed.
+    if (this.mode_ === 'chase' && (this.reseatT < 1 || this.blendT < 1)) this.frameOutput(shipPosition);
+
+    // [v3-T1] Liftoff turn clamp: the blend is sized to stay under the limit;
+    // this is the guarantee, for when the poses themselves are moving.
+    if (this.turnClamp && this.lastOutSet && step > 1e-6) {
+      const ang = this.lastOutQuat.angleTo(this.poseOut.quaternion);
+      const max = this.liftoffMaxTurnRate * step;
+      if (ang > max) {
+        this.tmpQ.copy(this.lastOutQuat).rotateTowards(this.poseOut.quaternion, max);
+        this.poseOut.quaternion.copy(this.tmpQ);
+      } else if (this.blendT >= 1) {
+        this.turnClamp = false;
+      }
+    }
+
+    this.lastOutRel.copy(this.poseOut.position).sub(shipPosition);
+    this.lastOutQuat.copy(this.poseOut.quaternion);
+    this.lastOutSet = true;
+    this.lastShipPos.copy(shipPosition);
 
     this.applyShake(step);
     this.commit();
+  }
+
+  /** [v3-T1] Turn the output just enough to keep the hull inside chaseFrameMargin. */
+  private frameOutput(ship: Vector3): void {
+    const q = this.poseOut.quaternion;
+    const fwd = this.tmpA.set(0, 0, -1).applyQuaternion(q);
+    const up = this.tmpB.set(0, 1, 0).applyQuaternion(q);
+    const toShip = this.tmpC.copy(ship).sub(this.poseOut.position);
+    if (toShip.lengthSq() < 1e-14) return;
+    const aspect = this.camera.aspect > 0 ? this.camera.aspect : 16 / 9;
+    const halfY = (this.poseOut.fov * Math.PI) / 360;
+    constrainAimToFrame(this.tmpD, fwd, toShip, up, halfY, aspect, this.chaseFrameMargin);
+    if (this.tmpD.angleTo(fwd) < 1e-6) return;
+    this.lookRotation(q, this.poseOut.position, this.tmpD, up);
+  }
+
+  /** [v3-T1] Mode blend about the hull: radius linear, direction on the sphere. */
+  private blendAboutShip(a: Pose, b: Pose, t: number, ship: Vector3): void {
+    const ra = this.tmpA.copy(a.position).sub(ship);
+    const rb = this.tmpB.copy(b.position).sub(ship);
+    sphericalLerp(this.tmpC, ra, rb, t);
+    this.poseOut.position.copy(ship).add(this.tmpC);
+    this.tmpQ.copy(a.quaternion).slerp(b.quaternion, t);
+    this.poseOut.quaternion.copy(this.tmpQ);
+    this.poseOut.fov = a.fov + (b.fov - a.fov) * t;
   }
 
   dispose(): void {
@@ -748,31 +915,38 @@ export class CameraRig {
     if (off.equals(this.lastOriginOffset)) return;
     const d = this.tmpA.copy(off).sub(this.lastOriginOffset);
     this.lastOriginOffset.copy(off);
-    this.chasePos.sub(d);
-    this.chaseAnchor.sub(d);
-    this.chaseAnchorPrev.sub(d);
+    // [v3-T1] The chase is hull-relative and needs nothing here.
     this.orbitTarget.sub(d);
     this.cinematicSubject.sub(d);
     this.poseOut.position.sub(d);
+    this.lastShipPos.sub(d);
   }
 
-  private snapTo(shipPosition: Vector3, q: Quaternion, vel: Vector3): void {
-    this.chaseAnchor.copy(this.chaseOffset).applyQuaternion(q).add(shipPosition);
-    this.chaseAnchorPrev.copy(this.chaseAnchor);
-    this.chaseAnchorVel.set(0, 0, 0);
-    this.chasePos.copy(this.chaseAnchor);
-    this.chaseVel.set(0, 0, 0);
+  private snapTo(shipPosition: Vector3, q: Quaternion): void {
+    this.anchorRel.copy(this.chaseOffset).applyQuaternion(q);
+    this.anchorRelPrev.copy(this.anchorRel);
+    this.anchorRelVel.set(0, 0, 0);
+    this.chaseR.set(0, 0, 0);
+    this.chaseRelVel.set(0, 0, 0);
+    this.lagOff.set(0, 0, 0);
+    this.camRel.copy(this.anchorRel);
+    this.qPrev.copy(q);
+    this.omega.set(0, 0, 0);
     this.chaseAim.set(0, 0, -1).applyQuaternion(q);
     this.chaseAimVel.set(0, 0, 0);
     this.chaseUp.set(0, 1, 0).applyQuaternion(q);
     this.chaseUpVel.set(0, 0, 0);
     this.cockpitNudge.set(0, 0, 0);
     this.cockpitNudgeVel.set(0, 0, 0);
-    this.prevShipVel.copy(vel);
-    this.accel.set(0, 0, 0);
-    this.accelSmooth.set(0, 0, 0);
+    this.accelF.copy(this.motionAccel);
     this.impulseTrauma = 0;
     this.thrustTrauma = 0;
+    this.fovSeeded = false;
+    this.reseatT = 1;
+    // The aim snaps onto its target on the first chase step.
+    this.snapAim = true;
+    this.lastShipPos.copy(shipPosition);
+    this.lastOutSet = false;
   }
 
   private poseFor(mode: CameraMode): Pose {
@@ -789,57 +963,110 @@ export class CameraRig {
     }
   }
 
-  /** Acceleration, speed and the eased fov factor — shared by several modes. */
+  /** Speed ease (velocity aim), fov policy, frame rate — shared by several modes. */
   private updateDerived(dt: number, shipVelocity: Vector3): void {
-    if (dt > 1e-6) {
-      this.accel.copy(shipVelocity).sub(this.prevShipVel).divideScalar(dt);
-      // Finite-differenced acceleration is noisy; a short low-pass keeps the
-      // cockpit nudge and the thrust rumble from buzzing on a jittery frame.
-      const k = 1 - Math.exp(-dt / 0.08);
-      this.accelSmooth.lerp(this.accel, k);
-    }
-    this.prevShipVel.copy(shipVelocity);
-
     const speed = shipVelocity.length();
     // Saturating rather than clamped: works at 0.2 km/s and at 400 km/s.
     const target = 1 - Math.exp(-speed / Math.max(this.speedReference, 1e-3));
     const tau = Math.max(this.fovEaseSeconds, 1e-3) / 3;
-    this.speedEase += (target - this.speedEase) * (dt > 0 ? 1 - Math.exp(-dt / tau) : 0);
+    const k = dt > 0 ? 1 - Math.exp(-dt / tau) : 0;
+    this.speedEase += (target - this.speedEase) * k;
+
+    // [v3-T1] FOV from the D0 policy: aspect, thrust and cruise spool. Never
+    // from speed (v2 sat at its ceiling in every orbit: 110-124 deg wide).
+    const fi = this.fovIn;
+    fi.aspect = this.camera.aspect > 0 ? this.camera.aspect : 16 / 9;
+    fi.thrustFrac = this.thrustFrac;
+    fi.cruiseSpool = this.cruiseSpool;
+    fi.mode = 'chase';
+    const chase = fovPolicy(fi);
+    fi.mode = 'cockpit';
+    const cockpit = fovPolicy(fi);
+    if (!this.fovSeeded) {
+      this.fovChase = chase;
+      this.fovCockpit = cockpit;
+      this.fovSeeded = true;
+    } else {
+      this.fovChase += (chase - this.fovChase) * k;
+      this.fovCockpit += (cockpit - this.fovCockpit) * k;
+    }
+
+    if (dt > 1e-6) {
+      this.frameHz += (clamp(1 / dt, 10, 1000) - this.frameHz) * 0.1;
+      lowPassVec(this.accelF, this.motionAccel, dt, this.chaseAccelTau);
+    }
   }
 
   // -- chase ---------------------------------------------------------------
 
+  /**
+   * [v3-T1] The chase, hull-relative.
+   *
+   *   lens = hull + anchor + r + lag
+   *
+   * - anchor: the follow offset in the hull's axes. Its velocity (attitude
+   *   only) feeds the spring forward, limited to chaseAnchorAccelMax; more
+   *   than that is an attitude snap and triggers a blended reseat.
+   * - r: the follower spring's deviation, solved in the anchor's frame, so a
+   *   steady turn carries the lens round and an onset of turn swings it
+   *   late — the gimballed-drone read. Softly bounded by chaseSwingMax.
+   * - lag: the trail from proper acceleration (thrust, drag; not gravity),
+   *   low-passed and tanh-saturated (chaseLagOffset). v2 differentiated
+   *   positions instead, so a lost 8 ms of ship time read as a 4 km/s spike.
+   */
   private stepChase(dt: number, shipPosition: Vector3, q: Quaternion, vel: Vector3): void {
-    this.chaseAnchorPrev.copy(this.chaseAnchor);
-    this.chaseAnchor.copy(this.chaseOffset).applyQuaternion(q).add(shipPosition);
+    const anchor = this.anchorRel.copy(this.chaseOffset).applyQuaternion(q);
+    let snapped = false;
+    let reseatFor = this.reseatSeconds;
+    if (this.reseatPending > 0) {
+      snapped = true;
+      reseatFor = this.reseatPending;
+      this.reseatPending = -1;
+    }
 
     if (dt > 1e-6) {
-      this.chaseAnchorVel.copy(this.chaseAnchor).sub(this.chaseAnchorPrev).divideScalar(dt);
-
-      // Solve the spring in the anchor's frame. `r` is where the camera sits
-      // relative to where it *should* sit; `rv` is how fast that gap is
-      // changing. Because rv is measured against the anchor's velocity, a
-      // constant cruise leaves the gap at zero while a change in the anchor's
-      // velocity injects exactly the pseudo-force that shoves the camera back.
-      const r = this.tmpA.copy(this.chasePos).sub(this.chaseAnchorPrev);
-      const rv = this.tmpB.copy(this.chaseVel).sub(this.chaseAnchorVel);
-
-      this.spring.compute(dt, this.chaseFrequency, this.chaseDamping);
-      this.spring.stepToZero(r, rv);
-
-      // Ceiling on the trail, or a violent burn would put the ship off screen.
-      const len = r.length();
-      if (len > this.chaseMaxLag) {
-        r.multiplyScalar(this.chaseMaxLag / len);
-        // Kill only the outward part of the relative velocity: the camera may
-        // still recover inward, it just cannot fall further behind.
-        const radial = rv.dot(r) / (this.chaseMaxLag * this.chaseMaxLag);
-        if (radial > 0) rv.addScaledVector(r, -radial);
+      // Hull turn rate from the change of attitude, world axes.
+      const dq = this.tmpQ.copy(q).multiply(this.tmpQ2.copy(this.qPrev).invert());
+      if (dq.w < 0) dq.set(-dq.x, -dq.y, -dq.z, -dq.w);
+      const ang = 2 * Math.acos(clamp(dq.w, -1, 1));
+      if (ang / dt > this.attitudeSnapRate) {
+        snapped = true; // keep last frame's rate
+      } else if (ang > 1e-9) {
+        this.omega.set(dq.x, dq.y, dq.z).normalize().multiplyScalar(ang / dt);
+      } else {
+        this.omega.set(0, 0, 0);
       }
 
-      this.chasePos.copy(this.chaseAnchor).add(r);
-      this.chaseVel.copy(this.chaseAnchorVel).add(rv);
+      const raw = this.tmpA.copy(anchor).sub(this.anchorRelPrev).divideScalar(dt);
+      // The excess is carried (the lens is solved in the anchor's frame), not
+      // fed to the spring; it only re-seats the view when the attitude itself
+      // snapped (above), since under time compression fast but real turns
+      // exceed aMax too.
+      const lim = limitAnchorVelocity(this.anchorRelVel, raw, dt, this.chaseAnchorAccelMax, this.anchorLimit);
+      this.anchorRelVel.copy(lim.vel);
+
+      // Spring in the anchor's frame: position carried with the anchor, the
+      // relative velocity sees only the anchor's (limited) change of velocity.
+      const r = this.chaseR;
+      const rv = this.tmpB.copy(this.chaseRelVel).sub(this.anchorRelVel);
+      this.spring.compute(dt, this.chaseFrequency, this.chaseDamping);
+      this.spring.stepToZero(r, rv);
+      const rl = r.length();
+      if (rl > 1e-12) r.multiplyScalar((this.chaseSwingMax * Math.tanh(rl / this.chaseSwingMax)) / rl);
+      this.chaseRelVel.copy(this.anchorRelVel).add(rv);
+
+      chaseLagOffset(this.accelF, TWO_PI * this.chaseFrequency, this.chaseLagMax, this.lagOff);
     }
+    this.anchorRelPrev.copy(anchor);
+    this.qPrev.copy(q);
+
+    if (snapped) {
+      this.beginReseat(reseatFor);
+      this.chaseR.set(0, 0, 0);
+      this.chaseRelVel.copy(this.anchorRelVel);
+    }
+
+    const camRel = this.camRel.copy(anchor).add(this.chaseR).add(this.lagOff);
 
     // Aim: nose vector eased towards the velocity vector, so a ship travelling
     // sideways is framed sideways and the drift is legible.
@@ -848,15 +1075,7 @@ export class CameraRig {
     let align = this.velocityAlign * this.speedEase;
     if (align > 1e-3 && speed > 1e-5) {
       const vdir = this.tmpB.copy(vel).divideScalar(speed);
-      // Cap how far the aim may leave the nose.
-      //
-      // The blend exists so thrust-induced drift is legible. In ORBIT the
-      // velocity is permanently perpendicular to a nose pointed at the world
-      // below, so an uncapped 0.55 blend swings the aim ~30 degrees and parks
-      // the ship a quarter of the screen off-centre for as long as you are in
-      // orbit — with the HUD boresight still dead ahead. Limit the deviation
-      // so the subject never leaves the middle third; drift still reads,
-      // the ship stays framed.
+      // Cap how far the aim may leave the nose (MAX_VELOCITY_AIM_ANGLE).
       const cosT = Math.max(-1, Math.min(1, nose.dot(vdir)));
       const theta = Math.acos(cosT);
       if (theta > 1e-4) align = Math.min(align, MAX_VELOCITY_AIM_ANGLE / theta);
@@ -868,33 +1087,83 @@ export class CameraRig {
       else nose.set(0, 0, -1).applyQuaternion(q);
     }
 
-    const aimPoint = this.tmpC.copy(nose).multiplyScalar(this.chaseLookAhead).add(shipPosition);
-    const wantAim = this.tmpD.copy(aimPoint).sub(this.chasePos);
+    // Wanted aim, hull-relative: the look-ahead point minus the lens.
+    const wantAim = this.tmpD.copy(nose).multiplyScalar(this.chaseLookAhead).sub(camRel);
     const al = wantAim.length();
     if (al > 1e-9) wantAim.divideScalar(al);
+    const shipUp = this.tmpB.set(0, 1, 0).applyQuaternion(q);
+    if (this.chaseAimPitchBias !== 0) {
+      const right = this.tmpC.crossVectors(wantAim, shipUp);
+      if (right.lengthSq() > 1e-12) wantAim.applyAxisAngle(right.normalize(), this.chaseAimPitchBias);
+    }
 
-    if (dt > 1e-6) {
-      this.spring.compute(
-        dt,
-        this.chaseFrequency * this.chaseOrientationLagRatio,
-        this.chaseOrientationDamping,
-      );
-      this.spring.step(this.chaseAim, this.chaseAimVel, wantAim);
+    if (snapped || this.snapAim) {
+      this.chaseAim.copy(wantAim);
+      this.chaseAimVel.set(0, 0, 0);
+      this.chaseUp.copy(shipUp);
+      this.chaseUpVel.set(0, 0, 0);
+      this.snapAim = false;
+    } else if (dt > 1e-6) {
+      // Feed-forward: the wanted aim turns with the hull at omega. The spring
+      // only smooths the difference, so a held turn does not lag.
+      const wantVel = this.tmpC.crossVectors(this.omega, wantAim);
+      // Error against where the target was at the START of the step (the
+      // analytic spring assumes the target moves at wantVel through it).
+      const e = this.tmpA.copy(this.chaseAim).sub(wantAim).addScaledVector(wantVel, dt);
+      const ev = this.chaseAimVel.sub(wantVel);
+      this.spring.compute(dt, this.chaseAimFrequency, this.chaseOrientationDamping);
+      this.spring.stepToZero(e, ev);
+      this.chaseAim.copy(wantAim).add(e);
+      this.chaseAimVel.add(wantVel);
       const l = this.chaseAim.length();
       if (l > 1e-9) this.chaseAim.divideScalar(l);
 
       // Roll lags slowest of all. Rolling the ship and watching the horizon
-      // follow a beat later is most of the "heavy machine" read.
-      const wantUp = this.tmpA.set(0, 1, 0).applyQuaternion(q);
+      // follow a beat later is most of the "heavy machine" read. Pitch and
+      // yaw are fed forward (they would otherwise drag the up 40 deg behind a
+      // full-rate pitch); roll about the nose is not.
+      const nz = this.tmpA.set(0, 0, -1).applyQuaternion(q);
+      const wpy = this.tmpD.copy(this.omega).addScaledVector(nz, -this.omega.dot(nz));
+      const upVel = this.tmpC.crossVectors(wpy, shipUp);
+      const eu = this.tmpA.copy(this.chaseUp).sub(shipUp).addScaledVector(upVel, dt);
+      const euv = this.chaseUpVel.sub(upVel);
       this.spring2.compute(dt, this.chaseFrequency * this.chaseRollLagRatio, 1.0);
-      this.spring2.step(this.chaseUp, this.chaseUpVel, wantUp);
+      this.spring2.stepToZero(eu, euv);
+      this.chaseUp.copy(shipUp).add(eu);
+      this.chaseUpVel.add(upVel);
       const ul = this.chaseUp.length();
       if (ul > 1e-9) this.chaseUp.divideScalar(ul);
     }
 
-    this.poseChase.position.copy(this.chasePos);
-    this.lookRotation(this.poseChase.quaternion, this.chasePos, this.chaseAim, this.chaseUp);
-    this.poseChase.fov = this.fovBase + (this.fovWide - this.fovBase) * this.speedEase;
+    // Keep the hull in frame: 60 % of the half-frame, softly from 40 %.
+    const toShip = this.tmpA.copy(camRel).negate();
+    constrainAimToFrame(
+      this.chaseAim,
+      this.chaseAim,
+      toShip,
+      this.chaseUp,
+      (this.fovChase * Math.PI) / 360,
+      this.fovIn.aspect,
+      this.chaseFrameMargin,
+    );
+
+    this.poseChase.position.copy(shipPosition).add(camRel);
+    this.lookRotation(
+      this.poseChase.quaternion,
+      this.poseChase.position,
+      this.chaseAim,
+      this.tmpB.copy(this.chaseUp),
+    );
+    this.poseChase.fov = this.fovChase;
+  }
+
+  /** [v3-T1] Start a blended reseat from last frame's output. */
+  private beginReseat(seconds: number): void {
+    if (!this.lastOutSet) return;
+    this.reseatRel.copy(this.lastOutRel);
+    this.reseatQuat.copy(this.lastOutQuat);
+    this.reseatDur = Math.max(seconds, 1e-3);
+    this.reseatT = 0;
   }
 
   // -- cockpit -------------------------------------------------------------
@@ -907,7 +1176,9 @@ export class CameraRig {
   ): void {
     // Acceleration expressed in the hull's own axes, then negated: burn forward
     // and the viewpoint sinks back into the seat.
-    const local = this.tmpA.copy(this.accelSmooth).applyQuaternion(
+    // [v3-T1] Proper acceleration, filtered — not a finite difference of the
+    // velocity, which read 0-200 % of the thrust frame to frame.
+    const local = this.tmpA.copy(this.accelF).applyQuaternion(
       this.tmpQ.copy(q).invert(),
     );
     const target = this.tmpB.copy(local).multiplyScalar(-this.cockpitAccelGain);
@@ -933,8 +1204,7 @@ export class CameraRig {
     this.tmpE.set(this.headPitch, this.headYaw, 0, 'YXZ');
     this.poseCockpit.quaternion.copy(q).multiply(this.tmpQ2.setFromEuler(this.tmpE));
 
-    this.poseCockpit.fov =
-      this.cockpitFovBase + (this.cockpitFovWide - this.cockpitFovBase) * this.speedEase;
+    this.poseCockpit.fov = this.fovCockpit;
   }
 
   private stepHeadLook(dt: number, ctx: EngineContext): void {
@@ -1038,7 +1308,7 @@ export class CameraRig {
       // transition. Another mode's blend carries the view away from it on its
       // own; staying in orbit, the rig blends to the plain orbit itself.
       const first = this.landedReleaseT === 0;
-      this.landedReleaseT = Math.min(1, this.landedReleaseT + dt / Math.max(this.transitionSeconds, 1e-3));
+      this.landedReleaseT = Math.min(1, this.landedReleaseT + dt / Math.max(this.landedReleaseSeconds, 1e-3));
       this.stepLanded(dt, shipPosition, shipOrientation, ctx, this.landedHold);
       if (this.mode_ !== 'orbit') return;
       // Start the plain orbit on the landed eye's bearing, so the hand-over
@@ -1279,6 +1549,17 @@ export class CameraRig {
       .addScaledVector(side, Math.sin(this.landedAz) * this.landedR)
       .addScaledVector(up, h)
       .add(shipPosition);
+    // [v3-T1] The reveal swings the eye round the hull at 0.22 Hz and the look
+    // at 0.28 Hz; keep the hull in the picture while they disagree.
+    constrainAimToFrame(
+      this.landedLook,
+      this.landedLook,
+      this.tmpC.copy(shipPosition).sub(pos),
+      up,
+      (this.landedFov * Math.PI) / 360,
+      this.camera.aspect > 0 ? this.camera.aspect : 16 / 9,
+      0.8,
+    );
     this.tmpB.copy(up);
     this.lookRotation(this.poseOrbit.quaternion, pos, this.landedLook, this.tmpB);
     this.poseOrbit.fov = this.landedFov;
@@ -1291,10 +1572,9 @@ export class CameraRig {
       this.impulseTrauma = Math.max(0, this.impulseTrauma - this.impulseDecay * dt);
     }
 
-    // Continuous rumble under thrust, tracking the smoothed acceleration.
-    const accelMag = this.accelSmooth.length();
-    const want =
-      clamp(accelMag / Math.max(this.shakeAccelReference, 1e-6), 0, 1) * this.shakeThrustCeiling;
+    // Continuous rumble under thrust — [v3-T1] from the engine's output only.
+    // Drag, gear and gravity are not the hull straining.
+    const want = this.thrustFrac * this.shakeThrustCeiling;
     this.thrustTrauma += (want - this.thrustTrauma) * (dt > 0 ? 1 - Math.exp(-dt / 0.12) : 0);
 
     const trauma = clamp(this.impulseTrauma + this.thrustTrauma, 0, 1);
@@ -1304,20 +1584,22 @@ export class CameraRig {
     // third. Squared, the tail disappears before you can name the moment.
     const env = trauma * trauma;
     const t = this.time;
+    // [v3-T1] Band-limited to what this frame rate can show (<= 25 Hz).
+    const hz = this.frameHz;
 
     const tr = this.tmpA.set(
-      shakeNoise(t, 1) * this.shakeTranslation * env,
-      shakeNoise(t, 2) * this.shakeTranslation * env,
-      shakeNoise(t, 3) * this.shakeTranslation * env * 0.6,
+      shakeNoise(t, 1, hz) * this.shakeTranslation * env,
+      shakeNoise(t, 2, hz) * this.shakeTranslation * env,
+      shakeNoise(t, 3, hz) * this.shakeTranslation * env * 0.6,
     );
     // Translate in camera-local axes so shake reads the same at any heading.
     tr.applyQuaternion(this.poseOut.quaternion);
     this.poseOut.position.add(tr);
 
     this.tmpE.set(
-      shakeNoise(t, 4) * this.shakeRotation * env,
-      shakeNoise(t, 5) * this.shakeRotation * env,
-      shakeNoise(t, 6) * this.shakeRotation * this.shakeRollScale * env,
+      shakeNoise(t, 4, hz) * this.shakeRotation * env,
+      shakeNoise(t, 5, hz) * this.shakeRotation * env,
+      shakeNoise(t, 6, hz) * this.shakeRotation * this.shakeRollScale * env,
       'YXZ',
     );
     this.poseOut.quaternion.multiply(this.tmpQ.setFromEuler(this.tmpE));

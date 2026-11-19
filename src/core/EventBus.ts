@@ -8,6 +8,8 @@
  */
 
 import type { GameScale, PlanetSpec, StarSystemSpec, GalaxySpec, ScanResult } from '@/gen/types';
+import type { PropellantAction } from '@/ship/travelCost';
+import type { CargoAction, CargoResult } from '@/ship/cargo';
 
 export interface GameEvents {
   /** Boot progress, 0..1, plus a status line for the loading veil. */
@@ -64,7 +66,8 @@ export interface GameEvents {
   'camera:shake': { intensity: number; duration: number };
 
   /** Ship met the ground softly enough to survive. `vertical` is impact speed along the surface normal, km/s. */
-  'ship:touchdown': { speed: number; vertical: number; planetId: string | null };
+  /** `slip`: horizontal speed against the (turning) ground at first contact, km/s. */
+  'ship:touchdown': { speed: number; vertical: number; slip: number; planetId: string | null };
   /** Ship met the ground too fast. The hull is gone. */
   'ship:crashed': { speed: number; planetId: string | null };
   /**
@@ -72,7 +75,24 @@ export interface GameEvents {
    * (crash, star contact or RETURN TO ORBIT). Anything flying the ship — the
    * cruise drive above all — must let go, or it flies the ship out again.
    */
-  'ship:recovered': { cause: 'crash' | 'star' | 'requested' };
+  'ship:recovered': { cause: 'crash' | 'star' | 'requested' | 'beacon' };
+
+  /** [v4-fuel] The pilot took the emergency exit on an empty tank (sub-plan 3 logs it). */
+  'emergency:used': {
+    kind: 'cannibalize' | 'cannibalize-cargo' | 'beacon';
+    /** Cannibalizations so far, this one included (cannibalize only). */
+    timesUsed?: number;
+  };
+
+  /**
+   * [v4-fuel] A named tank action was applied (P3). `kg`: taken from the tank,
+   * or put back for a refund. Cruise legs are announced per leg segment.
+   */
+  /** [v4-save] R7: `tankDeltaKg` is the signed change the action made to the tank's mass. */
+  'propellant:action': { action: PropellantAction; ok: boolean; kg: number; tankDeltaKg: number };
+
+  /** [v4-mining] A named hold action was applied; refusals are announced too. */
+  'cargo:action': { action: CargoAction; result: CargoResult };
 
   /** The star map's open transition started/ended. Flight input should stand down. */
   'ui:map-opened': void;

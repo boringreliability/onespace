@@ -205,7 +205,8 @@ describe('ResolutionGovernor', () => {
     const g = new ResolutionGovernor();
     feed(g, 60, 1); // drops
     const first = g.scale;
-    feed(g, 45, 1); // improved (60 → 45) but still slow: keep going
+    // [v3-T1] steps are ≥ 2 s apart now (governorHysteresis.test.ts).
+    feed(g, 45, 2.5); // improved (60 → 45) but still slow: keep going
     expect(g.scale).toBeLessThan(first);
   });
 });

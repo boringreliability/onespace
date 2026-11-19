@@ -305,5 +305,5 @@ export interface ScanResult {
    * is exactly the kind of cross-module assumption that has cost this project
    * a day at a time.
    */
-  readonly kind?: 'world' | 'vessel';
+  readonly kind?: 'world' | 'vessel' | 'asteroid';
 }

@@ -28,20 +28,24 @@ import { shotOwnsScene } from '@/game/Shots';
 import type { Traffic } from '@/game/Traffic';
 import type { Universe, UniverseBody } from '@/game/Universe';
 import { projectToScreen, type ScreenPoint } from '@/game/flightAids';
+import { MAX_CONTACT_BRACKETS, selectContacts, type ContactIn } from '@/game/contacts';
+import { WorldPointMarker } from '@/game/worldMarker';
 import {
   TargetSelection,
   bodyTargetId,
   closingSpeed,
-  etaSeconds,
+  targetEtaSeconds,
   nextTargetId,
   orderByNoseAngle,
   targetRangeKm,
   type NamedBody,
   type TargetCandidate,
 } from '@/game/targets';
+import { beltTargetName, type Belt } from '@/game/Belt';
+import { FIELD_RADIUS_KM } from '@/gen/belt';
 import { BodyDotsRenderer, registerBodyDotsShots } from '@/render/BodyDots';
 import { MutableViewState } from '@/render/ViewState';
-import type { Hud, HudTarget } from '@/ui/Hud';
+import type { Hud, HudContact, HudTarget } from '@/ui/Hud';
 
 /** Slots in the dot renderer. Generated systems stay well under this. */
 const DOT_CAPACITY = 96;
@@ -53,9 +57,21 @@ export interface TargetingOptions {
   readonly universe: Universe;
   readonly traffic?: Traffic | null;
   readonly hud?: Hud | null;
+  /** [v4-mining] Field and asteroid targets resolve through it. Absent: v3 behaviour. */
+  readonly belt?: Pick<
+    Belt,
+    'nearestField' | 'fieldWorld' | 'fieldVelocity' | 'asteroidWorld' | 'asteroidVelocity' | 'asteroidsNearSurface' | 'asteroidSpec'
+  > | null;
 }
 
+/** [v4-mining] Asteroids whose surface is within this range of the ship join the Tab cycle. */
+export const TAB_ASTEROID_RANGE_KM = 150;
+
 type MutableHudTarget = { -readonly [K in keyof HudTarget]: HudTarget[K] };
+type MutableContact = { -readonly [K in keyof ContactIn]: ContactIn[K] };
+
+/** Seconds between refreshes of the contact id cache (Traffic.contactAt allocates). */
+const CONTACT_REFRESH_S = 1;
 
 export class Targeting implements GameModule {
   readonly name = 'targeting';
@@ -65,11 +81,14 @@ export class Targeting implements GameModule {
   private readonly universe: Universe;
   private readonly traffic: Traffic | null;
   private readonly hud: Hud | null;
+  private readonly belt: NonNullable<TargetingOptions['belt']> | null;
   private readonly selection = new TargetSelection();
   private offs: Array<() => void> = [];
 
   /** Resolved each frame: the targeted body, or null for a vessel / nothing. */
   private body: UniverseBody | null = null;
+  /** [v4-mining] Radius the range is measured to for a field or asteroid target, km. */
+  private beltRadius = 0;
   private targetName = '';
   private targetKind = '';
   /** The targeted body's name, cached at selection so resolving never slices. */
@@ -87,6 +106,20 @@ export class Targeting implements GameModule {
   private readonly render = new Vector3();
   private readonly screen: ScreenPoint = { x: 0, y: 0, behind: false };
   private readonly view = new MutableViewState();
+  /** v3 A8: the bracket's direction is damped in world space, not on screen. */
+  private readonly tgtMarker = new WorldPointMarker();
+  private readonly marked = new Vector3();
+  private hadTarget = false;
+
+  // --- v3: contact brackets ------------------------------------------------
+  private contactIds: string[] = [];
+  private contactRefresh = 0;
+  private contactCountSeen = -1;
+  private readonly contactIn: MutableContact[] = [];
+  private readonly contactWorld: Vector3[] = [];
+  private readonly contactMarkers: WorldPointMarker[] = [];
+  private readonly contactPick: number[] = [];
+  private readonly hudContacts: HudContact[] = [];
   private readonly hudTarget: MutableHudTarget = {
     id: '',
     name: '',
@@ -103,6 +136,11 @@ export class Targeting implements GameModule {
     this.universe = opts.universe;
     this.traffic = opts.traffic ?? null;
     this.hud = opts.hud ?? null;
+    this.belt = opts.belt ?? null;
+    for (let i = 0; i < MAX_CONTACT_BRACKETS; i++) {
+      this.contactPick.push(0);
+      this.hudContacts.push({ x: 0, y: 0, behind: false });
+    }
   }
 
   /** The current target id, or null. Read-only view for other modules. */
@@ -142,7 +180,10 @@ export class Targeting implements GameModule {
     this.dots.object3d.visible = true;
 
     const flight = this.universe.flight;
-    this.shipWorld.copy(flight.worldPosition);
+    // [v4-mining] The ship on the orbit clock (state + velocity × substep
+    // carry): bodies and belt rocks are placed on that clock, and at a
+    // field's ~30 km/s the carry alone is up to ~0.25 km of range.
+    this.shipWorld.copy(flight.renderWorldPosition);
     // The ship's world velocity: its parent-relative velocity plus the frame's.
     this.shipVel.copy(flight.velocity);
     const parent = this.universe.shipParent;
@@ -162,11 +203,13 @@ export class Targeting implements GameModule {
     this.dots.update(dt, ctx, this.view);
 
     if (!this.hud) return;
+    this.publishContacts(dt, ctx);
     if (!found) {
       this.hud.setTarget(null);
+      this.hadTarget = false;
       return;
     }
-    this.publish(ctx);
+    this.publish(dt, ctx);
   }
 
   dispose(): void {
@@ -195,6 +238,21 @@ export class Targeting implements GameModule {
         if (c) cands.push({ id: c.id, name: c.name, rel: new Vector3().subVectors(c.world, this.shipWorld) });
       }
     }
+    const belt = this.belt;
+    if (belt) {
+      // [v4-mining] Asteroids near the ship, and the nearest field from outside it.
+      const ids: string[] = [];
+      belt.asteroidsNearSurface(this.shipWorld, TAB_ASTEROID_RANGE_KM, ids);
+      for (const id of ids) {
+        const w = new Vector3();
+        if (belt.asteroidWorld(id, w)) cands.push({ id, name: beltTargetName(id) ?? id, rel: w.sub(this.shipWorld) });
+      }
+      const f = belt.nearestField();
+      const w = new Vector3();
+      if (f && belt.fieldWorld(f.id, w) && w.distanceTo(this.shipWorld) > f.radiusKm) {
+        cands.push({ id: f.id, name: beltTargetName(f.id, this.universe.system?.name) ?? f.id, rel: w.sub(this.shipWorld) });
+      }
+    }
     const ordered = orderByNoseAngle(cands, nose).map((c) => c.id);
     const next = nextTargetId(ordered, this.selection.id);
     if (next === null) {
@@ -214,7 +272,23 @@ export class Targeting implements GameModule {
   private resolve(dt: number): boolean {
     const id = this.selection.id;
     this.body = null;
+    this.beltRadius = 0;
     if (id === null) return false;
+
+    // [v4-mining] Asteroids and fields, through the Belt (allocation-free).
+    const belt = this.belt;
+    if (belt && id.startsWith('ast:')) {
+      const a = belt.asteroidSpec(id);
+      if (!a || !belt.asteroidWorld(id, this.tgtWorld) || !belt.asteroidVelocity(id, this.tgtVel)) return false;
+      this.beltRadius = a.radiusKm;
+      return true;
+    }
+    if (belt && id.startsWith('field:')) {
+      if (!belt.fieldWorld(id, this.tgtWorld) || !belt.fieldVelocity(id, this.tgtVel)) return false;
+      // To the edge, so the cruise drive drops out ahead of the field.
+      this.beltRadius = FIELD_RADIUS_KM;
+      return true;
+    }
 
     const name = this.bodyName;
     if (name !== null) {
@@ -242,14 +316,22 @@ export class Targeting implements GameModule {
     return true;
   }
 
-  private publish(ctx: EngineContext): void {
+  private publish(dt: number, ctx: EngineContext): void {
     const h = this.hudTarget;
     this.rel.subVectors(this.tgtWorld, this.shipWorld);
     this.relVel.subVectors(this.tgtVel, this.shipVel);
     const closing = closingSpeed(this.rel, this.relVel);
-    const range = targetRangeKm(this.rel.length(), this.body ? this.body.spec.radius : 0);
+    const range = targetRangeKm(this.rel.length(), this.body ? this.body.spec.radius : this.beltRadius);
 
-    ctx.origin.toRender(this.tgtWorld, this.render);
+    // Damped in world space from the ship, held at the exact range, then
+    // projected through this frame's camera: glued to the target under any
+    // camera rotation, lag or shake. A newly selected target slews across in
+    // world space; the first target after none starts on it.
+    if (!this.hadTarget) this.tgtMarker.reset();
+    this.hadTarget = true;
+    this.tgtMarker.step(this.shipWorld, this.tgtWorld, dt);
+    this.tgtMarker.point(this.shipWorld, this.marked);
+    ctx.origin.toRender(this.marked, this.render);
     projectToScreen(this.render.x, this.render.y, this.render.z, 1, ctx.camera, ctx.width, ctx.height, this.screen);
 
     h.id = this.selection.id ?? '';
@@ -260,8 +342,74 @@ export class Targeting implements GameModule {
     h.behind = this.screen.behind;
     h.distanceKm = range;
     h.closingKmS = closing;
-    h.etaS = etaSeconds(range, closing);
+    h.etaS = targetEtaSeconds(range, closing, this.universe.flight.cruising);
     this.hud!.setTarget(h);
+  }
+
+  /**
+   * v3 F: faint brackets on vessels within range, no Tab needed. Ids are cached
+   * (Traffic.contactAt allocates) and refreshed when the fleet changes and once
+   * a second; positions come through the copy-out `vesselWorld` every frame.
+   */
+  private publishContacts(dt: number, ctx: EngineContext): void {
+    const t = this.traffic;
+    if (!t) {
+      this.hud!.setContacts(this.hudContacts, 0);
+      return;
+    }
+    this.contactRefresh -= dt;
+    if (t.contactCount !== this.contactCountSeen || this.contactRefresh <= 0) this.refreshContactIds(t);
+
+    const ids = this.contactIds;
+    for (let i = 0; i < ids.length; i++) {
+      const c = this.contactIn[i]!;
+      const w = this.contactWorld[i]!;
+      if (t.vesselWorld(ids[i]!, w)) {
+        c.dx = w.x - this.shipWorld.x;
+        c.dy = w.y - this.shipWorld.y;
+        c.dz = w.z - this.shipWorld.z;
+        // Every contact's marker runs, bracketed or not, so one that comes
+        // into range starts where it is rather than slewing from stale history.
+        this.contactMarkers[i]!.step(this.shipWorld, w, dt);
+      } else {
+        c.dx = Number.NaN;
+      }
+    }
+    const n = selectContacts(this.contactIn, this.selection.id, this.contactPick);
+    for (let k = 0; k < n; k++) {
+      const i = this.contactPick[k]!;
+      this.contactMarkers[i]!.point(this.shipWorld, this.marked);
+      ctx.origin.toRender(this.marked, this.render);
+      projectToScreen(this.render.x, this.render.y, this.render.z, 1, ctx.camera, ctx.width, ctx.height, this.screen);
+      const hc = this.hudContacts[k]!;
+      hc.x = this.screen.x;
+      hc.y = this.screen.y;
+      hc.behind = this.screen.behind;
+    }
+    this.hud!.setContacts(this.hudContacts, n);
+  }
+
+  /** Allocates: on fleet changes and once a second, never per frame. */
+  private refreshContactIds(t: Traffic): void {
+    this.contactRefresh = CONTACT_REFRESH_S;
+    this.contactCountSeen = t.contactCount;
+    const ids: string[] = [];
+    for (let i = 0; i < t.contactCount; i++) {
+      const c = t.contactAt(i);
+      if (c) ids.push(c.id);
+    }
+    const same = ids.length === this.contactIds.length && ids.every((id, i) => id === this.contactIds[i]);
+    if (same) return;
+    this.contactIds = ids;
+    while (this.contactWorld.length < ids.length) {
+      this.contactWorld.push(new Vector3());
+      this.contactMarkers.push(new WorldPointMarker());
+    }
+    this.contactIn.length = 0;
+    for (let i = 0; i < ids.length; i++) {
+      this.contactIn.push({ id: ids[i]!, dx: 0, dy: 0, dz: 0 });
+      this.contactMarkers[i]!.reset();
+    }
   }
 
   /** Dots for every body that has no visible disc of its own. */
@@ -294,6 +442,11 @@ export class Targeting implements GameModule {
       const b = this.universe.allBodies().find((x) => x.spec.name === name);
       this.targetName = name;
       this.targetKind = b ? (b.spec.isMoon ? `moon · ${b.spec.type}` : b.spec.type) : '';
+      return;
+    }
+    if (id.startsWith('ast:') || id.startsWith('field:')) {
+      this.targetName = beltTargetName(id, this.universe.system?.name) ?? id;
+      this.targetKind = id.startsWith('ast:') ? 'asteroid' : 'field';
       return;
     }
     const t = this.traffic;

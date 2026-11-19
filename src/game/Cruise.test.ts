@@ -16,7 +16,9 @@ import type { ActionName } from '@/core/Input';
 import { DEFAULT_SHIP_CONFIG, FlightModel, type ParentBody } from '@/ship/FlightModel';
 import { CRUISE_DEFAULTS } from '@/ship/CruiseDrive';
 import { noseErrorRad } from '@/ship/cruiseSteer';
-import { Cruise, type CruiseWorld } from './Cruise';
+import { EXHAUST_VELOCITY_KMS, PROBE_TANK_CAPACITY_KG, Propellant } from '@/ship/propellant';
+import { AU } from '@/gen/types';
+import { Cruise, lineBlockedBy, type CruiseWorld } from './Cruise';
 
 const R = 7_240;
 const MU = 9.8e-3 * R * R;
@@ -33,6 +35,8 @@ interface Rig {
   step: (seconds?: number) => void;
   /** Space held (the pilot's brake). */
   brake: boolean;
+  /** Physics slices per frame (Universe's time-compression slicing); 1 = real time. */
+  slices: number;
 }
 
 function facing(dir: Vector3): Quaternion {
@@ -87,7 +91,7 @@ function build(pos: Vector3, nose: Vector3): Rig {
 
   const step = (seconds = H): void => {
     for (let t = 0; t < seconds - 1e-9; t += H) {
-      flight.update(H); // Universe
+      for (let s = 0; s < r.slices; s++) flight.update(H); // Universe
       (world as { nearestGapKm: number }).nearestGapKm = flight.position.length() - R;
       flight.applyInput(axes, false, r.brake); // Pilot
       cruise.update(H, ctx);
@@ -96,7 +100,7 @@ function build(pos: Vector3, nose: Vector3): Rig {
     }
   };
 
-  const r: Rig = { cruise, flight, world, axes, press, logs, step, brake: false };
+  const r: Rig = { cruise, flight, world, axes, press, logs, step, brake: false, slices: 1 };
   rig = r;
   return r;
 }
@@ -360,7 +364,7 @@ describe('review-p1: a target behind the world being orbited', () => {
    * behind it on the −X axis. The ship opens on +X, so the straight line to
    * the target runs through the home world — the playtest's Vassa/Remit 31.
    */
-  function behind(): { cruise: Cruise; flight: FlightModel; logs: string[]; run: (s: number) => string[] } {
+  function behind(): { cruise: Cruise; flight: FlightModel; logs: string[]; run: (s: number, onFrame?: () => void) => string[] } {
     const frame: ParentBody = { position: new Vector3(), velocity: new Vector3(), mu: MU, radius: R };
     const flight = new FlightModel(DEFAULT_SHIP_CONFIG);
     flight.setParent(frame);
@@ -382,7 +386,7 @@ describe('review-p1: a target behind the world being orbited', () => {
     bus.emit('target:changed', { id: 'body:Vassa', name: 'Vassa' });
     press.add('cruise');
     const reasons: string[] = [];
-    const run = (seconds: number): string[] => {
+    const run = (seconds: number, onFrame?: () => void): string[] => {
       for (let t = 0; t < seconds; t += H) {
         flight.update(H);
         const p = flight.worldPosition;
@@ -400,6 +404,7 @@ describe('review-p1: a target behind the world being orbited', () => {
         cruise.update(H, ctx);
         press.clear();
         if (before === 'cruise' && cruise.drive.phase === 'dropping') reasons.push(cruise.drive.dropReason ?? '?');
+        onFrame?.();
         if (reasons.length) break;
       }
       return reasons;
@@ -421,6 +426,43 @@ describe('review-p1: a target behind the world being orbited', () => {
     expect(reasons).toEqual(['arrival']);
     expect(r.flight.worldPosition.distanceTo(new Vector3(-2e7, 0, 0))).toBeLessThan(5_000 * 4);
     expect(r.logs.some((t) => t.includes('MASS'))).toBe(false);
+  });
+
+  // v3 polish (D22b): the readout said ETA 0:40 for a 79 s trip while the
+  // drive skirted Remit 31. Cruise now says when it is skirting, and which world.
+  it('Given the target behind the home world, When the drive carries the ship, Then `skirting` names the home world while it is in the way and clears (null) once the line is clear, before arrival', () => {
+    const r = behind();
+    expect(r.cruise.skirting).toBeNull(); // idle: nothing to skirt
+    const seen: Array<string | null> = [];
+    r.run(120, () => {
+      if (r.cruise.drive.phase === 'spooling' || r.cruise.drive.phase === 'cruise') seen.push(r.cruise.skirting);
+    });
+    expect(seen[0]).toBe('Remit 31');
+    const firstClear = seen.indexOf(null);
+    expect(firstClear).toBeGreaterThan(0);
+    // Once clear it stays clear — and the drive still had a stretch of cruise to count down.
+    expect(seen.slice(firstClear).every((x) => x === null)).toBe(true);
+    expect(seen.length - firstClear).toBeGreaterThan(30);
+    expect(r.cruise.drive.phase === 'dropping' || r.cruise.drive.phase === 'idle').toBe(true);
+    expect(r.cruise.skirting).toBeNull();
+  });
+});
+
+describe('lineBlockedBy — the occluder test, pure (v3 polish)', () => {
+  const ship = new Vector3(10_000, 0, 0);
+  const target = new Vector3(-2e7, 0, 0);
+  it('Given a world on the line nearer than the target, Then blocked', () => {
+    expect(lineBlockedBy(ship, target, new Vector3(0, 0, 0), 7_500)).toBe(true);
+  });
+  it('Given the same world passed by more than its safe radius, Then clear', () => {
+    expect(lineBlockedBy(ship, target, new Vector3(0, 8_000, 0), 7_500)).toBe(false);
+  });
+  it('Given a world behind the ship or beyond the target, Then clear', () => {
+    expect(lineBlockedBy(ship, target, new Vector3(20_000, 0, 0), 7_500)).toBe(false);
+    expect(lineBlockedBy(ship, target, new Vector3(-3e7, 0, 0), 7_500)).toBe(false);
+  });
+  it('Given the ship on the target, Then clear (no line to block)', () => {
+    expect(lineBlockedBy(target, target, new Vector3(0, 0, 0), 7_500)).toBe(false);
   });
 });
 
@@ -459,6 +501,321 @@ describe('v2 merge: leaving the home world, and the arrival frame', () => {
     const v = r.flight.velocity.clone().normalize();
     expect(nose.dot(down)).toBeCloseTo(Math.sin(Math.PI / 6), 2);
     expect(nose.dot(v)).toBeCloseTo(Math.cos(Math.PI / 6), 2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v4 sub-plan 1 (propellant), Task 4: cruise is paid for out of the tank
+// ---------------------------------------------------------------------------
+
+describe('v4-fuel: cruise is paid for out of the tank', () => {
+  const CAP = PROBE_TANK_CAPACITY_KG;
+  /** 0.5 % of capacity (travelCost.cruiseSpoolKg). */
+  const SPOOL_KG = 0.005 * CAP;
+
+  /**
+   * The opening orbit with `kg` in a probe tank. FA-OFF at the coast detent,
+   * so the main drive draws nothing of its own and every kg that leaves the
+   * tank is the cruise bill. (The detent still carries the ship under cruise.)
+   */
+  function fuelled(kg: number): Rig {
+    const r = opening();
+    const p = new Propellant(CAP, 0);
+    p.add(kg);
+    r.flight.attachPropellant(p, EXHAUST_VELOCITY_KMS);
+    r.flight.flightAssist = false;
+    r.axes.throttle = 0;
+    return r;
+  }
+
+  const seen: Array<{ text: string; tone?: string }> = [];
+  let offSeen: (() => void) | null = null;
+  beforeEach(() => {
+    seen.length = 0;
+    offSeen = bus.on('log', (e) => seen.push(e));
+  });
+  afterEach(() => {
+    offSeen?.();
+    offSeen = null;
+  });
+
+  it('Given an empty tank, When cruise is requested, Then it does not spool and logs "CRUISE · NO PROPELLANT"', () => {
+    const r = fuelled(0);
+    const phases = new Set<string>();
+    r.press.add('cruise');
+    for (let i = 0; i < Math.round((CRUISE_DEFAULTS.spoolTime + 0.5) / H); i++) {
+      r.step(H);
+      phases.add(r.cruise.drive.phase);
+    }
+    expect([...phases]).toEqual(['idle']);
+    expect(r.flight.cruising).toBe(false);
+    expect(r.logs).toContain('CRUISE · NO PROPELLANT');
+  });
+
+  it('Given a full tank, When cruise is requested, Then the spool is paid up front: 0.5 % of capacity leaves the tank on the request frame', () => {
+    const r = fuelled(CAP);
+    r.press.add('cruise');
+    r.step(H);
+    expect(r.cruise.drive.phase).toBe('spooling');
+    expect(r.flight.propellant!.massKg).toBeCloseTo(CAP - SPOOL_KG, 6);
+  });
+
+  it('Given cruise in progress, Then it is paid frame by frame for the distance travelled: 1 % of capacity per AU', () => {
+    const r = fuelled(CAP);
+    r.press.add('cruise');
+    r.step(CRUISE_DEFAULTS.spoolTime + 0.5);
+    expect(r.cruise.drive.phase).toBe('cruise');
+    const kg0 = r.flight.propellant!.massKg;
+    const last = r.flight.worldPosition.clone();
+    let km = 0;
+    for (let i = 0; i < 4 * 60; i++) {
+      r.step(H);
+      expect(r.cruise.drive.phase).toBe('cruise');
+      km += r.flight.worldPosition.distanceTo(last);
+      last.copy(r.flight.worldPosition);
+    }
+    const paid = kg0 - r.flight.propellant!.massKg;
+    const expected = (0.01 * CAP * km) / AU;
+    expect(km).toBeGreaterThan(1_000);
+    expect(paid).toBeGreaterThan(0);
+    expect(Math.abs(paid - expected) / expected).toBeLessThan(0.1);
+  });
+
+  it("Given cruise in progress and a tank that runs dry, Then the drive drops out through its normal 'dropping' phase (no teleport) and logs it", () => {
+    // The spool price plus ~1 500 km of cruise at 1 % / AU of 20 000 kg.
+    const r = fuelled(SPOOL_KG + 0.002);
+    r.press.add('cruise');
+    const seq: string[] = [];
+    let maxStepKm = 0;
+    let maxSpeedKmS = 0;
+    const last = r.flight.worldPosition.clone();
+    for (let i = 0; i < 20 * 60; i++) {
+      r.step(H);
+      const ph = r.cruise.drive.phase;
+      if (seq[seq.length - 1] !== ph) seq.push(ph);
+      maxStepKm = Math.max(maxStepKm, r.flight.worldPosition.distanceTo(last));
+      maxSpeedKmS = Math.max(maxSpeedKmS, r.flight.velocity.length());
+      last.copy(r.flight.worldPosition);
+      if (seq.length >= 4 && ph === 'idle') break;
+    }
+    expect(seq).toEqual(['spooling', 'cruise', 'dropping', 'idle']);
+    expect(r.flight.propellant!.empty).toBe(true);
+    // No teleport: no frame moves the ship further than the fastest speed seen carries it.
+    expect(maxStepKm).toBeLessThanOrEqual(maxSpeedKmS * H * 1.5 + 1e-6);
+    const dry = seen.find((e) => e.text.startsWith('CRUISE') && e.text.includes('PROPELLANT'));
+    expect(dry).toBeDefined();
+    expect(dry!.tone).toBe('warn');
+    // A drop is an answer: the drive does not spool up again on an empty tank.
+    r.step(3);
+    expect(r.cruise.drive.phase).toBe('idle');
+  });
+
+  it('Given a spool that never reaches cruise (the toggle released mid-charge), Then the spool price is refunded', () => {
+    const r = fuelled(CAP);
+    r.press.add('cruise');
+    r.step(0.5);
+    expect(r.cruise.drive.phase).toBe('spooling');
+    expect(r.flight.propellant!.massKg).toBeCloseTo(CAP - SPOOL_KG, 6);
+    r.press.add('cruise'); // G again: abort the charge
+    r.step(H);
+    expect(r.cruise.drive.phase).toBe('idle');
+    expect(r.flight.propellant!.massKg).toBeCloseTo(CAP, 6);
+    r.step(1);
+    expect(r.flight.propellant!.massKg).toBeCloseTo(CAP, 6);
+  });
+
+  it('Given a spool that reaches cruise, Then the spool price stays paid (no refund on a later drop)', () => {
+    const r = fuelled(CAP);
+    r.press.add('cruise');
+    r.step(CRUISE_DEFAULTS.spoolTime + 0.2);
+    expect(r.cruise.drive.phase).toBe('cruise');
+    r.press.add('cruise'); // release: cruise → dropping → idle
+    r.step(5);
+    expect(r.cruise.drive.phase).toBe('idle');
+    expect(r.flight.propellant!.massKg).toBeLessThan(CAP - SPOOL_KG + 1e-9);
+  });
+
+  it('Given the same cruise distance at 1× and 100×, Then the same kg is charged (the bill is by sim distance)', () => {
+    /** kg per km over `frames` cruise frames with `slices` physics slices per frame. */
+    const rate = (slices: number, frames: number): { kgPerKm: number; km: number } => {
+      const r = fuelled(CAP);
+      r.press.add('cruise');
+      r.step(CRUISE_DEFAULTS.spoolTime + 0.5);
+      expect(r.cruise.drive.phase).toBe('cruise');
+      r.slices = slices;
+      const kg0 = r.flight.propellant!.massKg;
+      const last = r.flight.worldPosition.clone();
+      let km = 0;
+      for (let i = 0; i < frames; i++) {
+        r.step(H);
+        km += r.flight.worldPosition.distanceTo(last);
+        last.copy(r.flight.worldPosition);
+      }
+      expect(r.cruise.drive.phase).toBe('cruise');
+      const out = { kgPerKm: (kg0 - r.flight.propellant!.massKg) / km, km };
+      r.cruise.dispose();
+      offLog?.();
+      return out;
+    };
+    // The same 200 sim-frames: 200 frames at 1×, or 2 frames of 100 slices.
+    const real = rate(1, 200);
+    const fast = rate(100, 2);
+    expect(fast.km / real.km).toBeGreaterThan(0.5); // about the same distance flown
+    expect(fast.km / real.km).toBeLessThan(2);
+    const perKm = (0.01 * CAP) / AU;
+    expect(Math.abs(real.kgPerKm - perKm) / perKm).toBeLessThan(1e-3);
+    expect(Math.abs(fast.kgPerKm - real.kgPerKm) / real.kgPerKm).toBeLessThan(0.01);
+  });
+
+  it('Given no tank attached (a bare hull), Then cruise is not charged and engages as before', () => {
+    const r = opening();
+    expect(r.flight.propellant).toBeFalsy();
+    r.press.add('cruise');
+    r.step(CRUISE_DEFAULTS.spoolTime + 0.3);
+    expect(r.cruise.drive.phase).toBe('cruise');
+  });
+
+  // -------------------------------------------------------------------------
+  // Final whole-branch review, I4 — every tank change is a named action, and
+  // the cruise leg is announced per leg segment, not per frame.
+  // -------------------------------------------------------------------------
+
+  describe('final review I4 — named actions from cruise', () => {
+    type Seen = { action: { kind: string; kg?: number }; ok: boolean; kg: number; tankDeltaKg: number };
+    let actions: Seen[] = [];
+    let offAction: (() => void) | null = null;
+    beforeEach(() => {
+      actions = [];
+      offAction = bus.on('propellant:action', (e: Seen) => actions.push(e));
+    });
+    afterEach(() => {
+      offAction?.();
+      offAction = null;
+    });
+    const of = (kind: string): Seen[] => actions.filter((e) => e.action.kind === kind);
+
+    it('Given a spool released mid-charge, Then the refund is applied as a named action (spool-refund, the spool price) and propellant:action is emitted', () => {
+      const r = fuelled(CAP);
+      r.press.add('cruise');
+      r.step(0.5);
+      r.press.add('cruise'); // G again: abort the charge
+      r.step(H);
+      const refunds = of('spool-refund');
+      expect(refunds).toHaveLength(1);
+      expect(refunds[0]!.ok).toBe(true);
+      expect(refunds[0]!.action.kg).toBeCloseTo(SPOOL_KG, 6);
+      expect(refunds[0]!.kg).toBeCloseTo(SPOOL_KG, 6);
+      expect(r.flight.propellant!.massKg).toBeCloseTo(CAP, 6);
+    });
+
+    it('Given a spool cut short by a recovery, Then that refund is a named action too', () => {
+      const r = fuelled(CAP);
+      r.press.add('cruise');
+      r.step(0.5);
+      expect(r.cruise.drive.phase).toBe('spooling');
+      bus.emit('ship:recovered', { cause: 'requested' });
+      r.step(H);
+      expect(of('spool-refund')).toHaveLength(1);
+      expect(r.flight.propellant!.massKg).toBeCloseTo(CAP, 6);
+    });
+
+    it('Given a cruise leg, Then propellant:action is not emitted every frame (at most one per second of cruise)', () => {
+      const r = fuelled(CAP);
+      r.press.add('cruise');
+      r.step(CRUISE_DEFAULTS.spoolTime + 0.5);
+      expect(r.cruise.drive.phase).toBe('cruise');
+      actions = [];
+      const frames = 4 * 60; // 4 s at 60 fps
+      r.step(frames * H);
+      expect(r.cruise.drive.phase).toBe('cruise');
+      expect(of('cruise-leg').length).toBeLessThanOrEqual(5);
+      expect(of('cruise-leg').length).toBeLessThan(frames / 10);
+    });
+
+    it('Given a cruise leg flown and dropped out of, Then the emitted cruise-leg kg add up to what left the tank for the leg', () => {
+      const r = fuelled(CAP);
+      r.press.add('cruise');
+      r.step(H); // the spool is paid on this frame; the leg has not begun
+      // Start counting at the segment's start: a window opened mid-segment
+      // would catch kg billed before kg0 in the first announcement.
+      const kg0 = r.flight.propellant!.massKg;
+      actions = [];
+      r.step(CRUISE_DEFAULTS.spoolTime + 0.5);
+      expect(r.cruise.drive.phase).toBe('cruise');
+      r.step(3);
+      r.press.add('cruise'); // release: cruise → dropping → idle
+      r.step(5);
+      expect(r.cruise.drive.phase).toBe('idle');
+      const billed = kg0 - r.flight.propellant!.massKg;
+      const announced = of('cruise-leg').reduce((s, e) => s + e.kg, 0);
+      expect(billed).toBeGreaterThan(0);
+      expect(of('cruise-leg').length).toBeGreaterThan(0);
+      expect(Math.abs(announced - billed) / billed).toBeLessThan(1e-6);
+      // Nothing else touched the tank in that stretch.
+      expect(actions.every((e) => e.action.kind === 'cruise-leg')).toBe(true);
+    });
+
+    // R7 (2): a save must see every kg the leg has billed as cruise, never as
+    // thrust — so the leg billed since the last announcement can be flushed on
+    // demand, once, without being announced again later.
+    describe('R7: flushLeg() — the pending leg, announced on demand', () => {
+      /** Into cruise, then 0.4 s into a fresh segment (less than the 1 s announce period). */
+      function midSegment(): { r: Rig; kgAtLastAnnounce: number } {
+        const r = fuelled(CAP);
+        r.press.add('cruise');
+        r.step(CRUISE_DEFAULTS.spoolTime + 0.5);
+        expect(r.cruise.drive.phase).toBe('cruise');
+        // Wait for an announcement, so a segment starts on a known frame.
+        actions = [];
+        for (let i = 0; i < 120 && of('cruise-leg').length === 0; i++) r.step(H);
+        expect(of('cruise-leg').length).toBe(1);
+        const kgAtLastAnnounce = r.flight.propellant!.massKg;
+        actions = [];
+        r.step(0.4);
+        expect(of('cruise-leg')).toHaveLength(0);
+        return { r, kgAtLastAnnounce };
+      }
+
+      it('Given 0.4 s of leg billed but not yet announced, When flushLeg(), Then one cruise-leg is announced with exactly the kg billed since the last announcement', () => {
+        const { r, kgAtLastAnnounce } = midSegment();
+        const billed = kgAtLastAnnounce - r.flight.propellant!.massKg;
+        expect(billed).toBeGreaterThan(0);
+        r.cruise.flushLeg();
+        const legs = of('cruise-leg');
+        expect(legs).toHaveLength(1);
+        expect(Math.abs(legs[0]!.kg - billed)).toBeLessThan(1e-9);
+        expect(Math.abs(legs[0]!.tankDeltaKg + billed)).toBeLessThan(1e-9);
+      });
+
+      it('Given a flushLeg(), When flushLeg() is called again at once, Then nothing more is announced', () => {
+        const { r } = midSegment();
+        r.cruise.flushLeg();
+        r.cruise.flushLeg();
+        expect(of('cruise-leg')).toHaveLength(1);
+      });
+
+      it('Given a flush mid-segment and the cruise flown on and dropped out of, Then all cruise-leg kg add up to the tank\'s drop — nothing counted twice, nothing lost', () => {
+        const { r, kgAtLastAnnounce } = midSegment();
+        r.cruise.flushLeg();
+        r.step(1.7);
+        r.cruise.flushLeg();
+        r.step(0.3);
+        r.press.add('cruise');
+        r.step(5);
+        expect(r.cruise.drive.phase).toBe('idle');
+        const billed = kgAtLastAnnounce - r.flight.propellant!.massKg;
+        const announced = of('cruise-leg').reduce((s, e) => s + e.kg, 0);
+        expect(Math.abs(announced - billed) / billed).toBeLessThan(1e-9);
+        const delta = of('cruise-leg').reduce((s, e) => s + e.tankDeltaKg, 0);
+        expect(Math.abs(delta + billed) / billed).toBeLessThan(1e-9);
+      });
+
+      it('Given no cruise at all, When flushLeg(), Then nothing is announced', () => {
+        const r = fuelled(CAP);
+        r.cruise.flushLeg();
+        expect(actions).toEqual([]);
+      });
+    });
   });
 });
 
