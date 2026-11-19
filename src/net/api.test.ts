@@ -33,7 +33,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { DEVICE_ID, GAME_X, save } from './__fixtures__/sync';
-import { SYNC_TIMEOUT_MS, SYNC_WRITE_TIMEOUT_MS, createApi } from './api';
+import { ConflictBodySchema, SYNC_TIMEOUT_MS, SYNC_WRITE_TIMEOUT_MS, createApi } from './api';
 
 interface Call {
   url: string;
@@ -363,5 +363,36 @@ describe('Ruling R70 — timeouts per call', () => {
     expect(r).toBeNull();
     await vi.advanceTimersByTimeAsync(1);
     expect(r).toEqual({ ok: false, status: 'timeout' });
+  });
+});
+
+// =============================================================================
+//  D51 follow-up — Ruling R84: a 409 from POST /api/save/resolve may carry
+//  `resolvedAs: { saveId, revision }` (the revision a replayed resolve became).
+//  Pinned: `ConflictBodySchema` (Zod), exported from api.ts, is the one schema
+//  for a 409 body { cloud: { revision, save }, resolvedAs?: { saveId, revision } }.
+// =============================================================================
+
+describe('Ruling R84 — the 409 body schema', () => {
+  const cloud = { revision: 11, save: save({ revision: 11 }) };
+
+  it("Ruling R84: Given an older server's 409 body { cloud }, When parsed, Then it still parses and resolvedAs is absent", () => {
+    const r = ConflictBodySchema.safeParse({ cloud });
+    expect(r.success).toBe(true);
+    expect(r.data?.cloud.revision).toBe(11);
+    expect(r.data?.resolvedAs).toBeUndefined();
+  });
+
+  it('Ruling R84: Given a 409 body { cloud, resolvedAs: { saveId, revision } }, When parsed, Then resolvedAs is kept as sent', () => {
+    const r = ConflictBodySchema.safeParse({ cloud, resolvedAs: { saveId: GAME_X, revision: 10 } });
+    expect(r.success).toBe(true);
+    expect(r.data?.resolvedAs).toEqual({ saveId: GAME_X, revision: 10 });
+  });
+
+  it('Ruling R84 (guard): Given a resolve answered 409 with resolvedAs, When resolve(), Then the api hands the body over untouched', async () => {
+    const body = { cloud: { revision: 11, save: save({ revision: 11 }) }, resolvedAs: { saveId: GAME_X, revision: 10 } };
+    const f = fakeFetch(() => json(409, body));
+    const r = await createApi({ fetch: f.fetch }).resolve({ deviceId: DEVICE_ID, keep: 'device', device: save({ revision: 9 }), base: null, cloud: null });
+    expect(r).toMatchObject({ ok: false, status: 409, body });
   });
 });

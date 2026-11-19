@@ -17,7 +17,7 @@
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { shipDigest } from '../../src/save/conflict';
+import { resolveSameGame, shipDigest } from '../../src/save/conflict';
 import golden from '../../src/save/fixtures/v1-golden.json';
 import { migrate as migrateSave } from '../../src/save/migrate';
 import type { SaveV1 } from '../../src/save/schema';
@@ -552,7 +552,9 @@ describe('POST /api/save/resolve (R22)', () => {
     expect(got).toEqual(b1);
   });
 
-  it('Given a resolved head, When a later forward PUT moves it (key cleared) and the same resolve is repeated, Then 409 with the new head and nothing changes', async () => {
+  // CHANGED by Ruling R84 (D51b): the key is still on r7's revision row, so the 409 also names it; was
+  // toEqual({ cloud: { revision: r1.revision + 1, save: next } }) and the title without "naming the revision it resolved as".
+  it('Given a resolved head, When a later forward PUT moves it (key cleared) and the same resolve is repeated, Then 409 with the new head naming the revision it resolved as, and nothing changes', async () => {
     const a = await mkUser('a');
     const { base, device, cloudHead } = await diverged(a);
     const r1 = (await (await resolve(a, 'device', device, head(base), cloudHead, DEV_B)).json()) as { revision: number; save: SaveV1 };
@@ -561,7 +563,7 @@ describe('POST /api/save/resolve (R22)', () => {
     const before = await snapshot(a.id);
     const res = await resolve(a, 'device', device, head(base), cloudHead, DEV_B);
     expect(res.status).toBe(409);
-    expect(await res.json()).toEqual({ cloud: { revision: r1.revision + 1, save: next } });
+    expect(await res.json()).toEqual({ cloud: { revision: r1.revision + 1, save: next }, resolvedAs: { saveId: SAVE_X, revision: r1.revision } });
     expect(await snapshot(a.id)).toEqual(before);
   });
 
@@ -645,6 +647,126 @@ describe('POST /api/save/resolve (R22)', () => {
     await put(a, mk({ revision: 8 }), head(r1.save));
     const [after] = await t.sql<{ resolve_key: string | null }[]>`select resolve_key from saves where user_id = ${a.id}`;
     expect(after!.resolve_key).toBeNull();
+  });
+});
+
+// ---- Ruling R84 (D51b): a replay is recognised after another device moved on ----
+//
+//   POST /api/save/resolve -> 409 { cloud: { revision, save }, resolvedAs?: { saveId, revision } }
+//   resolvedAs: the revision (of the session user) whose save_revisions row holds the request's resolve key,
+//   when the head does not hold it. A key found nowhere: 409 { cloud } exactly as before.
+
+describe('Ruling R84 — POST /api/save/resolve names the revision a replayed resolve became', () => {
+  /** As in the R22 block: base r5 (tank 12000) -> cloud branch r6 (tank 9000) and a device branch r6 (tank 11000). */
+  async function diverged(a: User) {
+    const base = mk({ revision: 5, tank: 12_000 });
+    await put(a, base, null);
+    const cloud = mk({ revision: 6, tank: 9_000 });
+    await put(a, cloud, head(base));
+    return { base, device: mk({ revision: 6, tank: 11_000 }), cloudHead: head(cloud) };
+  }
+
+  it(
+    'Ruling R84 (end to end): Given A resolves r9 vs r8 into r10 (answer lost), B takes r10 and PUTs r11, ' +
+      'When A replays the IDENTICAL body, Then 409 { cloud: r11, resolvedAs: r10 }; ' +
+      'When A (played on to r11 locally) resolves the new conflict with base = r10, Then the tank is 9000 (one deduction), not 5000 (A\'s r7→r9 spending deducted twice)',
+    async () => {
+      const a = await mkUser('a');
+      // The shared start: r7, tank 12000.
+      const r7 = mk({ revision: 7, tank: 12_000 });
+      expect((await put(a, r7, null, DEV_A)).status).toBe(200);
+      // Device B spends 3000 → r8 (tank 9000).
+      const r8 = mk({ revision: 8, tank: 9_000 });
+      expect((await put(a, r8, head(r7), DEV_B)).status).toBe(200);
+      // Device A spent 1000 from r7 → r9 (tank 11000); its PUT conflicts.
+      const aR9 = mk({ revision: 9, tank: 11_000 });
+      expect((await put(a, aR9, head(r7), DEV_A)).status).toBe(409);
+
+      // A resolves KEEP THIS: 11000 − (12000 − 9000) = 8000, revision max(9, 8) + 1 = 10. The answer is lost.
+      const first = await resolve(a, 'device', aR9, head(r7), head(r8), DEV_A);
+      expect(first.status).toBe(200);
+      const r10 = ((await first.json()) as { revision: number; save: SaveV1 }).save;
+      expect(r10.revision).toBe(10);
+      expect(r10.ship.propellant.massKg).toBe(8_000);
+
+      // B takes r10 and spends 500 → r11 (tank 7500).
+      expect(((await (await get(a)).json()) as { revision: number }).revision).toBe(10);
+      const bR11 = mk({ revision: 11, tank: 7_500 });
+      expect((await put(a, bR11, head(r10), DEV_B)).status).toBe(200);
+
+      // A boots and replays the identical body.
+      const before = await snapshot(a.id);
+      const replay = await resolve(a, 'device', aR9, head(r7), head(r8), DEV_A);
+      expect(replay.status).toBe(409);
+      expect(await replay.json()).toEqual({ cloud: { revision: 11, save: bR11 }, resolvedAs: { saveId: SAVE_X, revision: 10 } });
+      expect(await snapshot(a.id)).toEqual(before);
+
+      // Meanwhile A played on from r9: spent 1500 more → r11 (tank 9500). A keeps it, base = resolvedAs r10.
+      const aR11 = mk({ revision: 11, tank: 9_500 });
+      // The two numbers, from the real rule (src/save/conflict.ts resolveSameGame):
+      //   base r10 (8000): 9500 − max(0, 8000 − 7500) = 9000  — B's 500 deducted once, A's 1000 already inside both;
+      //   base r7 (12000): 9500 − max(0, 12000 − 7500) = 5000 — A's r7→r9 1000 (inside r10, hence inside B's r11) deducted again.
+      // (Neither is the full ledger 12000 − 3000 − 1000 − 500 − 1500 = 6000: keeping A's branch drops the r7→r8 spending
+      //  that only r10 carried — the known D45 under-deduction, never a double one.)
+      expect(resolveSameGame(aR11, bR11, shipDigest(r10)).ship.propellant.massKg).toBe(9_000);
+      expect(resolveSameGame(aR11, bR11, shipDigest(r7)).ship.propellant.massKg).toBe(5_000);
+
+      const second = await resolve(a, 'device', aR11, { saveId: SAVE_X, revision: 10 }, head(bR11), DEV_A);
+      expect(second.status).toBe(200);
+      const out = (await second.json()) as { revision: number; save: SaveV1 };
+      expect(out.revision).toBe(12);
+      expect(out.save.ship.propellant.massKg).toBe(9_000);
+      expect(out.save.ship.propellant.massKg).not.toBe(5_000);
+    },
+  );
+
+  it('Ruling R84: Given A resolved X into r7 and the head has since moved to ANOTHER game (the other device started a new game Y, X archived), When A replays the identical body, Then 409 with the head Y and resolvedAs naming the OLD game\'s revision X r7 — the lookup matches (session user, key), not the head\'s game', async () => {
+    const a = await mkUser('a');
+    const { base, device, cloudHead } = await diverged(a);
+    const r1 = (await (await resolve(a, 'device', device, head(base), cloudHead, DEV_B)).json()) as { revision: number; save: SaveV1 };
+    const y = mk({ saveId: SAVE_Y, revision: 1, tank: 15_000 });
+    expect((await put(a, y, head(r1.save), DEV_A)).status).toBe(200);
+    expect((await archiveRows(a.id))[0]).toMatchObject({ save_id: SAVE_X, revision: r1.revision });
+    const before = await snapshot(a.id);
+    const res = await resolve(a, 'device', device, head(base), cloudHead, DEV_B);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ cloud: { revision: 1, save: y }, resolvedAs: { saveId: SAVE_X, revision: r1.revision } });
+    expect(await snapshot(a.id)).toEqual(before);
+  });
+
+  it('Ruling R84 (guard): Given a resolve that was never committed (its key is on no row) and a moved cloud, When it arrives, Then 409 with exactly { cloud } — no resolvedAs field at all', async () => {
+    const a = await mkUser('a');
+    const { base, device } = await diverged(a);
+    const res = await resolve(a, 'device', device, head(base), head(base), DEV_B);
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(Object.keys(body)).toEqual(['cloud']);
+  });
+
+  it("Ruling R84: Given user A's key sits on A's earlier revision row, When user B (whose own rows include the same saveId and revision, without a key) sends the identical body, Then B gets 409 WITHOUT resolvedAs — the lookup is scoped to the session user — and A's rows are untouched", async () => {
+    const a = await mkUser('a');
+    const b = await mkUser('b');
+    const { base, device, cloudHead } = await diverged(a);
+    const r1 = (await (await resolve(a, 'device', device, head(base), cloudHead, DEV_B)).json()) as { revision: number; save: SaveV1 };
+    expect((await put(a, mk({ revision: r1.revision + 1, tank: 7_000 }), head(r1.save))).status).toBe(200);
+    // B: X r5 → r7 → r8 in its own cloud (so B has an (X, 7) row of its own, with no key).
+    const b5 = mk({ revision: 5, tank: 12_000 });
+    const b7 = mk({ revision: 7, tank: 10_000 });
+    expect((await put(b, b5, null)).status).toBe(200);
+    expect((await put(b, b7, head(b5))).status).toBe(200);
+    expect((await put(b, mk({ revision: 8, tank: 9_500 }), head(b7))).status).toBe(200);
+    const aBefore = await snapshot(a.id);
+    const bBefore = await snapshot(b.id);
+
+    const res = await resolve(b, 'device', device, head(base), cloudHead, DEV_B);
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(Object.keys(body)).toEqual(['cloud']);
+    expect(await snapshot(a.id)).toEqual(aBefore);
+    expect(await snapshot(b.id)).toEqual(bBefore);
+    // …while A itself is told where its resolve went.
+    const own = await resolve(a, 'device', device, head(base), cloudHead, DEV_B);
+    expect(((await own.json()) as { resolvedAs?: unknown }).resolvedAs).toEqual({ saveId: SAVE_X, revision: r1.revision });
   });
 });
 

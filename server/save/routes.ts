@@ -100,7 +100,8 @@ export function saveRoutes(deps: { sql: Sql; now: () => number }): Hono<Env> {
       if (!device) return c.json({ error: 'invalid-save' }, 400);
       const { deviceId, keep, base, cloud } = body.data;
       const r = await resolveSave(sql, c.get('user').id, { deviceId, keep, device, base, cloud });
-      if (r.kind === 'conflict') return c.json({ cloud: r.cloud }, 409);
+      // R84: `resolvedAs` only when found — an older client's body stays exactly { cloud }.
+      if (r.kind === 'conflict') return c.json(r.resolvedAs ? { cloud: r.cloud, resolvedAs: r.resolvedAs } : { cloud: r.cloud }, 409);
       return c.json({ revision: r.revision, save: r.save });
     }),
   );
