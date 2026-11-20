@@ -17,7 +17,7 @@ run the API server beside Vite; Vite proxies `/api` to `127.0.0.1:8790`.
 Node 24 or newer.
 
 ```bash
-docker compose up -d db                          # Postgres on 127.0.0.1:5432
+docker compose up -d db                          # Postgres on 127.0.0.1:54328
 cp .env.example .env                             # then fill in the Discord values
 node scripts/build-server.mjs                    # server/ -> dist-server/
 node --env-file=.env dist-server/index.mjs       # migrates, then listens on :8790
