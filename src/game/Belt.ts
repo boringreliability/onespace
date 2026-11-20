@@ -37,6 +37,7 @@ import {
 import { orbitalPosition, orbitalVelocity } from '@/gen/orbit';
 import type { OrbitSpec, StarSystemSpec } from '@/gen/types';
 import type { WorldState } from '@/game/worldState';
+import { MINE_MIN_KG } from '@/game/miningRules';
 
 /** What the Belt reads of the universe. `Universe` satisfies it. */
 export interface BeltWorld {
@@ -126,7 +127,7 @@ export class Belt implements GameModule {
     this.rememo(k);
   }
 
-  /** The field nearest the ship as of the last update, or null. */
+  /** The field nearest the ship as of the last update, or null. Its `asteroids` are the generated list and may include destroyed rocks: rock lookups go through the Belt methods. */
   nearestField(): FieldSpec | null {
     return this.nearest;
   }
@@ -190,7 +191,7 @@ export class Belt implements GameModule {
         const ax = dx + a.offsetKm[0];
         const ay = dy + a.offsetKm[1];
         const az = dz + a.offsetKm[2];
-        if (ax * ax + ay * ay + az * az <= maxKm * maxKm) out.push(a.id);
+        if (ax * ax + ay * ay + az * az <= maxKm * maxKm && !this.gone(a)) out.push(a.id);
       }
     }
     return out.length;
@@ -221,7 +222,7 @@ export class Belt implements GameModule {
         const ax = dx + a.offsetKm[0];
         const ay = dy + a.offsetKm[1];
         const az = dz + a.offsetKm[2];
-        if (ax * ax + ay * ay + az * az <= r * r) out.push(a.id);
+        if (ax * ax + ay * ay + az * az <= r * r && !this.gone(a)) out.push(a.id);
       }
     }
     return out.length;
@@ -243,6 +244,7 @@ export class Belt implements GameModule {
     let anyD = Number.POSITIVE_INFINITY;
     for (let i = 0; i < f.asteroids.length; i++) {
       const a = f.asteroids[i]!;
+      if (this.gone(a)) continue;
       const d =
         Math.hypot(c.x + a.offsetKm[0] - world.x, c.y + a.offsetKm[1] - world.y, c.z + a.offsetKm[2] - world.z) -
         a.radiusKm;
@@ -258,14 +260,39 @@ export class Belt implements GameModule {
     return icy ?? any;
   }
 
-  /** The generated spec of an asteroid, or null. */
+  /** The generated spec of an asteroid, or null (also null for a destroyed rock: it no longer exists). */
   asteroidSpec(id: string): AsteroidSpec | null {
     return this.fieldOfAsteroid(id) ? this.foundAst : null;
   }
 
+  /** The generated spec even for a destroyed rock (for its break-up); null only for an unknown id. */
+  asteroidSpecRaw(id: string): AsteroidSpec | null {
+    return this.resolveAsteroid(id) ? this.foundAst : null;
+  }
+
+  /** Mined mass / original mass, 0..1; 0 for an unknown id. Allocation-free. */
+  wear(id: string): number {
+    if (!this.resolveAsteroid(id)) return 0;
+    const a = this.foundAst!;
+    const d = this.worldState.depleted(id);
+    let total = 0;
+    let mined = 0;
+    for (let i = 0; i < RES_LIST.length; i++) {
+      const r = RES_LIST[i]!;
+      total += a.composition[r];
+      mined += Math.min(a.composition[r], d[r]);
+    }
+    return total > 0 ? Math.min(1, Math.max(0, mined / total)) : 0;
+  }
+
+  /** True when every resource has less than MINE_MIN_KG left. False for an unknown id. */
+  isDestroyed(id: string): boolean {
+    return this.resolveAsteroid(id) !== null && this.gone(this.foundAst!);
+  }
+
   /** Kilograms of `r` still in the asteroid: generated minus mined, never negative. */
   remainingKg(id: string, r: Resource): number {
-    const a = this.asteroidSpec(id);
+    const a = this.asteroidSpecRaw(id);
     if (!a) return 0;
     return Math.max(0, a.composition[r] - this.worldState.depleted(id)[r]);
   }
@@ -311,8 +338,32 @@ export class Belt implements GameModule {
     return this.loadExtra(k);
   }
 
-  /** The asteroid's field, with `foundAst` set to the asteroid; null if unknown. */
+  /**
+   * THE filter: true when no resource of `a` has MINE_MIN_KG left. Read live
+   * from WorldState on every call (no cache), so a mined bite or a restore
+   * takes effect at once. Two property reads per resource, no allocation.
+   */
+  private gone(a: AsteroidSpec): boolean {
+    const d = this.worldState.depleted(a.id);
+    for (let i = 0; i < RES_LIST.length; i++) {
+      const r = RES_LIST[i]!;
+      if (a.composition[r] - d[r] >= MINE_MIN_KG) return false;
+    }
+    return true;
+  }
+
+  /** As `resolveAsteroid`, but a destroyed rock is not found. */
   private fieldOfAsteroid(id: string): FieldSpec | null {
+    const f = this.resolveAsteroid(id);
+    if (f && this.gone(this.foundAst!)) {
+      this.foundAst = null;
+      return null;
+    }
+    return f;
+  }
+
+  /** The asteroid's field, with `foundAst` set to the asteroid (destroyed or not); null if unknown. */
+  private resolveAsteroid(id: string): FieldSpec | null {
     this.foundAst = null;
     if (!this.spec || !id.startsWith(this.astPrefix)) return null;
     for (let s = 0; s <= MEMO_SLOTS; s++) {
@@ -344,6 +395,8 @@ export class Belt implements GameModule {
     return this.extra;
   }
 }
+
+const RES_LIST: readonly Resource[] = ['ice', 'metal', 'silicate', 'rare'];
 
 /** A non-negative decimal integer, or -1. */
 function parseIndex(s: string): number {

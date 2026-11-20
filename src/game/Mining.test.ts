@@ -361,7 +361,8 @@ describe('mine refusals — logged, nothing started', () => {
     expect(r.cargo.totalKg).toBe(CARGO_CAPACITY_KG);
   });
 
-  it('Given a depleted rock, When B, Then "DEPLETED", nothing is mined and nothing is NaN', () => {
+  // Plan 5 (owner, 2026-11-20): a mined-out rock no longer exists, so it is not a target.
+  it('Given a depleted rock, When B, Then "NO ASTEROID TARGETED" (the rock is gone), nothing is mined and nothing is NaN', () => {
     const r = rig();
     for (const res of ['ice', 'metal', 'silicate', 'rare'] as const) {
       r.worldState.recordMined(r.ast.id, res, r.ast.composition[res], 'local');
@@ -370,7 +371,7 @@ describe('mine refusals — logged, nothing started', () => {
     r.press(MINING_KEYS.mine);
     r.tick(300);
     expect(r.mining.busy).toBeNull();
-    expect(r.logs).toEqual(['DEPLETED']);
+    expect(r.logs).toEqual(['NO ASTEROID TARGETED']);
     expect(r.cargo.totalKg).toBe(0);
     expect(r.worldState.entries()).toHaveLength(before);
     for (const res of ['ice', 'metal', 'silicate', 'rare'] as const) {
@@ -712,7 +713,8 @@ describe('one hold-full rule; dust is depleted (R18)', () => {
     expect(r.worldState.entries()).toHaveLength(0);
   });
 
-  it('Given a rock with 0.3 kg left of everything, Then B is refused DEPLETED (never "MINED · 0 KG")', () => {
+  // Plan 5 (owner, 2026-11-20): dust under 0.5 kg of everything is a destroyed rock.
+  it('Given a rock with 0.3 kg left of everything, Then B is refused NO ASTEROID TARGETED (the rock is gone; never "MINED · 0 KG")', () => {
     const r = rig();
     for (const res of ['ice', 'metal', 'silicate', 'rare'] as const) {
       r.worldState.recordMined(r.ast.id, res, r.ast.composition[res] - 0.3, 'local');
@@ -721,7 +723,7 @@ describe('one hold-full rule; dust is depleted (R18)', () => {
     r.press(MINING_KEYS.mine);
     r.tick(300);
     expect(r.mining.busy).toBeNull();
-    expect(r.logs).toEqual(['DEPLETED']);
+    expect(r.logs).toEqual(['NO ASTEROID TARGETED']);
     expect(r.actions).toEqual([]);
     expect(r.cargo.totalKg).toBe(0);
     expect(r.worldState.entries()).toHaveLength(before);
