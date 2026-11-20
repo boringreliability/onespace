@@ -165,7 +165,8 @@ WebAudio-syntese, Vitest, Playwright (`scripts/e2e-cloud.mjs`, `scripts/shoot.mj
     `'asteroid:destroyed' { asteroidId }` (udsendt i den frame, den sidste bid tømmer stenen).
   - `'mine'`-lektionen tæller `mining:ended` med `minedKg > 0`, ikke `cargo:action`.
 
-- [ ] **Step 0: Mål tidskompression.** Hold ved en sten med farthold (FA) og mål, om
+- [x] **Step 0 (udført 2026-11-20):** tidskompression kan ikke slås til ved en sten (`no-world`);
+  ejeren har accepteret det (spec §9). Oprindelig tekst: Hold ved en sten med farthold (FA) og mål, om
   tidskompression 10× kan slås til og forbliver til (`engineOutput < 0.01`). Skriv resultatet i
   rapporten. Kan den ikke, stoppes tasken efter fase A, og ejeren afgør (spec §9).
 - [ ] **Step 1: Skriv de fejlende tests:**

@@ -39,8 +39,8 @@ gang **[ejer]**. Koden bekræfter det:
 ## 4. Anti-mål
 
 - **Grind.** Mining må ikke være at holde en tast nede eller at vente uden at kunne gøre andet
-  (DESIGN §2). Derfor: ét tryk starter, tidskompression virker under mining, og man kan stoppe når
-  som helst.
+  (DESIGN §2). Derfor: ét tryk starter, det udvundne beholdes, og man kan stoppe når som helst.
+  (Tidskompression virker ikke ved en sten, se §9; ejeren har accepteret 53 s for en fuld last.)
 - **Tab ved afbrydelse.** En lang handling, der giver nul ved afbrydelse, straffer hårdere, jo
   længere den varer.
 - **Skjulte krav.** Ingen handling må afvises med en grund, spilleren ikke kan aflæse og rette.
@@ -74,12 +74,12 @@ gang **[ejer]**. Koden bekræfter det:
 - **Start:** `B` med de samme krav som i dag (mål er en asteroide, ≤ 0,5 km fra overfladen,
   relativ fart ≤ 0,005 km/s, ≥ 0,5 kg plads, ≥ 0,5 kg tilbage i stenen).
 - **Forløb:** udvindingen kører i spiltid med **150 kg/s [Claude]**. 2 000 kg tager ca. 13 s, en
-  fuld last på 8 000 kg ca. 53 s. Tidskompression virker som på alt andet.
+  fuld last på 8 000 kg ca. 53 s, i virkelig tid (ingen tidskompression ved en sten, §9).
 - **Bidder:** materialet lægges i lasten i hele bidder på **250 kg [Claude]** (den sidste bid kan
   være mindre). Hver bid er én almindelig `mine`-post: den trækker fra stenen, lægger i lasten og
   gemmes som i dag. HUD'ens tal tæller jævnt op mellem bidderne. Lukkes fanen, er alle færdige
   bidder gemt, og den ufærdige er ikke sket.
-- **Flere bidder pr. frame.** Ved 100× tidskompression kan én frame dække flere bidder. Kravene
+- **Flere bidder pr. frame.** En lang frame (en hakkende fane) kan dække flere bidder. Kravene
   tjekkes én gang pr. frame, og alle bidder, tiden rækker til, lægges i lasten i samme frame.
 - **Ressourcer:** rækkefølgen er som i dag (is, sjælden, metal, silikat). En udvinding tager én
   ressource: den, der står først i rækkefølgen og ikke er tom, når `B` trykkes. Når den slipper
@@ -223,9 +223,11 @@ blokken viser spillerens egen operation. Droner, deres styring og deres visning 
 - Flere poster i handlingsloggen: hver bid giver to poster (last og sten), så en fuld last giver
   op til 64 poster mod 8 i dag. Loggen komprimeres ved 5 000 poster, og autosave og sync er
   allerede begrænset i takt, men serverens `actions`-tabel vokser hurtigere (kendt gæld, D51 d).
-- **Tidskompression under mining skal måles.** Kompression slås fra, når hovedmotoren arbejder.
-  Bruger farthold ved stenen hovedmotoren, virker "10× under mining" ikke; så skal det meldes og
-  afgøres, før strålen bygges.
+- **Ingen tidskompression under mining (målt 2026-11-20, afgjort af ejeren).** Kompression
+  afvises med `NO WORLD`, når skibet ikke kredser om en planet (`compressionBlock`,
+  `src/game/timeCompression.ts`), og bæltefelterne ligger i stjernens ramme. Hovedmotoren er ikke
+  årsagen. Ejeren har valgt at acceptere det: en fuld last tager 53 s, og man kan stoppe når som
+  helst. Fundet ved kodelæsning; ikke prøvet i det kørende spil.
 - **Uden tidskompression** (multiplayer, P5) tager en fuld last 53 s. Tempoet er en konstant og
   kan justeres.
 
