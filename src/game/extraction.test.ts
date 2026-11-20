@@ -97,6 +97,15 @@ describe('accrue', () => {
     accrue(e, Number.NaN);
     expect(e.carryKg).toBe(150);
   });
+
+  // Plan 5, Task 3 (Task 1 review, P1): an infinite frame must not make carryKg infinite.
+  it('Given infinite seconds, Then they count as 0 (carryKg stays finite and unchanged)', () => {
+    const e = fresh();
+    accrue(e, 1);
+    accrue(e, Number.POSITIVE_INFINITY);
+    expect(e.carryKg).toBe(150);
+    expect(Number.isFinite(e.carryKg)).toBe(true);
+  });
 });
 
 describe('commitBite', () => {

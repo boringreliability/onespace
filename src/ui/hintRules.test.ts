@@ -11,8 +11,8 @@
 import { describe, expect, it } from 'vitest';
 
 import { MINING_KEYS } from '@/core/Input';
-import type { CargoAction, CargoResult } from '@/ship/cargo';
 
+import * as hintRules from './hintRules';
 import {
   HINT_COUNTS_KEY,
   HINT_RETIRE_AFTER,
@@ -21,7 +21,7 @@ import {
   type HintState,
   isRetired,
   loadHintCounts,
-  recordCargoAction,
+  recordMiningEnded,
   recordUse,
   saveHintCounts,
   selectHint,
@@ -219,14 +219,13 @@ describe('persistence — localStorage, defensively', () => {
 // v4 sub-plan 2, Task 5 — the 'mine' hint. It appears the first time an
 // asteroid is targeted within mining range, and retires after 2 COMPLETED
 // mines (a refused or aborted B does not count).
+// v4 sub-plan 5, Task 3: a "mine" is an EXTRACTION — it counts on
+// `mining:ended` with minedKg > 0, once however many bites it took; one that
+// ended with nothing does not count, and a bite (`cargo:action`) never does.
 // ---------------------------------------------------------------------------
 
 describe("the 'mine' hint", () => {
-  const ok = (kind: CargoAction['kind'], good: boolean): { action: CargoAction; result: CargoResult } => ({
-    action:
-      kind === 'mine' ? { kind: 'mine', asteroidId: 'ast:x:0:1', resource: 'ice', kg: 2_000 } : ({ kind } as CargoAction),
-    result: { ok: good, kgIn: good ? 2_000 : 0, kgOut: 0, fuelKg: 0, restoredFrac: 0 },
-  });
+  const endedWith = (minedKg: number) => ({ asteroidId: 'ast:x:0:1', resource: 'ice' as const, minedKg, end: 'stopped' as const });
 
   it('Given its text, Then it names the mine key: "B — MINE"', () => {
     const label = MINING_KEYS.mine.replace(/^Key/, '');
@@ -259,17 +258,27 @@ describe("the 'mine' hint", () => {
     expect(selectHint(s, { ...allUsed, mine: 2 })).toBeNull();
   });
 
-  it('Given cargo:action events, Then only a SUCCESSFUL mine counts towards retirement', () => {
+  // Plan 5, Task 3: replaces "Given cargo:action events, Then only a SUCCESSFUL mine counts".
+  it('Given mining:ended events, Then an extraction that mined something counts once; one that mined 0 kg does not', () => {
     let c: HintCounts = {};
-    c = recordCargoAction(c, ok('mine', true));
+    c = recordMiningEnded(c, endedWith(500)); // two bites, one extraction
     expect(c.mine).toBe(1);
-    const same = recordCargoAction(c, ok('mine', false));
-    expect(same).toBe(c); // a refused mine: untouched, same object
-    expect(recordCargoAction(c, ok('refine', true))).toBe(c);
-    expect(recordCargoAction(c, ok('repair', true))).toBe(c);
-    c = recordCargoAction(c, ok('mine', true));
+    const same = recordMiningEnded(c, endedWith(0));
+    expect(same).toBe(c); // nothing mined: untouched, same object
+    c = recordMiningEnded(c, endedWith(250));
     expect(c.mine).toBe(2);
     expect(isRetired(c, 'mine')).toBe(true);
+  });
+
+  it('Given a count, Then recordMiningEnded leaves the other counts alone and returns a new object', () => {
+    const c: HintCounts = { fly: 3, mine: 1 };
+    const next = recordMiningEnded(c, endedWith(250));
+    expect(next).toEqual({ fly: 3, mine: 2 });
+    expect(c).toEqual({ fly: 3, mine: 1 });
+  });
+
+  it('Given plan 5, Then a bite no longer counts: hintRules has no recordCargoAction', () => {
+    expect('recordCargoAction' in hintRules).toBe(false);
   });
 
   it('Given saved counts with mine, When reloaded, Then mine round-trips like every other hint', () => {
