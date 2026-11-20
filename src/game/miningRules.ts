@@ -137,3 +137,9 @@ export const REFUSAL_LOG: Readonly<Record<MiningRefusal, string>> = {
   'no-tank': 'NO TANK',
   invalid: 'INVALID AMOUNT',
 };
+
+/** The next key for a refusal the player can act on. */
+export const ACTION_HINT: Readonly<Partial<Record<MiningRefusal, string>>> = {
+  range: 'L TO APPROACH',
+  speed: 'SPACE TO STOP',
+};
