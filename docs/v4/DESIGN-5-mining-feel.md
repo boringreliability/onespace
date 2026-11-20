@@ -1,6 +1,6 @@
 # oneSpace v4, delplan 5: mining man kan se
 
-> Design til godkendelse. Bygger på delplan 2 (asteroider og mining) og ændrer dens regler for
+> Godkendt af ejeren 2026-11-20. Bygger på delplan 2 (asteroider og mining) og ændrer dens regler for
 > udvinding. Mærkerne **[ejer]** og **[Claude]** viser, hvem der har truffet et valg.
 
 ## 1. Hvorfor
@@ -81,20 +81,22 @@ gang **[ejer]**. Koden bekræfter det:
   bidder gemt, og den ufærdige er ikke sket.
 - **Flere bidder pr. frame.** Ved 100× tidskompression kan én frame dække flere bidder. Kravene
   tjekkes én gang pr. frame, og alle bidder, tiden rækker til, lægges i lasten i samme frame.
-- **Ressourcer:** rækkefølgen er som i dag (is, sjælden, metal, silikat). **Åbent spørgsmål til
-  ejeren:** hvad der sker, når den ressource, der udvindes, slipper op (se §10).
+- **Ressourcer:** rækkefølgen er som i dag (is, sjælden, metal, silikat). En udvinding tager én
+  ressource: den, der står først i rækkefølgen og ikke er tom, når `B` trykkes. Når den slipper
+  op, stopper udvindingen **[ejer]** (se §10). Et nyt tryk på `B` fortsætter med den næste.
 - **Lektionen `B — MINE`** tæller udvindinger, ikke bidder, så den ikke forsvinder efter et halvt
   sekund.
-- **Stop:** `B` igen, fuld last, tom sten, eller et brudt krav (ude af rækkevidde, for høj relativ
+- **Stop:** `B` igen, fuld last, ressourcen er tom, eller et brudt krav (ude af rækkevidde, for høj relativ
   fart, nyt mål, pause, cruise, hop, nødsignal, forladt flyvetilstand). I alle tilfælde beholdes
   det, der er lagt i lasten.
 - **Beskeder:** én loglinje, når udvindingen slutter, med summen pr. ressource og årsagen, når den
   ikke er spillerens eget stop:
-  - `MINED · 1 250 KG ICE`
-  - `MINED · 2 000 KG ICE · 500 KG METAL — HOLD FULL`
+  - `MINED · 1 250 KG ICE` (spilleren stoppede selv)
+  - `MINED · 2 000 KG ICE — HOLD FULL`
+  - `MINED · 1 250 KG ICE — ICE DEPLETED`
   - `MINING STOPPED — OUT OF RANGE · 750 KG ICE`
   Sluttede den uden en eneste bid: `MINING STOPPED — <årsag>`.
-- Tømmer den sidste bid stenen, er årsagen `DEPLETED`, ikke et afbrud: stenen forsvinder som mål i
+- Tømmer den sidste bid hele stenen, er årsagen `DEPLETED`, ikke et afbrud: stenen forsvinder som mål i
   samme øjeblik (§7.5), og det må ikke læses som "målet blev skiftet".
 - `U` og `N` under en udvinding svarer `BUSY` som i dag.
 
@@ -227,12 +229,14 @@ blokken viser spillerens egen operation. Droner, deres styring og deres visning 
 - **Uden tidskompression** (multiplayer, P5) tager en fuld last 53 s. Tempoet er en konstant og
   kan justeres.
 
-## 10. Åbent spørgsmål til ejeren
+## 10. Afgjort af ejeren
 
 **Hvad sker der, når isen i stenen slipper op?** Lasten kan kun tømmes helt (der findes ingen
-måde at smide én ressource ud), så en udvinding, der fortsætter fra is til metal og silikat uden
-nyt tryk, kan fylde lasten med noget, spilleren ikke ville have.
+måde at smide én ressource ud), så en udvinding, der fortsatte fra is til metal og silikat uden
+nyt tryk, kunne fylde lasten med noget, spilleren ikke ville have.
 
-- **Stop ved skift [Claude anbefaler]:** udvindingen stopper, når den aktuelle ressource er tom,
-  og siger `MINED · 1 250 KG ICE — ICE DEPLETED`. Et nyt tryk på `B` fortsætter med den næste.
-- **Fortsæt:** udvindingen tager det næste uden nyt tryk, til lasten er fuld eller stenen tom.
+**Afgørelse [ejer]:** "udvinding fortsætter til ressourcen er udtømt eller man stopper". Læst
+som: udvindingen tager én ressource og stopper, når den er tom, med `MINED · 1 250 KG ICE — ICE
+DEPLETED`. Et nyt tryk på `B` fortsætter med den næste.
+
+Designet er godkendt af ejeren 2026-11-20.
