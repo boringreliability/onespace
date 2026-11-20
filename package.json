@@ -9,6 +9,7 @@
   },
   "scripts": {
     "dev": "vite",
+    "dev:cloud": "node scripts/dev-cloud.mjs",
     "build": "tsc --noEmit && vite build && node scripts/build-server.mjs",
     "start": "node dist-server/index.mjs",
     "preview": "vite preview --port 4173 --strictPort",
