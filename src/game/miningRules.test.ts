@@ -13,6 +13,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { Resource } from '@/gen/belt';
 import {
+  ACTION_HINT,
   MINE_ACTION_S,
   MINE_MAX_REL_KMS,
   MINE_MIN_KG,
@@ -295,5 +296,23 @@ describe('repairedLog — rounds to the nearest percent (hardening)', () => {
   it('Given 0.285 and 0.2849, Then 29 % and 28 % (nearest)', () => {
     expect(repairedLog(0.2851)).toBe('REPAIRED · TANK +29 %');
     expect(repairedLog(0.2849)).toBe('REPAIRED · TANK +28 %');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v4 sub-plan 5, Task 1 (phase A) — what the HUD tells you to do about a refusal.
+// ---------------------------------------------------------------------------
+
+describe('ACTION_HINT — the next key for a refusal you can act on', () => {
+  it('Given a range refusal, Then "L TO APPROACH"', () => {
+    expect(ACTION_HINT.range).toBe('L TO APPROACH');
+  });
+
+  it('Given a speed refusal, Then "SPACE TO STOP"', () => {
+    expect(ACTION_HINT.speed).toBe('SPACE TO STOP');
+  });
+
+  it('Given the table, Then range and speed are its only keys', () => {
+    expect(Object.keys(ACTION_HINT).sort()).toEqual(['range', 'speed']);
   });
 });
