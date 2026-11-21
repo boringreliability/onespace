@@ -66,3 +66,17 @@ describe('v4-save — the save module is gated to piloting', () => {
     for (const b of ['title', 'boot', 'yard', 'review'] as const) expect(ticks('save', b), b).toBe(false);
   });
 });
+
+// v4 sub-plan 5, Task 4 (review): the HUD's action rows are read from Mining,
+// so the feed must sleep whenever Mining sleeps — else it prints a frozen verdict.
+describe('the action feed follows Mining', () => {
+  it('Given the gating table, Then action-feed is listed and ticks in exactly the modes mining ticks in', () => {
+    expect(MODULE_MODES['action-feed']).toBeDefined();
+    expect(MODULE_MODES['action-feed']).toEqual(MODULE_MODES['mining']);
+  });
+
+  it('Given the map, the title, the yard or a review shot, Then the action feed sleeps; in flight it ticks', () => {
+    for (const base of ['map', 'title', 'yard', 'review', 'boot'] as const) expect(ticks('action-feed', base), base).toBe(false);
+    expect(ticks('action-feed', 'flight')).toBe(true);
+  });
+});
