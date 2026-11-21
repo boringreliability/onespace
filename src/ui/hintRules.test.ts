@@ -534,3 +534,76 @@ describe('plan 5 Task 8 — Hints.ts wires the two lessons', () => {
     expect(src).toMatch(/new Hints\(\{[^}]*\bautopilot\b[^}]*\}\)/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Plan 5 final review, fix round (phase A) — M-1: the mine lesson is shown
+// only when the mine key would START an extraction, as `U — REFINE` is shown
+// only when U would run (Task 8). Today `asteroidInRange` alone decides, so
+// the line says `B — MINE` all through an extraction (when B means stop) and
+// with a full hold (when B is refused).
+//
+// Assumed surface (src/ui/hintRules.ts), in the pattern of `refinable`:
+//   miningHintFacts(mine, refine) also returns `minable: boolean`
+//     — the mine row 'ready' (`Mining.status('mine').kind === 'ready'`).
+//   HintState gains optional `minable?: boolean`; with `minable: false` the
+//   mine lesson is never chosen, whatever `asteroidInRange` says; with
+//   `minable: true` (and an asteroid in range) it is, as today.
+//   Hints.ts hands `facts.minable` to the advisory.
+// ---------------------------------------------------------------------------
+
+type FactsV6 = { asteroidOutOfRange: boolean; refinable: boolean; minable?: boolean };
+const factsV6 = (): ((mine: StatusLike, refine: StatusLike) => FactsV6) =>
+  fn('miningHintFacts') as unknown as (mine: StatusLike, refine: StatusLike) => FactsV6;
+/** A state with `minable` (cast: it is not on HintState yet). */
+const stM = (extra: Partial<HintState> & { asteroidOutOfRange?: boolean; refinable?: boolean; minable?: boolean }): HintState =>
+  ({ ...base, ...extra }) as HintState;
+
+describe("plan 5 final review M-1 — 'B — MINE' only when B would start an extraction", () => {
+  const ready: StatusLike = { kind: 'ready' };
+  const running: StatusLike = { kind: 'running' };
+  const blocked = (reason: string): StatusLike => ({ kind: 'blocked', reason });
+  /** Every mine-row state in which B would NOT start an extraction. */
+  const notReady: readonly StatusLike[] = [
+    running,
+    blocked('hold-full'),
+    blocked('speed'),
+    blocked('range'),
+    blocked('no-target'),
+    blocked('depleted'),
+    blocked('busy'),
+    blocked('cruise'),
+    blocked('jump'),
+    blocked('no-tank'),
+  ];
+
+  it('Given the mine row ready, Then miningHintFacts says minable; any other mine state (running, blocked for any reason), Then it does not', () => {
+    const facts = factsV6();
+    expect(facts(ready, blocked('nothing-to-refine')).minable).toBe(true);
+    for (const s of notReady) expect(facts(s, blocked('nothing-to-refine')).minable, JSON.stringify(s)).toBe(false);
+  });
+
+  it('Given an asteroid in range and minable, Then the hint is mine, ahead of approach and refine (as today)', () => {
+    expect(selectHint(stM({ hasTarget: true, asteroidInRange: true, minable: true }), none)).toBe('mine');
+    expect(selectHint(stM({ hasTarget: true, asteroidInRange: true, minable: true, refinable: true }), none)).toBe('mine');
+  });
+
+  it('Given an asteroid in range but not minable (an extraction running, a full hold), Then mine is not advised: the next lesson shows, and with all else learnt the line is empty', () => {
+    expect(selectHint(stM({ hasTarget: true, asteroidInRange: true, minable: false }), none)).toBe('fly');
+    expect(selectHint(stM({ hasTarget: true, asteroidInRange: true, minable: false, refinable: true }), none)).toBe('refine');
+    expect(selectHint(stM({ hasTarget: true, asteroidInRange: true, minable: false }), allUsedBut('mine'))).toBeNull();
+    expect(advisoryText(stM({ hasTarget: true, asteroidInRange: true, minable: false }), allUsedBut('mine'), null)).toBeNull();
+  });
+
+  it('Given the state built as Hints.ts builds it (facts from Mining.status spread in, an asteroid in range), Then B — MINE shows only for the ready mine row', () => {
+    const facts = factsV6();
+    const advisory = (mine: StatusLike): string | null =>
+      advisoryText(stM({ hasTarget: true, asteroidInRange: true, ...facts(mine, blocked('nothing-to-refine')) }), allUsedBut('mine'), null);
+    expect(advisory(ready)).toBe(HINT_TEXT.mine);
+    for (const s of notReady) expect(advisory(s), JSON.stringify(s)).not.toBe(HINT_TEXT.mine);
+  });
+
+  it('Given Hints.ts, Then it hands minable from the facts to the advisory', () => {
+    const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'Hints.ts'), 'utf8');
+    expect(src).toMatch(/\bminable\s*:\s*facts\.minable\b/);
+  });
+});

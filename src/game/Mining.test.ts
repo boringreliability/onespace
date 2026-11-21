@@ -45,6 +45,7 @@ import { ActionJournal } from '@/save/actionJournal';
 import { replay, zeroState } from '@/save/replay';
 import { CARGO_CAPACITY_KG, Cargo, type CargoAction, type CargoResult } from '@/ship/cargo';
 import { PROBE_TANK_CAPACITY_KG, Propellant } from '@/ship/propellant';
+import { actionRow } from '@/ui/actionRows';
 import { extractionLog, type ExtractionEnd } from './extraction';
 import { Mining, type MiningWorld } from './Mining';
 import { MINE_RANGE_KM } from './miningRules';
@@ -1758,5 +1759,283 @@ describe('refine and repair are announced: action:started and action:ended (plan
     r.tick(60);
     r.mining.dispose?.();
     expect(r.seen).toEqual(['started:refine']);
+  });
+});
+
+// ===========================================================================
+// Plan 5 final review, fix round (phase A) — I-2 and M-3.
+//
+// I-2: photo mode (`P`) is an OVERLAY over flight (core/Modes.ts). Under it
+// Mining is not asleep: it ticks with dt = 0 (core/tick.ts moduleDt, pinned in
+// gating.test.ts), and Pause freezes the world while an overlay is up
+// (ui/Pause.ts: `frozen = open || recovery.active || modes.overlay !== null`),
+// so the sim clock (`simulatedSeconds`) is 0. What the game does on `P`, in
+// order: Engine calls `onModeChange('flight', 'photo')`, then every frame in
+// photo has `frozen === true` (Pause is registered before Mining). On the way
+// back: `onModeChange('photo', 'flight')`, then `frozen === false`.
+//
+// Wanted (controller's recommendation; the owner decides): an extraction is
+// HELD in photo — not ended, nothing mined, the clock frozen — and carries on
+// as the same extraction back in flight (no second mining:started, no
+// mining:ended in between), so the beam can be photographed. A refine or
+// repair in photo does what pause does to it today: it aborts
+// (REFINING / REPAIR ABORTED, one action:ended ok:false). Leaving flight for
+// map, Yard or title, and a freeze WITHOUT the photo overlay (a recovery cut),
+// still end the extraction exactly as today.
+//
+// Note: pause does NOT hold an extraction today — it ends it 'interrupted'
+// (the enders table above, DESIGN-5 §7.1 line 90). Photo is pinned to differ
+// from pause for the extraction, and to match it for refine / repair.
+//
+// M-3 (DESIGN-5 §7.3): `BUSY` means only "another action is running". A
+// press refused because of cruise or a jump logs what the action row shows
+// for that state (`actionRow(kind, status(kind)).text`): `IN CRUISE` /
+// `IN JUMP` — for B, U and N alike.
+// ===========================================================================
+
+describe('photo mode holds an extraction (plan 5 final review I-2)', () => {
+  type R = ReturnType<typeof rig>;
+  /** P as the game does it: the overlay goes up, then Pause freezes the world every frame in photo. */
+  const enterPhoto = (r: R): void => {
+    r.mining.onModeChange?.('flight', 'photo');
+    r.world.frozen = true;
+  };
+  /** Back to flight: the overlay comes down, then Pause unfreezes. */
+  const leavePhoto = (r: R): void => {
+    r.mining.onModeChange?.('photo', 'flight');
+    r.world.frozen = false;
+  };
+  /** An extraction 2 s in: one bite of 250 kg landed, 47.5 kg begun on the next. */
+  const twoSecondsIn = (): R => {
+    const r = rig();
+    r.press(MINING_KEYS.mine);
+    r.tick(119);
+    // Precondition: it really runs, one bite has landed, nothing has ended.
+    expect(r.mining.status('mine').kind).toBe('running');
+    expect(r.cargo.kg('ice')).toBe(250);
+    expect(r.started).toHaveLength(1);
+    expect(r.ended).toEqual([]);
+    return r;
+  };
+
+  it('Given an extraction 2 s in, When photo mode goes up (onModeChange flight → photo), Then at once it is still running, nothing is logged and no mining:ended comes', () => {
+    const r = twoSecondsIn();
+    r.mining.onModeChange?.('flight', 'photo');
+    expect(r.mining.status('mine').kind).toBe('running');
+    expect(r.mining.operations).toHaveLength(1);
+    expect(r.logs).toEqual([]);
+    expect(r.ended).toEqual([]);
+  });
+
+  it('Given an extraction 2 s in, When 300 frames pass in photo (world frozen, sim clock 0), Then it is still running on the same rock with its operation (the beam), and nothing is mined: no bite, no cargo:action, no recordMined, shownKg unchanged', () => {
+    const r = twoSecondsIn();
+    const shown = r.mining.status('mine').shownKg;
+    const iceInRock = r.belt.remainingKg(r.ast.id, 'ice');
+    enterPhoto(r);
+    r.tick(300);
+    expect(r.world.simulatedSeconds).toBe(0); // the rig's frozen world: no sim time passes
+    expect(r.mining.status('mine').kind).toBe('running');
+    expect(r.mining.status('mine').shownKg).toBe(shown);
+    expect(r.mining.operations).toHaveLength(1);
+    expect(r.mining.operations[0]!.asteroidId).toBe(r.ast.id);
+    expect(r.cargo.kg('ice')).toBe(250);
+    expect(r.bites).toHaveLength(1);
+    expect(r.actions).toHaveLength(1);
+    expect(r.worldState.entries()).toHaveLength(1);
+    expect(r.belt.remainingKg(r.ast.id, 'ice')).toBe(iceInRock);
+    expect(r.logs).toEqual([]);
+    expect(r.ended).toEqual([]);
+  });
+
+  it('Given an extraction held 300 frames in photo, When the game returns to flight, Then the SAME extraction carries on from where it stood: no second mining:started, no mining:ended in between, and the next bite lands after the 202.5 kg it still lacked (not sooner, not later)', () => {
+    const r = twoSecondsIn();
+    enterPhoto(r);
+    r.tick(300);
+    leavePhoto(r);
+    r.tick(78); // 47.5 + 195 = 242.5 kg: no second bite yet
+    expect(r.mining.status('mine').kind).toBe('running');
+    expect(r.cargo.kg('ice')).toBe(250);
+    r.tick(6); // 47.5 + 210 = 257.5 kg: the second bite has landed
+    expect(r.cargo.kg('ice')).toBe(500);
+    expect(r.bites.map((b) => b.kg)).toEqual([250, 250]);
+    expect(r.started).toEqual([{ asteroidId: r.ast.id, resource: 'ice' }]);
+    expect(r.ended).toEqual([]);
+    expect(r.logs).toEqual([]);
+    expect(r.mining.status('mine').kind).toBe('running');
+  });
+
+  it('Given an extraction held in photo and resumed, When B stops it in flight, Then one mining:ended "stopped" counts every bite, the ones before and after photo', () => {
+    const r = twoSecondsIn();
+    enterPhoto(r);
+    r.tick(120);
+    leavePhoto(r);
+    r.tick(100); // 47.5 + 250 = 297.5 kg: one more bite
+    r.press(MINING_KEYS.mine);
+    expect(r.ended).toEqual([{ asteroidId: r.ast.id, resource: 'ice', minedKg: 500, end: 'stopped' }]);
+    expect(r.logs).toEqual([extractionLog('stopped', 500, 'ice')]);
+    expect(r.started).toHaveLength(1);
+  });
+
+  it('Given an extraction held in photo, When B arrives while the world is frozen, Then it says nothing and stops nothing (the keys are silent while frozen, as today)', () => {
+    const r = twoSecondsIn();
+    enterPhoto(r);
+    r.tick();
+    r.press(MINING_KEYS.mine);
+    r.tick(10);
+    expect(r.mining.status('mine').kind).toBe('running');
+    expect(r.logs).toEqual([]);
+    expect(r.ended).toEqual([]);
+  });
+
+  it('Given an extraction that went through photo and back, When the world is then frozen without the overlay (a recovery cut), Then it ends interrupted as before (photo leaves nothing behind)', () => {
+    const r = twoSecondsIn();
+    enterPhoto(r);
+    r.tick(30);
+    leavePhoto(r);
+    r.tick();
+    expect(r.mining.status('mine').kind).toBe('running');
+    r.world.frozen = true;
+    r.tick();
+    expect(r.mining.status('mine').kind).not.toBe('running');
+    expect(r.ended).toEqual([{ asteroidId: r.ast.id, resource: 'ice', minedKg: 250, end: 'interrupted' }]);
+    expect(r.logs).toEqual([extractionLog('interrupted', 250, 'ice')]);
+  });
+
+  // Guard: leaving flight for a BASE mode still ends the extraction at once (map is pinned in 'more clean aborts (R18)').
+  for (const to of ['yard', 'title'] as const) {
+    it(`Given an extraction 2 s in, When the game leaves flight for ${to}, Then it still ends interrupted at once, the bite is kept, and back in flight it does not resume`, () => {
+      const r = twoSecondsIn();
+      r.mining.onModeChange?.('flight', to);
+      expect(r.mining.status('mine').kind).not.toBe('running');
+      expect(r.mining.operations).toEqual([]);
+      expect(r.ended).toEqual([{ asteroidId: r.ast.id, resource: 'ice', minedKg: 250, end: 'interrupted' }]);
+      expect(r.logs).toEqual([extractionLog('interrupted', 250, 'ice')]);
+      r.mining.onModeChange?.(to, 'flight');
+      r.tick(300);
+      expect(r.mining.status('mine').kind).not.toBe('running');
+      expect(r.cargo.kg('ice')).toBe(250);
+      expect(r.ended).toHaveLength(1);
+    });
+  }
+
+  it('Given an extraction that went through photo and back, When the game then leaves flight for the map, Then it ends interrupted at once (photo leaves nothing behind)', () => {
+    const r = twoSecondsIn();
+    enterPhoto(r);
+    r.tick(30);
+    leavePhoto(r);
+    r.mining.onModeChange?.('flight', 'map');
+    expect(r.mining.status('mine').kind).not.toBe('running');
+    expect(r.ended).toEqual([{ asteroidId: r.ast.id, resource: 'ice', minedKg: 250, end: 'interrupted' }]);
+  });
+
+  // Refine / repair: photo does what pause does to them today (abort, R16).
+  for (const k of ACTION_KINDS) {
+    it(`Given a ${k.kind} underway, When photo mode goes up and the world freezes, Then it aborts as on pause: one "${k.kind === 'refine' ? 'REFINING ABORTED' : 'REPAIR ABORTED'}", one action:ended ok:false, nothing applied, and back in flight nothing resumes`, () => {
+      const r = actionRig();
+      const mass = r.tank.massKg;
+      const loss = r.tank.capacityLossFrac;
+      r.press(k.key);
+      r.tick(60);
+      expect(r.mining.busy?.kind).toBe(k.kind);
+      enterPhoto(r);
+      r.tick(k.frames);
+      expect(r.mining.busy).toBeNull();
+      expect(r.logs).toEqual([k.kind === 'refine' ? 'REFINING ABORTED' : 'REPAIR ABORTED']);
+      expect(r.actionEnded).toEqual([{ kind: k.kind, ok: false }]);
+      leavePhoto(r);
+      r.tick(k.frames + 60);
+      expect(r.mining.busy).toBeNull();
+      expect(r.seen).toEqual([`started:${k.kind}`, `ended:${k.kind}:fail`]);
+      expect(r.tank.massKg).toBe(mass);
+      expect(r.tank.capacityLossFrac).toBe(loss);
+      expect(r.cargo.kg('ice')).toBe(5_000);
+      expect(r.actions).toEqual([]);
+    });
+  }
+
+  it('Given a refine underway, When pause opens (the same freeze), Then it aborts the same way — the behaviour photo is pinned to', () => {
+    const r = actionRig();
+    r.press(MINING_KEYS.refine);
+    r.tick(60);
+    r.world.paused = true;
+    r.tick(480);
+    expect(r.logs).toEqual(['REFINING ABORTED']);
+    expect(r.actionEnded).toEqual([{ kind: 'refine', ok: false }]);
+  });
+});
+
+describe('a press refused for cruise or a jump logs what the row shows (plan 5 final review M-3)', () => {
+  type R = ReturnType<typeof rig>;
+  const states: Array<[string, string, (r: R) => void]> = [
+    ['cruise', 'IN CRUISE', (r) => (r.cruise.busy = true)],
+    ['a jump charging', 'IN JUMP', (r) => (r.warp.phase = 'charging')],
+    ['a jump in the tunnel', 'IN JUMP', (r) => (r.warp.phase = 'tunnel')],
+  ];
+  const keys = [
+    { kind: 'mine', key: MINING_KEYS.mine },
+    { kind: 'refine', key: MINING_KEYS.refine },
+    { kind: 'repair', key: MINING_KEYS.repair },
+  ] as const;
+
+  /** Everything else ready: a rock in range and matched, ice to refine, room in the tank, loss and materials to repair. */
+  const stocked = (): R => {
+    const r = rig({ fill: 0.5, lossFrac: 0.1 });
+    r.cargo.restore({ ice: 1_000, metal: 600, silicate: 400 });
+    r.tick();
+    for (const k of keys) expect(r.mining.status(k.kind), `${k.kind} ready before`).toEqual({ kind: 'ready' });
+    return r;
+  };
+
+  for (const [why, text, set] of states) {
+    for (const k of keys) {
+      it(`Given ${why} and ${k.kind} otherwise ready, When the ${k.kind} key is pressed, Then the log says "${text}" — exactly the ${k.kind} row's text — and not "BUSY", and nothing starts`, () => {
+        const r = stocked();
+        set(r);
+        r.press(k.key);
+        expect(r.logs).toEqual([text]);
+        expect(r.logs[0]).toBe(actionRow(k.kind, r.mining.status(k.kind)).text);
+        expect(r.logs).not.toContain('BUSY');
+        expect(r.started).toEqual([]);
+        expect(r.mining.busy).toBeNull();
+        expect(r.actions).toEqual([]);
+      });
+    }
+  }
+
+  it('Given cruise and a full hold, When B, Then "IN CRUISE" — the reason the row shows first, not "HOLD FULL" and not "BUSY"', () => {
+    const r = rig();
+    r.cargo.restore({ metal: CARGO_CAPACITY_KG });
+    r.cruise.busy = true;
+    r.press(MINING_KEYS.mine);
+    expect(r.mining.status('mine')).toEqual({ kind: 'blocked', reason: 'cruise' });
+    expect(r.logs).toEqual(['IN CRUISE']);
+  });
+
+  it('Given a jump charging and no target, When B, Then "IN JUMP" — the reason the row shows first, not "NO ASTEROID TARGETED"', () => {
+    const r = rig({ target: null });
+    r.warp.phase = 'charging';
+    r.press(MINING_KEYS.mine);
+    expect(r.mining.status('mine')).toEqual({ kind: 'blocked', reason: 'jump' });
+    expect(r.logs).toEqual(['IN JUMP']);
+  });
+
+  it('Given cruise and NO ICE to refine, When U, Then "IN CRUISE" — cruise outranks the hold, as on the row', () => {
+    const r = rig({ fill: 0.5 });
+    r.cruise.busy = true;
+    r.press(MINING_KEYS.refine);
+    expect(r.mining.status('refine')).toEqual({ kind: 'blocked', reason: 'cruise' });
+    expect(r.logs).toEqual(['IN CRUISE']);
+  });
+
+  it('Given a refine underway, When B and N are pressed, Then each still logs "BUSY" (another action is running), and the row says BUSY too', () => {
+    const r = rig({ fill: 0.5, lossFrac: 0.1 });
+    r.cargo.restore({ ice: 1_000, metal: 600, silicate: 400 });
+    r.press(MINING_KEYS.refine);
+    r.press(MINING_KEYS.mine);
+    r.press(MINING_KEYS.repair);
+    expect(r.logs).toEqual(['BUSY', 'BUSY']);
+    expect(actionRow('mine', r.mining.status('mine')).text).toBe('BUSY');
+    expect(actionRow('repair', r.mining.status('repair')).text).toBe('BUSY');
+    expect(r.mining.busy?.kind).toBe('refine');
   });
 });

@@ -80,3 +80,24 @@ describe('the action feed follows Mining', () => {
     expect(ticks('action-feed', 'flight')).toBe(true);
   });
 });
+
+// Plan 5 final review, fix round (phase A) — I-2. Photo is an overlay: under
+// it Mining and its beam are NOT asleep — they tick with dt = 0 — and Pause
+// ticks too (it is what freezes the world while an overlay is up). Mining's
+// and MiningBeams' "photo holds the extraction / keeps the beam" tests rest
+// on exactly this; leaving flight for a base mode puts both to sleep.
+describe('photo over flight: Mining and its beam stand still, they do not sleep (plan 5 final review I-2)', () => {
+  const dtIn = (name: string, base: BaseMode, overlay: 'photo' | null): number =>
+    moduleDt({ activeIn: MODULE_MODES[name] }, { base, overlay }, 1 / 60);
+
+  it('Given a photo overlay over flight, Then mining, mining-beams, action-feed, pause and universe tick with dt = 0', () => {
+    for (const m of ['mining', 'mining-beams', 'action-feed', 'pause', 'universe']) expect(dtIn(m, 'flight', 'photo'), m).toBe(0);
+  });
+
+  it('Given flight with no overlay, Then mining and mining-beams tick with the frame dt; in map, Yard or title they sleep', () => {
+    for (const m of ['mining', 'mining-beams']) {
+      expect(dtIn(m, 'flight', null), m).toBe(1 / 60);
+      for (const b of ['map', 'yard', 'title'] as const) expect(dtIn(m, b, null), `${m} in ${b}`).toBe(-1);
+    }
+  });
+});

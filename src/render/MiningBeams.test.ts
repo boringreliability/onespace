@@ -1406,3 +1406,85 @@ describe('MiningBeams — pebbles and a fading beam ride with a moving rock (pla
     }
   });
 });
+
+// ===========================================================================
+// Plan 5 final review, fix round (phase A) — I-2: photo mode keeps the beam.
+//
+// Photo is an OVERLAY over flight (core/Modes.ts): `modes.push('photo')` calls
+// `onModeChange('flight', 'photo')`, and under it MiningBeams ticks with
+// dt = 0 (core/tick.ts; gating.test.ts pins it) while the world is frozen
+// (Pause.ts), so the orbit clock stands still: `frame(0)` below. Mining keeps
+// its operation in photo (Mining.test.ts, 'photo mode holds an extraction'),
+// so the FakeMining keeps its list. Wanted: the beam, its glow and its
+// pebbles stay where they are, frozen, and can be photographed; back in
+// flight the SAME beam carries on (it does not fade in anew). Leaving flight
+// for map, Yard or title still drops everything at once (the test above).
+// ===========================================================================
+
+describe('MiningBeams — photo mode keeps the beam, frozen (plan 5 final review I-2)', () => {
+  /** A full beam on ROCK_A with pebbles in flight: drawn, faded in, one bite. */
+  function shooting() {
+    const r = rig();
+    const op = opToward(ROCK_A, new Vector3(1, 0, 0));
+    r.mining.set([op]);
+    r.frame(0); // claimed: fade starts at 0
+    r.frame(BEAM_FADE_S + 0.1);
+    bite(ROCK_A);
+    r.frame(0.05);
+    // Precondition: the beam is drawn at full fade, with its glow and some pebbles.
+    expect(beamFor(r.beams, r.ctx, op)?.fade).toBeGreaterThanOrEqual(0.999);
+    expect(glowsAt(r.beams, r.ctx)).toHaveLength(1);
+    expect(drawnCount(r.beams.pebbles, r.ctx)).toBeGreaterThan(0);
+    return { ...r, op };
+  }
+
+  it('Given a beam with pebbles, When photo mode goes up (onModeChange flight → photo), Then the beam, its glow and its pebbles are still drawn at once', () => {
+    const { beams, ctx, op } = shooting();
+    const pebbles = drawnCount(beams.pebbles, ctx);
+    (beams as GameModule).onModeChange?.('flight', 'photo', ctx);
+    expect(beamFor(beams, ctx, op), 'the beam is still drawn').toBeDefined();
+    expect(beamFor(beams, ctx, op)!.fade).toBeGreaterThanOrEqual(0.999);
+    expect(glowsAt(beams, ctx)).toHaveLength(1);
+    expect(glowsAt(beams, ctx)[0]!.distanceTo(vec(op.impact))).toBeLessThanOrEqual(0.005);
+    expect(drawnCount(beams.pebbles, ctx)).toBe(pebbles);
+    expect(drawCalls(ctx.scene)).toBeGreaterThanOrEqual(2);
+  });
+
+  it('Given a beam with pebbles in photo mode, When 300 frames pass on the frozen orbit clock, Then the beam stays on its endpoints at full fade and the pebbles are exactly where they were', () => {
+    const { beams, ctx, op, frame } = shooting();
+    (beams as GameModule).onModeChange?.('flight', 'photo', ctx);
+    frame(0);
+    const pebbles = instanceData(beams.pebbles);
+    expect(pebbles[0]!.length).toBeGreaterThan(0);
+    for (let i = 0; i < 300; i++) frame(0);
+    const b = beamFor(beams, ctx, op);
+    expect(b).toBeDefined();
+    expect(b!.fade).toBeGreaterThanOrEqual(0.999);
+    expect(glowsAt(beams, ctx)).toHaveLength(1);
+    expect(instanceData(beams.pebbles)).toEqual(pebbles);
+  });
+
+  it('Given a beam held through photo mode, When the game returns to flight (onModeChange photo → flight), Then it is the same beam: still at full fade the next frame (not fading in anew), and its pebbles are still in flight', () => {
+    const { beams, ctx, op, frame } = shooting();
+    (beams as GameModule).onModeChange?.('flight', 'photo', ctx);
+    for (let i = 0; i < 120; i++) frame(0);
+    (beams as GameModule).onModeChange?.('photo', 'flight', ctx);
+    frame();
+    // A beam claimed anew starts at fade ≈ (1/60) / BEAM_FADE_S ≈ 0.07.
+    expect(beamFor(beams, ctx, op)?.fade).toBeGreaterThanOrEqual(0.999);
+    expect(beamsDrawn(beams, ctx)).toHaveLength(1);
+    expect(drawnCount(beams.pebbles, ctx)).toBeGreaterThan(0);
+  });
+
+  it('Given a beam that went through photo mode and back, When the mode then leaves flight for the map, Then everything is dropped at once (photo leaves nothing behind)', () => {
+    const { mining, beams, ctx, frame } = shooting();
+    (beams as GameModule).onModeChange?.('flight', 'photo', ctx);
+    frame(0);
+    (beams as GameModule).onModeChange?.('photo', 'flight', ctx);
+    frame();
+    expect(drawCalls(ctx.scene)).toBeGreaterThan(0);
+    mining.clear(); // Mining ends the extraction when flight is left
+    (beams as GameModule).onModeChange?.('flight', 'map', ctx);
+    expect(drawCalls(ctx.scene)).toBe(0);
+  });
+});
