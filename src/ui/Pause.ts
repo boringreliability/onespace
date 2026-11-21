@@ -26,6 +26,7 @@ import {
   initialSyncNotice,
   pauseAccountView,
   pauseContextFor,
+  pauseControls,
   pauseStep,
   returnToOrbitLabel,
   syncNoticeStep,
@@ -79,28 +80,6 @@ export interface PauseOptions {
 }
 
 type PauseSync = NonNullable<PauseOptions['sync']>;
-
-const CONTROLS: ReadonlyArray<readonly [string, string]> = [
-  ['MOUSE · ARROWS', 'PITCH AND YAW'],
-  ['Q / E', 'ROLL'],
-  ['W / S · WHEEL', 'THROTTLE'],
-  ['X', 'THROTTLE ZERO'],
-  ['A D · R F', 'LATERAL · VERTICAL THRUST'],
-  ['SHIFT · SPACE', 'BOOST · BRAKE'],
-  ['Z', 'FLIGHT ASSIST'],
-  ['TAB', 'CYCLE TARGET'],
-  ['G', 'CRUISE'],
-  ['T', 'SCAN'],
-  ['M', 'CHART (WHEEL OUT FOR THE GALAXY)'],
-  ['J', 'JUMP TO THE CHARTED SYSTEM'],
-  ['C', 'CODEX'],
-  ['V', 'CAMERA'],
-  ['F2', 'SCREENSHOT'],
-  ['ESC', 'PAUSE'],
-  // [v2-p4]
-  ['L', 'AUTOPILOT — LAND · TO ORBIT'],
-  [', / .', 'TIME COMPRESSION (GROUND · STABLE ORBIT)'],
-];
 
 /** localStorage, or null where it is blocked (private windows, sandboxed frames). */
 function storage(): Storage | null {
@@ -412,7 +391,7 @@ export class Pause implements GameModule {
     // Controls. Built with textContent throughout — nothing here is HTML.
     const list = document.createElement('dl');
     list.className = 'os-pz-keys';
-    for (const [k, v] of CONTROLS) {
+    for (const [k, v] of pauseControls()) {
       const dt = document.createElement('dt');
       dt.textContent = k;
       const dd = document.createElement('dd');

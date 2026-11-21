@@ -17,14 +17,19 @@ import { shotOwnsScene } from '@/game/Shots';
 import type { Universe } from '@/game/Universe';
 import type { RecoveryCut } from '@/game/RecoveryCut';
 import type { Pause } from '@/ui/Pause';
+import type { AutopilotGoal } from '@/ship/autopilot';
 import {
   advisoryText,
   loadHintCounts,
+  miningHintFacts,
+  recordActionEnded,
+  recordApproach,
   recordMiningEnded,
   recordUse,
   saveHintCounts,
   type HintCounts,
   type KeyValueStore,
+  type MiningStatusLike,
   type RetirableHintId,
 } from '@/ui/hintRules';
 
@@ -43,8 +48,16 @@ export interface HintsOptions {
    * set it outranks every lesson: a dry tank is not a tutorial moment.
    */
   readonly emergency?: { readonly line: string | null };
-  /** [v4-mining] Whether an asteroid is targeted within mining range. */
-  readonly mining?: { readonly asteroidInRange: boolean };
+  /**
+   * [v4-mining] Whether an asteroid is targeted within mining range, and the
+   * mine/refine rows' status (plan 5 Task 8: the approach and refine lessons).
+   */
+  readonly mining?: {
+    readonly asteroidInRange: boolean;
+    status(kind: 'mine' | 'refine'): MiningStatusLike;
+  };
+  /** [v4-mining] The autopilot: the frame its goal becomes 'approach' counts towards the approach lesson. */
+  readonly autopilot?: { readonly goal: AutopilotGoal | null };
 }
 
 function storage(): KeyValueStore | null {
@@ -63,6 +76,7 @@ export class Hints implements GameModule {
   private hasTarget = false;
   private wasPaused = false;
   private throttleHeld = false;
+  private wasApproaching = false;
 
   private el: HTMLDivElement | null = null;
   private textEl: HTMLSpanElement | null = null;
@@ -108,16 +122,24 @@ export class Hints implements GameModule {
       }),
       // [v4-mining] an extraction that mined something counts towards retiring the 'mine' hint.
       bus.on('mining:ended', (e) => {
-        const next = recordMiningEnded(this.counts, e);
-        if (next === this.counts) return;
-        this.counts = next;
-        saveHintCounts(storage(), this.counts);
+        this.setCounts(recordMiningEnded(this.counts, e));
+      }),
+      // [v4-mining] a completed refine counts towards retiring the 'refine' hint.
+      bus.on('action:ended', (e) => {
+        this.setCounts(recordActionEnded(this.counts, e));
       }),
       // A new system means the old target is gone.
       bus.on('system:entered', () => {
         this.hasTarget = false;
       }),
     );
+  }
+
+  /** Keeps and saves `next` when a record function changed the counts. */
+  private setCounts(next: HintCounts): void {
+    if (next === this.counts) return;
+    this.counts = next;
+    saveHintCounts(storage(), this.counts);
   }
 
   private use(id: RetirableHintId): void {
@@ -139,6 +161,15 @@ export class Hints implements GameModule {
     if (input.pressed('cruise')) this.use('cruise');
     if (pause.isOpen && !this.wasPaused) this.use('pause');
     this.wasPaused = pause.isOpen;
+    // [v4-mining] an approach the autopilot actually started (not a refused L, not a landing).
+    const approaching = this.opts.autopilot?.goal === 'approach';
+    this.setCounts(recordApproach(this.counts, { wasApproaching: this.wasApproaching, approaching }));
+    this.wasApproaching = approaching;
+
+    const mining = this.opts.mining;
+    const facts = mining
+      ? miningHintFacts(mining.status('mine'), mining.status('refine'))
+      : { asteroidOutOfRange: false, refinable: false };
 
     const codexOpen = document.querySelector('.os-codex.is-live') !== null;
     // [v4-fuel] R16: the emergency line is `Emergency.line`, null unless
@@ -155,7 +186,10 @@ export class Hints implements GameModule {
             busy: warp.phase !== 'idle' || recovery.active,
             hasTarget: this.hasTarget,
             cruising: universe.flight.cruising,
-            asteroidInRange: this.opts.mining?.asteroidInRange ?? false,
+            asteroidInRange: mining?.asteroidInRange ?? false,
+            // Not while the autopilot already flies there: L again would hand back the controls.
+            asteroidOutOfRange: facts.asteroidOutOfRange && !approaching,
+            refinable: facts.refinable,
           },
           this.counts,
           this.opts.emergency?.line ?? null,

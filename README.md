@@ -58,6 +58,7 @@ once you have used it a couple of times.
 | `Space` | brake |
 | `Z` | flight assist on / off |
 | `Tab` | cycle target |
+| `K` | formation hold (flight assist on): hold speed relative to a targeted vessel or asteroid |
 | `G` | cruise drive (in-system) |
 | `T` | scan |
 | `M` | local chart; wheel out for the galaxy chart |
@@ -66,9 +67,16 @@ once you have used it a couple of times.
 | `V` | camera: chase → cockpit → orbit → cinematic |
 | `F2` | screenshot (saved as a PNG) |
 | `Esc` | pause: controls, mouse settings, quality, return to orbit |
+| `L` | autopilot: land, lift off to orbit, or — with an asteroid targeted — fly to it and park |
+| `,` / `.` | time compression (on the ground or in a stable orbit) |
+| `B` | mine the targeted asteroid (within 0.5 km, nearly at rest relative to it); `B` again stops |
+| `U` | refine the ice in the hold into propellant |
+| `N` | repair the tank (600 kg metal and 400 kg silicate restore 4 % of its capacity) |
+| `H`, then `1` / `2` / `3` | emergency exit, offered only with an empty tank: `1` cannibalizes the tank, `2` fires the beacon (the hold is jettisoned), `3` burns the cargo (from 1 000 kg) |
 
-`L` (land) is reserved for auto-land / lift-off and does nothing yet beyond
-stopping the cruise drive; set down by hand for now.
+Mining takes one resource per extraction, 150 kg a second, into an 8 000 kg
+hold, and stops by itself when the hold is full or the resource runs out. The
+pause sheet lists every key.
 
 Crashing, or flying into the star, fades to black and puts the ship back in a
 stable orbit, 0.6 radii above the nearest world, with the nose prograde. The
@@ -99,8 +107,9 @@ orbit reads 0G no matter how fast you are going.
 ## What it is
 
 You fly one ship through a universe generated on demand: galaxy → star system →
-planet → surface. There is no combat and no inventory. The loop is **travel,
-look, scan, log** — the reward is arriving somewhere no one has been and having
+planet → surface. There is no combat. The loop is **travel,
+look, scan, log** — with a hold to fill from the asteroid belts and a tank to
+keep topped up — and the reward is arriving somewhere no one has been and having
 the instruments tell you what it is.
 
 The tone is *Farscape* by way of 1940s film noir: hard shadows, amber

@@ -8,6 +8,8 @@
  */
 
 import type { SyncStatus } from '@/net/SyncClient';
+import { EMERGENCY_KEYS, MINING_KEYS } from '@/core/Input';
+import { FORMATION_KEY } from '@/ship/formation';
 import { signedInText, type AccountView } from './accountMenu';
 
 /** A keydown this soon after the pause opened is the same Esc, not a second one. */
@@ -61,6 +63,67 @@ export function pauseContextFor(s: {
 export function returnToOrbitLabel(hasTank: boolean, cargoKg = 0): string {
   if (!hasTank) return 'RETURN TO ORBIT';
   return cargoKg > 0 ? 'RETURN TO ORBIT · COSTS AS BEACON · LOSES CARGO' : 'RETURN TO ORBIT · COSTS AS BEACON';
+}
+
+// =============================================================================
+// v4 sub-plan 5, Task 8 — the sheet's key lines (DESIGN-5 §7.7). The keys that
+// live in a key map are read from it, not typed here, so a rebinding moves the
+// line with it. Pause.ts renders this list and keeps none of its own.
+// =============================================================================
+
+/** The key maps the sheet reads: `MINING_KEYS`, `EMERGENCY_KEYS` (core/Input) and `FORMATION_KEY` (ship/formation). */
+export interface PauseKeyMap {
+  readonly mining: { readonly mine: string; readonly refine: string; readonly repair: string };
+  readonly emergency: {
+    readonly open: string;
+    readonly cannibalize: string;
+    readonly beacon: string;
+    readonly cannibalizeCargo: string;
+  };
+  readonly formation: string;
+}
+
+const GAME_KEYS: PauseKeyMap = { mining: MINING_KEYS, emergency: EMERGENCY_KEYS, formation: FORMATION_KEY };
+
+/** What the sheet prints for a key code: the code without its Key / Digit prefix (as Emergency.ts writes it). */
+function keyLabel(code: string): string {
+  return code.replace(/^Key/, '').replace(/^Digit/, '');
+}
+
+/** The sheet's key lines, `[key, what it does]`; omitted `keys` = the game's own map. */
+export function pauseControls(keys: PauseKeyMap = GAME_KEYS): ReadonlyArray<readonly [string, string]> {
+  const { mining, emergency } = keys;
+  return [
+    ['MOUSE · ARROWS', 'PITCH AND YAW'],
+    ['Q / E', 'ROLL'],
+    ['W / S · WHEEL', 'THROTTLE'],
+    ['X', 'THROTTLE ZERO'],
+    ['A D · R F', 'LATERAL · VERTICAL THRUST'],
+    ['SHIFT · SPACE', 'BOOST · BRAKE'],
+    ['Z', 'FLIGHT ASSIST'],
+    ['TAB', 'CYCLE TARGET'],
+    [keyLabel(keys.formation), 'FORMATION HOLD'],
+    ['G', 'CRUISE'],
+    ['T', 'SCAN'],
+    ['M', 'CHART (WHEEL OUT FOR THE GALAXY)'],
+    ['J', 'JUMP TO THE CHARTED SYSTEM'],
+    ['C', 'CODEX'],
+    ['V', 'CAMERA'],
+    ['F2', 'SCREENSHOT'],
+    ['ESC', 'PAUSE'],
+    // [v2-p4]; [v4-mining] L also flies to a targeted rock.
+    ['L', 'AUTOPILOT — LAND · TO ORBIT · APPROACH TARGET'],
+    [', / .', 'TIME COMPRESSION (GROUND · STABLE ORBIT)'],
+    // [v4-mining]
+    [keyLabel(mining.mine), 'MINE (AGAIN TO STOP)'],
+    [keyLabel(mining.refine), 'REFINE ICE TO PROPELLANT'],
+    [keyLabel(mining.repair), 'REPAIR THE TANK'],
+    // [v4-fuel]
+    [
+      `${keyLabel(emergency.open)} · ${keyLabel(emergency.cannibalize)} / ${keyLabel(emergency.beacon)} / ${keyLabel(emergency.cannibalizeCargo)}`,
+      'EMERGENCY EXIT (EMPTY TANK)',
+    ],
+  ];
 }
 
 /** What the caller must do as a result. */

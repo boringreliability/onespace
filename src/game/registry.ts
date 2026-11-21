@@ -610,7 +610,7 @@ export async function registerModules(engine: Engine, progress: ProgressFn, boot
   const continueGame = (): void => {
     if (hasSave && continued && saveGame?.revision === continued.revision) saveGame.continueFrom(continued);
   };
-  await engine.add(new Hints({ universe, pause, recovery, warp, emergency, mining }));
+  await engine.add(new Hints({ universe, pause, recovery, warp, emergency, mining, autopilot }));
   // --- end track D -------------------------------------------------------------
 
   progress(0.88, 'assembling gallery');

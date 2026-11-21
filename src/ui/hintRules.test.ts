@@ -111,7 +111,7 @@ describe('review-p1: hints outside flight and pinned constants', () => {
   });
 
   it('Given the retirement limits, Then they are fly 3 and every other hint 2 (pinned, not read back)', () => {
-    expect(HINT_RETIRE_AFTER).toEqual({ fly: 3, cruise: 2, scan: 2, chart: 2, pause: 2, mine: 2 });
+    expect(HINT_RETIRE_AFTER).toEqual({ fly: 3, cruise: 2, scan: 2, chart: 2, pause: 2, mine: 2, approach: 2, refine: 2 });
   });
 
   it('Given fly used twice, Then fly is still advised; three times, Then it is not', () => {
