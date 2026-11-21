@@ -451,7 +451,7 @@ describe('mine refusals — logged, nothing started', () => {
     }
   });
 
-  it('Given cruise or a warp, When B, Then "BUSY"', () => {
+  it('Given cruise or a warp, When B, Then "IN CRUISE" / "IN JUMP"', () => {
     const r = rig();
     r.cruise.busy = true;
     r.press(MINING_KEYS.mine);
@@ -459,7 +459,7 @@ describe('mine refusals — logged, nothing started', () => {
     r.warp.phase = 'charging';
     r.press(MINING_KEYS.mine);
     expect(r.mining.busy).toBeNull();
-    expect(r.logs).toEqual(['BUSY', 'BUSY']);
+    expect(r.logs).toEqual(['IN CRUISE', 'IN JUMP']);
   });
 
   it('Given paused or frozen, When B/U/N, Then the keys do nothing — not even a log', () => {
@@ -1242,7 +1242,7 @@ describe('status(kind) — what the HUD reads', () => {
     });
   }
 
-  it('Given cruise or a jump, When B, Then the log still says "BUSY" (unchanged) while status says cruise / jump', () => {
+  it('Given cruise or a jump, When B, Then the log says IN CRUISE / IN JUMP, as status and the row do', () => {
     const r = rig();
     r.cruise.busy = true;
     r.press(MINING_KEYS.mine);
@@ -1251,7 +1251,7 @@ describe('status(kind) — what the HUD reads', () => {
     r.warp.phase = 'charging';
     r.press(MINING_KEYS.mine);
     expect(r.mining.status('mine')).toEqual({ kind: 'blocked', reason: 'jump' });
-    expect(r.logs).toEqual(['BUSY', 'BUSY']);
+    expect(r.logs).toEqual(['IN CRUISE', 'IN JUMP']);
   });
 
   it('Given a refine running, Then status(mine) is blocked busy (another action is running)', () => {
@@ -1774,18 +1774,12 @@ describe('refine and repair are announced: action:started and action:ended (plan
 // photo has `frozen === true` (Pause is registered before Mining). On the way
 // back: `onModeChange('photo', 'flight')`, then `frozen === false`.
 //
-// Wanted (controller's recommendation; the owner decides): an extraction is
-// HELD in photo — not ended, nothing mined, the clock frozen — and carries on
-// as the same extraction back in flight (no second mining:started, no
-// mining:ended in between), so the beam can be photographed. A refine or
-// repair in photo does what pause does to it today: it aborts
-// (REFINING / REPAIR ABORTED, one action:ended ok:false). Leaving flight for
-// map, Yard or title, and a freeze WITHOUT the photo overlay (a recovery cut),
-// still end the extraction exactly as today.
-//
-// Note: pause does NOT hold an extraction today — it ends it 'interrupted'
-// (the enders table above, DESIGN-5 §7.1 line 90). Photo is pinned to differ
-// from pause for the extraction, and to match it for refine / repair.
+// The owner chose (2026-11-21, D53) that photo stays as pause: entering it
+// ends an extraction (interrupted) and aborts a refine or repair, so the beam
+// cannot be photographed. The guards below pin the rest around it: leaving
+// flight for Yard or title still ends an extraction at once, a trip through
+// photo leaves nothing that would keep one alive into the map, and a refine or
+// repair in photo aborts exactly as on pause.
 //
 // M-3 (DESIGN-5 §7.3): `BUSY` means only "another action is running". A
 // press refused because of cruise or a jump logs what the action row shows
@@ -1793,7 +1787,7 @@ describe('refine and repair are announced: action:started and action:ended (plan
 // `IN JUMP` — for B, U and N alike.
 // ===========================================================================
 
-describe('photo mode holds an extraction (plan 5 final review I-2)', () => {
+describe('photo mode, Yard and title end what runs, as pause does (plan 5 final review I-2)', () => {
   type R = ReturnType<typeof rig>;
   /** P as the game does it: the overlay goes up, then Pause freezes the world every frame in photo. */
   const enterPhoto = (r: R): void => {
@@ -1817,89 +1811,6 @@ describe('photo mode holds an extraction (plan 5 final review I-2)', () => {
     expect(r.ended).toEqual([]);
     return r;
   };
-
-  it('Given an extraction 2 s in, When photo mode goes up (onModeChange flight → photo), Then at once it is still running, nothing is logged and no mining:ended comes', () => {
-    const r = twoSecondsIn();
-    r.mining.onModeChange?.('flight', 'photo');
-    expect(r.mining.status('mine').kind).toBe('running');
-    expect(r.mining.operations).toHaveLength(1);
-    expect(r.logs).toEqual([]);
-    expect(r.ended).toEqual([]);
-  });
-
-  it('Given an extraction 2 s in, When 300 frames pass in photo (world frozen, sim clock 0), Then it is still running on the same rock with its operation (the beam), and nothing is mined: no bite, no cargo:action, no recordMined, shownKg unchanged', () => {
-    const r = twoSecondsIn();
-    const shown = r.mining.status('mine').shownKg;
-    const iceInRock = r.belt.remainingKg(r.ast.id, 'ice');
-    enterPhoto(r);
-    r.tick(300);
-    expect(r.world.simulatedSeconds).toBe(0); // the rig's frozen world: no sim time passes
-    expect(r.mining.status('mine').kind).toBe('running');
-    expect(r.mining.status('mine').shownKg).toBe(shown);
-    expect(r.mining.operations).toHaveLength(1);
-    expect(r.mining.operations[0]!.asteroidId).toBe(r.ast.id);
-    expect(r.cargo.kg('ice')).toBe(250);
-    expect(r.bites).toHaveLength(1);
-    expect(r.actions).toHaveLength(1);
-    expect(r.worldState.entries()).toHaveLength(1);
-    expect(r.belt.remainingKg(r.ast.id, 'ice')).toBe(iceInRock);
-    expect(r.logs).toEqual([]);
-    expect(r.ended).toEqual([]);
-  });
-
-  it('Given an extraction held 300 frames in photo, When the game returns to flight, Then the SAME extraction carries on from where it stood: no second mining:started, no mining:ended in between, and the next bite lands after the 202.5 kg it still lacked (not sooner, not later)', () => {
-    const r = twoSecondsIn();
-    enterPhoto(r);
-    r.tick(300);
-    leavePhoto(r);
-    r.tick(78); // 47.5 + 195 = 242.5 kg: no second bite yet
-    expect(r.mining.status('mine').kind).toBe('running');
-    expect(r.cargo.kg('ice')).toBe(250);
-    r.tick(6); // 47.5 + 210 = 257.5 kg: the second bite has landed
-    expect(r.cargo.kg('ice')).toBe(500);
-    expect(r.bites.map((b) => b.kg)).toEqual([250, 250]);
-    expect(r.started).toEqual([{ asteroidId: r.ast.id, resource: 'ice' }]);
-    expect(r.ended).toEqual([]);
-    expect(r.logs).toEqual([]);
-    expect(r.mining.status('mine').kind).toBe('running');
-  });
-
-  it('Given an extraction held in photo and resumed, When B stops it in flight, Then one mining:ended "stopped" counts every bite, the ones before and after photo', () => {
-    const r = twoSecondsIn();
-    enterPhoto(r);
-    r.tick(120);
-    leavePhoto(r);
-    r.tick(100); // 47.5 + 250 = 297.5 kg: one more bite
-    r.press(MINING_KEYS.mine);
-    expect(r.ended).toEqual([{ asteroidId: r.ast.id, resource: 'ice', minedKg: 500, end: 'stopped' }]);
-    expect(r.logs).toEqual([extractionLog('stopped', 500, 'ice')]);
-    expect(r.started).toHaveLength(1);
-  });
-
-  it('Given an extraction held in photo, When B arrives while the world is frozen, Then it says nothing and stops nothing (the keys are silent while frozen, as today)', () => {
-    const r = twoSecondsIn();
-    enterPhoto(r);
-    r.tick();
-    r.press(MINING_KEYS.mine);
-    r.tick(10);
-    expect(r.mining.status('mine').kind).toBe('running');
-    expect(r.logs).toEqual([]);
-    expect(r.ended).toEqual([]);
-  });
-
-  it('Given an extraction that went through photo and back, When the world is then frozen without the overlay (a recovery cut), Then it ends interrupted as before (photo leaves nothing behind)', () => {
-    const r = twoSecondsIn();
-    enterPhoto(r);
-    r.tick(30);
-    leavePhoto(r);
-    r.tick();
-    expect(r.mining.status('mine').kind).toBe('running');
-    r.world.frozen = true;
-    r.tick();
-    expect(r.mining.status('mine').kind).not.toBe('running');
-    expect(r.ended).toEqual([{ asteroidId: r.ast.id, resource: 'ice', minedKg: 250, end: 'interrupted' }]);
-    expect(r.logs).toEqual([extractionLog('interrupted', 250, 'ice')]);
-  });
 
   // Guard: leaving flight for a BASE mode still ends the extraction at once (map is pinned in 'more clean aborts (R18)').
   for (const to of ['yard', 'title'] as const) {

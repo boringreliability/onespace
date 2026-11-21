@@ -25,6 +25,9 @@
  * false on every abort, a lost tank or hold, or a refused completion). A
  * refusal at the press announces nothing; dispose() announces nothing, as for an extraction.
  *
+ * A press refused because of cruise or a jump logs what the action row shows
+ * (`IN CRUISE` / `IN JUMP`, OCCUPIED_TEXT); `BUSY` means another action runs.
+ *
  * Paused or frozen, the keys are silent. A hull without a tank or a hold is
  * inert. update() allocates nothing on a frame without a bite (a bite's
  * cargo action and bus payloads are new objects: the journal keeps them).
@@ -52,6 +55,7 @@ import {
   MINE_MAX_REL_KMS,
   MINE_MIN_KG,
   MINE_RANGE_KM,
+  OCCUPIED_TEXT,
   REFINE_ACTION_S,
   REFINING_ABORTED_TEXT,
   REFUSAL_LOG,
@@ -325,8 +329,12 @@ export class Mining implements GameModule {
   }
 
   /**
-   * Gated to flight (game/gating.ts). A module that sleeps does not update, so
-   * an extraction ends (interrupted) and a refine or repair is aborted.
+   * Gated to flight (game/gating.ts). Leaving flight for map, Yard or title
+   * puts this module to sleep (core/tick.ts `moduleDt` returns -1); the photo
+   * overlay does not, it ticks with dt = 0 while Pause freezes the world. In
+   * every case the extraction is ended here (interrupted) and a refine or
+   * repair aborted, at the mode change: photo (P) ends them as pause does, so
+   * the beam is out before the picture is taken (D53).
    */
   onModeChange(_from: Mode, to: Mode): void {
     if (to === 'flight') return;
@@ -548,6 +556,11 @@ export class Mining implements GameModule {
     }
     if (this.active || this.ext) {
       this.log(REFUSAL_LOG.busy, 'warn');
+      return;
+    }
+    // Cruise or a jump: the log says what the row says (status() ranks them the same way).
+    if (this.gate.cruise || this.gate.warpPhase !== 'idle') {
+      this.log(this.gate.cruise ? OCCUPIED_TEXT.cruise : OCCUPIED_TEXT.jump, 'warn');
       return;
     }
     let refusal: MiningRefusal | null;

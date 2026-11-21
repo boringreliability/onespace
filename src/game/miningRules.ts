@@ -135,6 +135,13 @@ export const REFUSAL_LOG: Readonly<Record<MiningRefusal, string>> = {
   invalid: 'INVALID AMOUNT',
 };
 
+/**
+ * What a press refused for cruise or a jump logs, and what the action row
+ * shows for those two states (DESIGN-5 §7.3): `BUSY` means only that another
+ * action is running. Not refusals of the gate (`mayMine` says 'busy' for both).
+ */
+export const OCCUPIED_TEXT = { cruise: 'IN CRUISE', jump: 'IN JUMP' } as const;
+
 /** The next key for a refusal the player can act on. */
 export const ACTION_HINT: Readonly<Partial<Record<MiningRefusal, string>>> = {
   range: 'L TO APPROACH',

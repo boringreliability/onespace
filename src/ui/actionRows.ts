@@ -23,7 +23,7 @@
 import { MINING_KEYS } from '@/core/Input';
 import type { Resource } from '@/gen/belt';
 import type { ActionState, MiningKind } from '@/game/Mining';
-import { ACTION_HINT, REFUSAL_LOG, formatKg, type MiningRefusal } from '@/game/miningRules';
+import { ACTION_HINT, OCCUPIED_TEXT, REFUSAL_LOG, formatKg, type MiningRefusal } from '@/game/miningRules';
 
 export type ActionLabel = 'MINE' | 'REFINE' | 'REPAIR';
 export type ActionTone = 'ready' | 'blocked' | 'running';
@@ -54,10 +54,10 @@ const KEY: Readonly<Record<MiningKind, string>> = {
 
 const RESOURCE_NAME: Readonly<Record<Resource, string>> = { ice: 'ICE', metal: 'METAL', silicate: 'SILICATE', rare: 'RARE' };
 
-/** Row texts that are not the log line: cruise and jump have none, insufficient is too long for the panel. */
+/** Row texts that are not a REFUSAL_LOG line: cruise and jump log OCCUPIED_TEXT, insufficient is too long for the panel. */
 const OVERRIDE: Readonly<Partial<Record<BlockedReason, string>>> = {
-  cruise: 'IN CRUISE',
-  jump: 'IN JUMP',
+  cruise: OCCUPIED_TEXT.cruise,
+  jump: OCCUPIED_TEXT.jump,
   insufficient: 'NEED METAL · SILICATE',
 };
 

@@ -83,9 +83,10 @@ describe('the action feed follows Mining', () => {
 
 // Plan 5 final review, fix round (phase A) — I-2. Photo is an overlay: under
 // it Mining and its beam are NOT asleep — they tick with dt = 0 — and Pause
-// ticks too (it is what freezes the world while an overlay is up). Mining's
-// and MiningBeams' "photo holds the extraction / keeps the beam" tests rest
-// on exactly this; leaving flight for a base mode puts both to sleep.
+// ticks too (it is what freezes the world while an overlay is up). So the
+// extraction and the beam do not end in photo by sleeping: Mining and
+// MiningBeams end them in `onModeChange` (D53, photo stays as pause); leaving
+// flight for a base mode puts both to sleep.
 describe('photo over flight: Mining and its beam stand still, they do not sleep (plan 5 final review I-2)', () => {
   const dtIn = (name: string, base: BaseMode, overlay: 'photo' | null): number =>
     moduleDt({ activeIn: MODULE_MODES[name] }, { base, overlay }, 1 / 60);

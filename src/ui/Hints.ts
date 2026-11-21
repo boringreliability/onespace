@@ -169,7 +169,7 @@ export class Hints implements GameModule {
     const mining = this.opts.mining;
     const facts = mining
       ? miningHintFacts(mining.status('mine'), mining.status('refine'))
-      : { asteroidOutOfRange: false, refinable: false };
+      : { asteroidOutOfRange: false, refinable: false, minable: false };
 
     const codexOpen = document.querySelector('.os-codex.is-live') !== null;
     // [v4-fuel] R16: the emergency line is `Emergency.line`, null unless
@@ -187,6 +187,8 @@ export class Hints implements GameModule {
             hasTarget: this.hasTarget,
             cruising: universe.flight.cruising,
             asteroidInRange: mining?.asteroidInRange ?? false,
+            // B — MINE only when B would start an extraction (not stop one, not be refused).
+            minable: facts.minable,
             // Not while the autopilot already flies there: L again would hand back the controls.
             asteroidOutOfRange: facts.asteroidOutOfRange && !approaching,
             refinable: facts.refinable,

@@ -68,6 +68,12 @@ export interface HintState {
   readonly asteroidOutOfRange?: boolean;
   /** [v4-mining] A refine would run now: ice aboard, room in the tank (`miningHintFacts`). */
   readonly refinable?: boolean;
+  /**
+   * [v4-mining] The mine key would start an extraction now: the mine row
+   * 'ready' (`miningHintFacts`). `false` keeps the mine lesson off (an
+   * extraction running, a full hold); left out, `asteroidInRange` alone decides.
+   */
+  readonly minable?: boolean;
 }
 
 export const HINT_COUNTS_KEY = 'os.hints.v1';
@@ -126,25 +132,27 @@ export type MiningStatusLike =
   | { readonly kind: 'blocked'; readonly reason: string };
 
 /**
- * [v4-mining] The two lesson facts from `Mining.status`: out of range is the
+ * [v4-mining] The lesson facts from `Mining.status`: out of range is the
  * mine row blocked for 'range' (the row's OUT OF RANGE — L TO APPROACH);
- * refinable is the refine row 'ready', so the line never says U when U would
- * be refused.
+ * minable is the mine row 'ready' and refinable the refine row 'ready', so the
+ * line never says B or U when that key would be refused or would stop an
+ * extraction.
  */
 export function miningHintFacts(
   mine: MiningStatusLike,
   refine: MiningStatusLike,
-): { asteroidOutOfRange: boolean; refinable: boolean } {
+): { asteroidOutOfRange: boolean; refinable: boolean; minable: boolean } {
   return {
     asteroidOutOfRange: mine.kind === 'blocked' && mine.reason === 'range',
     refinable: refine.kind === 'ready',
+    minable: mine.kind === 'ready',
   };
 }
 
 export function selectHint(state: HintState, counts: HintCounts): HintId | null {
   if (!state.inFlight || state.overlayOpen || state.paused || state.busy) return null;
   if (!state.pointerLocked) return 'click';
-  if (state.asteroidInRange === true && !isRetired(counts, 'mine')) return 'mine';
+  if (state.asteroidInRange === true && state.minable !== false && !isRetired(counts, 'mine')) return 'mine';
   if (state.asteroidOutOfRange === true && !isRetired(counts, 'approach')) return 'approach';
   if (state.refinable === true && !isRetired(counts, 'refine')) return 'refine';
   if (!isRetired(counts, 'fly')) return 'fly';
