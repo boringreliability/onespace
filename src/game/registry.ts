@@ -57,7 +57,7 @@ import { Dust } from '@/render/Dust';
 import { FlightSense } from '@/game/FlightSense';
 import { Belt } from '@/game/Belt'; // [v4-mining]
 import { WorldState } from '@/game/worldState'; // [v4-mining]
-import { Asteroids } from '@/render/Asteroids'; // [v4-mining]
+import { Asteroids, registerAsteroidShots } from '@/render/Asteroids'; // [v4-mining]
 import { selectionFromRoute, toShipParams } from '@/game/showroom/catalog';
 // -----------------------------------------------------------------------------
 import { RecoveryCut } from '@/game/RecoveryCut';
@@ -499,7 +499,8 @@ export async function registerModules(engine: Engine, progress: ProgressFn, boot
   // likewise, and its altitude replaces the sphere one Pilot just published.
   // [v4-mining] The rocks themselves: after the Belt (its memo is current) and
   // after Universe (the origin has already rebased this frame).
-  await engine.add(new Asteroids({ belt, universe }));
+  const asteroids = new Asteroids({ belt, universe });
+  await engine.add(asteroids);
   const targeting = new Targeting({ universe, traffic, hud, belt });
   await engine.add(targeting);
   // -- v3 T4: drive field → sky, silent events → audio, K formation ----------
@@ -653,6 +654,7 @@ export async function registerModules(engine: Engine, progress: ProgressFn, boot
   registerPostFXShots(postfx);
   registerStarShots();
   registerPlanetShots();
+  registerAsteroidShots(asteroids); // [v4-mining] plan 5 task 5: wear and break-up
   registerHudShots(hud);
   registerWarpShots(warp);
   registerCameraShots(pilot.rig);
