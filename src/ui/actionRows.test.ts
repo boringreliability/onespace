@@ -12,7 +12,7 @@ import { MINING_KEYS } from '@/core/Input';
 import type { ActionState, MiningKind } from '@/game/Mining';
 import { ACTION_HINT, REFUSAL_LOG, formatKg, type MiningRefusal } from '@/game/miningRules';
 import { CARGO_CAPACITY_KG } from '@/ship/cargo';
-import { actionRow } from './actionRows';
+import { actionRow, actionRows, speedTone } from './actionRows';
 
 type Blocked = Extract<ActionState, { kind: 'blocked' }>;
 type BlockedReason = Blocked['reason'];
@@ -231,5 +231,36 @@ describe('actionRow — width', () => {
     const longest = Math.max(...texts.map((t) => t.length));
     expect(longest).toBe(28);
     expect(texts.filter((t) => t.length === longest)).toEqual(['OUT OF RANGE — L TO APPROACH', 'OUT OF RANGE — L TO APPROACH', 'OUT OF RANGE — L TO APPROACH']);
+  });
+});
+
+// The HUD's DOM has no unit tests (vitest runs in node, no DOM): what feeds it
+// is kept pure and tested here; the look is checked on screenshots at 1280×700.
+describe('actionRows — the three rows the HUD is handed each frame', () => {
+  it('Given a status source, Then the rows are mine, refine, repair in that order, each built by actionRow', () => {
+    const states: Record<MiningKind, ActionState> = { mine: mining(1240, 'ice', 0.4), refine: blocked('nothing-to-refine'), repair: ready };
+    const asked: MiningKind[] = [];
+    const rows = actionRows((k) => {
+      asked.push(k);
+      return states[k];
+    });
+    expect(asked).toEqual(['mine', 'refine', 'repair']);
+    expect(rows).toHaveLength(3);
+    expect(rows.map((r) => r.label)).toEqual(['MINE', 'REFINE', 'REPAIR']);
+    for (let i = 0; i < 3; i++) expect(rows[i]).toEqual(actionRow(KINDS[i]!, states[KINDS[i]!]));
+  });
+});
+
+describe('speedTone — VEL says when the ship is slow enough to mine', () => {
+  it('Given a rock targeted and speed within the limit, Then "ok"', () => {
+    expect(speedTone(true)).toBe('ok');
+  });
+
+  it('Given a rock targeted and too much speed, Then "normal"', () => {
+    expect(speedTone(false)).toBe('normal');
+  });
+
+  it('Given no rock targeted (null), Then "normal"', () => {
+    expect(speedTone(null)).toBe('normal');
   });
 });
