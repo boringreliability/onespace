@@ -1,0 +1,4106 @@
+{
+ "format": 1,
+ "saveId": "3f9c2b1e-7a4d-4e8b-9c61-2d5f0a8e7b14",
+ "universeId": "gx-1mwhji:v1",
+ "revision": 41,
+ "savedAt": {
+  "wallMs": 1762897811000,
+  "orbitSeconds": 10023
+ },
+ "player": {
+  "system": {
+   "id": "gx-1mwhji--377.-3.266.1",
+   "seed": 785987357,
+   "name": "Fyss",
+   "positionLy": [
+    -5267.702264680527,
+    -31.999891466926783,
+    3734.344962382689
+   ]
+  },
+  "parentId": "gx-1mwhji--377.-3.266.1:p2",
+  "flight": {
+   "position": [
+    10344.5,
+    -212.75,
+    4120.125
+   ],
+   "velocity": [
+    -1.25,
+    0.03125,
+    7.5
+   ],
+   "orientation": [
+    0.5,
+    -0.5,
+    0.5,
+    0.5
+   ],
+   "grounded": false,
+   "flightAssist": true
+  }
+ },
+ "ship": {
+  "propellant": {
+   "massKg": 12600,
+   "capacityLossFrac": 0.19399999999999998
+  },
+  "cargo": {
+   "ice": 0,
+   "metal": 1400,
+   "silicate": 900,
+   "rare": 6
+  },
+  "emergencyTimesUsed": 2
+ },
+ "log": {
+  "time": 5412.25,
+  "entries": [
+   {
+    "key": "sys:gx-1mwhji--377.-3.266.1",
+    "kind": "arrival",
+    "at": 0,
+    "system": "Fyss",
+    "title": "Fyss",
+    "body": [
+     "K · 8 worlds",
+     "a quiet orange star with a working belt."
+    ],
+    "visits": 1
+   },
+   {
+    "key": "scan:gx-1mwhji--377.-3.266.1:p2",
+    "kind": "world",
+    "at": 42.5,
+    "system": "Fyss",
+    "title": "Remit 31 / Fyss",
+    "body": [
+     "terrestrial · 0.097 AU",
+     "a mining charter's world; the lights never go out."
+    ],
+    "visits": 2
+   },
+   {
+    "key": "land:gx-1mwhji--377.-3.266.1:p2",
+    "kind": "landing",
+    "at": 610,
+    "system": "Fyss",
+    "title": "Remit 31 / Fyss — surface",
+    "body": [
+     "touchdown at 0.4 m/s."
+    ],
+    "visits": 1
+   },
+   {
+    "key": "scan:ast:gx-1mwhji--377.-3.266.1:398:12",
+    "kind": "note",
+    "at": 3120.75,
+    "system": "Fyss",
+    "title": "Rock 398-12",
+    "body": [
+     "ice 61% · metal 22% · silicate 16% · rare 1%",
+     "taken: 1 200 kg"
+    ],
+    "visits": 3
+   }
+  ]
+ },
+ "world": {
+  "universeId": "gx-1mwhji:v1",
+  "entries": [
+   {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "ice",
+    "kg": 40000,
+    "wallMs": 1762897810000,
+    "orbitSeconds": 10022
+   },
+   {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "metal",
+    "kg": 56000,
+    "wallMs": 1762897810000,
+    "orbitSeconds": 10022
+   },
+   {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "silicate",
+    "kg": 36000,
+    "wallMs": 1762897810000,
+    "orbitSeconds": 10022
+   },
+   {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "rare",
+    "kg": 240,
+    "wallMs": 1762897810000,
+    "orbitSeconds": 10022
+   }
+  ]
+ },
+ "actions": [
+  {
+   "seq": 752,
+   "source": "checkpoint",
+   "payload": {
+    "upToSeq": 752,
+    "tankNetKg": 600,
+    "capacityLossNetFrac": 0.09999999999999998,
+    "cargoNetKg": {
+     "ice": 0,
+     "metal": 0,
+     "silicate": 0,
+     "rare": 0
+    },
+    "minedByAsteroid": {
+     "ast:gx-1mwhji--377.-3.266.1:398:12": {
+      "ice": 30000,
+      "metal": 42000,
+      "silicate": 0,
+      "rare": 0
+     },
+     "ast:gx-1mwhji--377.-3.266.1:398:4": {
+      "ice": 0,
+      "metal": 0,
+      "silicate": 27000,
+      "rare": 180
+     }
+    },
+    "emergency": {
+     "cannibalize": 1,
+     "cannibalizeCargo": 0,
+     "beacon": 0
+    },
+    "lastCannibalizeTimesUsed": 2
+   },
+   "wallMs": 1762895320000,
+   "orbitSeconds": 7532
+  },
+  {
+   "seq": 753,
+   "wallMs": 1762895330000,
+   "orbitSeconds": 7542,
+   "source": "thrust",
+   "payload": {
+    "kg": 400
+   }
+  },
+  {
+   "seq": 754,
+   "wallMs": 1762895340000,
+   "orbitSeconds": 7552,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "ice",
+     "kg": 500
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 500,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 755,
+   "wallMs": 1762895350000,
+   "orbitSeconds": 7562,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "ice",
+    "kg": 500
+   }
+  },
+  {
+   "seq": 756,
+   "wallMs": 1762895360000,
+   "orbitSeconds": 7572,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "metal",
+     "kg": 700
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 700,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 757,
+   "wallMs": 1762895370000,
+   "orbitSeconds": 7582,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "metal",
+    "kg": 700
+   }
+  },
+  {
+   "seq": 758,
+   "wallMs": 1762895380000,
+   "orbitSeconds": 7592,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "silicate",
+     "kg": 450
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 450,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 759,
+   "wallMs": 1762895390000,
+   "orbitSeconds": 7602,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "silicate",
+    "kg": 450
+   }
+  },
+  {
+   "seq": 760,
+   "wallMs": 1762895400000,
+   "orbitSeconds": 7612,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "rare",
+     "kg": 3
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 3,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 761,
+   "wallMs": 1762895410000,
+   "orbitSeconds": 7622,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "rare",
+    "kg": 3
+   }
+  },
+  {
+   "seq": 762,
+   "wallMs": 1762895420000,
+   "orbitSeconds": 7632,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "refine"
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 0,
+     "kgOut": 500,
+     "fuelKg": 400,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 763,
+   "wallMs": 1762895430000,
+   "orbitSeconds": 7642,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "cruise-spool"
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": -60
+   }
+  },
+  {
+   "seq": 764,
+   "wallMs": 1762895440000,
+   "orbitSeconds": 7652,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "spool-refund",
+     "kg": 60
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": 60
+   }
+  },
+  {
+   "seq": 765,
+   "wallMs": 1762895450000,
+   "orbitSeconds": 7662,
+   "source": "thrust",
+   "payload": {
+    "kg": 400
+   }
+  },
+  {
+   "seq": 766,
+   "wallMs": 1762895460000,
+   "orbitSeconds": 7672,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "ice",
+     "kg": 500
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 500,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 767,
+   "wallMs": 1762895470000,
+   "orbitSeconds": 7682,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "ice",
+    "kg": 500
+   }
+  },
+  {
+   "seq": 768,
+   "wallMs": 1762895480000,
+   "orbitSeconds": 7692,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "metal",
+     "kg": 700
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 700,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 769,
+   "wallMs": 1762895490000,
+   "orbitSeconds": 7702,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "metal",
+    "kg": 700
+   }
+  },
+  {
+   "seq": 770,
+   "wallMs": 1762895500000,
+   "orbitSeconds": 7712,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "silicate",
+     "kg": 450
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 450,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 771,
+   "wallMs": 1762895510000,
+   "orbitSeconds": 7722,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "silicate",
+    "kg": 450
+   }
+  },
+  {
+   "seq": 772,
+   "wallMs": 1762895520000,
+   "orbitSeconds": 7732,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "rare",
+     "kg": 3
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 3,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 773,
+   "wallMs": 1762895530000,
+   "orbitSeconds": 7742,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "rare",
+    "kg": 3
+   }
+  },
+  {
+   "seq": 774,
+   "wallMs": 1762895540000,
+   "orbitSeconds": 7752,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "refine"
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 0,
+     "kgOut": 500,
+     "fuelKg": 400,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 775,
+   "wallMs": 1762895550000,
+   "orbitSeconds": 7762,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "cruise-spool"
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": -60
+   }
+  },
+  {
+   "seq": 776,
+   "wallMs": 1762895560000,
+   "orbitSeconds": 7772,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "spool-refund",
+     "kg": 60
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": 60
+   }
+  },
+  {
+   "seq": 777,
+   "wallMs": 1762895570000,
+   "orbitSeconds": 7782,
+   "source": "thrust",
+   "payload": {
+    "kg": 400
+   }
+  },
+  {
+   "seq": 778,
+   "wallMs": 1762895580000,
+   "orbitSeconds": 7792,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "ice",
+     "kg": 500
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 500,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 779,
+   "wallMs": 1762895590000,
+   "orbitSeconds": 7802,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "ice",
+    "kg": 500
+   }
+  },
+  {
+   "seq": 780,
+   "wallMs": 1762895600000,
+   "orbitSeconds": 7812,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "metal",
+     "kg": 700
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 700,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 781,
+   "wallMs": 1762895610000,
+   "orbitSeconds": 7822,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "metal",
+    "kg": 700
+   }
+  },
+  {
+   "seq": 782,
+   "wallMs": 1762895620000,
+   "orbitSeconds": 7832,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "silicate",
+     "kg": 450
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 450,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 783,
+   "wallMs": 1762895630000,
+   "orbitSeconds": 7842,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "silicate",
+    "kg": 450
+   }
+  },
+  {
+   "seq": 784,
+   "wallMs": 1762895640000,
+   "orbitSeconds": 7852,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "rare",
+     "kg": 3
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 3,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 785,
+   "wallMs": 1762895650000,
+   "orbitSeconds": 7862,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "rare",
+    "kg": 3
+   }
+  },
+  {
+   "seq": 786,
+   "wallMs": 1762895660000,
+   "orbitSeconds": 7872,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "refine"
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 0,
+     "kgOut": 500,
+     "fuelKg": 400,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 787,
+   "wallMs": 1762895670000,
+   "orbitSeconds": 7882,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "cruise-spool"
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": -60
+   }
+  },
+  {
+   "seq": 788,
+   "wallMs": 1762895680000,
+   "orbitSeconds": 7892,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "spool-refund",
+     "kg": 60
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": 60
+   }
+  },
+  {
+   "seq": 789,
+   "wallMs": 1762895690000,
+   "orbitSeconds": 7902,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "repair"
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 0,
+     "kgOut": 1000,
+     "fuelKg": 0,
+     "restoredFrac": 0.001
+    }
+   }
+  },
+  {
+   "seq": 790,
+   "wallMs": 1762895700000,
+   "orbitSeconds": 7912,
+   "source": "thrust",
+   "payload": {
+    "kg": 400
+   }
+  },
+  {
+   "seq": 791,
+   "wallMs": 1762895710000,
+   "orbitSeconds": 7922,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "ice",
+     "kg": 500
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 500,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 792,
+   "wallMs": 1762895720000,
+   "orbitSeconds": 7932,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "ice",
+    "kg": 500
+   }
+  },
+  {
+   "seq": 793,
+   "wallMs": 1762895730000,
+   "orbitSeconds": 7942,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "metal",
+     "kg": 700
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 700,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 794,
+   "wallMs": 1762895740000,
+   "orbitSeconds": 7952,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "metal",
+    "kg": 700
+   }
+  },
+  {
+   "seq": 795,
+   "wallMs": 1762895750000,
+   "orbitSeconds": 7962,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "silicate",
+     "kg": 450
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 450,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 796,
+   "wallMs": 1762895760000,
+   "orbitSeconds": 7972,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "silicate",
+    "kg": 450
+   }
+  },
+  {
+   "seq": 797,
+   "wallMs": 1762895770000,
+   "orbitSeconds": 7982,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "rare",
+     "kg": 3
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 3,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 798,
+   "wallMs": 1762895780000,
+   "orbitSeconds": 7992,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "rare",
+    "kg": 3
+   }
+  },
+  {
+   "seq": 799,
+   "wallMs": 1762895790000,
+   "orbitSeconds": 8002,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "refine"
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 0,
+     "kgOut": 500,
+     "fuelKg": 400,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 800,
+   "wallMs": 1762895800000,
+   "orbitSeconds": 8012,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "cruise-spool"
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": -60
+   }
+  },
+  {
+   "seq": 801,
+   "wallMs": 1762895810000,
+   "orbitSeconds": 8022,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "spool-refund",
+     "kg": 60
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": 60
+   }
+  },
+  {
+   "seq": 802,
+   "wallMs": 1762895820000,
+   "orbitSeconds": 8032,
+   "source": "thrust",
+   "payload": {
+    "kg": 400
+   }
+  },
+  {
+   "seq": 803,
+   "wallMs": 1762895830000,
+   "orbitSeconds": 8042,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "ice",
+     "kg": 500
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 500,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 804,
+   "wallMs": 1762895840000,
+   "orbitSeconds": 8052,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "ice",
+    "kg": 500
+   }
+  },
+  {
+   "seq": 805,
+   "wallMs": 1762895850000,
+   "orbitSeconds": 8062,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "metal",
+     "kg": 700
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 700,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 806,
+   "wallMs": 1762895860000,
+   "orbitSeconds": 8072,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "metal",
+    "kg": 700
+   }
+  },
+  {
+   "seq": 807,
+   "wallMs": 1762895870000,
+   "orbitSeconds": 8082,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "silicate",
+     "kg": 450
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 450,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 808,
+   "wallMs": 1762895880000,
+   "orbitSeconds": 8092,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "silicate",
+    "kg": 450
+   }
+  },
+  {
+   "seq": 809,
+   "wallMs": 1762895890000,
+   "orbitSeconds": 8102,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "rare",
+     "kg": 3
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 3,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 810,
+   "wallMs": 1762895900000,
+   "orbitSeconds": 8112,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "rare",
+    "kg": 3
+   }
+  },
+  {
+   "seq": 811,
+   "wallMs": 1762895910000,
+   "orbitSeconds": 8122,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "refine"
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 0,
+     "kgOut": 500,
+     "fuelKg": 400,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 812,
+   "wallMs": 1762895920000,
+   "orbitSeconds": 8132,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "cruise-spool"
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": -60
+   }
+  },
+  {
+   "seq": 813,
+   "wallMs": 1762895930000,
+   "orbitSeconds": 8142,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "spool-refund",
+     "kg": 60
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": 60
+   }
+  },
+  {
+   "seq": 814,
+   "wallMs": 1762895940000,
+   "orbitSeconds": 8152,
+   "source": "thrust",
+   "payload": {
+    "kg": 400
+   }
+  },
+  {
+   "seq": 815,
+   "wallMs": 1762895950000,
+   "orbitSeconds": 8162,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "ice",
+     "kg": 500
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 500,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 816,
+   "wallMs": 1762895960000,
+   "orbitSeconds": 8172,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "ice",
+    "kg": 500
+   }
+  },
+  {
+   "seq": 817,
+   "wallMs": 1762895970000,
+   "orbitSeconds": 8182,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "metal",
+     "kg": 700
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 700,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 818,
+   "wallMs": 1762895980000,
+   "orbitSeconds": 8192,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "metal",
+    "kg": 700
+   }
+  },
+  {
+   "seq": 819,
+   "wallMs": 1762895990000,
+   "orbitSeconds": 8202,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "silicate",
+     "kg": 450
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 450,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 820,
+   "wallMs": 1762896000000,
+   "orbitSeconds": 8212,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "silicate",
+    "kg": 450
+   }
+  },
+  {
+   "seq": 821,
+   "wallMs": 1762896010000,
+   "orbitSeconds": 8222,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "rare",
+     "kg": 3
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 3,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 822,
+   "wallMs": 1762896020000,
+   "orbitSeconds": 8232,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "rare",
+    "kg": 3
+   }
+  },
+  {
+   "seq": 823,
+   "wallMs": 1762896030000,
+   "orbitSeconds": 8242,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "refine"
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 0,
+     "kgOut": 500,
+     "fuelKg": 400,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 824,
+   "wallMs": 1762896040000,
+   "orbitSeconds": 8252,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "cruise-spool"
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": -60
+   }
+  },
+  {
+   "seq": 825,
+   "wallMs": 1762896050000,
+   "orbitSeconds": 8262,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "spool-refund",
+     "kg": 60
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": 60
+   }
+  },
+  {
+   "seq": 826,
+   "wallMs": 1762896060000,
+   "orbitSeconds": 8272,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "repair"
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 0,
+     "kgOut": 1000,
+     "fuelKg": 0,
+     "restoredFrac": 0.001
+    }
+   }
+  },
+  {
+   "seq": 827,
+   "wallMs": 1762896070000,
+   "orbitSeconds": 8282,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "jettison-all"
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 0,
+     "kgOut": 4918,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 828,
+   "wallMs": 1762896080000,
+   "orbitSeconds": 8292,
+   "source": "thrust",
+   "payload": {
+    "kg": 400
+   }
+  },
+  {
+   "seq": 829,
+   "wallMs": 1762896090000,
+   "orbitSeconds": 8302,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "ice",
+     "kg": 500
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 500,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 830,
+   "wallMs": 1762896100000,
+   "orbitSeconds": 8312,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "ice",
+    "kg": 500
+   }
+  },
+  {
+   "seq": 831,
+   "wallMs": 1762896110000,
+   "orbitSeconds": 8322,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "metal",
+     "kg": 700
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 700,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 832,
+   "wallMs": 1762896120000,
+   "orbitSeconds": 8332,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "metal",
+    "kg": 700
+   }
+  },
+  {
+   "seq": 833,
+   "wallMs": 1762896130000,
+   "orbitSeconds": 8342,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "silicate",
+     "kg": 450
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 450,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 834,
+   "wallMs": 1762896140000,
+   "orbitSeconds": 8352,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "silicate",
+    "kg": 450
+   }
+  },
+  {
+   "seq": 835,
+   "wallMs": 1762896150000,
+   "orbitSeconds": 8362,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "rare",
+     "kg": 3
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 3,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 836,
+   "wallMs": 1762896160000,
+   "orbitSeconds": 8372,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "rare",
+    "kg": 3
+   }
+  },
+  {
+   "seq": 837,
+   "wallMs": 1762896170000,
+   "orbitSeconds": 8382,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "refine"
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 0,
+     "kgOut": 500,
+     "fuelKg": 400,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 838,
+   "wallMs": 1762896180000,
+   "orbitSeconds": 8392,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "cruise-spool"
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": -60
+   }
+  },
+  {
+   "seq": 839,
+   "wallMs": 1762896190000,
+   "orbitSeconds": 8402,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "spool-refund",
+     "kg": 60
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": 60
+   }
+  },
+  {
+   "seq": 840,
+   "wallMs": 1762896200000,
+   "orbitSeconds": 8412,
+   "source": "thrust",
+   "payload": {
+    "kg": 400
+   }
+  },
+  {
+   "seq": 841,
+   "wallMs": 1762896210000,
+   "orbitSeconds": 8422,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "ice",
+     "kg": 500
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 500,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 842,
+   "wallMs": 1762896220000,
+   "orbitSeconds": 8432,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "ice",
+    "kg": 500
+   }
+  },
+  {
+   "seq": 843,
+   "wallMs": 1762896230000,
+   "orbitSeconds": 8442,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "metal",
+     "kg": 700
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 700,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 844,
+   "wallMs": 1762896240000,
+   "orbitSeconds": 8452,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "metal",
+    "kg": 700
+   }
+  },
+  {
+   "seq": 845,
+   "wallMs": 1762896250000,
+   "orbitSeconds": 8462,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "silicate",
+     "kg": 450
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 450,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 846,
+   "wallMs": 1762896260000,
+   "orbitSeconds": 8472,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "silicate",
+    "kg": 450
+   }
+  },
+  {
+   "seq": 847,
+   "wallMs": 1762896270000,
+   "orbitSeconds": 8482,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "rare",
+     "kg": 3
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 3,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 848,
+   "wallMs": 1762896280000,
+   "orbitSeconds": 8492,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "rare",
+    "kg": 3
+   }
+  },
+  {
+   "seq": 849,
+   "wallMs": 1762896290000,
+   "orbitSeconds": 8502,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "refine"
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 0,
+     "kgOut": 500,
+     "fuelKg": 400,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 850,
+   "wallMs": 1762896300000,
+   "orbitSeconds": 8512,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "cruise-spool"
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": -60
+   }
+  },
+  {
+   "seq": 851,
+   "wallMs": 1762896310000,
+   "orbitSeconds": 8522,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "spool-refund",
+     "kg": 60
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": 60
+   }
+  },
+  {
+   "seq": 852,
+   "wallMs": 1762896320000,
+   "orbitSeconds": 8532,
+   "source": "thrust",
+   "payload": {
+    "kg": 400
+   }
+  },
+  {
+   "seq": 853,
+   "wallMs": 1762896330000,
+   "orbitSeconds": 8542,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "ice",
+     "kg": 500
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 500,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 854,
+   "wallMs": 1762896340000,
+   "orbitSeconds": 8552,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "ice",
+    "kg": 500
+   }
+  },
+  {
+   "seq": 855,
+   "wallMs": 1762896350000,
+   "orbitSeconds": 8562,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "metal",
+     "kg": 700
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 700,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 856,
+   "wallMs": 1762896360000,
+   "orbitSeconds": 8572,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "metal",
+    "kg": 700
+   }
+  },
+  {
+   "seq": 857,
+   "wallMs": 1762896370000,
+   "orbitSeconds": 8582,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "silicate",
+     "kg": 450
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 450,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 858,
+   "wallMs": 1762896380000,
+   "orbitSeconds": 8592,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "silicate",
+    "kg": 450
+   }
+  },
+  {
+   "seq": 859,
+   "wallMs": 1762896390000,
+   "orbitSeconds": 8602,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "rare",
+     "kg": 3
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 3,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 860,
+   "wallMs": 1762896400000,
+   "orbitSeconds": 8612,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "rare",
+    "kg": 3
+   }
+  },
+  {
+   "seq": 861,
+   "wallMs": 1762896410000,
+   "orbitSeconds": 8622,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "refine"
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 0,
+     "kgOut": 500,
+     "fuelKg": 400,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 862,
+   "wallMs": 1762896420000,
+   "orbitSeconds": 8632,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "cruise-spool"
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": -60
+   }
+  },
+  {
+   "seq": 863,
+   "wallMs": 1762896430000,
+   "orbitSeconds": 8642,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "spool-refund",
+     "kg": 60
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": 60
+   }
+  },
+  {
+   "seq": 864,
+   "wallMs": 1762896440000,
+   "orbitSeconds": 8652,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "repair"
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 0,
+     "kgOut": 1000,
+     "fuelKg": 0,
+     "restoredFrac": 0.001
+    }
+   }
+  },
+  {
+   "seq": 865,
+   "wallMs": 1762896450000,
+   "orbitSeconds": 8662,
+   "source": "thrust",
+   "payload": {
+    "kg": 400
+   }
+  },
+  {
+   "seq": 866,
+   "wallMs": 1762896460000,
+   "orbitSeconds": 8672,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "ice",
+     "kg": 500
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 500,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 867,
+   "wallMs": 1762896470000,
+   "orbitSeconds": 8682,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "ice",
+    "kg": 500
+   }
+  },
+  {
+   "seq": 868,
+   "wallMs": 1762896480000,
+   "orbitSeconds": 8692,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "metal",
+     "kg": 700
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 700,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 869,
+   "wallMs": 1762896490000,
+   "orbitSeconds": 8702,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "metal",
+    "kg": 700
+   }
+  },
+  {
+   "seq": 870,
+   "wallMs": 1762896500000,
+   "orbitSeconds": 8712,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "silicate",
+     "kg": 450
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 450,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 871,
+   "wallMs": 1762896510000,
+   "orbitSeconds": 8722,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "silicate",
+    "kg": 450
+   }
+  },
+  {
+   "seq": 872,
+   "wallMs": 1762896520000,
+   "orbitSeconds": 8732,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "rare",
+     "kg": 3
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 3,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 873,
+   "wallMs": 1762896530000,
+   "orbitSeconds": 8742,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "rare",
+    "kg": 3
+   }
+  },
+  {
+   "seq": 874,
+   "wallMs": 1762896540000,
+   "orbitSeconds": 8752,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "refine"
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 0,
+     "kgOut": 500,
+     "fuelKg": 400,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 875,
+   "wallMs": 1762896550000,
+   "orbitSeconds": 8762,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "cruise-spool"
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": -60
+   }
+  },
+  {
+   "seq": 876,
+   "wallMs": 1762896560000,
+   "orbitSeconds": 8772,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "spool-refund",
+     "kg": 60
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": 60
+   }
+  },
+  {
+   "seq": 877,
+   "wallMs": 1762896570000,
+   "orbitSeconds": 8782,
+   "source": "thrust",
+   "payload": {
+    "kg": 400
+   }
+  },
+  {
+   "seq": 878,
+   "wallMs": 1762896580000,
+   "orbitSeconds": 8792,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "ice",
+     "kg": 500
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 500,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 879,
+   "wallMs": 1762896590000,
+   "orbitSeconds": 8802,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "ice",
+    "kg": 500
+   }
+  },
+  {
+   "seq": 880,
+   "wallMs": 1762896600000,
+   "orbitSeconds": 8812,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "metal",
+     "kg": 700
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 700,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 881,
+   "wallMs": 1762896610000,
+   "orbitSeconds": 8822,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "metal",
+    "kg": 700
+   }
+  },
+  {
+   "seq": 882,
+   "wallMs": 1762896620000,
+   "orbitSeconds": 8832,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "silicate",
+     "kg": 450
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 450,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 883,
+   "wallMs": 1762896630000,
+   "orbitSeconds": 8842,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "silicate",
+    "kg": 450
+   }
+  },
+  {
+   "seq": 884,
+   "wallMs": 1762896640000,
+   "orbitSeconds": 8852,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "rare",
+     "kg": 3
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 3,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 885,
+   "wallMs": 1762896650000,
+   "orbitSeconds": 8862,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "rare",
+    "kg": 3
+   }
+  },
+  {
+   "seq": 886,
+   "wallMs": 1762896660000,
+   "orbitSeconds": 8872,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "refine"
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 0,
+     "kgOut": 500,
+     "fuelKg": 400,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 887,
+   "wallMs": 1762896670000,
+   "orbitSeconds": 8882,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "cruise-spool"
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": -60
+   }
+  },
+  {
+   "seq": 888,
+   "wallMs": 1762896680000,
+   "orbitSeconds": 8892,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "spool-refund",
+     "kg": 60
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": 60
+   }
+  },
+  {
+   "seq": 889,
+   "wallMs": 1762896690000,
+   "orbitSeconds": 8902,
+   "source": "thrust",
+   "payload": {
+    "kg": 400
+   }
+  },
+  {
+   "seq": 890,
+   "wallMs": 1762896700000,
+   "orbitSeconds": 8912,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "ice",
+     "kg": 500
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 500,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 891,
+   "wallMs": 1762896710000,
+   "orbitSeconds": 8922,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "ice",
+    "kg": 500
+   }
+  },
+  {
+   "seq": 892,
+   "wallMs": 1762896720000,
+   "orbitSeconds": 8932,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "metal",
+     "kg": 700
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 700,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 893,
+   "wallMs": 1762896730000,
+   "orbitSeconds": 8942,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "metal",
+    "kg": 700
+   }
+  },
+  {
+   "seq": 894,
+   "wallMs": 1762896740000,
+   "orbitSeconds": 8952,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "silicate",
+     "kg": 450
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 450,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 895,
+   "wallMs": 1762896750000,
+   "orbitSeconds": 8962,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "silicate",
+    "kg": 450
+   }
+  },
+  {
+   "seq": 896,
+   "wallMs": 1762896760000,
+   "orbitSeconds": 8972,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "rare",
+     "kg": 3
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 3,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 897,
+   "wallMs": 1762896770000,
+   "orbitSeconds": 8982,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "rare",
+    "kg": 3
+   }
+  },
+  {
+   "seq": 898,
+   "wallMs": 1762896780000,
+   "orbitSeconds": 8992,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "refine"
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 0,
+     "kgOut": 500,
+     "fuelKg": 400,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 899,
+   "wallMs": 1762896790000,
+   "orbitSeconds": 9002,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "cruise-spool"
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": -60
+   }
+  },
+  {
+   "seq": 900,
+   "wallMs": 1762896800000,
+   "orbitSeconds": 9012,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "spool-refund",
+     "kg": 60
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": 60
+   }
+  },
+  {
+   "seq": 901,
+   "wallMs": 1762896810000,
+   "orbitSeconds": 9022,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "repair"
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 0,
+     "kgOut": 1000,
+     "fuelKg": 0,
+     "restoredFrac": 0.001
+    }
+   }
+  },
+  {
+   "seq": 902,
+   "wallMs": 1762896820000,
+   "orbitSeconds": 9032,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "jettison-all"
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 0,
+     "kgOut": 4918,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 903,
+   "wallMs": 1762896830000,
+   "orbitSeconds": 9042,
+   "source": "thrust",
+   "payload": {
+    "kg": 400
+   }
+  },
+  {
+   "seq": 904,
+   "wallMs": 1762896840000,
+   "orbitSeconds": 9052,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "ice",
+     "kg": 500
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 500,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 905,
+   "wallMs": 1762896850000,
+   "orbitSeconds": 9062,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "ice",
+    "kg": 500
+   }
+  },
+  {
+   "seq": 906,
+   "wallMs": 1762896860000,
+   "orbitSeconds": 9072,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "metal",
+     "kg": 700
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 700,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 907,
+   "wallMs": 1762896870000,
+   "orbitSeconds": 9082,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "metal",
+    "kg": 700
+   }
+  },
+  {
+   "seq": 908,
+   "wallMs": 1762896880000,
+   "orbitSeconds": 9092,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "silicate",
+     "kg": 450
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 450,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 909,
+   "wallMs": 1762896890000,
+   "orbitSeconds": 9102,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "silicate",
+    "kg": 450
+   }
+  },
+  {
+   "seq": 910,
+   "wallMs": 1762896900000,
+   "orbitSeconds": 9112,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "rare",
+     "kg": 3
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 3,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 911,
+   "wallMs": 1762896910000,
+   "orbitSeconds": 9122,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "rare",
+    "kg": 3
+   }
+  },
+  {
+   "seq": 912,
+   "wallMs": 1762896920000,
+   "orbitSeconds": 9132,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "refine"
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 0,
+     "kgOut": 500,
+     "fuelKg": 400,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 913,
+   "wallMs": 1762896930000,
+   "orbitSeconds": 9142,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "cruise-spool"
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": -60
+   }
+  },
+  {
+   "seq": 914,
+   "wallMs": 1762896940000,
+   "orbitSeconds": 9152,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "spool-refund",
+     "kg": 60
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": 60
+   }
+  },
+  {
+   "seq": 915,
+   "wallMs": 1762896950000,
+   "orbitSeconds": 9162,
+   "source": "thrust",
+   "payload": {
+    "kg": 400
+   }
+  },
+  {
+   "seq": 916,
+   "wallMs": 1762896960000,
+   "orbitSeconds": 9172,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "ice",
+     "kg": 500
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 500,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 917,
+   "wallMs": 1762896970000,
+   "orbitSeconds": 9182,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "ice",
+    "kg": 500
+   }
+  },
+  {
+   "seq": 918,
+   "wallMs": 1762896980000,
+   "orbitSeconds": 9192,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "metal",
+     "kg": 700
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 700,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 919,
+   "wallMs": 1762896990000,
+   "orbitSeconds": 9202,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "metal",
+    "kg": 700
+   }
+  },
+  {
+   "seq": 920,
+   "wallMs": 1762897000000,
+   "orbitSeconds": 9212,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "silicate",
+     "kg": 450
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 450,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 921,
+   "wallMs": 1762897010000,
+   "orbitSeconds": 9222,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "silicate",
+    "kg": 450
+   }
+  },
+  {
+   "seq": 922,
+   "wallMs": 1762897020000,
+   "orbitSeconds": 9232,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "rare",
+     "kg": 3
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 3,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 923,
+   "wallMs": 1762897030000,
+   "orbitSeconds": 9242,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "rare",
+    "kg": 3
+   }
+  },
+  {
+   "seq": 924,
+   "wallMs": 1762897040000,
+   "orbitSeconds": 9252,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "refine"
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 0,
+     "kgOut": 500,
+     "fuelKg": 400,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 925,
+   "wallMs": 1762897050000,
+   "orbitSeconds": 9262,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "cruise-spool"
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": -60
+   }
+  },
+  {
+   "seq": 926,
+   "wallMs": 1762897060000,
+   "orbitSeconds": 9272,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "spool-refund",
+     "kg": 60
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": 60
+   }
+  },
+  {
+   "seq": 927,
+   "wallMs": 1762897070000,
+   "orbitSeconds": 9282,
+   "source": "thrust",
+   "payload": {
+    "kg": 400
+   }
+  },
+  {
+   "seq": 928,
+   "wallMs": 1762897080000,
+   "orbitSeconds": 9292,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "ice",
+     "kg": 500
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 500,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 929,
+   "wallMs": 1762897090000,
+   "orbitSeconds": 9302,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "ice",
+    "kg": 500
+   }
+  },
+  {
+   "seq": 930,
+   "wallMs": 1762897100000,
+   "orbitSeconds": 9312,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "metal",
+     "kg": 700
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 700,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 931,
+   "wallMs": 1762897110000,
+   "orbitSeconds": 9322,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "metal",
+    "kg": 700
+   }
+  },
+  {
+   "seq": 932,
+   "wallMs": 1762897120000,
+   "orbitSeconds": 9332,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "silicate",
+     "kg": 450
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 450,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 933,
+   "wallMs": 1762897130000,
+   "orbitSeconds": 9342,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "silicate",
+    "kg": 450
+   }
+  },
+  {
+   "seq": 934,
+   "wallMs": 1762897140000,
+   "orbitSeconds": 9352,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "rare",
+     "kg": 3
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 3,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 935,
+   "wallMs": 1762897150000,
+   "orbitSeconds": 9362,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "rare",
+    "kg": 3
+   }
+  },
+  {
+   "seq": 936,
+   "wallMs": 1762897160000,
+   "orbitSeconds": 9372,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "refine"
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 0,
+     "kgOut": 500,
+     "fuelKg": 400,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 937,
+   "wallMs": 1762897170000,
+   "orbitSeconds": 9382,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "cruise-spool"
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": -60
+   }
+  },
+  {
+   "seq": 938,
+   "wallMs": 1762897180000,
+   "orbitSeconds": 9392,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "spool-refund",
+     "kg": 60
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": 60
+   }
+  },
+  {
+   "seq": 939,
+   "wallMs": 1762897190000,
+   "orbitSeconds": 9402,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "repair"
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 0,
+     "kgOut": 1000,
+     "fuelKg": 0,
+     "restoredFrac": 0.001
+    }
+   }
+  },
+  {
+   "seq": 940,
+   "wallMs": 1762897200000,
+   "orbitSeconds": 9412,
+   "source": "thrust",
+   "payload": {
+    "kg": 400
+   }
+  },
+  {
+   "seq": 941,
+   "wallMs": 1762897210000,
+   "orbitSeconds": 9422,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "ice",
+     "kg": 500
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 500,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 942,
+   "wallMs": 1762897220000,
+   "orbitSeconds": 9432,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "ice",
+    "kg": 500
+   }
+  },
+  {
+   "seq": 943,
+   "wallMs": 1762897230000,
+   "orbitSeconds": 9442,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "metal",
+     "kg": 700
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 700,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 944,
+   "wallMs": 1762897240000,
+   "orbitSeconds": 9452,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "metal",
+    "kg": 700
+   }
+  },
+  {
+   "seq": 945,
+   "wallMs": 1762897250000,
+   "orbitSeconds": 9462,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "silicate",
+     "kg": 450
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 450,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 946,
+   "wallMs": 1762897260000,
+   "orbitSeconds": 9472,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "silicate",
+    "kg": 450
+   }
+  },
+  {
+   "seq": 947,
+   "wallMs": 1762897270000,
+   "orbitSeconds": 9482,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "rare",
+     "kg": 3
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 3,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 948,
+   "wallMs": 1762897280000,
+   "orbitSeconds": 9492,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "rare",
+    "kg": 3
+   }
+  },
+  {
+   "seq": 949,
+   "wallMs": 1762897290000,
+   "orbitSeconds": 9502,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "refine"
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 0,
+     "kgOut": 500,
+     "fuelKg": 400,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 950,
+   "wallMs": 1762897300000,
+   "orbitSeconds": 9512,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "cruise-spool"
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": -60
+   }
+  },
+  {
+   "seq": 951,
+   "wallMs": 1762897310000,
+   "orbitSeconds": 9522,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "spool-refund",
+     "kg": 60
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": 60
+   }
+  },
+  {
+   "seq": 952,
+   "wallMs": 1762897320000,
+   "orbitSeconds": 9532,
+   "source": "thrust",
+   "payload": {
+    "kg": 400
+   }
+  },
+  {
+   "seq": 953,
+   "wallMs": 1762897330000,
+   "orbitSeconds": 9542,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "ice",
+     "kg": 500
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 500,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 954,
+   "wallMs": 1762897340000,
+   "orbitSeconds": 9552,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "ice",
+    "kg": 500
+   }
+  },
+  {
+   "seq": 955,
+   "wallMs": 1762897350000,
+   "orbitSeconds": 9562,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "metal",
+     "kg": 700
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 700,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 956,
+   "wallMs": 1762897360000,
+   "orbitSeconds": 9572,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "metal",
+    "kg": 700
+   }
+  },
+  {
+   "seq": 957,
+   "wallMs": 1762897370000,
+   "orbitSeconds": 9582,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "silicate",
+     "kg": 450
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 450,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 958,
+   "wallMs": 1762897380000,
+   "orbitSeconds": 9592,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "silicate",
+    "kg": 450
+   }
+  },
+  {
+   "seq": 959,
+   "wallMs": 1762897390000,
+   "orbitSeconds": 9602,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "rare",
+     "kg": 3
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 3,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 960,
+   "wallMs": 1762897400000,
+   "orbitSeconds": 9612,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "rare",
+    "kg": 3
+   }
+  },
+  {
+   "seq": 961,
+   "wallMs": 1762897410000,
+   "orbitSeconds": 9622,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "refine"
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 0,
+     "kgOut": 500,
+     "fuelKg": 400,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 962,
+   "wallMs": 1762897420000,
+   "orbitSeconds": 9632,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "cruise-spool"
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": -60
+   }
+  },
+  {
+   "seq": 963,
+   "wallMs": 1762897430000,
+   "orbitSeconds": 9642,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "spool-refund",
+     "kg": 60
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": 60
+   }
+  },
+  {
+   "seq": 964,
+   "wallMs": 1762897440000,
+   "orbitSeconds": 9652,
+   "source": "thrust",
+   "payload": {
+    "kg": 400
+   }
+  },
+  {
+   "seq": 965,
+   "wallMs": 1762897450000,
+   "orbitSeconds": 9662,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "ice",
+     "kg": 500
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 500,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 966,
+   "wallMs": 1762897460000,
+   "orbitSeconds": 9672,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "ice",
+    "kg": 500
+   }
+  },
+  {
+   "seq": 967,
+   "wallMs": 1762897470000,
+   "orbitSeconds": 9682,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "metal",
+     "kg": 700
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 700,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 968,
+   "wallMs": 1762897480000,
+   "orbitSeconds": 9692,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "metal",
+    "kg": 700
+   }
+  },
+  {
+   "seq": 969,
+   "wallMs": 1762897490000,
+   "orbitSeconds": 9702,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "silicate",
+     "kg": 450
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 450,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 970,
+   "wallMs": 1762897500000,
+   "orbitSeconds": 9712,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "silicate",
+    "kg": 450
+   }
+  },
+  {
+   "seq": 971,
+   "wallMs": 1762897510000,
+   "orbitSeconds": 9722,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "rare",
+     "kg": 3
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 3,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 972,
+   "wallMs": 1762897520000,
+   "orbitSeconds": 9732,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "rare",
+    "kg": 3
+   }
+  },
+  {
+   "seq": 973,
+   "wallMs": 1762897530000,
+   "orbitSeconds": 9742,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "refine"
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 0,
+     "kgOut": 500,
+     "fuelKg": 400,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 974,
+   "wallMs": 1762897540000,
+   "orbitSeconds": 9752,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "cruise-spool"
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": -60
+   }
+  },
+  {
+   "seq": 975,
+   "wallMs": 1762897550000,
+   "orbitSeconds": 9762,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "spool-refund",
+     "kg": 60
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": 60
+   }
+  },
+  {
+   "seq": 976,
+   "wallMs": 1762897560000,
+   "orbitSeconds": 9772,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "repair"
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 0,
+     "kgOut": 1000,
+     "fuelKg": 0,
+     "restoredFrac": 0.001
+    }
+   }
+  },
+  {
+   "seq": 977,
+   "wallMs": 1762897570000,
+   "orbitSeconds": 9782,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "jettison-all"
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 0,
+     "kgOut": 4918,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 978,
+   "wallMs": 1762897580000,
+   "orbitSeconds": 9792,
+   "source": "thrust",
+   "payload": {
+    "kg": 400
+   }
+  },
+  {
+   "seq": 979,
+   "wallMs": 1762897590000,
+   "orbitSeconds": 9802,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "ice",
+     "kg": 500
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 500,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 980,
+   "wallMs": 1762897600000,
+   "orbitSeconds": 9812,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "ice",
+    "kg": 500
+   }
+  },
+  {
+   "seq": 981,
+   "wallMs": 1762897610000,
+   "orbitSeconds": 9822,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "metal",
+     "kg": 700
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 700,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 982,
+   "wallMs": 1762897620000,
+   "orbitSeconds": 9832,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "metal",
+    "kg": 700
+   }
+  },
+  {
+   "seq": 983,
+   "wallMs": 1762897630000,
+   "orbitSeconds": 9842,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "silicate",
+     "kg": 450
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 450,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 984,
+   "wallMs": 1762897640000,
+   "orbitSeconds": 9852,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "silicate",
+    "kg": 450
+   }
+  },
+  {
+   "seq": 985,
+   "wallMs": 1762897650000,
+   "orbitSeconds": 9862,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "rare",
+     "kg": 3
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 3,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 986,
+   "wallMs": 1762897660000,
+   "orbitSeconds": 9872,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "rare",
+    "kg": 3
+   }
+  },
+  {
+   "seq": 987,
+   "wallMs": 1762897670000,
+   "orbitSeconds": 9882,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "refine"
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 0,
+     "kgOut": 500,
+     "fuelKg": 400,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 988,
+   "wallMs": 1762897680000,
+   "orbitSeconds": 9892,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "cruise-spool"
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": -60
+   }
+  },
+  {
+   "seq": 989,
+   "wallMs": 1762897690000,
+   "orbitSeconds": 9902,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "spool-refund",
+     "kg": 60
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": 60
+   }
+  },
+  {
+   "seq": 990,
+   "wallMs": 1762897700000,
+   "orbitSeconds": 9912,
+   "source": "thrust",
+   "payload": {
+    "kg": 400
+   }
+  },
+  {
+   "seq": 991,
+   "wallMs": 1762897710000,
+   "orbitSeconds": 9922,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "ice",
+     "kg": 500
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 500,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 992,
+   "wallMs": 1762897720000,
+   "orbitSeconds": 9932,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "ice",
+    "kg": 500
+   }
+  },
+  {
+   "seq": 993,
+   "wallMs": 1762897730000,
+   "orbitSeconds": 9942,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:12",
+     "resource": "metal",
+     "kg": 700
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 700,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 994,
+   "wallMs": 1762897740000,
+   "orbitSeconds": 9952,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:12",
+    "by": "local",
+    "resource": "metal",
+    "kg": 700
+   }
+  },
+  {
+   "seq": 995,
+   "wallMs": 1762897750000,
+   "orbitSeconds": 9962,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "silicate",
+     "kg": 450
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 450,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 996,
+   "wallMs": 1762897760000,
+   "orbitSeconds": 9972,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "silicate",
+    "kg": 450
+   }
+  },
+  {
+   "seq": 997,
+   "wallMs": 1762897770000,
+   "orbitSeconds": 9982,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "mine",
+     "asteroidId": "ast:gx-1mwhji--377.-3.266.1:398:4",
+     "resource": "rare",
+     "kg": 3
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 3,
+     "kgOut": 0,
+     "fuelKg": 0,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 998,
+   "wallMs": 1762897780000,
+   "orbitSeconds": 9992,
+   "source": "mined",
+   "payload": {
+    "id": "ast:gx-1mwhji--377.-3.266.1:398:4",
+    "by": "local",
+    "resource": "rare",
+    "kg": 3
+   }
+  },
+  {
+   "seq": 999,
+   "wallMs": 1762897790000,
+   "orbitSeconds": 10002,
+   "source": "cargo",
+   "payload": {
+    "action": {
+     "kind": "refine"
+    },
+    "result": {
+     "ok": true,
+     "kgIn": 0,
+     "kgOut": 500,
+     "fuelKg": 400,
+     "restoredFrac": 0
+    }
+   }
+  },
+  {
+   "seq": 1000,
+   "wallMs": 1762897800000,
+   "orbitSeconds": 10012,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "cruise-spool"
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": -60
+   }
+  },
+  {
+   "seq": 1001,
+   "wallMs": 1762897810000,
+   "orbitSeconds": 10022,
+   "source": "propellant",
+   "payload": {
+    "action": {
+     "kind": "spool-refund",
+     "kg": 60
+    },
+    "ok": true,
+    "kg": 60,
+    "tankDeltaKg": 60
+   }
+  }
+ ]
+}

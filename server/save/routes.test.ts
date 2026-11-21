@@ -25,6 +25,7 @@ import { createApp } from '../app';
 import { createSession, SESSION_COOKIE } from '../auth/session';
 import type { Config } from '../config';
 import { migrate } from '../migrate';
+import { putSave } from './repo';
 import { withTestSchema, type TestSchema } from '../test/db';
 
 const ORIGIN = 'https://onespace.example';
@@ -1085,5 +1086,150 @@ describe('Digest history is immutable (M7)', () => {
     expect((await headRow(a.id))?.body.ship.propellant.massKg).toBe(5_000);
     const [row] = await t.sql<{ digest: { tankKg: number } }[]>`select digest from save_revisions where user_id = ${a.id} and save_id = ${SAVE_X} and revision = 1`;
     expect(row!.digest.tankKg).toBe(20_000);
+  });
+});
+
+// =============================================================================
+// v4 sub-plan 6, Task 1 (phase A) — save format 2 on the server.
+//
+// What the server really does (read in routes.ts / repo.ts): `validateSave`
+// runs `migrate` and returns the MIGRATED save (`r.save`), and that object —
+// not the raw body — is what putSave/resolveSave store and hand back. Any
+// `migrate` refusal (invalid, unknown-format, newer-build) is the same
+// 400 { error: 'invalid-save' }.
+// Pinned: a format 2 save is accepted and stored as sent; a format 1 save is
+// accepted and stored as format 2 (beamResource 'ice', nothing else changed);
+// a format 3 save is refused exactly like an invalid save today.
+// Also pinned (choice, phase A): a head an OLDER build stored as format 1
+// (seeded with putSave, past the route) still resolves, and the result is
+// format 2; and the same save PUT again as format 2 is `unchanged`, not a
+// conflict.
+// =============================================================================
+
+describe('save format 2 (plan 6 task 1)', () => {
+  /** `head` for a save of any format (the outer one is typed to format 1). */
+  const head = (s: { saveId: string; revision: number }): Base => ({ saveId: s.saveId, revision: s.revision });
+  type Loose = Omit<SaveV1, 'format' | 'ship'> & { format: number; ship: SaveV1['ship'] & { beamResource?: string } };
+  const JETTISON = {
+    source: 'cargo',
+    payload: {
+      action: { kind: 'jettison', resource: 'metal', kg: 250 },
+      result: { ok: true, kgIn: 0, kgOut: 250, fuelKg: 0, restoredFrac: 0 },
+    },
+    wallMs: 1762891300000,
+    orbitSeconds: 5500,
+  };
+
+  /** `mk` as a format 2 save: beam on metal, a jettison after the golden log. */
+  function mk2(o: Parameters<typeof mk>[0] = {}): Loose {
+    const s = mk(o) as unknown as Loose;
+    s.format = 2;
+    s.ship = { ...s.ship, beamResource: 'metal' };
+    s.actions = [...s.actions, { seq: s.actions.length + 1, ...JETTISON } as unknown as SaveV1['actions'][number]];
+    return s;
+  }
+
+  /** What the upgrade must make of a format 1 save: format 2, beam "ice", nothing else. */
+  const lifted = (s: SaveV1): Loose => ({ ...structuredClone(s), format: 2, ship: { ...structuredClone(s.ship), beamResource: 'ice' } }) as Loose;
+
+  it('Given an empty cloud, When a format 2 save (with a jettison) is PUT, Then 200 { revision }, GET returns it as sent, and its jettison entry is in the actions table', async () => {
+    const a = await mkUser('a');
+    const s = mk2({ revision: 4 });
+    const res = await put(a, s, null);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ revision: 4 });
+    expect(await (await get(a)).json()).toEqual({ revision: 4, save: s });
+    expect((await headRow(a.id))?.body).toEqual(s);
+    const acts = await t.sql<{ entry: { payload: { action: { kind: string } } } }[]>`select entry from actions where user_id = ${a.id} order by seq`;
+    expect(acts).toHaveLength(ACTIONS_IN_GOLDEN + 1);
+    expect(acts.at(-1)!.entry.payload.action.kind).toBe('jettison');
+  });
+
+  it('Given an empty cloud, When a format 1 save is PUT, Then 200 and the stored head is that save lifted to format 2 (beamResource "ice", nothing else changed), and GET returns the lifted save', async () => {
+    const a = await mkUser('a');
+    const s = mk({ revision: 4 });
+    expect((s as unknown as Loose).format).toBe(1);
+    const res = await put(a, s, null);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ revision: 4 });
+    expect((await headRow(a.id))?.body).toEqual(lifted(s));
+    expect(await (await get(a)).json()).toEqual({ revision: 4, save: lifted(s) });
+  });
+
+  it('Given a format 2 head, When a format 1 save of the next revision is PUT on it, Then 200 and the head is format 2', async () => {
+    const a = await mkUser('a');
+    const s1 = mk2({ revision: 1 });
+    expect((await put(a, s1, null)).status).toBe(200);
+    const s2 = mk({ revision: 2 });
+    expect((await put(a, s2, head(s1))).status).toBe(200);
+    expect((await headRow(a.id))?.body).toEqual(lifted(s2));
+  });
+
+  it('Given a stored save, When a format 3 save is PUT, Then 400 { error: "invalid-save" } — the same as an invalid save — and nothing changes', async () => {
+    const a = await mkUser('a');
+    const s = mk2({ revision: 1 });
+    expect((await put(a, s, null)).status).toBe(200);
+    const before = await snapshot(a.id);
+    const future = await put(a, { ...mk2({ revision: 2 }), format: 3 }, head(s));
+    const invalid = await put(a, { ...mk2({ revision: 2 }), ship: 'gone' }, head(s));
+    expect(future.status).toBe(400);
+    expect(future.status).toBe(invalid.status);
+    expect(await future.json()).toEqual({ error: 'invalid-save' });
+    expect(await invalid.json()).toEqual({ error: 'invalid-save' });
+    expect(await snapshot(a.id)).toEqual(before);
+  });
+
+  it('Given a stored save, When a format 3 device save is resolved, Then 400 { error: "invalid-save" } and nothing changes', async () => {
+    const a = await mkUser('a');
+    const s = mk2({ revision: 1 });
+    expect((await put(a, s, null)).status).toBe(200);
+    const before = await snapshot(a.id);
+    const res = await resolve(a, 'device', { ...mk2({ revision: 2 }), format: 3 }, head(s), head(s));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'invalid-save' });
+    expect(await snapshot(a.id)).toEqual(before);
+  });
+
+  it('Given a save that says format 1 but holds a jettison entry, When PUT, Then 400 { error: "invalid-save" } (R4)', async () => {
+    const a = await mkUser('a');
+    const s = mk2({ revision: 1 });
+    (s as { format: number }).format = 1;
+    delete s.ship.beamResource;
+    const res = await put(a, s, null);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'invalid-save' });
+    expect((await get(a)).status).toBe(404);
+  });
+
+  /** A head an older (format 1) build stored: written past the route, as that build's PUT did. */
+  async function oldHead(a: User, s: SaveV1): Promise<void> {
+    const r = await putSave(t.sql, a.id, { deviceId: DEV_A, base: null, save: s });
+    expect(r.kind).toBe('stored');
+    expect(((await headRow(a.id))?.body as Loose).format).toBe(1);
+  }
+
+  for (const keep of ['cloud', 'device'] as const) {
+    it(`Given a format 1 head stored by an older build and a diverged format 2 device save of the same game, When resolved keeping "${keep}", Then 200 and the result is a format 2 save`, async () => {
+      const a = await mkUser('a');
+      const base = mk({ revision: 5, tank: 12_000 });
+      await oldHead(a, base);
+      const device = mk2({ revision: 6, tank: 11_000 });
+      const res = await resolve(a, keep, device, head(base), head(base), DEV_B);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { revision: number; save: Loose };
+      expect(body.revision).toBe(7);
+      expect(body.save.format).toBe(2);
+      expect(['ice', 'metal']).toContain(body.save.ship.beamResource);
+      expect(((await headRow(a.id))?.body as Loose).format).toBe(2);
+    });
+  }
+
+  it('Given a format 1 head stored by an older build, When the same save comes back lifted to format 2 (same saveId and revision), Then 200 { revision } — unchanged, not a conflict', async () => {
+    const a = await mkUser('a');
+    const s = mk({ revision: 4 });
+    await oldHead(a, s);
+    const res = await put(a, lifted(s), head(s));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ revision: 4 });
   });
 });

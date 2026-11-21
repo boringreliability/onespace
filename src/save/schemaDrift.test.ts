@@ -175,6 +175,45 @@ describe('runtime drift — cargo:action, every CargoResult reason and every suc
   });
 });
 
+// v4 sub-plan 6, Task 1 (phase A): the new `jettison` cargo action. The
+// type-level guard above (`CargoAction` ⊆ the schema's cargo action) covers it
+// once the type grows; this is the runtime half. The action is cast: it does
+// not exist on `CargoAction` yet.
+describe('runtime drift — cargo:action, the jettison action (plan 6 task 1)', () => {
+  function hold(contents: Partial<Record<'ice' | 'metal' | 'silicate' | 'rare', number>>): Cargo {
+    const c = new Cargo(CARGO_CAPACITY_KG);
+    c.restore(contents);
+    return c;
+  }
+  const jettison = (resource: 'ice' | 'metal' | 'silicate' | 'rare', kg: number) =>
+    ({ kind: 'jettison', resource, kg }) as unknown as CargoAction;
+
+  it('Given a real jettison on its success paths (part and more than held) and its empty refusal, Then each announced event parses as a cargo ActionEntry, and the successes carry kgOut', () => {
+    const seen: GameEvents['cargo:action'][] = [];
+    bus.on('cargo:action', (e) => seen.push(e));
+    const results = [
+      applyCargoAction(hold({ ice: 1_000 }), null, jettison('ice', 250)),
+      applyCargoAction(hold({ rare: 12.5 }), null, jettison('rare', 250)),
+      applyCargoAction(hold({ ice: 1_000 }), null, jettison('metal', 250)),
+    ];
+    expect(results.map((r) => r?.ok)).toEqual([true, true, false]);
+    expect(results.map((r) => r?.kgOut)).toEqual([250, 12.5, 0]);
+    expect(results[2]!.reason).toBe('empty');
+    expect(seen).toHaveLength(3);
+    for (const e of seen) {
+      const r = ActionEntrySchema.safeParse(asEntry('cargo', e));
+      expect(r.success, JSON.stringify({ e, issues: issuesOf(r) })).toBe(true);
+    }
+  });
+
+  it('Given a jettison with an invalid kg (0), Then the result (reason invalid) still fits the schema beside a known-good action', () => {
+    const r = applyCargoAction(hold({ ice: 1_000 }), null, jettison('ice', 0));
+    expect(r?.reason).toBe('invalid');
+    const parsed = ActionEntrySchema.safeParse(asEntry('cargo', { action: { kind: 'refine' }, result: r }));
+    expect(parsed.success, JSON.stringify(issuesOf(parsed))).toBe(true);
+  });
+});
+
 describe('runtime drift — emergency:used, each kind', () => {
   const EVENTS = {
     cannibalize: { kind: 'cannibalize', timesUsed: 1 },

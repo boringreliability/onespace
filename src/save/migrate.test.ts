@@ -11,11 +11,16 @@
  * `{version: 1, time, entries}`) once, into the first save.
  */
 
+import { readFileSync, readdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { describe, expect, it } from 'vitest';
 
 import golden from './fixtures/v1-golden.json';
 import legacy from './fixtures/v0-legacy-log.json';
 import { legacyLogToV1, migrate } from './migrate';
+import { replay, zeroState } from './replay';
 import { SaveV1Schema, type SaveV1 } from './schema';
 
 function goldenCopy(): SaveV1 {
@@ -293,5 +298,229 @@ describe('migrate — messages and reasons pinned by mutation testing (Task 7)',
     if (r.ok) return;
     expect(r.reason).toBe('newer-build');
     expect(r.issues.some((i) => i.startsWith('(root):'))).toBe(true);
+  });
+});
+
+// =============================================================================
+// v4 sub-plan 6, Task 1 (phase A) — save format 2 and its upgrade.
+//
+// Assumed API (docs/v4/plan-6-resources.md, Task 1 Interfaces):
+//   CURRENT_FORMAT = 2; UPGRADES[1] sets `format: 2` and `ship.beamResource:
+//   'ice'` and changes nothing else; a format number ABOVE CURRENT_FORMAT is
+//   `newer-build`, one below OLDEST_FORMAT still `unknown-format`.
+// Review Focus 1: every format 1 fixture in src/save/fixtures/ (the golden
+// save, and v1-long-checkpoint.json: a 1 001-entry log a format 1 build
+// compacted to a checkpoint + 249 entries) comes out with the same hold, tank,
+// capacity loss and world, and `migrate` never writes into its input.
+// =============================================================================
+
+type LooseSave = Record<string, unknown> & {
+  format: unknown;
+  ship: Record<string, unknown> & SaveV1['ship'];
+  actions: Array<{ source: string; payload: Record<string, unknown> }>;
+  world: SaveV1['world'];
+};
+
+const FIXTURE_DIR = join(dirname(fileURLToPath(import.meta.url)), 'fixtures');
+
+/** Every fixture file that is a save claiming format 1 (the legacy logbook has no `format`). */
+function formatOneFixtures(): Array<{ name: string; raw: LooseSave }> {
+  return readdirSync(FIXTURE_DIR)
+    .filter((n) => n.endsWith('.json'))
+    .map((n) => ({ name: n, raw: JSON.parse(readFileSync(join(FIXTURE_DIR, n), 'utf8')) as LooseSave }))
+    .filter((f) => f.raw.format === 1);
+}
+
+const JETTISON = {
+  seq: 13,
+  source: 'cargo',
+  payload: {
+    action: { kind: 'jettison', resource: 'ice', kg: 250 },
+    result: { ok: true, kgIn: 0, kgOut: 250, fuelKg: 0, restoredFrac: 0 },
+  },
+  wallMs: 1762891300000,
+  orbitSeconds: 5500,
+};
+
+/** The golden save written as format 2 (beam on metal, a jettison after its log). */
+function goldenV2(): LooseSave {
+  const s = goldenCopy() as unknown as LooseSave;
+  s.format = 2;
+  s.ship = { ...s.ship, beamResource: 'metal' };
+  s.actions = [...s.actions, structuredClone(JETTISON)];
+  return s;
+}
+
+describe('migrate — format 1 is lifted to format 2 (plan 6 task 1, Review Focus 1)', () => {
+  it('Given the fixtures folder, Then it holds at least two format 1 saves, one with a checkpoint and a long log (the precondition of the upgrade tests)', () => {
+    const fx = formatOneFixtures();
+    expect(fx.map((f) => f.name).sort()).toEqual(expect.arrayContaining(['v1-golden.json', 'v1-long-checkpoint.json']));
+    const long = fx.find((f) => f.name === 'v1-long-checkpoint.json')!.raw;
+    expect(long.actions.length).toBeGreaterThanOrEqual(200);
+    expect(long.actions[0]!.source).toBe('checkpoint');
+    for (const f of fx) expect(SaveV1Schema.safeParse(f.raw).success, f.name).toBe(true);
+  });
+
+  for (const f of formatOneFixtures()) {
+    describe(f.name, () => {
+      it(`Given ${f.name} (format 1), When migrated, Then it is format 2, migratedFrom 1, beamResource "ice", and nothing else changed`, () => {
+        const before = SaveV1Schema.parse(structuredClone(f.raw));
+        const r = migrate(structuredClone(f.raw));
+        expect(r.ok, r.ok ? '' : r.issues.join('; ')).toBe(true);
+        if (!r.ok) return;
+        expect(r.migratedFrom).toBe(1);
+        const out = structuredClone(r.save) as unknown as LooseSave;
+        expect(out.format).toBe(2);
+        expect(out.ship.beamResource).toBe('ice');
+        delete out.ship.beamResource;
+        out.format = 1;
+        expect(out).toEqual(before);
+      });
+
+      it(`Given ${f.name}, When migrated, Then hold, tank mass, capacity loss and world entries are exactly as before`, () => {
+        const before = SaveV1Schema.parse(structuredClone(f.raw));
+        const r = migrate(structuredClone(f.raw));
+        expect(r.ok).toBe(true);
+        if (!r.ok) return;
+        expect((r.save as { format: unknown }).format, 'the save was lifted to format 2').toBe(2);
+        expect(r.save.ship.cargo).toEqual(before.ship.cargo);
+        expect(r.save.ship.propellant.massKg).toBe(before.ship.propellant.massKg);
+        expect(r.save.ship.propellant.capacityLossFrac).toBe(before.ship.propellant.capacityLossFrac);
+        expect(r.save.ship.emergencyTimesUsed).toBe(before.ship.emergencyTimesUsed);
+        expect(r.save.world).toEqual(before.world);
+      });
+
+      it(`Given ${f.name}, When its log is replayed before and after the upgrade, Then the hold, tank, capacity loss and depletion are the same — no action was rewritten`, () => {
+        const before = SaveV1Schema.parse(structuredClone(f.raw));
+        const r = migrate(structuredClone(f.raw));
+        expect(r.ok).toBe(true);
+        if (!r.ok) return;
+        expect((r.save as { format: unknown }).format, 'the save was lifted to format 2').toBe(2);
+        expect(r.save.actions).toEqual(before.actions);
+        const s0 = { ...zeroState(), tank: { ...before.ship.propellant } };
+        const a = replay(s0, before.actions);
+        const b = replay(s0, r.save.actions);
+        expect(b.tank).toEqual(a.tank);
+        expect(b.cargo).toEqual(a.cargo);
+        expect(JSON.parse(JSON.stringify(b.depletion))).toEqual(JSON.parse(JSON.stringify(a.depletion)));
+        expect(b.emergency).toEqual(a.emergency);
+      });
+
+      it(`Given ${f.name} deep-frozen, When migrated, Then migrate neither throws nor writes into its input, and the input still equals the file`, () => {
+        const pristine = structuredClone(f.raw);
+        const frozen = deepFreeze(structuredClone(f.raw));
+        let r: ReturnType<typeof migrate> | undefined;
+        expect(() => (r = migrate(frozen))).not.toThrow();
+        expect(r!.ok, r!.ok ? '' : r!.issues.join('; ')).toBe(true);
+        expect(r!.ok && (r!.save as { format: unknown }).format, 'the save was lifted to format 2').toBe(2);
+        expect(frozen).toEqual(pristine);
+        expect(frozen.format).toBe(1);
+        expect('beamResource' in frozen.ship).toBe(false);
+      });
+    });
+  }
+
+  it('Given the long fixture, When migrated, Then its checkpoint is carried over unchanged and still leads the log', () => {
+    const raw = formatOneFixtures().find((x) => x.name === 'v1-long-checkpoint.json')!.raw;
+    const r = migrate(structuredClone(raw));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect((r.save as { format: unknown }).format, 'the save was lifted to format 2').toBe(2);
+    expect(r.save.actions[0]).toEqual(SaveV1Schema.parse(structuredClone(raw)).actions[0]);
+    expect(r.save.actions[0]!.source).toBe('checkpoint');
+  });
+});
+
+describe('migrate — format 2 itself (plan 6 task 1)', () => {
+  it('Given a format 2 save with a jettison and beamResource "metal", When migrated, Then it comes back unchanged, migratedFrom 2', () => {
+    const s = goldenV2();
+    const r = migrate(structuredClone(s));
+    expect(r.ok, r.ok ? '' : r.issues.join('; ')).toBe(true);
+    if (!r.ok) return;
+    expect(r.migratedFrom).toBe(2);
+    expect(r.save).toEqual(s);
+  });
+
+  it('Given a format 2 save, When migrated twice (the result fed back in), Then it is a fixed point', () => {
+    const r1 = migrate(goldenV2());
+    expect(r1.ok).toBe(true);
+    if (!r1.ok) return;
+    const r2 = migrate(JSON.parse(JSON.stringify(r1.save)));
+    expect(r2.ok).toBe(true);
+    if (!r2.ok) return;
+    expect(r2.save).toEqual(r1.save);
+    expect(r2.migratedFrom).toBe(2);
+  });
+
+  it('Given a format 2 save with only an extra key, Then newer-build (R4 holds for the current format), and the raw save is untouched', () => {
+    const s = { ...goldenV2(), pets: [] };
+    const before = structuredClone(s);
+    const r = migrate(s);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toBe('newer-build');
+    expect(r.issues.some((i) => i.includes('pets'))).toBe(true);
+    expect(s).toEqual(before);
+  });
+
+  it('Given a format 2 save whose beamResource is "gold", Then invalid with the path ship.beamResource', () => {
+    const s = goldenV2();
+    s.ship.beamResource = 'gold';
+    const r = migrate(s);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toBe('invalid');
+    expect(hasPath(r.issues, 'ship.beamResource')).toBe(true);
+  });
+});
+
+describe('migrate — the new action never stands in a format 1 save (plan 6 task 1, R4)', () => {
+  // These pass today already (format 1 cannot hold either); they guard the
+  // upgrade: lifting first and checking against format 2 would let both in.
+  it('Given a save that says format 1 but holds a jettison entry, Then invalid — the upgrade does not make it valid', () => {
+    const s = goldenCopy() as unknown as LooseSave;
+    s.actions = [...s.actions, structuredClone(JETTISON)];
+    const r = migrate(s);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toBe('invalid');
+  });
+
+  it('Given a save that says format 1 but carries ship.beamResource "rare", Then it is refused — the upgrade never overwrites it with "ice"', () => {
+    const s = goldenCopy() as unknown as LooseSave;
+    s.ship = { ...s.ship, beamResource: 'rare' };
+    const r = migrate(s);
+    expect(r.ok).toBe(false);
+  });
+});
+
+describe('migrate — a save from a newer version is named as one (plan 6 task 1)', () => {
+  for (const f of [3, 99]) {
+    it(`Given format ${f}, Then newer-build (not unknown-format), the issue names ${f}, and the raw save is untouched`, () => {
+      const raw = { ...goldenV2(), format: f };
+      const before = structuredClone(raw);
+      const r = migrate(raw);
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.reason).toBe('newer-build');
+      expect(r.issues.join('\n')).toContain(String(f));
+      expect(raw).toEqual(before);
+    });
+  }
+
+  it('Given format 0 or -1 (below the oldest), Then still unknown-format', () => {
+    for (const f of [0, -1]) {
+      const r = migrate({ ...goldenCopy(), format: f });
+      expect(r.ok).toBe(false);
+      if (r.ok) continue;
+      expect(r.reason).toBe('unknown-format');
+    }
+  });
+
+  it('Given format 3 with garbage inside (the content is never read), Then still newer-build', () => {
+    const r = migrate({ format: 3, ship: 'whatever' });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toBe('newer-build');
   });
 });

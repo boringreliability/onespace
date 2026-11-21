@@ -14,6 +14,7 @@ import { fyssBelt, fyssField } from '@/game/testing/beltFixture';
 
 import golden from './fixtures/v1-golden.json';
 import { ActionEntrySchema, CURRENT_FORMAT, MinedEntrySchema, SaveV1Schema, type SaveV1 } from './schema';
+import * as schemaModule from './schema';
 
 /** A fresh, mutable copy of the golden save for each test. */
 function goldenCopy(): SaveV1 {
@@ -372,5 +373,134 @@ describe('R25 I1 — asteroid ids are whitelisted (ast:<system>:<field>:<n>)', (
       }
     }
     expect(n).toBeGreaterThan(0);
+  });
+});
+
+// =============================================================================
+// v4 sub-plan 6, Task 1 (phase A) — save format 2.
+//
+// Assumed API (docs/v4/plan-6-resources.md, Task 1 Interfaces):
+//   CURRENT_FORMAT = 2; SaveV1Schema unchanged (format: z.literal(1));
+//   SaveV2Schema = format 1 plus `{ kind: 'jettison', resource, kg }` in the
+//   cargo actions and `ship.beamResource` (a Resource).
+// Choice (phase A): `ship.beamResource` is REQUIRED in format 2 (the upgrade
+// writes 'ice'); the exported `ActionEntrySchema` — what the WAL and the
+// journal check entries with — is the CURRENT (format 2) one.
+// SaveV2Schema is read through a cast so `tsc` stays green until it exists.
+// =============================================================================
+
+type Parser = { safeParse(x: unknown): { success: boolean; data?: unknown; error?: { issues: Array<{ path: PropertyKey[] }> } } };
+const v2Schema = (): Parser => {
+  const s = (schemaModule as unknown as Record<string, unknown>).SaveV2Schema as Parser | undefined;
+  expect(typeof s?.safeParse, 'schema.ts exports SaveV2Schema').toBe('function');
+  return s!;
+};
+
+const JETTISON_ENTRY = {
+  seq: 13,
+  source: 'cargo',
+  payload: {
+    action: { kind: 'jettison', resource: 'ice', kg: 250 },
+    result: { ok: true, kgIn: 0, kgOut: 250, fuelKg: 0, restoredFrac: 0 },
+  },
+  wallMs: 1762891300000,
+  orbitSeconds: 5500,
+};
+
+type Loose = Record<string, unknown> & { ship: Record<string, unknown>; actions: unknown[] };
+
+/** The golden save as format 2: a jettison after its log, the beam on `beam`. */
+function v2Save(beam: unknown = 'metal'): Loose {
+  const s = goldenCopy() as unknown as Loose;
+  s.format = 2;
+  s.ship = { ...s.ship, beamResource: beam };
+  s.actions = [...s.actions, structuredClone(JETTISON_ENTRY)];
+  return s;
+}
+
+describe('save format 2 — the schema (plan 6 task 1)', () => {
+  it('Given the format constant, Then it is 2', () => {
+    expect(CURRENT_FORMAT).toBe(2);
+  });
+
+  it('Given a format 2 save with a jettison entry and beamResource "metal", Then SaveV2Schema accepts it and keeps both', () => {
+    const r = v2Schema().safeParse(v2Save('metal'));
+    expect(r.success, JSON.stringify(r.error?.issues?.slice(0, 3))).toBe(true);
+    const out = r.data as Loose;
+    expect(out.format).toBe(2);
+    expect(out.ship.beamResource).toBe('metal');
+    expect(out.actions.at(-1)).toEqual(JETTISON_ENTRY);
+  });
+
+  it('Given each of the four resources as beamResource, Then each is accepted', () => {
+    for (const r of ['ice', 'metal', 'silicate', 'rare']) expect(v2Schema().safeParse(v2Save(r)).success, r).toBe(true);
+  });
+
+  it('Given beamResource outside the four resources ("gold", "", null, 3) or missing, Then SaveV2Schema rejects it at ship.beamResource', () => {
+    for (const bad of ['gold', '', null, 3, undefined]) {
+      const s = v2Save(bad);
+      if (bad === undefined) delete s.ship.beamResource;
+      const r = v2Schema().safeParse(s);
+      expect(r.success, String(bad)).toBe(false);
+      expect(r.error?.issues.some((i) => i.path.join('.') === 'ship.beamResource'), String(bad)).toBe(true);
+    }
+  });
+
+  it('Given the same jettison entry in a save that says format 1, Then SaveV1Schema rejects it (R4: the new action never stands in a format 1 save)', () => {
+    const s = goldenCopy() as unknown as Loose;
+    expect(s.format).toBe(1);
+    s.actions = [...s.actions, structuredClone(JETTISON_ENTRY)];
+    expect(SaveV1Schema.safeParse(s).success).toBe(false);
+  });
+
+  it('Given a format 1 save carrying ship.beamResource, Then SaveV1Schema rejects it (format 1 stays frozen)', () => {
+    const s = goldenCopy() as unknown as Loose;
+    s.ship = { ...s.ship, beamResource: 'ice' };
+    expect(SaveV1Schema.safeParse(s).success).toBe(false);
+  });
+
+  it('Given the golden format 1 save, Then SaveV1Schema still accepts it unchanged (format 1 is kept, not replaced)', () => {
+    expect(SaveV1Schema.parse(goldenCopy())).toEqual(golden);
+  });
+
+  it('Given a valid format 2 save but with format 1 or 3 written on it, Then SaveV2Schema rejects it', () => {
+    for (const f of [1, 3]) expect(v2Schema().safeParse({ ...v2Save(), format: f }).success, String(f)).toBe(false);
+  });
+
+  it('Given a format 2 save whose world is from another universe, Then SaveV2Schema rejects it (the format 1 refinement is kept)', () => {
+    const s = v2Save();
+    s.world = { ...(s.world as object), universeId: 'gx-2:v1' };
+    expect(v2Schema().safeParse(s).success).toBe(false);
+  });
+
+  const badJettisons: Array<{ what: string; action: Record<string, unknown> }> = [
+    { what: 'a negative kg', action: { kind: 'jettison', resource: 'ice', kg: -1 } },
+    { what: 'no kg', action: { kind: 'jettison', resource: 'ice' } },
+    { what: 'no resource', action: { kind: 'jettison', kg: 250 } },
+    { what: 'an unknown resource', action: { kind: 'jettison', resource: 'gold', kg: 250 } },
+    { what: 'an extra key', action: { kind: 'jettison', resource: 'ice', kg: 250, all: true } },
+  ];
+  for (const b of badJettisons) {
+    it(`Given a format 2 save whose jettison has ${b.what}, Then SaveV2Schema rejects it`, () => {
+      // Precondition: the same save with a good jettison is valid.
+      expect(v2Schema().safeParse(v2Save()).success).toBe(true);
+      const s = v2Save();
+      (s.actions.at(-1) as { payload: { action: unknown } }).payload.action = b.action;
+      expect(v2Schema().safeParse(s).success).toBe(false);
+    });
+  }
+
+  it('Given the exported ActionEntrySchema (the WAL and the journal check entries with it), Then it accepts a jettison entry', () => {
+    const r = ActionEntrySchema.safeParse(JETTISON_ENTRY);
+    expect(r.success).toBe(true);
+    if (r.success) expect(r.data).toEqual(JETTISON_ENTRY);
+  });
+
+  it('Given a jettison-all entry, Then it is still accepted beside the new action (the beacon keeps its own name)', () => {
+    const e = { ...JETTISON_ENTRY, payload: { ...JETTISON_ENTRY.payload, action: { kind: 'jettison-all' } } };
+    expect(ActionEntrySchema.safeParse(e).success).toBe(true);
+    const s = v2Save();
+    s.actions = [...s.actions.slice(0, -1), e];
+    expect(v2Schema().safeParse(s).success).toBe(true);
   });
 });

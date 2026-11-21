@@ -22,6 +22,7 @@ import {
   type CargoResult,
   type Resource,
 } from './cargo';
+import * as cargoModule from './cargo';
 import { Propellant } from './propellant';
 
 type Seen = { action: CargoAction; result: CargoResult };
@@ -522,5 +523,126 @@ describe('Cargo — capacity sanitising (hardening)', () => {
 
   it('Given a positive finite capacity, Then it is kept as given', () => {
     expect(new Cargo(1234.5).capacityKg).toBe(1234.5);
+  });
+});
+
+// =============================================================================
+// v4 sub-plan 6, Task 1 (phase A) — jettison: throw out kg of ONE resource.
+//
+// Assumed API (docs/v4/plan-6-resources.md, Task 1 Interfaces):
+//   JETTISON_STEP_KG = 250
+//   CargoAction | { kind: 'jettison'; resource: Resource; kg: number }
+//   ok: true, kgOut = what actually left the hold (min(kg, held));
+//   reason 'empty' when none of that resource is held; reason 'invalid' when
+//   kg is not a finite number above 0. No new reason.
+// Read through casts so `tsc` stays green while the action does not exist.
+// =============================================================================
+
+const cargoV6 = cargoModule as unknown as Record<string, unknown>;
+const jettison = (resource: Resource, kg: number) => ({ kind: 'jettison', resource, kg }) as unknown as CargoAction;
+const ALL: readonly Resource[] = ['ice', 'metal', 'silicate', 'rare'];
+
+describe('jettison — one resource, a chosen amount (plan 6 task 1)', () => {
+  it('Given the plan, Then JETTISON_STEP_KG is exported and is 250', () => {
+    expect(cargoV6.JETTISON_STEP_KG, 'cargo.ts exports JETTISON_STEP_KG').toBe(250);
+  });
+
+  it('Given 1 000 kg of ice, When jettisoning 250 kg of ice, Then 750 kg is left, ok, and kgOut is 250', () => {
+    const c = hold({ ice: 1_000 });
+    const r = applyCargoAction(c, null, jettison('ice', 250));
+    expect(r.ok).toBe(true);
+    expect(r.reason).toBeUndefined();
+    expect(r.kgOut).toBe(250);
+    expect(r.kgIn).toBe(0);
+    expect(r.fuelKg).toBe(0);
+    expect(r.restoredFrac).toBe(0);
+    expect(c.kg('ice')).toBe(750);
+  });
+
+  it('Given 100 kg of ice, When jettisoning 250 kg of ice, Then only what is there leaves: 0 kg left and kgOut is 100 (never negative)', () => {
+    const c = hold({ ice: 100 });
+    const r = applyCargoAction(c, null, jettison('ice', 250));
+    expect(r.ok).toBe(true);
+    expect(r.kgOut).toBe(100);
+    expect(c.kg('ice')).toBe(0);
+  });
+
+  it('Given 0 kg of rare (but other cargo), When jettisoning 250 kg of rare, Then refused empty and the hold is unchanged', () => {
+    const c = hold({ ice: 1_000, metal: 500 });
+    const before = c.snapshot();
+    const r = applyCargoAction(c, null, jettison('rare', 250));
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('empty');
+    expect(r.kgOut).toBe(0);
+    expect(c.snapshot()).toEqual(before);
+  });
+
+  for (const kg of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    it(`Given 1 000 kg of ice, When jettisoning kg = ${kg} of ice, Then refused invalid and the hold is unchanged`, () => {
+      const c = hold({ ice: 1_000, metal: 500 });
+      const before = c.snapshot();
+      const r = applyCargoAction(c, null, jettison('ice', kg));
+      expect(r.ok).toBe(false);
+      expect(r.reason).toBe('invalid');
+      expect(r.kgOut).toBe(0);
+      expect(c.snapshot()).toEqual(before);
+    });
+  }
+
+  for (const target of ALL) {
+    it(`Given 400 kg of each resource, When jettisoning 250 kg of ${target}, Then only ${target} falls and the other three are untouched`, () => {
+      const c = hold({ ice: 400, metal: 400, silicate: 400, rare: 400 });
+      const r = applyCargoAction(c, null, jettison(target, 250));
+      expect(r.ok).toBe(true);
+      for (const other of ALL) expect(c.kg(other), other).toBe(other === target ? 150 : 400);
+    });
+  }
+
+  it('Given a jettison, Then the tank is never touched (with or without a tank)', () => {
+    const t = new Propellant(20_000, 0.3);
+    t.capacityLossFrac = 0.1;
+    const r = applyCargoAction(hold({ metal: 900 }), t, jettison('metal', 250));
+    expect(r.ok).toBe(true);
+    expect(t.massKg).toBeCloseTo(0.3 * 20_000 * 0.9, 6);
+    expect(t.capacityLossFrac).toBe(0.1);
+  });
+
+  const outcomes: Array<[string, () => Cargo, Resource, number]> = [
+    ['ok', () => hold({ ice: 1_000 }), 'ice', 250],
+    ['more than held', () => hold({ ice: 100 }), 'ice', 250],
+    ['empty', () => hold({ ice: 1_000 }), 'rare', 250],
+    ['invalid (0)', () => hold({ ice: 1_000 }), 'ice', 0],
+    ['invalid (NaN)', () => hold({ ice: 1_000 }), 'ice', Number.NaN],
+  ];
+  it.each(outcomes)('Given a jettison that is %s, Then cargo:action is emitted exactly once, carrying the action and the result', (_n, mk, res, kg) => {
+    const c = mk();
+    const a = jettison(res, kg);
+    const r = applyCargoAction(c, null, a);
+    expect(typeof r?.ok, 'applyCargoAction returns a CargoResult for a jettison').toBe('boolean');
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.action).toEqual(a);
+    expect(seen[0]!.result).toEqual(r);
+  });
+
+  it('Given a float remainder below the dust line (R18), When jettisoning almost all of it, Then the hold snaps to 0 and kgOut is what really left the hold', () => {
+    const c = hold({ silicate: 1_000 });
+    const r = applyCargoAction(c, null, jettison('silicate', 1_000 - 1e-9));
+    expect(r.ok).toBe(true);
+    expect(c.kg('silicate')).toBe(0);
+    expect(r.kgOut).toBe(1_000);
+  });
+
+  it('Given repeated 250 kg jettisons until refused, Then the kgOut sum is exactly what was held and the last one is refused empty', () => {
+    const c = hold({ metal: 1_100 });
+    let out = 0;
+    let last: CargoResult | null = null;
+    for (let i = 0; i < 10; i++) {
+      last = applyCargoAction(c, null, jettison('metal', 250));
+      if (!last.ok) break;
+      out += last.kgOut;
+    }
+    expect(out).toBe(1_100);
+    expect(c.kg('metal')).toBe(0);
+    expect(last?.reason).toBe('empty');
   });
 });

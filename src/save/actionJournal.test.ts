@@ -28,7 +28,7 @@ import { Belt } from '@/game/Belt';
 import { Mining, type MiningWorld } from '@/game/Mining';
 import { fyssField, nodeCtx, startSystem } from '@/game/testing/beltFixture';
 import { WorldState, type MinedEntry } from '@/game/worldState';
-import { CARGO_CAPACITY_KG, Cargo, type CargoAction, type CargoResult } from '@/ship/cargo';
+import { CARGO_CAPACITY_KG, Cargo, applyCargoAction, type CargoAction, type CargoResult } from '@/ship/cargo';
 import { PROBE_TANK_CAPACITY_KG, Propellant } from '@/ship/propellant';
 import type { PropellantAction } from '@/ship/travelCost';
 import { ActionJournal, MAX_ACTIONS, compactEntries } from './actionJournal';
@@ -822,4 +822,51 @@ describe('Task 7 — compactEntries edges (J11–J13)', () => {
     expect(out[0]!.wallMs).toBe(5_030);
     expect(out[0]!.orbitSeconds).toBe(300);
   });
+});
+
+// =============================================================================
+// v4 sub-plan 6, Task 1 (phase A) — a jettison through the real hold: an ok
+// one is ONE cargo entry with its kgOut; a refused one (empty, or an invalid
+// kg: 0, negative, NaN) leaves no entry (Review Focus 2). Cast: `CargoAction`
+// does not have `jettison` yet.
+// =============================================================================
+
+describe('jettison in the journal (plan 6 task 1)', () => {
+  const jettison = (resource: Resource, kg: number) => ({ kind: 'jettison', resource, kg }) as unknown as CargoAction;
+  function hold(contents: Partial<Record<Resource, number>>): Cargo {
+    const c = new Cargo(CARGO_CAPACITY_KG);
+    c.restore(contents);
+    return c;
+  }
+
+  it('Given 100 kg of ice, When jettisoning 250 kg of ice, Then one cargo entry carries the action and kgOut 100, and it is schema-valid', () => {
+    const { j } = journal();
+    applyCargoAction(hold({ ice: 100 }), null, jettison('ice', 250));
+    const out = j.drain();
+    expect(out).toHaveLength(1);
+    const e = out[0]!;
+    expect(e.source).toBe('cargo');
+    const p = e.payload as { action: unknown; result: CargoResult };
+    expect(p.action).toEqual({ kind: 'jettison', resource: 'ice', kg: 250 });
+    expect(p.result.ok).toBe(true);
+    expect(p.result.kgOut).toBe(100);
+    expect(ActionEntrySchema.safeParse(e).success).toBe(true);
+  });
+
+  for (const [what, c, kg] of [
+    ['none of the resource (empty)', () => hold({ metal: 500 }), 250],
+    ['kg 0 (invalid)', () => hold({ ice: 500 }), 0],
+    ['kg -1 (invalid)', () => hold({ ice: 500 }), -1],
+    ['kg NaN (invalid)', () => hold({ ice: 500 }), Number.NaN],
+  ] as Array<[string, () => Cargo, number]>) {
+    it(`Given a jettison refused for ${what}, Then the journal stays empty and the hold is unchanged`, () => {
+      const { j } = journal();
+      const h = c();
+      const before = h.snapshot();
+      const r = applyCargoAction(h, null, jettison('ice', kg));
+      expect(r?.ok, 'a CargoResult came back, refused').toBe(false);
+      expect(j.drain()).toEqual([]);
+      expect(h.snapshot()).toEqual(before);
+    });
+  }
 });
