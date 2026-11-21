@@ -10,6 +10,8 @@
 import type { GameScale, PlanetSpec, StarSystemSpec, GalaxySpec, ScanResult } from '@/gen/types';
 import type { PropellantAction } from '@/ship/travelCost';
 import type { CargoAction, CargoResult } from '@/ship/cargo';
+import type { Resource } from '@/gen/belt';
+import type { ExtractionEnd } from '@/game/extraction';
 
 export interface GameEvents {
   /** Boot progress, 0..1, plus a status line for the loading veil. */
@@ -93,6 +95,19 @@ export interface GameEvents {
 
   /** [v4-mining] A named hold action was applied; refusals are announced too. */
   'cargo:action': { action: CargoAction; result: CargoResult };
+
+  /** [v4-mining] Plan 5: an extraction of one resource began on a rock (B). */
+  'mining:started': { asteroidId: string; resource: Resource };
+  /** [v4-mining] Plan 5: one bite reached the hold (also a `cargo:action` mine and a recordMined). */
+  'mining:bite': { asteroidId: string; resource: Resource; kg: number };
+  /** [v4-mining] Plan 5: an extraction ended; `minedKg` is what it put in the hold, kept whatever the end. */
+  'mining:ended': { asteroidId: string; resource: Resource; minedKg: number; end: ExtractionEnd };
+  /** [v4-mining] Plan 5: the last bite emptied a rock; emitted once, in the frame of that bite. */
+  'asteroid:destroyed': { asteroidId: string };
+  /** [v4-mining] Plan 5: a refine (U) or repair (N) began, in the frame of the accepted press. */
+  'action:started': { kind: 'refine' | 'repair' };
+  /** [v4-mining] Plan 5: exactly once per `action:started`, except that `Mining.dispose()` mid-action emits none; `ok` false on every abort or refused completion. */
+  'action:ended': { kind: 'refine' | 'repair'; ok: boolean };
 
   /** The star map's open transition started/ended. Flight input should stand down. */
   'ui:map-opened': void;

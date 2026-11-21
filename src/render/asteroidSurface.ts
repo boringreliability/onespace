@@ -59,3 +59,18 @@ export function asteroidSurface(c: Readonly<Record<Resource, number>>): Asteroid
   const tint = (x: number): number => 1 - fm + fm * (x / max);
   return { albedo: [r, g, b], spec, metalness: fm, specColor: [tint(r), tint(g), tint(b)] };
 }
+
+/**
+ * How worn a rock LOOKS, 0..1, from how worn it IS (mined mass / original
+ * mass, `Belt.wear`) — plan 5, Task 5. Pure.
+ *
+ * A square root: concave and strictly increasing, so the first bite shows
+ * (2 000 kg of a 65 000 kg rock, wear 0.031, looks 0.175) and the late wear
+ * still separates (0.4 → 0.63, 0.95 → 0.97). Non-finite and out-of-range
+ * input is clamped; NaN and anything below 0 read as an unworn rock.
+ */
+export function wearVisual(wear: number): number {
+  if (!(wear > 0)) return 0;
+  if (wear >= 1) return 1;
+  return Math.sqrt(wear);
+}

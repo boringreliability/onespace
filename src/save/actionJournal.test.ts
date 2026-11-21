@@ -572,31 +572,34 @@ function miningRig() {
   return { j, ast, mining, input, tick, worldState };
 }
 
-describe('ordering: a completed mine is in the journal whole', () => {
-  it('Given a mine completes, Then the journal has the cargo action AND the mined entry before any save is built (recordMined comes after cargo:action)', () => {
+// Plan 5 (owner, 2026-11-21): an extraction lands in bites of 250 kg; the unit that is whole is the bite.
+describe('ordering: a landed bite is in the journal whole', () => {
+  it('Given a bite lands, Then the journal has the cargo action AND the mined entry before any save is built (recordMined comes after cargo:action)', () => {
     const r = miningRig();
     r.input.pressKey(MINING_KEYS.mine);
     r.tick(1);
-    expect(r.mining.busy).not.toBeNull();
-    r.tick(240);
-    expect(r.mining.busy).toBeNull();
+    expect(r.mining.status('mine').kind).toBe('running');
+    r.tick(100);
     expect(r.worldState.entries()).toHaveLength(1);
     // Straight after the completing frame — nothing else has run.
     const out = r.j.drain();
     expect(out.map((e) => e.source)).toEqual(['cargo', 'mined']);
-    expect(out[0]!.payload).toMatchObject({ action: { kind: 'mine', asteroidId: r.ast.id, resource: 'ice', kg: 2_000 }, result: { ok: true } });
-    expect(out[1]!.payload).toEqual({ id: r.ast.id, by: 'local', resource: 'ice', kg: 2_000 });
+    expect(out[0]!.payload).toMatchObject({ action: { kind: 'mine', asteroidId: r.ast.id, resource: 'ice', kg: 250 }, result: { ok: true } });
+    expect(out[1]!.payload).toEqual({ id: r.ast.id, by: 'local', resource: 'ice', kg: 250 });
     expect(out[1]!.seq).toBeGreaterThan(out[0]!.seq);
     expectValid(out);
   });
 
-  it('Given a mine aborted midway, Then the journal holds neither half', () => {
+  it('Given an extraction interrupted midway through its second bite, Then the journal holds the first bite whole and nothing of the second', () => {
     const r = miningRig();
     r.input.pressKey(MINING_KEYS.mine);
     r.tick(120);
     bus.emit('ship:recovered', { cause: 'beacon' });
     r.tick(300);
-    expect(r.j.drain().filter((e) => e.source === 'cargo' || e.source === 'mined')).toEqual([]);
+    const out = r.j.drain().filter((e) => e.source === 'cargo' || e.source === 'mined');
+    expect(out.map((e) => e.source)).toEqual(['cargo', 'mined']);
+    expect(out[0]!.payload).toMatchObject({ action: { kind: 'mine', resource: 'ice', kg: 250 }, result: { ok: true } });
+    expect(out[1]!.payload).toEqual({ id: r.ast.id, by: 'local', resource: 'ice', kg: 250 });
   });
 });
 

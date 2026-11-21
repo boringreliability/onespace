@@ -66,3 +66,39 @@ describe('v4-save — the save module is gated to piloting', () => {
     for (const b of ['title', 'boot', 'yard', 'review'] as const) expect(ticks('save', b), b).toBe(false);
   });
 });
+
+// v4 sub-plan 5, Task 4 (review): the HUD's action rows are read from Mining,
+// so the feed must sleep whenever Mining sleeps — else it prints a frozen verdict.
+describe('the action feed follows Mining', () => {
+  it('Given the gating table, Then action-feed is listed and ticks in exactly the modes mining ticks in', () => {
+    expect(MODULE_MODES['action-feed']).toBeDefined();
+    expect(MODULE_MODES['action-feed']).toEqual(MODULE_MODES['mining']);
+  });
+
+  it('Given the map, the title, the yard or a review shot, Then the action feed sleeps; in flight it ticks', () => {
+    for (const base of ['map', 'title', 'yard', 'review', 'boot'] as const) expect(ticks('action-feed', base), base).toBe(false);
+    expect(ticks('action-feed', 'flight')).toBe(true);
+  });
+});
+
+// Plan 5 final review, fix round (phase A) — I-2. Photo is an overlay: under
+// it Mining and its beam are NOT asleep — they tick with dt = 0 — and Pause
+// ticks too (it is what freezes the world while an overlay is up). So the
+// extraction and the beam do not end in photo by sleeping: Mining and
+// MiningBeams end them in `onModeChange` (D53, photo stays as pause); leaving
+// flight for a base mode puts both to sleep.
+describe('photo over flight: Mining and its beam stand still, they do not sleep (plan 5 final review I-2)', () => {
+  const dtIn = (name: string, base: BaseMode, overlay: 'photo' | null): number =>
+    moduleDt({ activeIn: MODULE_MODES[name] }, { base, overlay }, 1 / 60);
+
+  it('Given a photo overlay over flight, Then mining, mining-beams, action-feed, pause and universe tick with dt = 0', () => {
+    for (const m of ['mining', 'mining-beams', 'action-feed', 'pause', 'universe']) expect(dtIn(m, 'flight', 'photo'), m).toBe(0);
+  });
+
+  it('Given flight with no overlay, Then mining and mining-beams tick with the frame dt; in map, Yard or title they sleep', () => {
+    for (const m of ['mining', 'mining-beams']) {
+      expect(dtIn(m, 'flight', null), m).toBe(1 / 60);
+      for (const b of ['map', 'yard', 'title'] as const) expect(dtIn(m, b, null), `${m} in ${b}`).toBe(-1);
+    }
+  });
+});

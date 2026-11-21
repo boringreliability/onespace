@@ -3,8 +3,8 @@
  * resource a mine takes, and what the log says.
  *
  * `mayMine` is the one gate (as `emergencyMayAct`, R16): the key asks it on
- * the press, and Mining asks it again every frame of the 4 s action and at
- * completion. Precedence, first failure wins:
+ * the press, and Mining asks it again every frame of an extraction (plan 5:
+ * once per frame, before that frame's bites). Precedence, first failure wins:
  *   busy → no-target → range → speed → hold-full → depleted
  * Every limit is inclusive, and NaN never passes.
  */
@@ -12,12 +12,12 @@
 import { describe, expect, it } from 'vitest';
 
 import type { Resource } from '@/gen/belt';
+import * as miningRules from './miningRules';
 import {
-  MINE_ACTION_S,
+  ACTION_HINT,
   MINE_MAX_REL_KMS,
   MINE_MIN_KG,
   MINE_RANGE_KM,
-  MINE_YIELD_KG,
   MINING_ABORTED_TEXT,
   REFINE_ACTION_S,
   REFUSAL_LOG,
@@ -53,13 +53,18 @@ const all = (ice: number, metal: number, silicate: number, rare: number): Record
 });
 
 describe('the constants (pinned, from the plan)', () => {
-  it('Given the plan, Then range 0.5 km from the surface, 0.005 km/s, 4 s, 2 000 kg, refine 8 s, repair 10 s', () => {
+  // Plan 5, Task 3: the 4 s / 2 000 kg mine is gone (MINE_ACTION_S, MINE_YIELD_KG);
+  // the extraction's pace is MINE_RATE_KG_S / MINE_BITE_KG (extraction.test.ts).
+  it('Given the plan, Then range 0.5 km from the surface, 0.005 km/s, refine 8 s, repair 10 s', () => {
     expect(MINE_RANGE_KM).toBe(0.5);
     expect(MINE_MAX_REL_KMS).toBe(0.005);
-    expect(MINE_ACTION_S).toBe(4);
-    expect(MINE_YIELD_KG).toBe(2_000);
     expect(REFINE_ACTION_S).toBe(8);
     expect(REPAIR_ACTION_S).toBe(10);
+  });
+
+  it('Given plan 5 (continuous extraction), Then miningRules no longer exports MINE_ACTION_S or MINE_YIELD_KG', () => {
+    expect('MINE_ACTION_S' in miningRules).toBe(false);
+    expect('MINE_YIELD_KG' in miningRules).toBe(false);
   });
 });
 
@@ -295,5 +300,23 @@ describe('repairedLog — rounds to the nearest percent (hardening)', () => {
   it('Given 0.285 and 0.2849, Then 29 % and 28 % (nearest)', () => {
     expect(repairedLog(0.2851)).toBe('REPAIRED · TANK +29 %');
     expect(repairedLog(0.2849)).toBe('REPAIRED · TANK +28 %');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v4 sub-plan 5, Task 1 (phase A) — what the HUD tells you to do about a refusal.
+// ---------------------------------------------------------------------------
+
+describe('ACTION_HINT — the next key for a refusal you can act on', () => {
+  it('Given a range refusal, Then "L TO APPROACH"', () => {
+    expect(ACTION_HINT.range).toBe('L TO APPROACH');
+  });
+
+  it('Given a speed refusal, Then "SPACE TO STOP"', () => {
+    expect(ACTION_HINT.speed).toBe('SPACE TO STOP');
+  });
+
+  it('Given the table, Then range and speed are its only keys', () => {
+    expect(Object.keys(ACTION_HINT).sort()).toEqual(['range', 'speed']);
   });
 });

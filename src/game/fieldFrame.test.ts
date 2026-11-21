@@ -547,3 +547,29 @@ describe('K in the field: asteroids anywhere in the frame, vessels within 50 km'
     expect(r.logs).toContain('FORMATION — TARGET A VESSEL OR ASTEROID WITHIN 50 KM');
   });
 });
+
+// ---------------------------------------------------------------------------
+// v4 sub-plan 5, Task 3 (phase A): the last bite of an extraction destroys the
+// rock. Mining does not own formation: FlightSense releases a hold whose rock
+// the Belt no longer knows, with the existing line, on its next frame.
+// ---------------------------------------------------------------------------
+
+describe('formation on a rock that is mined out (plan 5, task 3)', () => {
+  it('Given formation held on a rock, When every resource in it falls under 0.5 kg, Then the next frame releases it with "FORMATION RELEASED", once, and later frames do not throw', () => {
+    const probe = fieldRig();
+    const rock = rocksBySurface(probe)[0]!;
+    const r = fieldRig({ targetId: rock.id });
+    r.pressK();
+    expect(r.fs.formation).toBe(rock.id);
+    const spec = r.field.asteroids.find((x) => x.id === rock.id)!;
+    for (const res of ['ice', 'metal', 'silicate', 'rare'] as const) {
+      r.b.worldState.recordMined(rock.id, res, spec.composition[res], 'local');
+    }
+    expect(r.b.belt.isDestroyed(rock.id)).toBe(true);
+    r.frame();
+    expect(r.fs.formation).toBeNull();
+    expect(r.logs.filter((l) => l === 'FORMATION RELEASED')).toHaveLength(1);
+    expect(() => r.step(1)).not.toThrow();
+    expect(r.logs.filter((l) => l === 'FORMATION RELEASED')).toHaveLength(1);
+  });
+});

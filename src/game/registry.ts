@@ -57,7 +57,7 @@ import { Dust } from '@/render/Dust';
 import { FlightSense } from '@/game/FlightSense';
 import { Belt } from '@/game/Belt'; // [v4-mining]
 import { WorldState } from '@/game/worldState'; // [v4-mining]
-import { Asteroids } from '@/render/Asteroids'; // [v4-mining]
+import { Asteroids, registerAsteroidShots } from '@/render/Asteroids'; // [v4-mining]
 import { selectionFromRoute, toShipParams } from '@/game/showroom/catalog';
 // -----------------------------------------------------------------------------
 import { RecoveryCut } from '@/game/RecoveryCut';
@@ -65,6 +65,8 @@ import { Pause } from '@/ui/Pause';
 import { Hints } from '@/ui/Hints';
 import { Emergency } from '@/game/Emergency'; // [v4-fuel]
 import { Mining } from '@/game/Mining'; // [v4-mining]
+import { ActionFeed } from '@/game/ActionFeed'; // [v4-mining] plan 5
+import { MiningBeams, registerMiningBeamShots } from '@/render/MiningBeams'; // [v4-mining] plan 5 task 6
 // -- v4 sub-plan 3: the save -----------------------------------------------------
 import { SaveGame } from '@/game/SaveGame';
 import { ActionJournal } from '@/save/actionJournal';
@@ -286,7 +288,9 @@ class ReviewGuard implements GameModule {
     // the title is not flight either (review-p1: its menu sat under the
     // pitch ladder). Title/boot are excluded by this whitelist.
     const flightMode = modes.base === 'flight' || modes.base === 'map' || modes.base === 'review';
-    this.hud.setVisible((!owned || shot === 'hud-full') && !this.mapOpen && flightMode);
+    // [v4-mining] plan 5: the action block's shots are HUD shots too.
+    const hudShot = shot === 'hud-full' || (shot?.startsWith('hud-actions-') ?? false);
+    this.hud.setVisible((!owned || hudShot) && !this.mapOpen && flightMode);
     this.gallery.root.visible = shot !== null && GALLERY_SHOTS.has(shot);
 
     // Planet shots build a fixture and only clear it for each other. Leaving
@@ -496,7 +500,8 @@ export async function registerModules(engine: Engine, progress: ProgressFn, boot
   // likewise, and its altitude replaces the sphere one Pilot just published.
   // [v4-mining] The rocks themselves: after the Belt (its memo is current) and
   // after Universe (the origin has already rebased this frame).
-  await engine.add(new Asteroids({ belt, universe }));
+  const asteroids = new Asteroids({ belt, universe });
+  await engine.add(asteroids);
   const targeting = new Targeting({ universe, traffic, hud, belt });
   await engine.add(targeting);
   // -- v3 T4: drive field → sky, silent events → audio, K formation ----------
@@ -553,6 +558,13 @@ export async function registerModules(engine: Engine, progress: ProgressFn, boot
   // Cruise and the emergency exit; its in-range flag drives the 'mine' hint.
   const mining = new Mining({ universe, belt, worldState, targeting, cruise, warp });
   await engine.add(mining);
+  // [v4-mining] plan 5: the HUD's action block and VEL's mining tone, from this
+  // frame's Mining (so after it; Instruments runs before Mining exists).
+  await engine.add(new ActionFeed({ hud, mining, targeting }));
+  // [v4-mining] plan 5 task 6: the beam, its glow and pebbles, from this frame's
+  // operations (after Mining); the Belt carries them along with the field.
+  const miningBeams = new MiningBeams({ mining, universe, belt });
+  await engine.add(miningBeams);
   // [v4-save] After Emergency and Mining: one writing tab (navigator.locks),
   // IndexedDB (memory where it is missing), the WAL on localStorage.
   progress(0.87, 'opening the logbook vault');
@@ -598,7 +610,7 @@ export async function registerModules(engine: Engine, progress: ProgressFn, boot
   const continueGame = (): void => {
     if (hasSave && continued && saveGame?.revision === continued.revision) saveGame.continueFrom(continued);
   };
-  await engine.add(new Hints({ universe, pause, recovery, warp, emergency, mining }));
+  await engine.add(new Hints({ universe, pause, recovery, warp, emergency, mining, autopilot }));
   // --- end track D -------------------------------------------------------------
 
   progress(0.88, 'assembling gallery');
@@ -647,6 +659,8 @@ export async function registerModules(engine: Engine, progress: ProgressFn, boot
   registerPostFXShots(postfx);
   registerStarShots();
   registerPlanetShots();
+  registerAsteroidShots(asteroids); // [v4-mining] plan 5 task 5: wear and break-up
+  registerMiningBeamShots(miningBeams, asteroids, pilot.ship); // [v4-mining] plan 5 task 6: the beam
   registerHudShots(hud);
   registerWarpShots(warp);
   registerCameraShots(pilot.rig);

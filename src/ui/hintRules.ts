@@ -7,13 +7,14 @@
  *   pointer not captured → CLICK (never retires: it is a state, not a lesson)
  *   [v4-mining] mine (an asteroid targeted within mining range) — ahead of
  *     every lesson: it is a situation, not a curriculum step
+ *   [v4-mining] approach (an asteroid targeted out of range), then refine
+ *     (refine would run: ice aboard, room in the tank) — situations too
  *   fly → cruise (only with a target, not already cruising) → scan → chart → pause
  */
 
 import { MINING_KEYS } from '@/core/Input';
-import type { CargoAction, CargoResult } from '@/ship/cargo';
 
-export type HintId = 'click' | 'fly' | 'cruise' | 'scan' | 'chart' | 'pause' | 'mine';
+export type HintId = 'click' | 'fly' | 'cruise' | 'scan' | 'chart' | 'pause' | 'mine' | 'approach' | 'refine';
 export type RetirableHintId = Exclude<HintId, 'click'>;
 
 export const HINT_TEXT: Readonly<Record<HintId, string>> = {
@@ -24,6 +25,9 @@ export const HINT_TEXT: Readonly<Record<HintId, string>> = {
   chart: 'M — CHART',
   pause: 'ESC — PAUSE',
   mine: `${MINING_KEYS.mine.replace(/^Key/, '')} — MINE`,
+  /** [v4-mining] L is the autopilot's key; at a targeted rock it approaches. */
+  approach: 'L — APPROACH',
+  refine: `${MINING_KEYS.refine.replace(/^Key/, '')} — REFINE`,
 };
 
 /** Uses after which a hint stops being shown. */
@@ -33,8 +37,12 @@ export const HINT_RETIRE_AFTER: Readonly<Record<RetirableHintId, number>> = {
   scan: 2,
   chart: 2,
   pause: 2,
-  /** [v4-mining] Retires after 2 COMPLETED mines (`recordCargoAction`). */
+  /** [v4-mining] Retires after 2 extractions that mined something (`recordMiningEnded`). */
   mine: 2,
+  /** [v4-mining] Retires after 2 approaches the autopilot started (`recordApproach`). */
+  approach: 2,
+  /** [v4-mining] Retires after 2 completed refines (`recordActionEnded`). */
+  refine: 2,
 };
 
 export type HintCounts = Partial<Record<RetirableHintId, number>>;
@@ -56,6 +64,16 @@ export interface HintState {
   readonly cruising: boolean;
   /** [v4-mining] An asteroid is targeted within mining range (`Mining.asteroidInRange`). */
   readonly asteroidInRange?: boolean;
+  /** [v4-mining] An asteroid is targeted out of mining range (`miningHintFacts`). */
+  readonly asteroidOutOfRange?: boolean;
+  /** [v4-mining] A refine would run now: ice aboard, room in the tank (`miningHintFacts`). */
+  readonly refinable?: boolean;
+  /**
+   * [v4-mining] The mine key would start an extraction now: the mine row
+   * 'ready' (`miningHintFacts`). `false` keeps the mine lesson off (an
+   * extraction running, a full hold); left out, `asteroidInRange` alone decides.
+   */
+  readonly minable?: boolean;
 }
 
 export const HINT_COUNTS_KEY = 'os.hints.v1';
@@ -76,20 +94,67 @@ export function recordUse(counts: HintCounts, id: RetirableHintId): HintCounts {
 }
 
 /**
- * [v4-mining] Counts a `cargo:action` towards the 'mine' hint: only a
- * successful mine counts. Anything else returns `counts` itself.
+ * [v4-mining] Counts a `mining:ended` towards the 'mine' hint (plan 5): one
+ * extraction counts once, however many bites it took, and only if it mined
+ * something. Otherwise returns `counts` itself.
  */
-export function recordCargoAction(
+export function recordMiningEnded(counts: HintCounts, e: { readonly minedKg: number }): HintCounts {
+  return e.minedKg > 0 ? recordUse(counts, 'mine') : counts;
+}
+
+/**
+ * [v4-mining] Counts an `action:ended` towards the 'refine' hint: only a
+ * completed refine. An abort, a refused completion or a repair returns
+ * `counts` itself.
+ */
+export function recordActionEnded(
   counts: HintCounts,
-  e: { readonly action: CargoAction; readonly result: CargoResult },
+  e: { readonly kind: 'refine' | 'repair'; readonly ok: boolean },
 ): HintCounts {
-  return e.action.kind === 'mine' && e.result.ok ? recordUse(counts, 'mine') : counts;
+  return e.kind === 'refine' && e.ok ? recordUse(counts, 'refine') : counts;
+}
+
+/**
+ * [v4-mining] Counts the frame the autopilot starts an approach (its goal
+ * becomes 'approach') towards the 'approach' hint. A refused L or a landing
+ * never gets there; every other frame returns `counts` itself.
+ */
+export function recordApproach(
+  counts: HintCounts,
+  e: { readonly wasApproaching: boolean; readonly approaching: boolean },
+): HintCounts {
+  return e.approaching && !e.wasApproaching ? recordUse(counts, 'approach') : counts;
+}
+
+/** The part of `Mining.status(kind)` the hints read. */
+export type MiningStatusLike =
+  | { readonly kind: 'ready' | 'running' }
+  | { readonly kind: 'blocked'; readonly reason: string };
+
+/**
+ * [v4-mining] The lesson facts from `Mining.status`: out of range is the
+ * mine row blocked for 'range' (the row's OUT OF RANGE — L TO APPROACH);
+ * minable is the mine row 'ready' and refinable the refine row 'ready', so the
+ * line never says B or U when that key would be refused or would stop an
+ * extraction.
+ */
+export function miningHintFacts(
+  mine: MiningStatusLike,
+  refine: MiningStatusLike,
+): { asteroidOutOfRange: boolean; refinable: boolean; minable: boolean } {
+  return {
+    asteroidOutOfRange: mine.kind === 'blocked' && mine.reason === 'range',
+    refinable: refine.kind === 'ready',
+    minable: mine.kind === 'ready',
+  };
 }
 
 export function selectHint(state: HintState, counts: HintCounts): HintId | null {
   if (!state.inFlight || state.overlayOpen || state.paused || state.busy) return null;
   if (!state.pointerLocked) return 'click';
-  if (state.asteroidInRange === true && !isRetired(counts, 'mine')) return 'mine';
+  if (state.asteroidInRange === true && state.minable !== false && !isRetired(counts, 'mine')) return 'mine';
+  if (state.asteroidOutOfRange === true && !isRetired(counts, 'approach')) return 'approach';
+  if (state.refinable === true && !isRetired(counts, 'refine')) return 'refine';
   if (!isRetired(counts, 'fly')) return 'fly';
   if (state.hasTarget && !state.cruising && !isRetired(counts, 'cruise')) return 'cruise';
   if (!isRetired(counts, 'scan')) return 'scan';

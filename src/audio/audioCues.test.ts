@@ -9,7 +9,9 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  ACTION_TONE_HZ,
   CREAK_ONSET_G,
+  MINING_TONE_HZ,
   crashCue,
   creakLevel,
   cruiseCue,
@@ -179,5 +181,24 @@ describe('creakLevel: the cockpit hull creaks under g', () => {
 
   it('Given the onset, Then it is above 1 g (sitting on a planet does not creak)', () => {
     expect(CREAK_ONSET_G).toBeGreaterThan(1.2);
+  });
+});
+
+// v4 sub-plan 5, Task 7 (phase A): the two held tones of mining. Their exact
+// pitch is the ear's (DESIGN-5 §7.6: "lydenes præcise klang" is open); what is
+// pinned is that both are audible and that they are not the same tone.
+describe('the mining tone and the refine/repair tone (plan 5 task 7)', () => {
+  it('Given MINING_TONE_HZ and ACTION_TONE_HZ, Then both are finite, audible-range frequencies (20 Hz – 20 kHz)', () => {
+    for (const hz of [MINING_TONE_HZ, ACTION_TONE_HZ]) {
+      expect(Number.isFinite(hz)).toBe(true);
+      expect(hz).toBeGreaterThanOrEqual(20);
+      expect(hz).toBeLessThanOrEqual(20_000);
+    }
+  });
+
+  it('Given the two base frequencies, Then they differ by more than a semitone (≈ 6 %), so refining does not sound like mining', () => {
+    const lo = Math.min(MINING_TONE_HZ, ACTION_TONE_HZ);
+    const hi = Math.max(MINING_TONE_HZ, ACTION_TONE_HZ);
+    expect(hi / lo).toBeGreaterThan(Math.pow(2, 1 / 12));
   });
 });

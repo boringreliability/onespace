@@ -102,7 +102,7 @@ function rig(opts: { system?: StarSystemSpec | null; ship?: Vector3; shipVel?: V
     return targeting.targetId;
   };
   const hudNow = (): HudTarget | null => hudLog[hudLog.length - 1] ?? null;
-  return { fm, belt, targeting, frame, pressTab, hudNow, bodies, universe };
+  return { fm, belt, worldState, targeting, frame, pressTab, hudNow, bodies, universe };
 }
 
 describe('Targeting — asteroids in the Tab cycle', () => {
@@ -236,5 +236,36 @@ describe('Targeting — unchanged without a belt', () => {
       if (id) seen.add(id);
     }
     expect([...seen].sort()).toEqual(['body:Ash', 'body:Dust']);
+  });
+});
+
+// v4 sub-plan 5, Task 3 (phase A): the last bite of an extraction destroys the
+// rock (Belt.isDestroyed). Mining does not own the target: Targeting drops a
+// target the Belt no longer knows, on its next frame (registry order:
+// Targeting runs before Mining, so "the next frame" after the bite).
+describe('Targeting — a mined-out rock is dropped (plan 5, task 3)', () => {
+  it('Given an asteroid targeted, When every resource in it falls under 0.5 kg, Then on the next frame the target is null, target:changed null is announced once, and the HUD bracket is gone', () => {
+    const f = fyssField(K);
+    const a = f.asteroids[2]!;
+    const ship = fieldCentre(f, 0).add(new Vector3(800, 0, 0));
+    const r = rig({ ship });
+    bus.emit('target:changed', { id: a.id, name: null });
+    r.frame();
+    expect(r.targeting.targetId).toBe(a.id);
+
+    const seen: Array<string | null> = [];
+    offs.push(bus.on('target:changed', ({ id }) => seen.push(id)));
+    for (const res of ['ice', 'metal', 'silicate', 'rare'] as const) {
+      r.worldState.recordMined(a.id, res, a.composition[res] - 0.3, 'local');
+    }
+    expect(r.belt.isDestroyed(a.id)).toBe(true);
+    r.frame();
+    expect(r.targeting.targetId).toBeNull();
+    expect(seen).toEqual([null]);
+    expect(r.hudNow()).toBeNull();
+    // And it stays gone.
+    r.frame();
+    expect(r.targeting.targetId).toBeNull();
+    expect(seen).toEqual([null]);
   });
 });

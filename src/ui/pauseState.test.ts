@@ -39,6 +39,10 @@ import {
   type SyncNoticeWatch,
 } from './pauseState';
 import { SYNC_CONFLICT_TEXT, SYNC_OFFLINE_TEXT, SYNC_REAUTH_TEXT, type SyncStatus } from '@/net/SyncClient';
+// v4 sub-plan 5, Task 8 (phase A): the sheet's key lines come from the key map.
+import * as pauseStateModule from './pauseState';
+import { EMERGENCY_KEYS, MINING_KEYS, actionForKey } from '@/core/Input';
+import { FORMATION_KEY } from '@/ship/formation';
 
 const flying: PauseContext = { overlayOpen: false, busy: false };
 const inChart: PauseContext = { overlayOpen: true, busy: false };
@@ -447,5 +451,126 @@ describe('Ruling R62a — the pointer entering another item disarms DELETE ACCOU
   it('Ruling R62a: Given Pause.ts, Then the other buttons wire mouseenter/pointerenter to the other event', () => {
     const s = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'Pause.ts'), 'utf8');
     expect(s).toMatch(/addEventListener\(\s*'(mouseenter|pointerenter)'[\s\S]{0,240}kind:\s*'other'/);
+  });
+});
+
+// =============================================================================
+// v4 sub-plan 5 (mining you can see), Task 8 — where the keys are looked up
+// (DESIGN-5 §7.7). The sheet listed neither B, U, N, K nor H, and said L only
+// lands and goes to orbit, though L also flies to a targeted rock.
+//
+// Assumed surface (src/ui/pauseState.ts; Pause.ts renders it):
+//   interface PauseKeyMap {
+//     readonly mining: { mine; refine; repair: string };              // MINING_KEYS
+//     readonly emergency: { open; cannibalize; beacon; cannibalizeCargo: string }; // EMERGENCY_KEYS
+//     readonly formation: string;                                      // FORMATION_KEY
+//   }
+//   pauseControls(keys?: PauseKeyMap): ReadonlyArray<readonly [key: string, text: string]>
+//     — the sheet's key lines; omitted `keys` = the game's own map. The key
+//       column is the code without its `Key` / `Digit` prefix ('KeyB' → 'B').
+// =============================================================================
+
+interface PauseKeyMapV5 {
+  readonly mining: { readonly mine: string; readonly refine: string; readonly repair: string };
+  readonly emergency: {
+    readonly open: string;
+    readonly cannibalize: string;
+    readonly beacon: string;
+    readonly cannibalizeCargo: string;
+  };
+  readonly formation: string;
+}
+type ControlLine = readonly [string, string];
+const pauseV5 = pauseStateModule as unknown as {
+  pauseControls?: (keys?: PauseKeyMapV5) => ReadonlyArray<ControlLine>;
+};
+function controls(keys?: PauseKeyMapV5): ReadonlyArray<ControlLine> {
+  expect(typeof pauseV5.pauseControls, 'pauseState exports pauseControls').toBe('function');
+  return pauseV5.pauseControls!(keys);
+}
+/** 'KeyB' → 'B', 'Digit1' → '1': what the sheet prints for a key code (as Emergency.ts does). */
+const keyLabel = (code: string): string => code.replace(/^Key/, '').replace(/^Digit/, '');
+const emergencyKeyColumn = (e: PauseKeyMapV5['emergency']): string =>
+  `${keyLabel(e.open)} · ${keyLabel(e.cannibalize)} / ${keyLabel(e.beacon)} / ${keyLabel(e.cannibalizeCargo)}`;
+const lineFor = (lines: ReadonlyArray<ControlLine>, key: string): ControlLine | undefined => lines.find(([k]) => k === key);
+
+describe('plan 5 Task 8 — the pause sheet lists every key (§7.7)', () => {
+  it('Given the sheet, Then it lists B mine, U refine, N repair, K formation hold and H emergency exit with 1 / 2 / 3', () => {
+    const lines = controls();
+    const expected: ReadonlyArray<readonly [string, RegExp]> = [
+      [keyLabel(MINING_KEYS.mine), /^MINE\b/],
+      [keyLabel(MINING_KEYS.refine), /^REFINE\b/],
+      [keyLabel(MINING_KEYS.repair), /^REPAIR\b/],
+      [keyLabel(FORMATION_KEY), /^FORMATION HOLD\b/],
+      [emergencyKeyColumn(EMERGENCY_KEYS), /^EMERGENCY EXIT\b/],
+    ];
+    for (const [key, text] of expected) {
+      const line = lineFor(lines, key);
+      expect(line, `a line for ${key}`).toBeDefined();
+      expect(line![1], key).toMatch(text);
+    }
+    // What the game binds today, so the test reads as the spec does.
+    expect(expected.map(([k]) => k)).toEqual(['B', 'U', 'N', 'K', 'H · 1 / 2 / 3']);
+  });
+
+  it('Given the sheet, Then L reads AUTOPILOT — LAND · TO ORBIT · APPROACH TARGET, and L is the key bound to the autopilot', () => {
+    expect(actionForKey('KeyL')).toBe('land');
+    expect(lineFor(controls(), 'L')).toEqual(['L', 'AUTOPILOT — LAND · TO ORBIT · APPROACH TARGET']);
+  });
+
+  it('Given a different key map, When the sheet is built from it, Then every new line follows the map (the keys are read, not typed by hand)', () => {
+    const moved: PauseKeyMapV5 = {
+      mining: { mine: 'KeyP', refine: 'KeyO', repair: 'KeyI' },
+      emergency: { open: 'KeyQ', cannibalize: 'Digit7', beacon: 'Digit8', cannibalizeCargo: 'Digit9' },
+      formation: 'KeyY',
+    };
+    const lines = controls(moved);
+    expect(lineFor(lines, 'P')?.[1]).toMatch(/^MINE\b/);
+    expect(lineFor(lines, 'O')?.[1]).toMatch(/^REFINE\b/);
+    expect(lineFor(lines, 'I')?.[1]).toMatch(/^REPAIR\b/);
+    expect(lineFor(lines, 'Y')?.[1]).toMatch(/^FORMATION HOLD\b/);
+    expect(lineFor(lines, 'Q · 7 / 8 / 9')?.[1]).toMatch(/^EMERGENCY EXIT\b/);
+    // The game's own keys are gone from those lines: nothing was written in by hand.
+    const keys = lines.map(([k]) => k);
+    for (const own of ['B', 'U', 'N', 'K', 'H · 1 / 2 / 3']) expect(keys, own).not.toContain(own);
+    // Omitting the map is the game's map.
+    const game: PauseKeyMapV5 = { mining: MINING_KEYS, emergency: EMERGENCY_KEYS, formation: FORMATION_KEY };
+    expect(controls(game)).toEqual(controls());
+  });
+
+  it('Given the sheet, Then every line it had before Task 8 is still there, in the same order, and no key is listed twice', () => {
+    const before: ReadonlyArray<ControlLine> = [
+      ['MOUSE · ARROWS', 'PITCH AND YAW'],
+      ['Q / E', 'ROLL'],
+      ['W / S · WHEEL', 'THROTTLE'],
+      ['X', 'THROTTLE ZERO'],
+      ['A D · R F', 'LATERAL · VERTICAL THRUST'],
+      ['SHIFT · SPACE', 'BOOST · BRAKE'],
+      ['Z', 'FLIGHT ASSIST'],
+      ['TAB', 'CYCLE TARGET'],
+      ['G', 'CRUISE'],
+      ['T', 'SCAN'],
+      ['M', 'CHART (WHEEL OUT FOR THE GALAXY)'],
+      ['J', 'JUMP TO THE CHARTED SYSTEM'],
+      ['C', 'CODEX'],
+      ['V', 'CAMERA'],
+      ['F2', 'SCREENSHOT'],
+      ['ESC', 'PAUSE'],
+      ['L', 'AUTOPILOT — LAND · TO ORBIT · APPROACH TARGET'], // the one text Task 8 changes
+      [', / .', 'TIME COMPRESSION (GROUND · STABLE ORBIT)'],
+    ];
+    const lines = controls();
+    const at = before.map((b) => lines.findIndex((l) => l[0] === b[0] && l[1] === b[1]));
+    expect(at.filter((i) => i < 0), JSON.stringify(before.filter((_, j) => at[j] < 0))).toEqual([]);
+    expect([...at].sort((a, b) => a - b)).toEqual(at);
+    expect(lines.length).toBe(before.length + 5);
+    expect(new Set(lines.map(([k]) => k)).size).toBe(lines.length);
+  });
+
+  it('Given Pause.ts, Then it renders the key lines from pauseControls and keeps no list of its own', () => {
+    const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'Pause.ts'), 'utf8');
+    expect(src).toMatch(/pauseControls\(/);
+    expect(src).not.toMatch(/const\s+CONTROLS\b/);
+    expect(src).not.toMatch(/AUTOPILOT — LAND/);
   });
 });

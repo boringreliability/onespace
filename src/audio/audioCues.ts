@@ -88,3 +88,17 @@ export function creakLevel(gForce: number, cockpit: boolean): number {
   if (!cockpit || !Number.isFinite(gForce) || gForce <= CREAK_ONSET_G) return 0;
   return Math.min(1, 1 - Math.exp(-(gForce - CREAK_ONSET_G) / 3.5));
 }
+
+// --- v4 plan 5, Task 7: mining, refining and repair can be heard. ----------
+//
+// The two held tones. Each is the base frequency of the oscillators that carry
+// it (any movement goes through `detune`, so the base is what is written).
+// Chosen clear of what already sounds at idle (engine 13/26/65 Hz, drone
+// 41.2/61.8/123.4/185 Hz) and a fifth apart, so the two can overlap without
+// beating against each other.
+
+/** The beam's held tone while an extraction runs: G2, low and warm. */
+export const MINING_TONE_HZ = 98;
+
+/** The refine/repair machinery's held tone: D3, a fifth above the beam. */
+export const ACTION_TONE_HZ = 146.83;

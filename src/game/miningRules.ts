@@ -2,7 +2,8 @@
  * v4 sub-plan 2, Task 5 — mining, as rules. Pure: no three.js, no bus.
  *
  * `mayMine` is the one gate (as `emergencyMayAct`, R16): Mining asks it on the
- * press, every frame of the action and again on the completion frame.
+ * press and once every frame of an extraction, before that frame's bites
+ * (plan 5: the pace is MINE_RATE_KG_S / MINE_BITE_KG in extraction.ts).
  * Precedence, first failure wins: busy → no-target → range → speed →
  * hold-full → depleted. Every limit is inclusive; NaN never passes.
  */
@@ -14,10 +15,6 @@ import { REPAIR_METAL_KG, REPAIR_SILICATE_KG, type CargoResult } from '@/ship/ca
 export const MINE_RANGE_KM = 0.5;
 /** Most speed relative to the asteroid a mine tolerates, km/s. */
 export const MINE_MAX_REL_KMS = 0.005;
-/** One mine, sim seconds. */
-export const MINE_ACTION_S = 4;
-/** Most one mine yields, kg. */
-export const MINE_YIELD_KG = 2_000;
 /**
  * R18: less than this many kg of a resource is dust: it would log as
  * "MINED · 0 KG". A rock with less of every resource is depleted.
@@ -71,7 +68,7 @@ export function mayMine(s: MineGate): MayMineResult {
   if (!(s.relSpeedKmS <= MINE_MAX_REL_KMS)) return REFUSED.speed;
   // R18 / final review (c): less room than MINE_MIN_KG is full — the same line
   // that makes a rock depleted — so an accepted press never ends in HOLD FULL,
-  // "MINED · 0 KG" or a dust record. Mining's post-mine HOLD FULL uses it too.
+  // "MINED · 0 KG" or a dust record. An extraction's bite size uses it too.
   if (!(s.holdFreeKg >= MINE_MIN_KG)) return REFUSED['hold-full'];
   if (!(s.remainingKg >= MINE_MIN_KG)) return REFUSED.depleted;
   return OK;
@@ -136,4 +133,17 @@ export const REFUSAL_LOG: Readonly<Record<MiningRefusal, string>> = {
   'not-empty': 'TANK NOT EMPTY',
   'no-tank': 'NO TANK',
   invalid: 'INVALID AMOUNT',
+};
+
+/**
+ * What a press refused for cruise or a jump logs, and what the action row
+ * shows for those two states (DESIGN-5 §7.3): `BUSY` means only that another
+ * action is running. Not refusals of the gate (`mayMine` says 'busy' for both).
+ */
+export const OCCUPIED_TEXT = { cruise: 'IN CRUISE', jump: 'IN JUMP' } as const;
+
+/** The next key for a refusal the player can act on. */
+export const ACTION_HINT: Readonly<Partial<Record<MiningRefusal, string>>> = {
+  range: 'L TO APPROACH',
+  speed: 'SPACE TO STOP',
 };
