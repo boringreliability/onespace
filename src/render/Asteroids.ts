@@ -165,11 +165,11 @@ float scarDepth(vec3 p, float seed, float wear) {
   for (int y = -1; y <= 1; y++)
   for (int x = -1; x <= 1; x++) {
     vec3 c = cell + vec3(float(x), float(y), float(z));
-    vec3 h = scarHash(c);
     vec3 k = scarHash(c + 71.3);
     // The look at which this pit opens: skewed low, so the first bites show.
     float opensAt = k.x * k.x * 0.9;
     if (wear <= opensAt) continue;
+    vec3 h = scarHash(c);
     float open = clamp((wear - opensAt) / (1.0 - opensAt), 0.0, 1.0);
     float r = (0.2 + 0.62 * sqrt(open)) * (0.7 + 0.5 * k.y);
     float d = length(q - (c + 0.15 + 0.7 * h));
@@ -260,6 +260,9 @@ void main() {
   vec3 n = normalize(vNormal);
   vec3 albedo = vSurface.rgb;
   float specK = vSurface.a;
+  // Screen derivatives are taken outside any branch (uniform control flow).
+  vec3 sx = dFdx(vRel);
+  vec3 sy = dFdy(vRel);
   // Wear 0 skips all of this: an untouched rock is drawn exactly as before.
   if (vWear > 0.0) {
     float pit = scarDepth(vObj, vSeed, vWear);
@@ -267,13 +270,13 @@ void main() {
     // through screen derivatives (Mikkelsen), so its far wall catches the
     // light and its near wall falls into shadow.
     float h = -pit * vRadius * 0.09;
-    vec3 sx = dFdx(vRel);
-    vec3 sy = dFdy(vRel);
     vec3 r1 = cross(sy, n);
     vec3 r2 = cross(n, sx);
     float det = dot(sx, r1);
+    float hx = dFdx(h);
+    float hy = dFdy(h);
     if (abs(det) > 0.0) {
-      vec3 grad = sign(det) * (dFdx(h) * r1 + dFdy(h) * r2);
+      vec3 grad = sign(det) * (hx * r1 + hy * r2);
       n = normalize(abs(det) * n - grad);
     }
     // Dark: fresh-cut floors are soot and shadow, and the whole rock dulls.
@@ -382,6 +385,8 @@ export class Asteroids implements GameModule {
   private readonly pieceRange16 = { start: 0, count: 0 };
   private readonly offDestroyed: () => void;
   private disposed = false;
+  /** The break-up program has been handed to the renderer to compile. */
+  private warmed = false;
 
   private readonly w = { x: 0, y: 0, z: 0 };
   private readonly cam = new Vector3();
@@ -484,12 +489,34 @@ export class Asteroids implements GameModule {
     ctx.scene.add(this.root);
   }
 
+  /**
+   * The break-up's program is its own (BREAKUP define) and `breakup` is hidden
+   * until an event, so the engine's prewarm never sees it. Compile it once,
+   * the first time a belt comes into view: `compile` walks all descendants,
+   * hidden or not, so handing it the mesh builds the program with the scene's
+   * own state. No draw call, no per-frame cost. A missing renderer (tests) is
+   * tolerated; a failure only means the first break-up compiles lazily.
+   */
+  private warmBreakup(ctx: EngineContext): void {
+    this.warmed = true;
+    const r = ctx.renderer as Partial<Pick<EngineContext['renderer'], 'compile' | 'compileAsync'>> | undefined;
+    try {
+      if (typeof r?.compileAsync === 'function') {
+        r.compileAsync(this.breakup, ctx.camera, ctx.scene).catch(() => {});
+      } else if (typeof r?.compile === 'function') {
+        r.compile(this.breakup, ctx.camera, ctx.scene);
+      }
+    } catch {
+      /* compiles lazily at the first break-up */
+    }
+  }
+
   onModeChange(_from: Mode, to: Mode): void {
     if (!ACTIVE.includes(to)) this.root.visible = false;
   }
 
   /** Which rocks, and which slot each one takes. */
-  update(_dt: number, _ctx: EngineContext): void {
+  update(_dt: number, ctx: EngineContext): void {
     // The ranges from the last frame were read by its render; this frame
     // starts empty and gathers exactly the slots it changes (final review, a).
     for (let v = 0; v < ASTEROID_VARIANTS; v++) {
@@ -600,6 +627,7 @@ export class Asteroids implements GameModule {
     this.breakup.visible = pieces > 0;
     this.root.visible = total > 0 || pieces > 0;
     if (!this.root.visible) return;
+    if (!this.warmed) this.warmBreakup(ctx);
 
     // The key light at the ship: every rock within 400 km sees the same star.
     const u = this.material.uniforms;
@@ -935,7 +963,7 @@ function layoutPieces(seed: number, out: Float64Array, at: number): void {
     const dz = z;
     const size = j < BIG_PIECES ? 0.34 + 0.12 * hash01(seed, j, 2) : 0.1 + 0.15 * hash01(seed, j, 2);
     const start = 0.2 + 0.3 * hash01(seed, j, 3);
-    // Small pieces fly faster: about 0.3 … 1.1 radii a second.
+    // Small pieces fly faster: about 0.3 … 1.5 radii a second.
     const speed = (0.22 + 0.25 * hash01(seed, j, 4)) / Math.sqrt(size);
     out[o] = dx * start;
     out[o + 1] = dy * start;
