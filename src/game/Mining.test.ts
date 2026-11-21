@@ -1540,3 +1540,223 @@ describe('B in the frame an extraction ends by itself', () => {
     expect(r.mining.status('mine').kind).not.toBe('running');
   });
 });
+
+// ---------------------------------------------------------------------------
+// v4 sub-plan 5, Task 7 (phase A) — refine and repair are announced on the bus,
+// so the audio can hold a tone for exactly as long as one runs.
+//
+// 'action:started' { kind: 'refine' | 'repair' } when one starts, and
+// 'action:ended' { kind; ok } when it finishes (ok: true) or ends any other way
+// (ok: false): every abort R16 knows (pause, freeze, cruise, a jump, the
+// beacon), leaving flight, the hull losing its tank or hold, and a completion
+// the hold refuses. Exactly one of each per action. A refusal at the press
+// starts nothing and announces nothing. An extraction (B) is not an action:
+// it has its own mining:* events.
+//
+// Choice (phase A): Mining.dispose() mid-action announces nothing, as
+// Mining.dispose() mid-extraction emits no mining:ended (finding F5, left on
+// purpose). The audio stops its own tones on dispose and on leaving flight
+// (src/audio/Audio.test.ts) instead of relying on these events.
+// ---------------------------------------------------------------------------
+
+type ActionKind = 'refine' | 'repair';
+type ActionStarted = { kind: ActionKind };
+type ActionEnded = { kind: ActionKind; ok: boolean };
+
+/** The rig plus the action events, in arrival order ('started:refine', 'ended:refine:ok' / ':fail'). */
+function actionRig(o: RigOpts = { fill: 0.5, lossFrac: 0.1 }) {
+  const r = rig(o);
+  r.cargo.restore({ ice: 5_000, metal: 600, silicate: 400 });
+  const started: ActionStarted[] = [];
+  const ended: ActionEnded[] = [];
+  const seen: string[] = [];
+  listen<ActionStarted>('action:started', (e) => {
+    started.push(e);
+    seen.push(`started:${e.kind}`);
+  });
+  listen<ActionEnded>('action:ended', (e) => {
+    ended.push(e);
+    seen.push(`ended:${e.kind}:${e.ok ? 'ok' : 'fail'}`);
+  });
+  return { ...r, actionStarted: started, actionEnded: ended, seen };
+}
+
+const ACTION_KINDS = [
+  { kind: 'refine', key: MINING_KEYS.refine, frames: 480 },
+  { kind: 'repair', key: MINING_KEYS.repair, frames: 600 },
+] as const;
+
+describe('refine and repair are announced: action:started and action:ended (plan 5 task 7)', () => {
+  for (const k of ACTION_KINDS) {
+    it(`Given a ${k.kind} that runs its full time, Then action:started { kind: '${k.kind}' } comes in the frame of the press and action:ended { kind: '${k.kind}', ok: true } in the frame it completes, once each`, () => {
+      const r = actionRig();
+      r.press(k.key);
+      expect(r.actionStarted).toEqual([{ kind: k.kind }]);
+      expect(r.actionEnded).toEqual([]);
+      r.tick(k.frames - 1);
+      expect(r.mining.busy?.kind).toBe(k.kind);
+      expect(r.actionEnded).toEqual([]);
+      r.tick(1);
+      expect(r.mining.busy).toBeNull();
+      expect(r.actionEnded).toEqual([{ kind: k.kind, ok: true }]);
+      r.tick(k.frames);
+      expect(r.seen).toEqual([`started:${k.kind}`, `ended:${k.kind}:ok`]);
+    });
+  }
+
+  type R = ReturnType<typeof actionRig>;
+  const blockers: Array<[string, (r: R) => void, (r: R) => void]> = [
+    ['pause', (r) => (r.world.paused = true), (r) => (r.world.paused = false)],
+    ['freeze', (r) => (r.world.frozen = true), (r) => (r.world.frozen = false)],
+    ['cruise', (r) => (r.cruise.busy = true), (r) => (r.cruise.busy = false)],
+    ['warp', (r) => (r.warp.phase = 'charging'), (r) => (r.warp.phase = 'idle')],
+    ['the emergency beacon (ship:recovered)', () => bus.emit('ship:recovered', { cause: 'beacon' }), () => undefined],
+  ];
+
+  for (const k of ACTION_KINDS) {
+    for (const [why, block, clear] of blockers) {
+      it(`Given a ${k.kind} half done, When ${why} aborts it, Then action:ended { kind: '${k.kind}', ok: false } comes once, in the frame of the abort, and nothing more after the blocker clears`, () => {
+        const r = actionRig();
+        r.press(k.key);
+        r.tick(k.frames / 2);
+        block(r);
+        r.tick();
+        expect(r.mining.busy).toBeNull();
+        expect(r.actionEnded).toEqual([{ kind: k.kind, ok: false }]);
+        clear(r);
+        r.tick(k.frames + 60);
+        expect(r.seen).toEqual([`started:${k.kind}`, `ended:${k.kind}:fail`]);
+      });
+    }
+
+    it(`Given a ${k.kind} underway, When the game leaves flight (onModeChange), Then action:ended { kind: '${k.kind}', ok: false } comes at once, and once only after returning to flight`, () => {
+      const r = actionRig();
+      r.press(k.key);
+      r.tick(60);
+      r.mining.onModeChange?.('flight', 'map');
+      expect(r.actionEnded).toEqual([{ kind: k.kind, ok: false }]);
+      r.mining.onModeChange?.('map', 'flight');
+      r.tick(k.frames + 60);
+      expect(r.seen).toEqual([`started:${k.kind}`, `ended:${k.kind}:fail`]);
+    });
+
+    it(`Given a ${k.kind} underway, When the hull loses its hold (the Yard, the showroom), Then action:ended { kind: '${k.kind}', ok: false } comes once (today the action is dropped silently)`, () => {
+      const r = actionRig();
+      r.press(k.key);
+      r.tick(60);
+      (r.world as { cargo: Cargo | null }).cargo = null;
+      r.tick();
+      expect(r.mining.busy).toBeNull();
+      expect(r.actionEnded).toEqual([{ kind: k.kind, ok: false }]);
+      r.tick(k.frames);
+      expect(r.seen).toEqual([`started:${k.kind}`, `ended:${k.kind}:fail`]);
+    });
+
+    it(`Given a ${k.kind} underway, When the hull loses its tank, Then action:ended { kind: '${k.kind}', ok: false } comes once`, () => {
+      const r = actionRig();
+      r.press(k.key);
+      r.tick(60);
+      (r.world.flight as { propellant: Propellant | null }).propellant = null;
+      r.tick();
+      expect(r.mining.busy).toBeNull();
+      expect(r.actionEnded).toEqual([{ kind: k.kind, ok: false }]);
+      r.tick(k.frames);
+      expect(r.seen).toEqual([`started:${k.kind}`, `ended:${k.kind}:fail`]);
+    });
+
+    it(`Given the gate fails on the very frame the ${k.kind} would complete, Then action:ended is ok: false (an abort, not a completion)`, () => {
+      const r = actionRig();
+      r.press(k.key);
+      r.tick(k.frames - 1);
+      r.warp.phase = 'charging';
+      r.tick(1);
+      expect(r.seen).toEqual([`started:${k.kind}`, `ended:${k.kind}:fail`]);
+    });
+  }
+
+  it('Given a refine whose ice leaves the hold before it completes, When the hold refuses the completion ("NO ICE"), Then action:ended { kind: \'refine\', ok: false }', () => {
+    const r = actionRig();
+    r.press(MINING_KEYS.refine);
+    r.tick(240);
+    r.cargo.restore({ metal: 600, silicate: 400 }); // the ice is gone
+    r.tick(240);
+    expect(r.mining.busy).toBeNull();
+    expect(r.logs).toEqual(['NO ICE']);
+    expect(r.seen).toEqual(['started:refine', 'ended:refine:fail']);
+  });
+
+  it('Given a repair whose materials leave the hold before it completes, When the hold refuses the completion, Then action:ended { kind: \'repair\', ok: false }', () => {
+    const r = actionRig();
+    r.press(MINING_KEYS.repair);
+    r.tick(300);
+    r.cargo.restore({ ice: 5_000 }); // the metal and silicate are gone
+    r.tick(300);
+    expect(r.mining.busy).toBeNull();
+    expect(r.logs).toEqual(['NEED 600 KG METAL · 400 KG SILICATE']);
+    expect(r.seen).toEqual(['started:repair', 'ended:repair:fail']);
+  });
+
+  it('Given a refine that completes and then a repair that completes, Then the events come in order, one started and one ended per action', () => {
+    const r = actionRig();
+    r.press(MINING_KEYS.refine);
+    r.tick(480);
+    r.press(MINING_KEYS.repair);
+    r.tick(600);
+    expect(r.seen).toEqual(['started:refine', 'ended:refine:ok', 'started:repair', 'ended:repair:ok']);
+  });
+
+  it('Given a refine underway, When U and N are pressed again ("BUSY"), Then no second action:started comes, and one action:ended at the end', () => {
+    const r = actionRig();
+    r.press(MINING_KEYS.refine);
+    r.tick(60);
+    r.press(MINING_KEYS.refine);
+    r.press(MINING_KEYS.repair);
+    r.tick(480);
+    expect(r.seen).toEqual(['started:refine', 'ended:refine:ok']);
+  });
+
+  it('Given refusals at the press (NO ICE, TANK FULL, TANK UNDAMAGED, NEED …), Then neither action:started nor action:ended comes', () => {
+    const empty = actionRig({ fill: 1, lossFrac: 0 });
+    empty.cargo.restore({});
+    empty.press(MINING_KEYS.refine); // NO ICE
+    empty.cargo.restore({ ice: 5_000 });
+    empty.press(MINING_KEYS.refine); // TANK FULL
+    empty.cargo.restore({ metal: 600, silicate: 400 });
+    empty.press(MINING_KEYS.repair); // TANK UNDAMAGED
+    empty.tick(700);
+    expect(empty.logs).toEqual(['NO ICE', 'TANK FULL', 'TANK UNDAMAGED']);
+    const poor = actionRig({ fill: 0.5, lossFrac: 0.1 });
+    poor.cargo.restore({ metal: 599, silicate: 400 });
+    poor.press(MINING_KEYS.repair); // NEED …
+    poor.tick(700);
+    expect(poor.logs).toEqual(['NEED 600 KG METAL · 400 KG SILICATE']);
+    expect(empty.seen).toEqual([]);
+    expect(poor.seen).toEqual([]);
+  });
+
+  it('Given an extraction (B) that runs, bites and ends, Then no action:* event comes (an extraction has its own mining:* events)', () => {
+    const r = actionRig();
+    r.press(MINING_KEYS.mine);
+    r.tick(250);
+    r.press(MINING_KEYS.mine);
+    expect(r.ended).toHaveLength(1);
+    expect(r.seen).toEqual([]);
+  });
+
+  it('Given a hull without a tank, When U and N are pressed, Then no action:* event comes', () => {
+    const r = actionRig({ noTank: true, lossFrac: 0.1 });
+    r.press(MINING_KEYS.refine);
+    r.press(MINING_KEYS.repair);
+    r.tick(700);
+    expect(r.seen).toEqual([]);
+  });
+
+  // Choice (phase A), mirroring F5: dispose announces nothing; the audio stops on its own.
+  it('Given a refine underway, When Mining is disposed, Then no action:ended comes (as no mining:ended comes for an extraction, F5)', () => {
+    const r = actionRig();
+    r.press(MINING_KEYS.refine);
+    r.tick(60);
+    r.mining.dispose?.();
+    expect(r.seen).toEqual(['started:refine']);
+  });
+});
