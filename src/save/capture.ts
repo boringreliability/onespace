@@ -30,7 +30,7 @@ import { circularOrbitState, progradeAttitude, starRadiusKm } from '@/game/recov
 import type { Resource } from '@/gen/belt';
 import { START_FILL } from '@/ship/propellant';
 import { compactEntries, MAX_ACTIONS, type ActionJournal } from './actionJournal';
-import { CURRENT_FORMAT, type Save } from './schema';
+import { CURRENT_FORMAT, ResourceSchema, type Save } from './schema';
 
 /** The minimal surface a save needs of the running game. */
 export interface SaveWorld {
@@ -56,6 +56,17 @@ export interface SaveWorld {
 
 /** The beam's resource when nothing has chosen one (a new game; format 1's lift says the same). */
 export const DEFAULT_BEAM_RESOURCE: Resource = 'ice';
+
+/**
+ * Whitelist (review finding M3): SaveGame writes without checking the schema,
+ * so a value outside the four resources would make every later save invalid
+ * at the next boot. Anything else falls back to the previous save's choice,
+ * else DEFAULT_BEAM_RESOURCE.
+ */
+function beamResourceOf(fromSeam: unknown, prev: Save | null | undefined): Resource {
+  const r = ResourceSchema.safeParse(fromSeam);
+  return r.success ? r.data : (prev?.ship.beamResource ?? DEFAULT_BEAM_RESOURCE);
+}
 
 type Vec3 = [number, number, number];
 type Flight = Save['player']['flight'];
@@ -241,7 +252,7 @@ export function buildSave(w: SaveWorld, prev: Save | null): Save {
       propellant: tank ? tank.snapshot() : { massKg: 0, capacityLossFrac: 0 },
       cargo: { ...u.cargo.snapshot() },
       emergencyTimesUsed: w.emergency.timesUsed,
-      beamResource: w.beamResource?.() ?? prev?.ship.beamResource ?? DEFAULT_BEAM_RESOURCE,
+      beamResource: beamResourceOf(w.beamResource?.(), prev),
     },
     log: { time: log.time, entries: log.entries.map((e) => ({ ...e, body: [...e.body] })) },
     world: { universeId, entries: aggregateMined(w.worldState.entries()) },

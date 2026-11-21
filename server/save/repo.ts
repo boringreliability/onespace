@@ -13,22 +13,28 @@
 
 import type { Sql, TransactionSql } from 'postgres';
 
-import { resolveSameGame, sameGame, shipDigest, type ShipDigest } from '../../src/save/conflict';
+import { resolveSameGame, shipDigest, type ShipDigest } from '../../src/save/conflict';
 import { migrate } from '../../src/save/migrate';
 import type { Save } from '../../src/save/schema';
 
 export type Base = { saveId: string; revision: number } | null;
 
-export type Head = { saveId: string; revision: number; save: Save };
+/**
+ * A row's body as stored: whatever format the build that wrote it used (format 1 before plan 6).
+ * Typed `unknown` on purpose — `current()` is the way to a `Save`.
+ */
+export type StoredBody = unknown;
+
+export type Head = { saveId: string; revision: number; save: StoredBody };
 
 export type PutResult =
   | { kind: 'stored'; revision: number; archived: boolean }
   | { kind: 'unchanged'; revision: number }
-  | { kind: 'conflict'; cloud: { revision: number; save: Save } };
+  | { kind: 'conflict'; cloud: { revision: number; save: StoredBody } };
 
 export type ResolveResult =
   | { kind: 'resolved' | 'replayed'; revision: number; save: Save }
-  | { kind: 'conflict'; cloud: { revision: number; save: Save }; resolvedAs?: { saveId: string; revision: number } };
+  | { kind: 'conflict'; cloud: { revision: number; save: StoredBody }; resolvedAs?: { saveId: string; revision: number } };
 
 /** The user row vanished (account deleted) before the write took its lock. */
 export class UserGoneError extends Error {
@@ -49,7 +55,7 @@ export class RevisionOverflowError extends Error {
 const INT4_MAX = 2_147_483_647;
 
 type Tx = TransactionSql;
-type HeadRow = { save_id: string; revision: number; body: Save; resolve_key: string | null };
+type HeadRow = { save_id: string; revision: number; body: StoredBody; resolve_key: string | null };
 
 const json = (tx: Tx, v: unknown) => tx.json(v as Parameters<Tx['json']>[0]);
 
@@ -71,9 +77,18 @@ const cloudOf = (h: HeadRow) => ({ revision: h.revision, save: h.body });
  * lifted by `migrate`. A body `migrate` refuses is returned as it is, so what reads it next
  * (resolveSameGame's schema check) still fails loudly instead of being skipped.
  */
-function current(s: Save): Save {
+function current(s: StoredBody): Save {
   const m = migrate(s);
-  return m.ok ? m.save : s;
+  return m.ok ? m.save : (s as Save);
+}
+
+/**
+ * A head handed back as stored (a replayed resolve, KEEP CLOUD across games): verbatim, so a row
+ * an older build wrote keeps its format and the client migrates it, as GET and a 409 do. Typed
+ * `Save` only because `ResolveResult`'s contract says so; nothing here reads it as one.
+ */
+function verbatim(h: HeadRow): Save {
+  return h.body as Save;
 }
 
 async function archiveHead(tx: Tx, userId: string, h: HeadRow): Promise<void> {
@@ -170,7 +185,7 @@ export async function resolveSave(
       await storeHead(tx, userId, deviceId, device, key);
       return { kind: 'resolved', revision: device.revision, save: device };
     }
-    if (head.resolve_key === key) return { kind: 'replayed', revision: head.revision, save: head.body };
+    if (head.resolve_key === key) return { kind: 'replayed', revision: head.revision, save: verbatim(head) };
     const sawHead = cloud !== null && cloud.saveId === head.save_id && cloud.revision === head.revision;
     if (!sawHead) {
       // R84: committed before another device moved the head on — name the revision it became.
@@ -184,7 +199,8 @@ export async function resolveSave(
         : { kind: 'conflict', cloud: cloudOf(head) };
     }
 
-    if (sameGame(head.body, device)) {
+    // sameGame, read off the row's save_id column (storeHead writes it from the body's saveId).
+    if (head.save_id === device.saveId) {
       if (Math.max(head.revision, device.revision) >= INT4_MAX) throw new RevisionOverflowError();
       // Both in the current format: a head an older build stored as format 1 is lifted (never mixed).
       const [headNow, deviceNow] = [current(head.body), current(device)];
@@ -210,7 +226,7 @@ export async function resolveSave(
     await tx`
       update save_revisions set resolve_key = ${key}
       where user_id = ${userId} and save_id = ${head.save_id} and revision = ${head.revision}`;
-    return { kind: 'resolved', revision: head.revision, save: head.body };
+    return { kind: 'resolved', revision: head.revision, save: verbatim(head) };
   });
 }
 

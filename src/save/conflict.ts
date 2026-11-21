@@ -13,8 +13,9 @@
  *
  * Formats: the rule takes and returns current-format saves (`Save`) and checks
  * its result with `SaveV2Schema`. It never lifts a save — that is `migrate`'s
- * job: SyncClient migrates both sides, and the server lifts a head (or device
- * save) an older build stored as format 1 before it resolves.
+ * job. Its only caller is the server's repo (`server/save/repo.ts`), which
+ * lifts the head and the device save with `current()` (`migrate`) before it
+ * resolves, so a row an older build stored as format 1 never reaches it raw.
  */
 
 import type { Resource } from '@/gen/belt';

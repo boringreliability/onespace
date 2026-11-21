@@ -153,7 +153,19 @@ export function saveFingerprint(save: Save): string {
 function advancedPast(local: Save | null, device: Save, dirty: boolean): boolean {
   if (local === null || local === device) return false;
   if (local.saveId !== device.saveId || local.revision > device.revision) return true;
-  return local.revision === device.revision && (dirty || rawKey(local) !== rawKey(device));
+  return local.revision === device.revision && (dirty || rawKey(local) !== rawKey(lifted(device)));
+}
+
+/**
+ * A pending resolve's device body is stored verbatim (R69) and may have been
+ * written by an older build in an older save format; `local` and the result
+ * have been through `migrate`. Content is compared on the lifted body — the
+ * body that is re-sent stays verbatim. A body `migrate` refuses is compared
+ * raw, as before (it then never matches a migrated save: counts as advanced).
+ */
+function lifted(device: Save): Save {
+  const m = migrate(device);
+  return m.ok ? m.save : device;
 }
 
 /** What the boot's replay of a pending resolve got (R69), when it answered within the budget. */
@@ -902,7 +914,7 @@ export class SyncClient {
         ? snap
         : null;
     try {
-      await this.replaceLocal([overruled, rawKey(save) === rawKey(device) ? null : device], save);
+      await this.replaceLocal([overruled, rawKey(save) === rawKey(lifted(device)) ? null : device], save);
     } catch {
       return { ok: false, reason: 'offline' };
     }
