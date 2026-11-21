@@ -829,7 +829,8 @@ describe('SaveGame — the tab hidden and closed (§5.2)', () => {
     expect(storage.getItem(WAL_SNAPSHOT_KEY)).toBeNull();
   });
 
-  it('Given a mine 2 s in, When pagehide fires, Then the saved state has no half mine (cargo unchanged, no mined entry, no cargo mine action)', () => {
+  // Plan 5 (owner, 2026-11-21): an extraction lands in bites and a finished bite is kept.
+  it('Given an extraction 2 s in (one bite landed, the next begun), When pagehide fires, Then the saved state has the finished bite whole and no half bite (cargo +250 kg, one mined entry, one cargo mine action)', () => {
     const r = rig();
     const g = r.g;
     const ast: AsteroidSpec = fyssField(0).asteroids.find((a) => a.composition.ice >= 6_000)!;
@@ -854,6 +855,7 @@ describe('SaveGame — the tab hidden and closed (§5.2)', () => {
       },
       remainingKg: (id: string, res: 'ice' | 'metal' | 'silicate' | 'rare') =>
         id === ast.id ? ast.composition[res] - g.worldState.depleted(id)[res] : 0,
+      isDestroyed: () => false,
     };
     const mining = new Mining({
       universe: g.u,
@@ -869,19 +871,19 @@ describe('SaveGame — the tab hidden and closed (§5.2)', () => {
     const keys = (a: ActionName | null) =>
       ({ ...g.ctx, input: { pressed: (x: ActionName) => x === a, setThrottle: () => undefined } }) as unknown as EngineContext;
     mining.update(1 / 60, keys('mine'));
-    expect(mining.busy?.kind).toBe('mine');
+    expect(mining.status('mine').kind).toBe('running');
     for (let i = 0; i < 120; i++) {
       g.u.update(1 / 60, g.ctx);
       mining.update(1 / 60, keys(null));
     }
-    expect(mining.busy).not.toBeNull(); // really mid-mine: ~2 s left
+    expect(mining.status('mine').kind).toBe('running'); // really mid-extraction: bite 2 is begun
     r.pagehide();
     const snap = walSnapshot()!;
     expect(snap).not.toBeNull();
-    expect(snap.ship.cargo).toEqual(cargoBefore);
-    expect(snap.world.entries).toHaveLength(0);
-    expect(snap.actions.filter(isMined)).toHaveLength(0);
-    expect(snap.actions.filter(isCargoMine)).toHaveLength(0);
+    expect(snap.ship.cargo).toEqual({ ...cargoBefore, ice: cargoBefore.ice + 250 });
+    expect(snap.world.entries).toHaveLength(1);
+    expect(snap.actions.filter(isMined)).toHaveLength(1);
+    expect(snap.actions.filter(isCargoMine)).toHaveLength(1);
   });
 });
 

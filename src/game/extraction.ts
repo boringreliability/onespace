@@ -27,9 +27,9 @@ export function startExtraction(asteroidId: string, resource: Resource): Extract
   return { asteroidId, resource, minedKg: 0, carryKg: 0 };
 }
 
-/** Negative or NaN time counts as 0. */
+/** Negative, NaN or infinite time counts as 0. */
 export function accrue(e: Extraction, simSeconds: number): void {
-  if (simSeconds > 0) e.carryKg += MINE_RATE_KG_S * simSeconds;
+  if (Number.isFinite(simSeconds) && simSeconds > 0) e.carryKg += MINE_RATE_KG_S * simSeconds;
 }
 
 /** Size of the next bite: min(MINE_BITE_KG, room, rest); under MINE_MIN_KG there is none. */

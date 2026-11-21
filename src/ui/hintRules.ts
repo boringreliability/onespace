@@ -11,7 +11,6 @@
  */
 
 import { MINING_KEYS } from '@/core/Input';
-import type { CargoAction, CargoResult } from '@/ship/cargo';
 
 export type HintId = 'click' | 'fly' | 'cruise' | 'scan' | 'chart' | 'pause' | 'mine';
 export type RetirableHintId = Exclude<HintId, 'click'>;
@@ -33,7 +32,7 @@ export const HINT_RETIRE_AFTER: Readonly<Record<RetirableHintId, number>> = {
   scan: 2,
   chart: 2,
   pause: 2,
-  /** [v4-mining] Retires after 2 COMPLETED mines (`recordCargoAction`). */
+  /** [v4-mining] Retires after 2 extractions that mined something (`recordMiningEnded`). */
   mine: 2,
 };
 
@@ -76,14 +75,12 @@ export function recordUse(counts: HintCounts, id: RetirableHintId): HintCounts {
 }
 
 /**
- * [v4-mining] Counts a `cargo:action` towards the 'mine' hint: only a
- * successful mine counts. Anything else returns `counts` itself.
+ * [v4-mining] Counts a `mining:ended` towards the 'mine' hint (plan 5): one
+ * extraction counts once, however many bites it took, and only if it mined
+ * something. Otherwise returns `counts` itself.
  */
-export function recordCargoAction(
-  counts: HintCounts,
-  e: { readonly action: CargoAction; readonly result: CargoResult },
-): HintCounts {
-  return e.action.kind === 'mine' && e.result.ok ? recordUse(counts, 'mine') : counts;
+export function recordMiningEnded(counts: HintCounts, e: { readonly minedKg: number }): HintCounts {
+  return e.minedKg > 0 ? recordUse(counts, 'mine') : counts;
 }
 
 export function selectHint(state: HintState, counts: HintCounts): HintId | null {

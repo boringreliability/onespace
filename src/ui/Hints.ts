@@ -20,7 +20,7 @@ import type { Pause } from '@/ui/Pause';
 import {
   advisoryText,
   loadHintCounts,
-  recordCargoAction,
+  recordMiningEnded,
   recordUse,
   saveHintCounts,
   type HintCounts,
@@ -106,9 +106,9 @@ export class Hints implements GameModule {
       bus.on('target:changed', ({ id }) => {
         this.hasTarget = id !== null;
       }),
-      // [v4-mining] a completed mine counts towards retiring the 'mine' hint.
-      bus.on('cargo:action', (e) => {
-        const next = recordCargoAction(this.counts, e);
+      // [v4-mining] an extraction that mined something counts towards retiring the 'mine' hint.
+      bus.on('mining:ended', (e) => {
+        const next = recordMiningEnded(this.counts, e);
         if (next === this.counts) return;
         this.counts = next;
         saveHintCounts(storage(), this.counts);

@@ -1,24 +1,28 @@
 /**
  * v4 sub-plan 2, Task 5 — mine (B), refine (U), repair (N), wired.
+ * v4 sub-plan 5, Task 3 — mining is a continuous EXTRACTION.
  *
  * - B on a targeted asteroid within MINE_RANGE_KM of its SURFACE, matched to
- *   within MINE_MAX_REL_KMS, starts a MINE_ACTION_S mine.
+ *   within MINE_MAX_REL_KMS, with room in the hold, starts an extraction of ONE
+ *   resource (chooseResource). From the next frame on it accrues sim time into
+ *   bites (extraction.ts); each bite goes through `applyCargoAction` and
+ *   `worldState.recordMined` like any mine, and is announced as `mining:bite`.
+ * - It ends — keeping every finished bite — on B again, a full hold, the
+ *   resource or the rock running out, or a broken requirement; one log line
+ *   (`extractionLog`) and one `mining:ended`. The last bite of a rock also
+ *   announces `asteroid:destroyed`, in that same frame.
  * - U refines all the ice the tank can take; N repairs the tank. Neither needs
- *   a target.
+ *   a target. Timed actions, as in sub-plan 2.
  *
- * Every action counts SIM time (`universe.simulatedSeconds`, so 10× finishes
- * ten times sooner in wall time) and completes through `applyCargoAction`; a
- * completed mine is recorded in WorldState exactly once. The press frame only
- * starts the clock.
- *
- * R16: one gate. A mine asks `mayMine` on the press, every frame and on the
- * completion frame; refine and repair ask `mayAct` (no target, range or speed).
- * Any failure — drift, pause, freeze, cruise, a warp, or the beacon
- * (`ship:recovered`) — aborts the action with nothing applied and logs
- * MINING / REFINING / REPAIR ABORTED. An aborted action never resumes.
+ * R16: one gate. An extraction asks `mayMine` on the press and once every
+ * frame BEFORE that frame's bites; refine and repair ask `mayAct` (no target,
+ * range or speed) every frame and on the completion frame. A broken
+ * requirement ends an extraction with its reason; it aborts a refine or repair
+ * with nothing applied (REFINING / REPAIR ABORTED). Nothing ever resumes.
  *
  * Paused or frozen, the keys are silent. A hull without a tank or a hold is
- * inert. Nothing in update() allocates.
+ * inert. update() allocates nothing on a frame without a bite (a bite's
+ * cargo action and bus payloads are new objects: the journal keeps them).
  */
 
 import type { EngineContext, GameModule } from '@/core/Engine';
@@ -30,11 +34,19 @@ import type { WorldState } from '@/game/worldState';
 import { applyCargoAction, refineRefusal, repairRefusal, type Cargo } from '@/ship/cargo';
 import type { Propellant } from '@/ship/propellant';
 import {
-  MINE_ACTION_S,
+  accrue,
+  commitBite,
+  extractionLog,
+  nextBiteKg,
+  shownKg,
+  startExtraction,
+  type Extraction,
+  type ExtractionEnd,
+} from './extraction';
+import {
+  MINE_MAX_REL_KMS,
   MINE_MIN_KG,
   MINE_RANGE_KM,
-  MINE_YIELD_KG,
-  MINING_ABORTED_TEXT,
   REFINE_ACTION_S,
   REFINING_ABORTED_TEXT,
   REFUSAL_LOG,
@@ -43,7 +55,6 @@ import {
   chooseResource,
   mayAct,
   mayMine,
-  minedLog,
   refinedLog,
   repairedLog,
   type MiningRefusal,
@@ -53,6 +64,12 @@ interface Vec3 {
   readonly x: number;
   readonly y: number;
   readonly z: number;
+}
+
+interface MutVec3 {
+  x: number;
+  y: number;
+  z: number;
 }
 
 /** What Mining reads of the universe. `Universe` satisfies it. */
@@ -73,13 +90,15 @@ export interface MiningWorld {
     readonly renderWorldPosition?: Vec3;
     /** Relative to `shipParent` (the star when null). */
     readonly velocity: Vec3;
+    /** [v4-mining] Plan 5: the nose's direction (unit). Absent: the source is the ship's centre. */
+    readonly forward?: Vec3;
   };
   readonly shipParent: { readonly worldVelocity: Vec3 } | null;
 }
 
 export interface MiningOptions {
   readonly universe: MiningWorld;
-  readonly belt: Pick<Belt, 'asteroidWorld' | 'asteroidVelocity' | 'asteroidSpec' | 'remainingKg'>;
+  readonly belt: Pick<Belt, 'asteroidWorld' | 'asteroidVelocity' | 'asteroidSpec' | 'remainingKg' | 'isDestroyed'>;
   readonly worldState: Pick<WorldState, 'recordMined'>;
   readonly targeting: { readonly targetId: string | null };
   readonly cruise: { readonly busy: boolean };
@@ -88,32 +107,114 @@ export interface MiningOptions {
 
 export type MiningKind = 'mine' | 'refine' | 'repair';
 
+/** One extraction underway: what the beam and the wear are drawn from. */
+export interface MiningOperation {
+  readonly asteroidId: string;
+  readonly resource: Resource;
+  /** The ship's nose, world km. */
+  readonly source: Readonly<Vec3>;
+  /** The point on the rock's surface nearest the ship, world km. */
+  readonly impact: Readonly<Vec3>;
+}
+
+/**
+ * What the HUD reads for one action. Every state carries `progress`,
+ * `shownKg`, `leftS` and `resource`; they mean something only while
+ * `running` (0 / null otherwise, read through a shared prototype so a ready or
+ * blocked state's own keys are only `kind` and `reason`).
+ */
+interface ActionNumbers {
+  /** mine: the hold's fill 0..1, the begun part of the next bite included; refine/repair: elapsed share. */
+  readonly progress: number;
+  /** mine: kilograms this extraction has mined plus the begun part of the next bite; else 0. */
+  readonly shownKg: number;
+  /** refine/repair: sim seconds left; mine: 0. */
+  readonly leftS: number;
+  /** mine: the extraction's resource; else null. */
+  readonly resource: Resource | null;
+}
+export type ActionState =
+  | (ActionNumbers & { readonly kind: 'ready' })
+  | (ActionNumbers & { readonly kind: 'blocked'; readonly reason: MiningRefusal | 'cruise' | 'jump' })
+  | (ActionNumbers & { readonly kind: 'running' });
+
+/** How far ahead of the ship's centre the nose is, km (the look is Task 6's). */
+const NOSE_OFFSET_KM = 0.005;
+
 /** Below this many seconds left an action is done (240 × 1/60 sums to 3.99999999999999). */
 const DONE_EPS_S = 1e-6;
 
 const RESOURCES: readonly Resource[] = ['ice', 'metal', 'silicate', 'rare'];
 
-const ABORT_TEXT: Readonly<Record<MiningKind, string>> = {
-  mine: MINING_ABORTED_TEXT,
+const ABORT_TEXT: Readonly<Record<'refine' | 'repair', string>> = {
   refine: REFINING_ABORTED_TEXT,
   repair: REPAIR_ABORTED_TEXT,
 };
+
+const ACTION_S: Readonly<Record<'refine' | 'repair', number>> = {
+  refine: REFINE_ACTION_S,
+  repair: REPAIR_ACTION_S,
+};
+
+/** The numbers of a state that is not running, shared through the prototype. */
+const IDLE_NUMBERS: ActionNumbers = Object.freeze({ progress: 0, shownKg: 0, leftS: 0, resource: null });
+
+const READY: ActionState = Object.freeze(Object.assign(Object.create(IDLE_NUMBERS) as ActionNumbers, { kind: 'ready' as const }));
+
+type BlockedState = { kind: 'blocked'; reason: MiningRefusal | 'cruise' | 'jump' } & ActionNumbers;
+type RunningState = { kind: 'running'; progress: number; shownKg: number; leftS: number; resource: Resource | null };
+
+function blockedState(): BlockedState {
+  return Object.assign(Object.create(IDLE_NUMBERS) as ActionNumbers, { kind: 'blocked' as const, reason: 'busy' as BlockedState['reason'] });
+}
+
+function runningState(): RunningState {
+  return { kind: 'running', progress: 0, shownKg: 0, leftS: 0, resource: null };
+}
+
+const NO_OPERATIONS: readonly MiningOperation[] = Object.freeze([]);
 
 export class Mining implements GameModule {
   readonly name = 'mining';
 
   private readonly opts: MiningOptions;
-  /** The action underway; mutated in place, never reallocated per frame. */
-  private readonly job = { kind: 'mine' as MiningKind, leftS: 0 };
+  /** The refine or repair underway; mutated in place, never reallocated per frame. */
+  private readonly job = { kind: 'refine' as 'refine' | 'repair', leftS: 0 };
   private active = false;
-  /** The asteroid the mine underway was started on. */
-  private jobAsteroid = '';
+  /** The extraction underway, or null. A new one always comes from startExtraction. */
+  private ext: Extraction | null = null;
   private recovered = false;
+  /** The last update had a tank and a hold (the gate below is current). */
+  private hull = false;
   private offs: Array<() => void> = [];
+
+  // The one operation, reused across extractions and updated in place.
+  private readonly opSource: MutVec3 = { x: 0, y: 0, z: 0 };
+  private readonly opImpact: MutVec3 = { x: 0, y: 0, z: 0 };
+  private readonly op: { asteroidId: string; resource: Resource; source: MutVec3; impact: MutVec3 } = {
+    asteroidId: '',
+    resource: 'ice',
+    source: this.opSource,
+    impact: this.opImpact,
+  };
+  private readonly oneOperation: readonly MiningOperation[] = [this.op];
+
+  // What status() hands out: one object per kind and state, mutated in place.
+  private readonly blocked: Readonly<Record<MiningKind, BlockedState>> = {
+    mine: blockedState(),
+    refine: blockedState(),
+    repair: blockedState(),
+  };
+  private readonly running: Readonly<Record<MiningKind, RunningState>> = {
+    mine: runningState(),
+    refine: runningState(),
+    repair: runningState(),
+  };
 
   // Measured each frame (scratch).
   private readonly astPos = { x: 0, y: 0, z: 0 };
   private readonly astVel = { x: 0, y: 0, z: 0 };
+  private astRadiusKm = 0;
   private readonly remaining: Record<Resource, number> = { ice: 0, metal: 0, silicate: 0, rare: 0 };
   private readonly gate = {
     paused: false,
@@ -133,7 +234,7 @@ export class Mining implements GameModule {
     this.opts = opts;
   }
 
-  /** The action underway and the sim seconds it has left, or null. */
+  /** The refine or repair underway and the sim seconds it has left, or null. An extraction is in status('mine'). */
   get busy(): null | { readonly kind: MiningKind; readonly leftS: number } {
     return this.active ? this.job : null;
   }
@@ -143,8 +244,71 @@ export class Mining implements GameModule {
     return this.inRange;
   }
 
+  /** Speed relative to the targeted asteroid, km/s (∞ without one). */
+  get relSpeedKmS(): number {
+    return this.gate.relSpeedKmS;
+  }
+
+  /** The relative speed is within MINE_MAX_REL_KMS (meaningful with a rock targeted). */
+  get speedOk(): boolean {
+    return this.gate.relSpeedKmS <= MINE_MAX_REL_KMS;
+  }
+
+  /** The extraction underway as an operation (empty or one element); a stable array. */
+  get operations(): readonly MiningOperation[] {
+    return this.ext ? this.oneOperation : NO_OPERATIONS;
+  }
+
+  /**
+   * What the HUD shows for one action, from the last update's measurements and
+   * the live hold. The returned object is reused (one per kind and state) and
+   * mutated by later calls: read it, do not keep it.
+   */
+  status(kind: MiningKind): ActionState {
+    const u = this.opts.universe;
+    const cargo = u.cargo;
+    const g = this.gate;
+    if (kind === 'mine') {
+      const e = this.ext;
+      if (e && cargo) {
+        const s = this.running.mine;
+        const begun = shownKg(e, cargo.freeKg, this.remaining[e.resource]) - e.minedKg;
+        const cap = cargo.capacityKg;
+        s.progress = cap > 0 ? Math.min(1, Math.max(0, (cargo.totalKg + begun) / cap)) : 0;
+        s.shownKg = e.minedKg + begun;
+        s.leftS = 0;
+        s.resource = e.resource;
+        return s;
+      }
+    } else if (this.active && this.job.kind === kind) {
+      const s = this.running[kind];
+      const total = ACTION_S[kind];
+      const left = Math.max(0, this.job.leftS);
+      s.progress = Math.min(1, Math.max(0, 1 - left / total));
+      s.shownKg = 0;
+      s.leftS = left;
+      s.resource = null;
+      return s;
+    }
+    let reason: BlockedState['reason'] | null;
+    if (!this.hull || !cargo || !u.flight.propellant) reason = 'no-tank';
+    else if (this.active || this.ext) reason = 'busy';
+    else if (g.cruise) reason = 'cruise';
+    else if (g.warpPhase !== 'idle') reason = 'jump';
+    else if (kind === 'mine') {
+      const m = mayMine(g);
+      reason = m.ok ? null : m.reason!;
+    } else if (!mayAct(g)) reason = 'busy';
+    else reason = kind === 'refine' ? refineRefusal(cargo, u.flight.propellant) : repairRefusal(cargo, u.flight.propellant);
+    if (reason === null) return READY;
+    const s = this.blocked[kind];
+    s.reason = reason;
+    return s;
+  }
+
   init(_ctx?: EngineContext): void {
     this.active = false;
+    this.ext = null;
     this.recovered = false;
     this.offs.push(
       bus.on('ship:recovered', () => {
@@ -154,17 +318,20 @@ export class Mining implements GameModule {
   }
 
   /**
-   * Gated to flight (game/gating.ts). A module that sleeps does not update,
-   * so an action underway would stall behind a chart; it is aborted instead.
+   * Gated to flight (game/gating.ts). A module that sleeps does not update, so
+   * an extraction ends (interrupted) and a refine or repair is aborted.
    */
   onModeChange(_from: Mode, to: Mode): void {
-    if (to !== 'flight' && this.active) this.abort();
+    if (to === 'flight') return;
+    if (this.ext) this.endExtraction('interrupted');
+    if (this.active) this.abort();
   }
 
   dispose(): void {
     for (const off of this.offs) off();
     this.offs = [];
     this.active = false;
+    this.ext = null;
   }
 
   update(_dt: number, ctx: EngineContext): void {
@@ -175,14 +342,19 @@ export class Mining implements GameModule {
     this.recovered = false;
     if (!cargo || !tank) {
       // Inert: no tank or no hold (Yard, showroom).
+      if (this.ext) this.endExtraction('interrupted');
       this.active = false;
       this.inRange = false;
+      this.hull = false;
       return;
     }
+    this.hull = true;
     this.measure(cargo);
 
+    if (this.ext) this.extract(cargo, tank, recovered, u.simulatedSeconds);
+
     if (this.active) {
-      if (recovered || !this.jobGate()) {
+      if (recovered || !mayAct(this.gate)) {
         this.abort();
       } else {
         this.job.leftS -= Math.max(0, u.simulatedSeconds);
@@ -211,6 +383,7 @@ export class Mining implements GameModule {
     g.holdFreeKg = cargo.freeKg;
 
     const id = targeting.targetId;
+    // A destroyed rock has no spec: it is not a target (the id may linger a frame).
     const spec = id !== null && id.startsWith('ast:') ? belt.asteroidSpec(id) : null;
     if (
       id === null ||
@@ -227,6 +400,7 @@ export class Mining implements GameModule {
       return;
     }
     this.targetAsteroid = id;
+    this.astRadiusKm = spec.radiusKm;
     g.targetIsAsteroid = true;
     // The ship on the rocks' clock, not up to a substep behind it.
     const p = u.flight.renderWorldPosition ?? u.flight.worldPosition;
@@ -252,16 +426,117 @@ export class Mining implements GameModule {
     this.inRange = g.surfaceRangeKm <= MINE_RANGE_KM;
   }
 
-  /** R16: the action underway may go on (asked every frame, the completion frame included). */
-  private jobGate(): boolean {
-    if (this.job.kind !== 'mine') return mayAct(this.gate);
-    // The rock it started on, still targeted, still in reach.
-    if (this.targetAsteroid !== this.jobAsteroid) return false;
-    return mayMine(this.gate).ok;
+  /** Why the extraction underway may not go on this frame, or null (asked once, before the bites). */
+  private extractionGate(e: Extraction, recovered: boolean): ExtractionEnd | null {
+    if (recovered) return 'interrupted';
+    const m = mayMine(this.gate);
+    // Pause, freeze, cruise or a jump own the ship now.
+    if (m.reason === 'busy') return 'interrupted';
+    // It belongs to the rock it started on.
+    if (this.targetAsteroid !== null && this.targetAsteroid !== e.asteroidId) return 'interrupted';
+    if (m.ok) return null;
+    switch (m.reason) {
+      case 'no-target':
+      case 'range':
+      case 'speed':
+      case 'hold-full':
+        return m.reason;
+      default:
+        // 'depleted': every resource under MINE_MIN_KG (such a rock is already gone).
+        return 'resource-depleted';
+    }
+  }
+
+  /** One frame of the extraction: the gate, the time, then every bite it pays. */
+  private extract(cargo: Cargo, tank: Propellant, recovered: boolean, simSeconds: number): void {
+    const e = this.ext!;
+    const end = this.extractionGate(e, recovered);
+    if (end !== null) {
+      this.endExtraction(end);
+      return;
+    }
+    accrue(e, simSeconds);
+    const { belt, worldState } = this.opts;
+    const id = e.asteroidId;
+    const r = e.resource;
+    let rest = this.remaining[r];
+    let bitten = false;
+    for (;;) {
+      const kg = nextBiteKg(e, cargo.freeKg, rest);
+      if (kg <= 0) break;
+      const res = applyCargoAction(cargo, tank, { kind: 'mine', asteroidId: id, resource: r, kg });
+      if (!res.ok) {
+        // The size is within the room and the rest, so the hold should not refuse.
+        this.endExtraction(res.reason === 'hold-full' ? 'hold-full' : 'interrupted');
+        if (bitten) this.measure(cargo);
+        return;
+      }
+      bitten = true;
+      commitBite(e, res.kgIn);
+      worldState.recordMined(id, r, res.kgIn, 'local');
+      rest = belt.remainingKg(id, r);
+      bus.emit('mining:bite', { asteroidId: id, resource: r, kg: res.kgIn });
+      if (belt.isDestroyed(id)) {
+        bus.emit('asteroid:destroyed', { asteroidId: id });
+        this.endExtraction('rock-depleted');
+        this.measure(cargo);
+        return;
+      }
+    }
+    // The bite size is 0: end now, so carry can never pay out later as a burst.
+    if (!(cargo.freeKg >= MINE_MIN_KG)) this.endExtraction('hold-full');
+    else if (!(rest >= MINE_MIN_KG)) this.endExtraction('resource-depleted');
+    // The hold and the rock changed: the gate and status() read this frame's state.
+    if (bitten) this.measure(cargo);
+    if (this.ext) this.placeOperation();
+  }
+
+  /** The operation's source (the nose) and impact (the rock's surface nearest the ship), in place. */
+  private placeOperation(): void {
+    const f = this.opts.universe.flight;
+    const p = f.renderWorldPosition ?? f.worldPosition;
+    const a = this.astPos;
+    let dx = p.x - a.x;
+    let dy = p.y - a.y;
+    let dz = p.z - a.z;
+    const d = Math.hypot(dx, dy, dz);
+    if (d > 1e-12) {
+      dx /= d;
+      dy /= d;
+      dz /= d;
+    } else {
+      dx = 1;
+      dy = 0;
+      dz = 0;
+    }
+    const rad = this.astRadiusKm;
+    const im = this.opImpact;
+    im.x = a.x + dx * rad;
+    im.y = a.y + dy * rad;
+    im.z = a.z + dz * rad;
+    const fw = f.forward;
+    const s = this.opSource;
+    s.x = p.x + (fw ? fw.x * NOSE_OFFSET_KM : 0);
+    s.y = p.y + (fw ? fw.y * NOSE_OFFSET_KM : 0);
+    s.z = p.z + (fw ? fw.z * NOSE_OFFSET_KM : 0);
+  }
+
+  private endExtraction(end: ExtractionEnd): void {
+    const e = this.ext;
+    if (!e) return;
+    this.ext = null;
+    const good = e.minedKg >= MINE_MIN_KG && (end === 'stopped' || end === 'hold-full' || end === 'resource-depleted' || end === 'rock-depleted');
+    this.log(extractionLog(end, e.minedKg, e.resource), good ? 'good' : 'warn');
+    bus.emit('mining:ended', { asteroidId: e.asteroidId, resource: e.resource, minedKg: e.minedKg, end });
   }
 
   private press(kind: MiningKind, cargo: Cargo, tank: Propellant): void {
-    if (this.active) {
+    // B again stops the extraction underway.
+    if (kind === 'mine' && this.ext) {
+      this.endExtraction('stopped');
+      return;
+    }
+    if (this.active || this.ext) {
       this.log(REFUSAL_LOG.busy, 'warn');
       return;
     }
@@ -278,10 +553,24 @@ export class Mining implements GameModule {
       this.log(REFUSAL_LOG[refusal], 'warn');
       return;
     }
+    if (kind === 'mine') {
+      const r = chooseResource(this.remaining);
+      if (r === null) {
+        // The gate passed on ≥ MINE_MIN_KG in all, so one resource has it; kept for safety.
+        this.log(REFUSAL_LOG.depleted, 'warn');
+        return;
+      }
+      const id = this.targetAsteroid!;
+      this.ext = startExtraction(id, r);
+      this.op.asteroidId = id;
+      this.op.resource = r;
+      this.placeOperation();
+      bus.emit('mining:started', { asteroidId: id, resource: r });
+      return;
+    }
     this.active = true;
     this.job.kind = kind;
-    this.job.leftS = kind === 'mine' ? MINE_ACTION_S : kind === 'refine' ? REFINE_ACTION_S : REPAIR_ACTION_S;
-    if (kind === 'mine') this.jobAsteroid = this.targetAsteroid!;
+    this.job.leftS = ACTION_S[kind];
   }
 
   private abort(): void {
@@ -292,26 +581,6 @@ export class Mining implements GameModule {
   private complete(cargo: Cargo, tank: Propellant): void {
     this.active = false;
     const kind = this.job.kind;
-    if (kind === 'mine') {
-      const id = this.jobAsteroid;
-      const r = chooseResource(this.remaining);
-      if (r === null) {
-        this.log(REFUSAL_LOG.depleted, 'warn');
-        return;
-      }
-      const kg = Math.min(MINE_YIELD_KG, this.remaining[r]);
-      const res = applyCargoAction(cargo, tank, { kind: 'mine', asteroidId: id, resource: r, kg });
-      if (!res.ok) {
-        this.log(REFUSAL_LOG[res.reason ?? 'invalid'], 'warn');
-        return;
-      }
-      // Once per completed mine, with what the hold actually took.
-      this.opts.worldState.recordMined(id, r, res.kgIn, 'local');
-      this.log(minedLog(res.kgIn, r), 'good');
-      // The gate's own line (mayMine): less room than MINE_MIN_KG is full.
-      if (cargo.freeKg < MINE_MIN_KG) this.log(REFUSAL_LOG['hold-full'], 'warn');
-      return;
-    }
     const res = applyCargoAction(cargo, tank, { kind });
     if (!res.ok) {
       this.log(REFUSAL_LOG[res.reason ?? 'invalid'], 'warn');
