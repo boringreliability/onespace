@@ -342,6 +342,7 @@ async function state(page) {
       job: e.get('mining').busy ? { ...e.get('mining').busy } : null,
       // Plan 5: an extraction is not a timed job; it is status('mine').
       mineKind: e.get('mining').status('mine').kind,
+      mineShownKg: e.get('mining').status('mine').shownKg,
       inRange: e.get('mining').asteroidInRange,
       revision: e.get('save').revision,
       sync: pause.sync ? pause.sync.status() : null,
@@ -411,10 +412,16 @@ async function targetIceRock(page, note) {
 async function mineAndRefine(page, note) {
   await page.keyboard.press('KeyB');
   await waitState(page, (x) => x.mineKind === 'running', 'the extraction to start', 5_000);
-  // Plan 5: 150 kg/s in 250 kg bites; 4 s gives two bites (it may end by itself first).
-  await page.waitForTimeout(4_000);
+  // Plan 5: 150 kg/s in 250 kg bites; wait on kilograms, not seconds (it may end by itself first).
+  await waitState(page, (x) => x.mineKind !== 'running' || x.mineShownKg >= 500, '500 kg to be mined', 30_000);
   if ((await state(page)).mineKind === 'running') await page.keyboard.press('KeyB');
   await waitState(page, (x) => x.mineKind !== 'running', 'the extraction to end', 10_000);
+  // Race: it may have ended by itself between the check and the key, so that B started a new one.
+  await page.waitForTimeout(1_000);
+  if ((await state(page)).mineKind === 'running') {
+    await page.keyboard.press('KeyB');
+    await waitState(page, (x) => x.mineKind !== 'running', 'the extraction to end', 10_000);
+  }
   const mined = await page.evaluate(() => window.__e2eLog.filter((l) => l.startsWith('MINED')).at(-1) ?? null);
   assert(mined && mined.includes(' KG ICE'), `the mine did not yield ice (log: ${mined})`);
   note(mined);

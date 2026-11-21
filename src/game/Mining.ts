@@ -184,6 +184,8 @@ export class Mining implements GameModule {
   /** The extraction underway, or null. A new one always comes from startExtraction. */
   private ext: Extraction | null = null;
   private recovered = false;
+  /** An extraction ended in this update (cleared at its start): a B press in the same frame is swallowed. */
+  private endedThisFrame = false;
   /** The last update had a tank and a hold (the gate below is current). */
   private hull = false;
   private offs: Array<() => void> = [];
@@ -254,7 +256,7 @@ export class Mining implements GameModule {
     return this.gate.relSpeedKmS <= MINE_MAX_REL_KMS;
   }
 
-  /** The extraction underway as an operation (empty or one element); a stable array. */
+  /** The extraction underway as an operation (empty or one element). Read `mining.operations` every frame and do not keep the array: it is one of two arrays, and the single `MiningOperation` object is reused and updated in place while an extraction runs. */
   get operations(): readonly MiningOperation[] {
     return this.ext ? this.oneOperation : NO_OPERATIONS;
   }
@@ -340,6 +342,7 @@ export class Mining implements GameModule {
     const tank = u.flight.propellant;
     const recovered = this.recovered;
     this.recovered = false;
+    this.endedThisFrame = false;
     if (!cargo || !tank) {
       // Inert: no tank or no hold (Yard, showroom).
       if (this.ext) this.endExtraction('interrupted');
@@ -365,7 +368,7 @@ export class Mining implements GameModule {
     // Paused or frozen: the keys say nothing at all.
     if (u.paused || u.frozen) return;
     const input = ctx.input;
-    if (input.pressed('mine')) this.press('mine', cargo, tank);
+    if (input.pressed('mine') && !this.endedThisFrame) this.press('mine', cargo, tank);
     if (input.pressed('refine')) this.press('refine', cargo, tank);
     if (input.pressed('repair')) this.press('repair', cargo, tank);
   }
@@ -525,6 +528,7 @@ export class Mining implements GameModule {
     const e = this.ext;
     if (!e) return;
     this.ext = null;
+    this.endedThisFrame = true;
     const good = e.minedKg >= MINE_MIN_KG && (end === 'stopped' || end === 'hold-full' || end === 'resource-depleted' || end === 'rock-depleted');
     this.log(extractionLog(end, e.minedKg, e.resource), good ? 'good' : 'warn');
     bus.emit('mining:ended', { asteroidId: e.asteroidId, resource: e.resource, minedKg: e.minedKg, end });
