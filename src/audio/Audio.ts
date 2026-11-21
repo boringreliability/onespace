@@ -47,6 +47,14 @@
  *                                                                          │      │
  *  UI  one-shot blips ▶ uiOut ▶ uiHp (dry, clicky, quiet) ─────────────────┼──────┤
  *                                                                          │      │
+ *  MINING (v4 plan 5 T7) — two held tones, each a permanent voice behind    │      │
+ *  a gate that opens only while its work runs:                              │      │
+ *    beam  saw + tri at MINING_TONE_HZ, sine an octave down, pink grit      │      │
+ *            ▶ mineBody (slow tremolo) ▶ mineLp (cutoff drifts) ▶ mineGate ─┼──────┤
+ *    work  tri at ACTION_TONE_HZ, sine octave + sub, a little hiss          │      │
+ *            ▶ actBody (a 2.3 Hz pump: machinery) ▶ actLp ▶ actGate ───────┼──────┤
+ *    bite and break-up are one-shot voices (a chip; a deep, wet crumble) ──┤      │
+ *                                                                          │      │
  *    reverbSend ▶ convolver(procedural IR) ▶ reverbReturn ─────────────────┘      │
  *                                                                                 │
  *  MASTER  sum ─┴─▶ limiter (compressor, ratio 20:1) ▶ clip (tanh waveshaper,
@@ -68,6 +76,7 @@
 
 import type { EngineContext, GameModule } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
+import type { Mode } from '@/core/Modes';
 import { Rng } from '@/math/rng';
 import type { GameScale } from '@/gen/types';
 // v3 T4 (PLAN E5): the flight events that were silent.
@@ -78,8 +87,11 @@ import {
   rcsHiss,
   touchdownThud,
   vesselHum,
+  ACTION_TONE_HZ,
+  MINING_TONE_HZ,
   type CruisePhaseName,
 } from './audioCues';
+import type { Resource } from '@/gen/belt';
 
 // --- Time constants for setTargetAtTime, in seconds. -----------------------
 // These ARE the feel. A time constant is how long the parameter takes to cover
@@ -111,6 +123,20 @@ const DRONE_LFO_HZ = [0.0071, 0.0113, 0.0173, 0.0091] as const;
 const DRONE_PAN = [-0.55, 0.42, -0.28, 0.66] as const;
 /** Root of the drone, Hz. Low E-ish — below the ship, under everything. */
 const DRONE_ROOT = 41.2;
+
+// --- v4 plan 5 T7: mining, refining and repair. -----------------------------
+// A full hold can take ~53 s of beam, so the held tones sit under the engine:
+// quiet, filtered soft, and always moving a little. Gate levels are the whole
+// mix of each tone; the voices behind the gate sum to roughly 1.
+const MINE_LEVEL = 0.05;
+const ACTION_LEVEL = 0.042;
+/** Gate time constants: a beam that swells in, and lets go a little faster. */
+const TC_TONE_ON = 0.22;
+const TC_TONE_OFF = 0.16;
+/** Bites arrive in bursts under time compression; one chip per this many seconds at most. */
+const BITE_MIN_GAP_S = 0.06;
+/** A chip's pitch by what is being cut: ice rings bright, metal low and hard. */
+const BITE_PITCH: Readonly<Record<Resource, number>> = { ice: 1.15, metal: 0.82, silicate: 1, rare: 1.3 };
 
 type WarpPhase = 'idle' | 'charging' | 'tunnel' | 'arriving';
 
@@ -187,6 +213,15 @@ interface Graph {
   readonly cruiseG: GainNode;
   // ---------------------------------------------------------------------------
 
+  // v4 plan 5 T7 ---------------------------------------------------------------
+  /** The beam's held tone; its gate is 0 unless an extraction runs. */
+  readonly mineLp: BiquadFilterNode;
+  readonly mineGate: GainNode;
+  /** The refine/repair machinery's held tone; its gate is 0 unless one runs. */
+  readonly actLp: BiquadFilterNode;
+  readonly actGate: GainNode;
+  // ---------------------------------------------------------------------------
+
   /** Everything that must be stopped before the context is closed. */
   readonly sources: AudioScheduledSourceNode[];
   readonly noiseBuffer: AudioBuffer;
@@ -219,6 +254,12 @@ export class Audio implements GameModule {
   private cockpit = false;
   private creakClock = 0;
   // ---------------------------------------------------------------------------
+
+  // v4 plan 5 T7: the held tones follow these, whether or not the context exists
+  // yet (an extraction underway when the browser unlocks audio is heard from then).
+  private miningOn = false;
+  private actionOn = false;
+  private lastBite = -1;
 
   private warpPhase: WarpPhase = 'idle';
   private warpCharge = 0;
@@ -381,6 +422,17 @@ export class Audio implements GameModule {
     this.g = null;
     if (ac && ac.state !== 'closed') void ac.close();
     this.ac = null;
+    this.miningOn = false;
+    this.actionOn = false;
+  }
+
+  /**
+   * Audio is never gated, so it hears every mode change. Leaving flight ends
+   * whatever was being worked, whether or not Mining says so in time (and
+   * Mining.dispose() says nothing): no tone may hang over a map or a menu.
+   */
+  onModeChange(_from: Mode, to: Mode): void {
+    if (to !== 'flight') this.silenceTones();
   }
 
   // -------------------------------------------------------------------------
@@ -632,8 +684,40 @@ export class Audio implements GameModule {
       }
     }
 
+    // --- v4 plan 5 T7: the beam and the machinery ---------------------------
+    this.tickTones(g, t);
+
     // --- warp --------------------------------------------------------------
     this.tickWarp(g, t, dt);
+  }
+
+  private tickTones(g: Graph, t: number): void {
+    const mOn = this.miningOn;
+    this.set(g.mineGate.gain, mOn ? MINE_LEVEL : 0, mOn ? TC_TONE_ON : TC_TONE_OFF);
+    if (mOn) {
+      // The beam's colour wanders on two unrelated slow sines: never static,
+      // never a rhythm. Pitch stays put (movement in pitch is detune LFOs).
+      const w = Math.sin(t * 0.23) * 0.6 + Math.sin(t * 0.071 + 0.9) * 0.4;
+      this.set(g.mineLp.frequency, 340 + w * 110, 0.9);
+    }
+    const aOn = this.actionOn;
+    this.set(g.actGate.gain, aOn ? ACTION_LEVEL : 0, aOn ? TC_TONE_ON * 1.4 : TC_TONE_OFF);
+    if (aOn) {
+      const w = Math.sin(t * 0.17 + 2.1);
+      this.set(g.actLp.frequency, 620 + w * 120, 0.9);
+    }
+  }
+
+  /** Both held tones off now (leaving flight, leaving the system). */
+  private silenceTones(): void {
+    this.miningOn = false;
+    this.actionOn = false;
+    const g = this.g;
+    const ac = this.ac;
+    if (!g || !ac) return;
+    this.audioTime = ac.currentTime;
+    this.set(g.mineGate.gain, 0, TC_TONE_OFF);
+    this.set(g.actGate.gain, 0, TC_TONE_OFF);
   }
 
   private tickWarp(g: Graph, t: number, _dt: number): void {
@@ -781,6 +865,35 @@ export class Audio implements GameModule {
         if (!this.cockpit) this.creak = 0;
       }),
 
+      // v4 plan 5 T7: mining, refining and repair -----------------------------
+      bus.on('mining:started', () => {
+        this.miningOn = true;
+      }),
+
+      bus.on('mining:ended', () => {
+        this.miningOn = false;
+      }),
+
+      bus.on('mining:bite', ({ resource }) => {
+        this.biteVoice(resource);
+      }),
+
+      bus.on('asteroid:destroyed', () => {
+        this.breakUp();
+      }),
+
+      bus.on('action:started', () => {
+        this.actionOn = true;
+      }),
+
+      bus.on('action:ended', () => {
+        this.actionOn = false;
+      }),
+
+      bus.on('system:left', () => {
+        this.silenceTones();
+      }),
+
       bus.on('warp:aborted', () => {
         this.warpPhase = 'idle';
         this.warpCharge = 0;
@@ -902,6 +1015,73 @@ export class Audio implements GameModule {
     };
     src.start(t0, (this.driftT * 0.37) % 2.5);
     src.stop(t0 + dur + 0.5);
+  }
+
+  /**
+   * One bite: a chip off the rock — a short band of noise falling in pitch
+   * with a small tonal knock under it. At most one per BITE_MIN_GAP_S, so a
+   * burst of bites in one compressed frame is one chip, not a machine gun.
+   */
+  private biteVoice(resource: Resource): void {
+    const ac = this.ac;
+    const g = this.g;
+    if (!ac || !g || ac.state !== 'running') return;
+    const t0 = ac.currentTime;
+    if (t0 - this.lastBite < BITE_MIN_GAP_S) return;
+    if (this.voices > 14) return;
+    this.lastBite = t0;
+    // A little deterministic wander so successive chips are not identical.
+    const k = (BITE_PITCH[resource] ?? 1) * (1 + 0.06 * Math.sin(this.driftT * 9.7));
+
+    const src = ac.createBufferSource();
+    src.buffer = g.noiseBuffer;
+    src.loop = true;
+    const bp = ac.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.Q.setValueAtTime(2.2, t0);
+    bp.frequency.setValueAtTime(2200 * k, t0);
+    bp.frequency.exponentialRampToValueAtTime(900 * k, t0 + 0.06);
+    const nEnv = ac.createGain();
+    nEnv.gain.setValueAtTime(0, t0);
+    nEnv.gain.linearRampToValueAtTime(0.05, t0 + 0.002);
+    nEnv.gain.setTargetAtTime(0, t0 + 0.004, 0.018);
+
+    const knock = ac.createOscillator();
+    knock.type = 'sine';
+    knock.frequency.setValueAtTime(330 * k, t0);
+    knock.frequency.exponentialRampToValueAtTime(240 * k, t0 + 0.05);
+    const kEnv = ac.createGain();
+    kEnv.gain.setValueAtTime(0, t0);
+    kEnv.gain.linearRampToValueAtTime(0.035, t0 + 0.003);
+    kEnv.gain.setTargetAtTime(0, t0 + 0.005, 0.022);
+
+    src.connect(bp);
+    bp.connect(nEnv);
+    nEnv.connect(g.sum);
+    knock.connect(kEnv);
+    kEnv.connect(g.sum);
+    this.voices++;
+    src.onended = () => {
+      this.voices--;
+      src.disconnect();
+      bp.disconnect();
+      nEnv.disconnect();
+    };
+    knock.onended = () => {
+      knock.disconnect();
+      kEnv.disconnect();
+    };
+    src.start(t0, (this.driftT * 0.61) % 3);
+    knock.start(t0);
+    src.stop(t0 + 0.16);
+    knock.stop(t0 + 0.16);
+  }
+
+  /** A rock breaks up: a deep, falling crumble with a wet tail. Never throttled by the bites. */
+  private breakUp(): void {
+    this.sweep(150, 30, 1.4, 0.16, 0.45);
+    this.crack(900, 0.5, 0.14, 0.6);
+    this.sweep(70, 26, 2.0, 0.10, 0.7);
   }
 
   private warpEngageTransient(): void {
@@ -1235,6 +1415,98 @@ function buildGraph(ac: AudioContext): Graph {
   sources.push(rcsNoise, hullOsc, hullPartial, hullLfo, cruiseOsc, cruiseBed);
   // ---------------------------------------------------------------------------
 
+  // --- v4 plan 5 T7: the mining beam -------------------------------------------
+  // Two oscillators on the same base, a few cents apart and each drifting on
+  // its own slow LFO (through detune: the base stays the written frequency),
+  // a sine an octave below for weight, and a breath of band-passed grit — the
+  // beam working the rock. A slow tremolo and a wandering low-pass keep a
+  // 50-second tone from setting into a test signal.
+  const mineLp = ac.createBiquadFilter();
+  mineLp.type = 'lowpass';
+  mineLp.frequency.setValueAtTime(340, t0);
+  mineLp.Q.setValueAtTime(0.9, t0);
+  const mineGate = gain(ac, 0);
+  const mineSend = gain(ac, 0.18);
+  const mineBody = gain(ac, 1);
+  mineBody.connect(mineLp);
+  mineLp.connect(mineGate);
+  mineGate.connect(sum);
+  mineGate.connect(mineSend);
+  mineSend.connect(reverbSend);
+
+  const mineA = osc(ac, 'sawtooth', MINING_TONE_HZ);
+  connectChain(mineA, gain(ac, 0.32), mineBody);
+  const mineB = osc(ac, 'triangle', MINING_TONE_HZ);
+  mineB.detune.setValueAtTime(-7, t0);
+  connectChain(mineB, gain(ac, 0.55), mineBody);
+  const mineSub = osc(ac, 'sine', MINING_TONE_HZ / 2);
+  connectChain(mineSub, gain(ac, 0.42), mineBody);
+  const mineGrit = looper(ac, noiseBufferB);
+  const mineGritBp = ac.createBiquadFilter();
+  mineGritBp.type = 'bandpass';
+  mineGritBp.frequency.setValueAtTime(720, t0);
+  mineGritBp.Q.setValueAtTime(1.1, t0);
+  const mineGritG = gain(ac, 0.3);
+  mineGrit.connect(mineGritBp);
+  connectChain(mineGritBp, mineGritG, mineBody);
+
+  const mineLfoA = osc(ac, 'sine', 0.19);
+  const mineLfoAG = gain(ac, 6);
+  mineLfoA.connect(mineLfoAG);
+  mineLfoAG.connect(mineA.detune);
+  const mineLfoB = osc(ac, 'sine', 0.113);
+  const mineLfoBG = gain(ac, 5);
+  mineLfoB.connect(mineLfoBG);
+  mineLfoBG.connect(mineB.detune); // sums with the -7 cents it sits at
+  const mineTrem = osc(ac, 'sine', 0.31);
+  const mineTremG = gain(ac, 0.12);
+  mineTrem.connect(mineTremG);
+  mineTremG.connect(mineBody.gain);
+  sources.push(mineA, mineB, mineSub, mineGrit, mineLfoA, mineLfoB, mineTrem);
+
+  // --- v4 plan 5 T7: the refine/repair machinery --------------------------------
+  // A fifth above the beam and pumped at 2.3 Hz: the ear reads "a machine is
+  // working", where the beam reads "a tool is held". A triangle base, a quiet
+  // octave that drifts, a sub, and a little hydraulic hiss.
+  const actLp = ac.createBiquadFilter();
+  actLp.type = 'lowpass';
+  actLp.frequency.setValueAtTime(620, t0);
+  actLp.Q.setValueAtTime(1.4, t0);
+  const actGate = gain(ac, 0);
+  const actSend = gain(ac, 0.12);
+  const actBody = gain(ac, 1);
+  actBody.connect(actLp);
+  actLp.connect(actGate);
+  actGate.connect(sum);
+  actGate.connect(actSend);
+  actSend.connect(reverbSend);
+
+  const actA = osc(ac, 'triangle', ACTION_TONE_HZ);
+  connectChain(actA, gain(ac, 0.6), actBody);
+  const actOct = osc(ac, 'sine', ACTION_TONE_HZ * 2);
+  connectChain(actOct, gain(ac, 0.16), actBody);
+  const actSub = osc(ac, 'sine', ACTION_TONE_HZ / 2);
+  connectChain(actSub, gain(ac, 0.32), actBody);
+  const actHiss = looper(ac, noiseBuffer);
+  const actHissBp = ac.createBiquadFilter();
+  actHissBp.type = 'bandpass';
+  actHissBp.frequency.setValueAtTime(1900, t0);
+  actHissBp.Q.setValueAtTime(3, t0);
+  const actHissG = gain(ac, 0.12);
+  actHiss.connect(actHissBp);
+  connectChain(actHissBp, actHissG, actBody);
+
+  const actLfo = osc(ac, 'sine', 0.27);
+  const actLfoG = gain(ac, 4);
+  actLfo.connect(actLfoG);
+  actLfoG.connect(actOct.detune);
+  const actPump = osc(ac, 'sine', 2.3);
+  const actPumpG = gain(ac, 0.3);
+  actPump.connect(actPumpG);
+  actPumpG.connect(actBody.gain);
+  sources.push(actA, actOct, actSub, actHiss, actLfo, actPump);
+  // ---------------------------------------------------------------------------
+
   for (let i = 0; i < sources.length; i++) sources[i]!.start(t0);
 
   return {
@@ -1247,6 +1519,7 @@ function buildGraph(ac: AudioContext): Graph {
     warpSub, warpSubG, warpSubLp, warpBed, warpBp, warpBedG,
     uiOut, uiHp,
     rcsBp, rcsG, rcsPan, hullOsc, hullPartial, hullLp, hullG, cruiseOsc, cruiseBp, cruiseG,
+    mineLp, mineGate, actLp, actGate,
     sources, noiseBuffer,
   };
 }

@@ -20,6 +20,11 @@
  * requirement ends an extraction with its reason; it aborts a refine or repair
  * with nothing applied (REFINING / REPAIR ABORTED). Nothing ever resumes.
  *
+ * Task 7: a refine or repair is announced — `action:started` in the frame of
+ * the accepted press, and exactly one `action:ended` (ok: true on completion,
+ * false on every abort, a lost tank or hold, or a refused completion). A
+ * refusal at the press announces nothing; dispose() announces nothing (F5).
+ *
  * Paused or frozen, the keys are silent. A hull without a tank or a hold is
  * inert. update() allocates nothing on a frame without a bite (a bite's
  * cargo action and bus payloads are new objects: the journal keeps them).
@@ -346,7 +351,8 @@ export class Mining implements GameModule {
     if (!cargo || !tank) {
       // Inert: no tank or no hold (Yard, showroom).
       if (this.ext) this.endExtraction('interrupted');
-      this.active = false;
+      // Task 7 (R16): a refine or repair dropped here is still announced as ended.
+      if (this.active) this.endAction(false);
       this.inRange = false;
       this.hull = false;
       return;
@@ -575,11 +581,13 @@ export class Mining implements GameModule {
     this.active = true;
     this.job.kind = kind;
     this.job.leftS = ACTION_S[kind];
+    bus.emit('action:started', { kind });
   }
 
   private abort(): void {
     this.active = false;
     this.log(ABORT_TEXT[this.job.kind], 'warn');
+    this.endAction(false);
   }
 
   private complete(cargo: Cargo, tank: Propellant): void {
@@ -588,9 +596,17 @@ export class Mining implements GameModule {
     const res = applyCargoAction(cargo, tank, { kind });
     if (!res.ok) {
       this.log(REFUSAL_LOG[res.reason ?? 'invalid'], 'warn');
+      this.endAction(false);
       return;
     }
     this.log(kind === 'refine' ? refinedLog(res.fuelKg) : repairedLog(res.restoredFrac), 'good');
+    this.endAction(true);
+  }
+
+  /** The refine or repair underway is over: the one `action:ended` it gets (Task 7). */
+  private endAction(ok: boolean): void {
+    this.active = false;
+    bus.emit('action:ended', { kind: this.job.kind, ok });
   }
 
   private log(text: string, tone: 'normal' | 'warn' | 'good'): void {
