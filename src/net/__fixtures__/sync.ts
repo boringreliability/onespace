@@ -39,7 +39,8 @@ export interface SaveOver {
 
 /** A valid SaveV1 (the golden one, actions seq 1–12), with the fields a test names set. */
 export function save(o: SaveOver = {}): SaveV1 {
-  const s = structuredClone(golden) as unknown as SaveV1;
+  const g = structuredClone(golden) as unknown as SaveV1;
+  const s: SaveV1 = { ...g, format: 2, ship: { ...g.ship, beamResource: 'ice' } };
   s.saveId = o.saveId ?? GAME_X;
   s.revision = o.revision ?? 7;
   if (o.wallMs !== undefined) s.savedAt.wallMs = o.wallMs;

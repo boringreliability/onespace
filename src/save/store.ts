@@ -9,13 +9,13 @@
  * store never trusts its own bytes; `migrate` is the only door in.
  */
 
-import type { SaveV1 } from './schema';
+import type { Save } from './schema';
 
 export interface SaveStore {
   /** The two slots as stored, unvalidated; null where a slot is empty. */
   load(): Promise<{ current: unknown | null; previous: unknown | null }>;
   /** Write `s` as current; the old current becomes previous. Rejects on failure, changing nothing. */
-  save(s: SaveV1): Promise<void>;
+  save(s: Save): Promise<void>;
   /**
    * R34 (v4 sub-plan 4): replace the local save outright — current = `s` (or
    * empty), previous = empty — in one transaction; the shelf is untouched.
@@ -24,7 +24,7 @@ export interface SaveStore {
    * plain `save` would keep the old game as previous, and the boot's
    * newest-by-revision rule could bring it back.
    */
-  replaceAll(s: SaveV1 | null): Promise<void>;
+  replaceAll(s: Save | null): Promise<void>;
   /**
    * Keep a save — one that could not be read, or one a NEW GAME replaced —
    * untouched, with the wall time it was found. A raw already on the shelf
@@ -91,7 +91,7 @@ export function rawKey(raw: unknown): string | null {
  * `savedAt.wallMs`; on a full tie the first argument. Returns one of its
  * arguments, never a copy.
  */
-export function newestOf(a: SaveV1 | null, b: SaveV1 | null): SaveV1 | null {
+export function newestOf(a: Save | null, b: Save | null): Save | null {
   if (a === null) return b;
   if (b === null) return a;
   if (a.revision !== b.revision) return a.revision > b.revision ? a : b;

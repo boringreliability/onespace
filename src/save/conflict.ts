@@ -10,11 +10,16 @@
  * loss is added, gains are ignored. Emergency counters add, depletion is the
  * union. Tank and hold clamp to >= 0, capacity loss to <= 1. So an emergency
  * or fuel spent on one device cannot be undone by choosing the other.
+ *
+ * Formats: the rule takes and returns current-format saves (`Save`) and checks
+ * its result with `SaveV2Schema`. It never lifts a save — that is `migrate`'s
+ * job: SyncClient migrates both sides, and the server lifts a head (or device
+ * save) an older build stored as format 1 before it resolves.
  */
 
 import type { Resource } from '@/gen/belt';
 
-import { SaveV1Schema, type SaveV1 } from './schema';
+import { SaveV2Schema, type Save } from './schema';
 
 const RESOURCES: readonly Resource[] = ['ice', 'metal', 'silicate', 'rare'];
 
@@ -25,7 +30,7 @@ export interface ShipDigest {
   emergencyTimesUsed: number;
 }
 
-export function shipDigest(s: SaveV1): ShipDigest {
+export function shipDigest(s: Save): ShipDigest {
   const { propellant, cargo, emergencyTimesUsed } = s.ship;
   return {
     tankKg: propellant.massKg,
@@ -35,11 +40,11 @@ export function shipDigest(s: SaveV1): ShipDigest {
   };
 }
 
-export function sameGame(a: SaveV1, b: SaveV1): boolean {
+export function sameGame(a: Save, b: Save): boolean {
   return a.saveId === b.saveId;
 }
 
-type MinedEntry = SaveV1['world']['entries'][number];
+type MinedEntry = Save['world']['entries'][number];
 
 /**
  * Depletion union (plan-3 C6): one entry per (id, resource), the larger kg
@@ -64,7 +69,7 @@ function unionEntries(chosen: readonly MinedEntry[], unchosen: readonly MinedEnt
   return [...out.values()];
 }
 
-export function resolveSameGame(chosen: SaveV1, unchosen: SaveV1, base: ShipDigest): SaveV1 {
+export function resolveSameGame(chosen: Save, unchosen: Save, base: ShipDigest): Save {
   if (!sameGame(chosen, unchosen)) {
     throw new Error(`resolveSameGame: different games (saveId ${chosen.saveId} vs ${unchosen.saveId})`);
   }
@@ -84,7 +89,8 @@ export function resolveSameGame(chosen: SaveV1, unchosen: SaveV1, base: ShipDige
 
   out.world.entries = unionEntries(chosen.world.entries, unchosen.world.entries);
 
-  return SaveV1Schema.parse(out);
+  // Zod: a bad result throws a ZodError (the server answers it with 400 invalid-save).
+  return SaveV2Schema.parse(out);
 }
 
 export interface CardSummary {
@@ -96,7 +102,7 @@ export interface CardSummary {
 }
 
 /** R18: `bodyName` is injected by the UI (the galaxy generator), which keeps this module pure. */
-export function cardSummary(s: SaveV1, capacityKg: number, bodyName?: (id: string) => string | null): CardSummary {
+export function cardSummary(s: Save, capacityKg: number, bodyName?: (id: string) => string | null): CardSummary {
   const parentId = s.player.parentId;
   let place = 'deep space';
   if (parentId !== null) {

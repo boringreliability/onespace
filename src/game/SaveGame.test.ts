@@ -63,7 +63,7 @@ import { decideBoot } from '@/save/boot';
 import { loadForBoot } from '@/save/bootLoad';
 import type { SaveWorld } from '@/save/capture';
 import { memoryStore } from '@/save/memoryStore';
-import { SaveV1Schema, type ActionEntry, type SaveV1 } from '@/save/schema';
+import { SaveV2Schema, type ActionEntry, type SaveV1 } from '@/save/schema';
 import type { SaveStore } from '@/save/store';
 import { WAL_KEY, WAL_SNAPSHOT_KEY, createWal, type Wal } from '@/save/wal';
 import type { WriterLock } from '@/save/writerLock';
@@ -400,7 +400,7 @@ describe('SaveGame — autosave (memoryStore)', () => {
     r.tick();
     await flush();
     expect(r.s.saved).toHaveLength(1);
-    expect(SaveV1Schema.safeParse(r.s.saved[0]).success).toBe(true);
+    expect(SaveV2Schema.safeParse(r.s.saved[0]).success).toBe(true);
   });
 
   it('Given a mine completes (cargo:action, then recordMined), When SaveGame ticks, Then a save is written holding the cargo mine AND the mined entry — not half a mine', async () => {
@@ -1407,7 +1407,7 @@ describe('R25 I4b — world entries are aggregated per (asteroid, resource) in a
       [b, 'ice', 100, WALL + 4_000],
     ]);
     expect(s.actions.filter(isMined)).toHaveLength(5);
-    expect(SaveV1Schema.safeParse(s).success).toBe(true);
+    expect(SaveV2Schema.safeParse(s).success).toBe(true);
     const loaded = new WorldState({ orbitSeconds: () => 0, wallMs: () => 0 });
     loaded.restore(s.world.entries);
     expect(loaded.depleted(a)).toEqual(r.g.worldState.depleted(a));

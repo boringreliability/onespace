@@ -47,13 +47,13 @@ const ctx = {
 };
 
 describe('migrate — a v1 save', () => {
-  it('Given the golden v1 save, Then migrate returns it unchanged, from format 1', () => {
+  it('Given the golden v1 save, Then migrate lifts it to format 2 (beamResource ice, nothing else changed), from format 1', () => {
     const r = migrate(goldenCopy());
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.migratedFrom).toBe(1);
-    expect(r.save).toEqual(golden);
-    expect(JSON.parse(JSON.stringify(r.save))).toEqual(golden);
+    expect(r.save).toEqual({ ...golden, format: 2, ship: { ...golden.ship, beamResource: 'ice' } });
+    expect(JSON.parse(JSON.stringify(r.save))).toEqual({ ...golden, format: 2, ship: { ...golden.ship, beamResource: 'ice' } });
   });
 
   it('Given a deep-frozen golden save, Then migrate neither throws nor needs to write into it', () => {
@@ -106,13 +106,13 @@ describe('migrate — a v1 save', () => {
 });
 
 describe('migrate — an unknown format is never silently discarded', () => {
-  it('Given format 99, Then unknown-format, and the raw save is handed back untouched for the caller to keep', () => {
+  it('Given format 99, Then newer-build, and the raw save is handed back untouched for the caller to keep', () => {
     const raw = { ...goldenCopy(), format: 99 };
     const before = structuredClone(raw);
     const r = migrate(raw);
     expect(r.ok).toBe(false);
     if (r.ok) return;
-    expect(r.reason).toBe('unknown-format');
+    expect(r.reason).toBe('newer-build');
     expect(r.issues.join('\n')).toContain('99');
     expect(raw).toEqual(before);
   });
@@ -316,7 +316,7 @@ describe('migrate — messages and reasons pinned by mutation testing (Task 7)',
 
 type LooseSave = Record<string, unknown> & {
   format: unknown;
-  ship: Record<string, unknown> & SaveV1['ship'];
+  ship: Record<string, unknown> & Omit<SaveV1['ship'], 'beamResource'>;
   actions: Array<{ source: string; payload: Record<string, unknown> }>;
   world: SaveV1['world'];
 };

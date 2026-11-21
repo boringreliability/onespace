@@ -223,9 +223,10 @@ function maxSeq(entries: readonly ActionEntry[]): number {
  * At most `max` entries: the oldest fold into ONE checkpoint at the front (an
  * existing leading checkpoint folds in too). The checkpoint holds the NET
  * effect of what it absorbed — the prefix replayed from nothing — so replay
- * of the result equals replay of the input. (A jettison inside the prefix is
- * netted against the hold the prefix itself filled: the log starts at a new
- * game, with an empty hold.) It takes the seq and clocks of the last entry it
+ * of the result equals replay of the input. (A jettison-all inside the prefix
+ * is netted against the hold the prefix itself filled: the log starts at a new
+ * game, with an empty hold. A `jettison` of one resource nets exactly from any
+ * start: it is its `kgOut`.) It takes the seq and clocks of the last entry it
  * absorbed, so seqs stay unique and rising.
  */
 export function compactEntries(entries: readonly ActionEntry[], max: number = MAX_ACTIONS): ActionEntry[] {

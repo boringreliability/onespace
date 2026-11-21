@@ -66,7 +66,8 @@ function emergency(seq: number): ActionEntry {
 }
 
 function saveAt(revision: number): SaveV1 {
-  const s = structuredClone(golden) as unknown as SaveV1;
+  const g = structuredClone(golden) as unknown as SaveV1;
+  const s: SaveV1 = { ...g, format: 2, ship: { ...g.ship, beamResource: 'ice' } };
   s.revision = revision;
   return s;
 }

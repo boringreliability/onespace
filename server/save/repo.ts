@@ -4,25 +4,31 @@
  * the user's `users` row (`select … for no key update`): that row always exists, so even two first
  * PUTs against an empty cloud (no `saves` row to lock yet) serialise and yield one winner.
  * Saves arrive already validated (`migrate`); this module trusts them.
+ *
+ * Rows an older build stored keep the format it wrote (format 1 before plan 6). GET and a 409
+ * hand them back as stored — the client migrates what it reads. Where the repo itself COMPARES or
+ * COMBINES a head with an incoming save (the idempotent-PUT check and a same-game resolve), both
+ * sides are first lifted to the current format with `migrate` (`current`), so formats never mix.
  */
 
 import type { Sql, TransactionSql } from 'postgres';
 
 import { resolveSameGame, sameGame, shipDigest, type ShipDigest } from '../../src/save/conflict';
-import type { SaveV1 } from '../../src/save/schema';
+import { migrate } from '../../src/save/migrate';
+import type { Save } from '../../src/save/schema';
 
 export type Base = { saveId: string; revision: number } | null;
 
-export type Head = { saveId: string; revision: number; save: SaveV1 };
+export type Head = { saveId: string; revision: number; save: Save };
 
 export type PutResult =
   | { kind: 'stored'; revision: number; archived: boolean }
   | { kind: 'unchanged'; revision: number }
-  | { kind: 'conflict'; cloud: { revision: number; save: SaveV1 } };
+  | { kind: 'conflict'; cloud: { revision: number; save: Save } };
 
 export type ResolveResult =
-  | { kind: 'resolved' | 'replayed'; revision: number; save: SaveV1 }
-  | { kind: 'conflict'; cloud: { revision: number; save: SaveV1 }; resolvedAs?: { saveId: string; revision: number } };
+  | { kind: 'resolved' | 'replayed'; revision: number; save: Save }
+  | { kind: 'conflict'; cloud: { revision: number; save: Save }; resolvedAs?: { saveId: string; revision: number } };
 
 /** The user row vanished (account deleted) before the write took its lock. */
 export class UserGoneError extends Error {
@@ -43,7 +49,7 @@ export class RevisionOverflowError extends Error {
 const INT4_MAX = 2_147_483_647;
 
 type Tx = TransactionSql;
-type HeadRow = { save_id: string; revision: number; body: SaveV1; resolve_key: string | null };
+type HeadRow = { save_id: string; revision: number; body: Save; resolve_key: string | null };
 
 const json = (tx: Tx, v: unknown) => tx.json(v as Parameters<Tx['json']>[0]);
 
@@ -60,6 +66,16 @@ async function readHead(tx: Tx, userId: string): Promise<HeadRow | undefined> {
 
 const cloudOf = (h: HeadRow) => ({ revision: h.revision, save: h.body });
 
+/**
+ * A save in the current format: a row an older build stored (or a save handed in unlifted) is
+ * lifted by `migrate`. A body `migrate` refuses is returned as it is, so what reads it next
+ * (resolveSameGame's schema check) still fails loudly instead of being skipped.
+ */
+function current(s: Save): Save {
+  const m = migrate(s);
+  return m.ok ? m.save : s;
+}
+
 async function archiveHead(tx: Tx, userId: string, h: HeadRow): Promise<void> {
   await tx`
     insert into save_archive (user_id, save_id, revision, body, archived_at)
@@ -72,7 +88,7 @@ async function storeHead(
   tx: Tx,
   userId: string,
   deviceId: string,
-  save: SaveV1,
+  save: Save,
   resolveKey: string | null,
 ): Promise<void> {
   await tx`
@@ -106,7 +122,7 @@ export async function getHead(sql: Sql, userId: string): Promise<Head | null> {
 export async function putSave(
   sql: Sql,
   userId: string,
-  input: { deviceId: string; base: Base; save: SaveV1 },
+  input: { deviceId: string; base: Base; save: Save },
 ): Promise<PutResult> {
   const { deviceId, base, save } = input;
   return sql.begin(async (tx): Promise<PutResult> => {
@@ -117,9 +133,11 @@ export async function putSave(
       return { kind: 'stored', revision: save.revision, archived: false };
     }
     if (head.save_id === save.saveId && head.revision === save.revision) {
-      // jsonb equality: key order does not matter.
+      // jsonb equality: key order does not matter. A head an older build stored as format 1 is
+      // also compared lifted, so the same save sent again in the current format is `unchanged`.
       const [eq] = await tx<{ same: boolean }[]>`
-        select body = ${json(tx, save)}::jsonb as same from saves where user_id = ${userId}`;
+        select (body = ${json(tx, save)}::jsonb or ${json(tx, current(head.body))}::jsonb = ${json(tx, save)}::jsonb) as same
+        from saves where user_id = ${userId}`;
       if (eq?.same) return { kind: 'unchanged', revision: head.revision };
       return { kind: 'conflict', cloud: cloudOf(head) };
     }
@@ -140,7 +158,7 @@ export async function putSave(
 export async function resolveSave(
   sql: Sql,
   userId: string,
-  input: { deviceId: string; keep: 'device' | 'cloud'; device: SaveV1; base: Base; cloud: Base },
+  input: { deviceId: string; keep: 'device' | 'cloud'; device: Save; base: Base; cloud: Base },
 ): Promise<ResolveResult> {
   const { deviceId, keep, device, base, cloud } = input;
   const key = `${keep}:${device.saveId}:${device.revision}:${cloud ? `${cloud.saveId}:${cloud.revision}` : 'none'}`;
@@ -168,7 +186,9 @@ export async function resolveSave(
 
     if (sameGame(head.body, device)) {
       if (Math.max(head.revision, device.revision) >= INT4_MAX) throw new RevisionOverflowError();
-      const [chosen, unchosen] = keep === 'device' ? [device, head.body] : [head.body, device];
+      // Both in the current format: a head an older build stored as format 1 is lifted (never mixed).
+      const [headNow, deviceNow] = [current(head.body), current(device)];
+      const [chosen, unchosen] = keep === 'device' ? [deviceNow, headNow] : [headNow, deviceNow];
       let baseDigest: ShipDigest = shipDigest(unchosen);
       // A base only counts for the head's own game.
       if (base && base.saveId === head.save_id) {

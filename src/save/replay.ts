@@ -14,8 +14,9 @@
  *  - thrust: the tank falls by its kg;
  *  - cargo: a mine adds `kgIn`; a refine takes `kgOut` ice and adds `fuelKg` to
  *    the tank; a repair takes 600 kg metal + 400 kg silicate and lowers the
- *    loss by `restoredFrac`; a jettison empties the hold; a cargo
- *    cannibalization empties it and adds `fuelKg` to the tank;
+ *    loss by `restoredFrac`; a jettison-all empties the hold; a jettison of
+ *    one resource takes its `kgOut` (what really left, not the kg asked for);
+ *    a cargo cannibalization empties the hold and adds `fuelKg` to the tank;
  *  - mined: the asteroid's depletion grows;
  *  - emergency: counted by kind;
  *  - checkpoint: its net effects are added.
@@ -121,6 +122,14 @@ export function applyEntry(s: ReplayState, e: ActionEntry): void {
           emptyHold(s);
           s.tank.massKg += r.fuelKg;
           break;
+        case 'jettison':
+          s.cargo[a.resource] -= r.kgOut;
+          break;
+        default: {
+          // R3: a cargo kind without a case here is a type error, not silently lost cargo.
+          const unknownKind: never = a;
+          void unknownKind;
+        }
       }
       break;
     }

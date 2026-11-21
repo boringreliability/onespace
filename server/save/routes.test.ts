@@ -67,7 +67,8 @@ beforeEach(async () => {
 type Base = { saveId: string; revision: number } | null;
 
 function mk(o: { saveId?: string; revision?: number; tank?: number; extraActions?: number } = {}): SaveV1 {
-  const s = structuredClone(golden) as unknown as SaveV1;
+  const g = structuredClone(golden) as unknown as SaveV1;
+  const s: SaveV1 = { ...g, format: 2, ship: { ...g.ship, beamResource: 'ice' } };
   s.saveId = o.saveId ?? SAVE_X;
   s.revision = o.revision ?? 1;
   if (o.tank !== undefined) s.ship.propellant.massKg = o.tank;
@@ -1109,7 +1110,7 @@ describe('Digest history is immutable (M7)', () => {
 describe('save format 2 (plan 6 task 1)', () => {
   /** `head` for a save of any format (the outer one is typed to format 1). */
   const head = (s: { saveId: string; revision: number }): Base => ({ saveId: s.saveId, revision: s.revision });
-  type Loose = Omit<SaveV1, 'format' | 'ship'> & { format: number; ship: SaveV1['ship'] & { beamResource?: string } };
+  type Loose = Omit<SaveV1, 'format' | 'ship'> & { format: number; ship: Omit<SaveV1['ship'], 'beamResource'> & { beamResource?: string } };
   const JETTISON = {
     source: 'cargo',
     payload: {
@@ -1127,6 +1128,14 @@ describe('save format 2 (plan 6 task 1)', () => {
     s.ship = { ...s.ship, beamResource: 'metal' };
     s.actions = [...s.actions, { seq: s.actions.length + 1, ...JETTISON } as unknown as SaveV1['actions'][number]];
     return s;
+  }
+
+  /** `mk` as a format 1 save, as an older build wrote it (the outer `mk` is format 2). */
+  function mk1(o: Parameters<typeof mk>[0] = {}): SaveV1 {
+    const s = mk(o) as unknown as Loose;
+    s.format = 1;
+    delete s.ship.beamResource;
+    return s as unknown as SaveV1;
   }
 
   /** What the upgrade must make of a format 1 save: format 2, beam "ice", nothing else. */
@@ -1147,7 +1156,7 @@ describe('save format 2 (plan 6 task 1)', () => {
 
   it('Given an empty cloud, When a format 1 save is PUT, Then 200 and the stored head is that save lifted to format 2 (beamResource "ice", nothing else changed), and GET returns the lifted save', async () => {
     const a = await mkUser('a');
-    const s = mk({ revision: 4 });
+    const s = mk1({ revision: 4 });
     expect((s as unknown as Loose).format).toBe(1);
     const res = await put(a, s, null);
     expect(res.status).toBe(200);
@@ -1160,7 +1169,7 @@ describe('save format 2 (plan 6 task 1)', () => {
     const a = await mkUser('a');
     const s1 = mk2({ revision: 1 });
     expect((await put(a, s1, null)).status).toBe(200);
-    const s2 = mk({ revision: 2 });
+    const s2 = mk1({ revision: 2 });
     expect((await put(a, s2, head(s1))).status).toBe(200);
     expect((await headRow(a.id))?.body).toEqual(lifted(s2));
   });
@@ -1211,7 +1220,7 @@ describe('save format 2 (plan 6 task 1)', () => {
   for (const keep of ['cloud', 'device'] as const) {
     it(`Given a format 1 head stored by an older build and a diverged format 2 device save of the same game, When resolved keeping "${keep}", Then 200 and the result is a format 2 save`, async () => {
       const a = await mkUser('a');
-      const base = mk({ revision: 5, tank: 12_000 });
+      const base = mk1({ revision: 5, tank: 12_000 });
       await oldHead(a, base);
       const device = mk2({ revision: 6, tank: 11_000 });
       const res = await resolve(a, keep, device, head(base), head(base), DEV_B);
@@ -1226,7 +1235,7 @@ describe('save format 2 (plan 6 task 1)', () => {
 
   it('Given a format 1 head stored by an older build, When the same save comes back lifted to format 2 (same saveId and revision), Then 200 { revision } — unchanged, not a conflict', async () => {
     const a = await mkUser('a');
-    const s = mk({ revision: 4 });
+    const s = mk1({ revision: 4 });
     await oldHead(a, s);
     const res = await put(a, lifted(s), head(s));
     expect(res.status).toBe(200);

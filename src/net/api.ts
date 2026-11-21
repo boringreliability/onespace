@@ -21,7 +21,7 @@
 
 import * as z from 'zod';
 
-import type { SaveV1 } from '@/save/schema';
+import type { Save } from '@/save/schema';
 
 import type { CloudHead } from './syncState';
 
@@ -49,13 +49,13 @@ export type ApiResult<T = unknown> =
 export interface PutBody {
   deviceId: string;
   base: CloudHead | null;
-  save: SaveV1;
+  save: Save;
 }
 
 export interface ResolveBody {
   deviceId: string;
   keep: 'device' | 'cloud';
-  device: SaveV1;
+  device: Save;
   base: CloudHead | null;
   cloud: CloudHead | null;
 }

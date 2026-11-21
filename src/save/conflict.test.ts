@@ -20,7 +20,7 @@ import type { Resource } from '@/gen/belt';
 
 import { cardSummary, resolveSameGame, sameGame, shipDigest, type ShipDigest } from './conflict';
 import golden from './fixtures/v1-golden.json';
-import { SaveV1Schema, type SaveV1 } from './schema';
+import { SaveV2Schema, type SaveV1 } from './schema';
 
 const RESOURCES: readonly Resource[] = ['ice', 'metal', 'silicate', 'rare'];
 const ZERO_CARGO = { ice: 0, metal: 0, silicate: 0, rare: 0 };
@@ -41,7 +41,8 @@ interface Over {
 
 /** A save built from the golden one: every field the rule reads is set explicitly. */
 function save(o: Over = {}): SaveV1 {
-  const s = structuredClone(golden) as unknown as SaveV1;
+  const g = structuredClone(golden) as unknown as SaveV1;
+  const s: SaveV1 = { ...g, format: 2, ship: { ...g.ship, beamResource: 'ice' } };
   if (o.saveId !== undefined) s.saveId = o.saveId;
   s.revision = o.revision ?? 5;
   s.ship.propellant.massKg = o.tank ?? 12_000;
@@ -277,14 +278,14 @@ describe('resolveSameGame — revision, identity, what is kept, purity', () => {
     expect(out.actions.length).toBeGreaterThan(0);
   });
 
-  it('Given any resolved result, Then it passes SaveV1Schema.parse', () => {
+  it('Given any resolved result, Then it passes SaveV2Schema.parse', () => {
     const base = digest({ tankKg: 12_000, cargo: { ice: 500, metal: 300 }, emergencyTimesUsed: 0 });
     const out = resolveSameGame(
       save({ tank: 11_000, cargo: { ice: 800 }, loss: 0.9, entries: [mined(A1, 'ice', 100, 1_000)] }),
       save({ tank: 600, cargo: {}, loss: 0.5, emergency: 1, revision: 8, entries: [mined(A2, 'metal', 5, 2_000)] }),
       base,
     );
-    expect(() => SaveV1Schema.parse(out)).not.toThrow();
+    expect(() => SaveV2Schema.parse(out)).not.toThrow();
   });
 
   it('Given the inputs, When resolved, Then neither input nor the base is mutated, and the result shares no structure with them', () => {

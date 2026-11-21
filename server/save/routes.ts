@@ -3,7 +3,7 @@ import type { Sql } from 'postgres';
 import * as z from 'zod';
 
 import { migrate } from '../../src/save/migrate';
-import type { SaveV1 } from '../../src/save/schema';
+import type { Save } from '../../src/save/schema';
 import { clearSessionCookie, requireUser, type AuthVariables } from '../auth/session';
 import { rateLimiter } from '../rateLimit';
 import { deleteAccount, getHead, putSave, resolveSave, RevisionOverflowError, UserGoneError } from './repo';
@@ -34,7 +34,7 @@ function hasUnstorable(v: unknown): boolean {
 }
 
 /** `migrate`, then the range checks the Postgres int columns need (R25). */
-function validateSave(raw: unknown): SaveV1 | null {
+function validateSave(raw: unknown): Save | null {
   const r = migrate(raw);
   if (!r.ok) return null;
   const s = r.save;

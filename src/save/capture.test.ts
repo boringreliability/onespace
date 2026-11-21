@@ -43,7 +43,7 @@ import { ActionJournal, MAX_ACTIONS, compactEntries } from './actionJournal';
 import { applySave, buildSave, type SaveWorld } from './capture';
 import { migrate } from './migrate';
 import { replay, type ReplayState } from './replay';
-import { SaveV1Schema, type ActionEntry, type SaveV1 } from './schema';
+import { SaveV2Schema, type ActionEntry, type SaveV1 } from './schema';
 
 /** Universe steps that need a GPU; everything else in update() runs for real. */
 const RENDER_STEPS = ['streamRenderers', 'updateBodies', 'updateStar', 'publishMotionReference', 'refreshAtmosphere'];
@@ -175,10 +175,10 @@ describe('buildSave — identity', () => {
   it('Given no previous save, Then revision is 1, saveId is a fresh v4 UUID and the save is a valid SaveV1', () => {
     const g = live();
     const s = buildSave(g.w, null);
-    expect(s.format).toBe(1);
+    expect(s.format).toBe(2);
     expect(s.revision).toBe(1);
     expect(s.saveId).toMatch(UUID);
-    expect(SaveV1Schema.safeParse(s).success).toBe(true);
+    expect(SaveV2Schema.safeParse(s).success).toBe(true);
   });
 
   it('Given two first saves, Then they get different saveIds', () => {
@@ -238,6 +238,7 @@ describe('buildSave — player, ship and world, separately (P2)', () => {
       propellant: g.u.flight.propellant!.snapshot(),
       cargo: g.u.cargo.snapshot(),
       emergencyTimesUsed: 3,
+      beamResource: 'ice',
     });
     expect(s.ship.cargo.metal).toBe(700);
   });
@@ -450,7 +451,7 @@ describe('R23: a cruise save orbits the deepest body whose SOI holds the ship', 
     const s = buildSave(g.w, null);
     expect(s.player.parentId).toBeNull();
     expect([...s.player.flight.position, ...s.player.flight.velocity].every(Number.isFinite)).toBe(true);
-    expect(SaveV1Schema.safeParse(s).success).toBe(true);
+    expect(SaveV2Schema.safeParse(s).success).toBe(true);
   });
 });
 
@@ -623,7 +624,7 @@ describe('buildSave — the action log', () => {
     expect(s.actions[0]!.source).toBe('checkpoint');
     expect(s.actions.at(-1)!.seq).toBeGreaterThan(4_999);
     expect(s.actions.filter((e) => e.source === 'emergency')).toHaveLength(3);
-    expect(SaveV1Schema.safeParse(s).success).toBe(true);
+    expect(SaveV2Schema.safeParse(s).success).toBe(true);
   });
 });
 
@@ -646,7 +647,7 @@ describe('R7: the books balance around emergencies and cruise', () => {
       s = buildSave(g.w, null);
     }).not.toThrow();
     const save = s as unknown as SaveV1;
-    expect(SaveV1Schema.safeParse(save).success).toBe(true);
+    expect(SaveV2Schema.safeParse(save).success).toBe(true);
     const { massKg, capacityLossFrac } = save.ship.propellant;
     expect(Number.isFinite(massKg) && massKg >= 0).toBe(true);
     expect(Number.isFinite(capacityLossFrac) && capacityLossFrac >= 0 && capacityLossFrac <= 1).toBe(true);
@@ -1052,7 +1053,7 @@ describe('R8: replay(start, log) recomputes the live ship', () => {
     const c = compactEntries(s2.actions, 5);
     expect(c).toHaveLength(5);
     expectState(replay(startState, c), now);
-    expect(SaveV1Schema.safeParse({ ...s2, actions: c }).success).toBe(true);
+    expect(SaveV2Schema.safeParse({ ...s2, actions: c }).success).toBe(true);
   });
 
   it('Given the log compacted twice (to 12, then to 5), Then replay still equals the live ship', () => {

@@ -18,7 +18,8 @@
  *    meant "the old snapshot is intact", so all three are simply compared);
  *  - nothing is discarded silently: an unreadable slot (invalid, unknown
  *    format, newer build) is kept with `store.keepCorrupt(raw, Date.now())`
- *    and the notice is `SAVE UNREADABLE — KEPT A COPY`;
+ *    and the notice is `SAVE UNREADABLE — KEPT A COPY`, or
+ *    `SAVE IS FROM A NEWER VERSION — KEPT, NOT LOADED` for a newer build;
  *  - a store that cannot be opened (an IDB `VersionError` after another tab
  *    upgraded the database) never crashes the boot: the WAL snapshot is used
  *    if there is one, else a new game, and the notice is
@@ -45,7 +46,7 @@ import { parseRoute } from '@/core/Route';
 import { PROBE_TANK_CAPACITY_KG } from '@/ship/propellant';
 import { BEACON_FILL_FRAC, BEACON_NOTE_TITLE, cannibalizeLossFrac } from '@/ship/emergency';
 import { compactEntries } from './actionJournal';
-import { loadForBoot, mergeCritical, openingLog, replaceGame, universeOptionsFor } from './bootLoad';
+import { loadForBoot, mergeCritical, SAVE_NEWER_TEXT, openingLog, replaceGame, universeOptionsFor } from './bootLoad';
 import * as bootLoadModule from './bootLoad';
 import golden from './fixtures/v1-golden.json';
 import legacy from './fixtures/v0-legacy-log.json';
@@ -53,7 +54,7 @@ import { idbStore } from './idbStore';
 import { memoryStore } from './memoryStore';
 import { migrate } from './migrate';
 import { replay, zeroState, type ReplayState } from './replay';
-import { SaveV1Schema, type ActionEntry, type SaveV1 } from './schema';
+import { SaveV2Schema, type ActionEntry, type SaveV1 } from './schema';
 import * as schemaModule from './schema';
 import type { SaveStore } from './store';
 import { WAL_SNAPSHOT_KEY, createWal, type Wal } from './wal';
@@ -226,7 +227,7 @@ describe('loadForBoot — which save wins', () => {
     const store = await storeWith(future);
     const r = await loadForBoot(store, wal);
     expect(r.save).toBeNull();
-    expect(r.notice).toBe(UNREADABLE);
+    expect(r.notice).toBe(SAVE_NEWER_TEXT);
     expect(store.corrupt).toEqual([{ wallMs: WALL, raw: future }]);
   });
 
@@ -235,13 +236,13 @@ describe('loadForBoot — which save wins', () => {
     const store = await storeWith(newer);
     const r = await loadForBoot(store, wal);
     expect(r.save).toBeNull();
-    expect(r.notice).toBe(UNREADABLE);
+    expect(r.notice).toBe(SAVE_NEWER_TEXT);
     expect(store.corrupt.map((c) => c.raw)).toEqual([newer]);
   });
 
-  it('Given the loaded save, Then it is a valid SaveV1 (it came through migrate)', async () => {
+  it('Given the loaded save, Then it is a valid SaveV2 (it came through migrate)', async () => {
     const r = await loadForBoot(await storeWith(save(7)), wal);
-    expect(SaveV1Schema.safeParse(r.save).success).toBe(true);
+    expect(SaveV2Schema.safeParse(r.save).success).toBe(true);
   });
 });
 
@@ -321,7 +322,7 @@ describe('loadForBoot — WAL critical entries, dedup by seq (carried obligation
     expect(notes[0]).toMatchObject({ key: 'beacon:1', kind: 'note', system: G.player.system.name, visits: 1 });
     expect(notes[0]!.body.join(' ')).toContain(`${Math.round(GOLD_CARGO_KG)} kg`);
     expect(s.world).toEqual(G.world);
-    expect(SaveV1Schema.safeParse(s).success).toBe(true);
+    expect(SaveV2Schema.safeParse(s).success).toBe(true);
   });
 
   it('Given that merged beacon, Then the books balance: replaying the appended entries over the saved ship gives the merged ship', async () => {
@@ -775,7 +776,7 @@ describe('R25 I3 — the store gets 3 s at boot', () => {
     await vi.advanceTimersByTimeAsync(3_000);
     expect(r).not.toBeNull();
     expect(r!.save?.revision).toBe(6);
-    expect(r!.notice).toBe(UNREADABLE);
+    expect(r!.notice).toBe(SAVE_NEWER_TEXT);
   });
 
   it('Given NEW GAME over save 7 and a store whose writes never settle, When replaceGame runs, Then it resolves within 3 s per write, above the old game', async () => {

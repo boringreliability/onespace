@@ -6,7 +6,7 @@
  * in localStorage under two keys:
  *
  *  - `onespace.wal.v1` — the critical entries: `{ v: 1, critical: [{ e, by }] }`;
- *  - `onespace.wal.v1.snapshot` — the one snapshot, a SaveV1 as JSON. Kept apart
+ *  - `onespace.wal.v1.snapshot` — the one snapshot, a Save as JSON. Kept apart
  *    so an append re-serialises only the entries, never the save (M2).
  *
  * Coverage (R11/I1): `by` is the revision of the save that CONTAINS the entry,
@@ -40,7 +40,7 @@
  */
 
 import { migrate } from './migrate';
-import { ActionEntrySchema, type ActionEntry, type SaveV1 } from './schema';
+import { ActionEntrySchema, type ActionEntry, type Save } from './schema';
 
 export const WAL_KEY = 'onespace.wal.v1';
 export const WAL_SNAPSHOT_KEY = 'onespace.wal.v1.snapshot';
@@ -73,14 +73,14 @@ export interface Wal {
    */
   appendCritical(entry: ActionEntry, saveId?: string): boolean;
   /** Synchronously keep `s` as THE snapshot; it covers the entries its action log holds. */
-  writeSnapshot(s: SaveV1): boolean;
+  writeSnapshot(s: Save): boolean;
   /**
    * R25 I4a: tag the entries `s` covers (writeSnapshot's rules: seq ≤ the
    * highest seq in `s.actions`, a checkpoint counting with its upToSeq; a save
    * older than the stored snapshot tags nothing) WITHOUT writing the snapshot.
    * False when nothing could be written or `s` is older than the snapshot.
    */
-  markCovered(s: SaveV1): boolean;
+  markCovered(s: Save): boolean;
   /** What is stored, validated; foreign bytes read as empty. */
   read(): { snapshot: unknown | null; critical: ActionEntry[] };
   /** As `read`, each entry with its coverage (`by`) and its game (`saveId`). */
@@ -163,7 +163,7 @@ function storedRevision(storage: Storage): number | null {
 }
 
 /** Tag the untagged entries `save` covers by its revision; false if that write failed. */
-function tagCovered(storage: Storage, save: SaveV1): boolean {
+function tagCovered(storage: Storage, save: Save): boolean {
   const env = loadEntries(storage);
   if (!env) return true;
   const upTo = coveredSeq(save);
@@ -191,7 +191,7 @@ function seqOf(e: unknown): number | null {
 }
 
 /** The highest seq a save's action log holds (a checkpoint counts with its upToSeq); 0 for none. */
-function coveredSeq(s: SaveV1): number {
+function coveredSeq(s: Save): number {
   let m = 0;
   if (!Array.isArray(s.actions)) return m;
   for (const a of s.actions) {

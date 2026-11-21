@@ -33,6 +33,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { decideBoot, logBeforeWorld, restartAfterRestoreFail } from './boot';
+import { SAVE_NEWER_TEXT } from './bootLoad';
 import golden from './fixtures/v1-golden.json';
 import legacy from './fixtures/v0-legacy-log.json';
 import { memoryStore } from './memoryStore';
@@ -244,7 +245,7 @@ describe('decideBoot — a link cannot start a new game over a save (R17)', () =
     await st.inner.save(save(6));
     await st.inner.save({ format: 99 } as unknown as SaveV1);
     const r = await decideBoot(deps({ search: '', store: st.store }).d);
-    expect(r.notices).toContain(UNREADABLE);
+    expect(r.notices).toContain(SAVE_NEWER_TEXT);
   });
 });
 

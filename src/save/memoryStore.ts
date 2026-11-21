@@ -3,7 +3,7 @@
  * Same promises as `idbStore`: copies in, copies out.
  */
 
-import type { SaveV1 } from './schema';
+import type { Save } from './schema';
 import { rawKey, type SaveStore } from './store';
 
 export function memoryStore(): SaveStore & { readonly corrupt: ReadonlyArray<{ wallMs: number; raw: unknown }> } {
@@ -16,12 +16,12 @@ export function memoryStore(): SaveStore & { readonly corrupt: ReadonlyArray<{ w
     async load() {
       return { current: structuredClone(current), previous: structuredClone(previous) };
     },
-    async save(s: SaveV1) {
+    async save(s: Save) {
       const copy = structuredClone(s);
       if (current !== null) previous = current;
       current = copy;
     },
-    async replaceAll(s: SaveV1 | null) {
+    async replaceAll(s: Save | null) {
       current = s === null ? null : structuredClone(s);
       previous = null;
     },

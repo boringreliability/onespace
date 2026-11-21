@@ -1,7 +1,7 @@
 /**
  * A save from the running game, and back (v4 sub-plan 3, Task 3).
  *
- * `buildSave` reads the live world into a SaveV1 and changes nothing in it
+ * `buildSave` reads the live world into a Save (the current format) and changes nothing in it
  * but the journal (drained into the save). `applySave` puts one back.
  *
  *  - Player and world are separate (P2); both clocks ride on everything (P5).
@@ -27,9 +27,10 @@ import type { ShipLog } from '@/game/Log';
 import type { Universe } from '@/game/Universe';
 import type { WorldState } from '@/game/worldState';
 import { circularOrbitState, progradeAttitude, starRadiusKm } from '@/game/recovery';
+import type { Resource } from '@/gen/belt';
 import { START_FILL } from '@/ship/propellant';
 import { compactEntries, MAX_ACTIONS, type ActionJournal } from './actionJournal';
-import { CURRENT_FORMAT, type SaveV1 } from './schema';
+import { CURRENT_FORMAT, type Save } from './schema';
 
 /** The minimal surface a save needs of the running game. */
 export interface SaveWorld {
@@ -45,10 +46,19 @@ export interface SaveWorld {
   readonly cruise?: { flushLeg(): void; reset?(): void };
   /** The pilot's lever: a load sets it to 0 (R9). */
   readonly input?: { setThrottle(v: number): void };
+  /**
+   * The resource the mining beam takes, saved as `ship.beamResource` (format
+   * 2). Plan 6 Task 2 feeds it from Mining. Absent: the previous save's
+   * choice, else DEFAULT_BEAM_RESOURCE.
+   */
+  readonly beamResource?: () => Resource;
 }
 
+/** The beam's resource when nothing has chosen one (a new game; format 1's lift says the same). */
+export const DEFAULT_BEAM_RESOURCE: Resource = 'ice';
+
 type Vec3 = [number, number, number];
-type Flight = SaveV1['player']['flight'];
+type Flight = Save['player']['flight'];
 
 const tuple = (v: Vector3): Vec3 => [v.x, v.y, v.z];
 
@@ -169,7 +179,7 @@ function playerPlace(u: Universe): { parentId: string | null; flight: Flight } {
   };
 }
 
-type MinedEntry = SaveV1['world']['entries'][number];
+type MinedEntry = Save['world']['entries'][number];
 
 /**
  * R25 I4b: one entry per (asteroid, resource) — kg summed, the newest mine's
@@ -202,7 +212,7 @@ function aggregateMined(entries: readonly MinedEntry[]): MinedEntry[] {
   return out;
 }
 
-export function buildSave(w: SaveWorld, prev: SaveV1 | null): SaveV1 {
+export function buildSave(w: SaveWorld, prev: Save | null): Save {
   const u = w.universe;
   const tank = u.flight.propellant;
 
@@ -231,6 +241,7 @@ export function buildSave(w: SaveWorld, prev: SaveV1 | null): SaveV1 {
       propellant: tank ? tank.snapshot() : { massKg: 0, capacityLossFrac: 0 },
       cargo: { ...u.cargo.snapshot() },
       emergencyTimesUsed: w.emergency.timesUsed,
+      beamResource: w.beamResource?.() ?? prev?.ship.beamResource ?? DEFAULT_BEAM_RESOURCE,
     },
     log: { time: log.time, entries: log.entries.map((e) => ({ ...e, body: [...e.body] })) },
     world: { universeId, entries: aggregateMined(w.worldState.entries()) },
@@ -251,7 +262,7 @@ export interface ApplyOptions {
  * Put a save back into the running game. False — and nothing changed — when
  * its system (or parent body) cannot be found.
  */
-export function applySave(w: SaveWorld, s: SaveV1, opts: ApplyOptions = {}): boolean {
+export function applySave(w: SaveWorld, s: Save, opts: ApplyOptions = {}): boolean {
   const u = w.universe;
   const p = s.player;
   const ok = opts.universeRestored === true || u.restoreState({

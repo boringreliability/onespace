@@ -5,7 +5,9 @@
  *    previous and the WAL snapshot (`newestOf`). A false from writeSnapshot
  *    never meant "the old snapshot is intact", so all three are compared.
  *  - Nothing is discarded silently: an unreadable slot is kept
- *    (`store.keepCorrupt`) and the notice says so; so is a valid save of
+ *    (`store.keepCorrupt`) and the notice says so — SAVE_NEWER_TEXT when it
+ *    is from a newer build (`migrate`: newer-build), SAVE_UNREADABLE_TEXT
+ *    otherwise (and when both happen); so is a valid save of
  *    ANOTHER game that loses the comparison (R26) — an older revision of the
  *    same game is not.
  *  - A store that cannot be opened (a VersionError after another tab
@@ -37,11 +39,13 @@ import type { UniverseOptions } from '@/game/Universe';
 import { BEACON_NOTE_TITLE } from '@/ship/emergency';
 import { legacyLogToV1, migrate } from './migrate';
 import { applyEntry, zeroState, type ReplayState } from './replay';
-import type { ActionEntry, SaveV1 } from './schema';
+import type { ActionEntry, Save } from './schema';
 import { newestOf, STORE_TIMEOUT_MS, withTimeout, type SaveStore } from './store';
 import type { TaggedEntry, Wal } from './wal';
 
 export const SAVE_UNREADABLE_TEXT = 'SAVE UNREADABLE — KEPT A COPY';
+/** A slot holds a save from a newer build (`migrate`: newer-build): kept on the shelf, untouched. */
+export const SAVE_NEWER_TEXT = 'SAVE IS FROM A NEWER VERSION — KEPT, NOT LOADED';
 export const STORE_UNAVAILABLE_TEXT = 'SAVE STORAGE UNAVAILABLE — RELOAD THE TAB';
 
 const LEGACY_LOG_KEY = 'onespace.log.v1';
@@ -49,11 +53,11 @@ const BEACON_KEY = /^beacon:(\d+)$/;
 
 export interface BootLoad {
   /** The save to CONTINUE, WAL entries merged; null = a new game. */
-  readonly save: SaveV1 | null;
+  readonly save: Save | null;
   /** One log line for the player, or null. */
   readonly notice: string | null;
   /** The pre-save logbook, only when nothing at all is stored. */
-  readonly legacyLog: SaveV1['log'] | null;
+  readonly legacyLog: Save['log'] | null;
   /**
    * R36 (v4 sub-plan 4): true when WAL critical entries were applied on top
    * of the chosen snapshot — paid progress no durable save (and so no cloud)
@@ -63,7 +67,7 @@ export interface BootLoad {
 }
 
 /** The highest seq a save's log holds (a checkpoint counts with its upToSeq). */
-function coveredSeq(s: SaveV1): number {
+function coveredSeq(s: Save): number {
   let m = 0;
   for (const a of s.actions) {
     m = Math.max(m, a.seq);
@@ -72,7 +76,7 @@ function coveredSeq(s: SaveV1): number {
   return m;
 }
 
-function nextBeacon(log: SaveV1['log']): number {
+function nextBeacon(log: Save['log']): number {
   let n = 0;
   for (const e of log.entries) {
     const m = BEACON_KEY.exec(e.key);
@@ -92,7 +96,7 @@ function tagged(x: WalEntry): TaggedEntry {
  * `s` with the WAL entries of ITS game that it does not cover applied, in seq
  * order. Returns `s` itself when none apply.
  */
-export function mergeCritical(s: SaveV1, entries: readonly WalEntry[]): SaveV1 {
+export function mergeCritical(s: Save, entries: readonly WalEntry[]): Save {
   const upTo = coveredSeq(s);
   const seen = new Set<number>();
   const fresh: ActionEntry[] = [];
@@ -119,6 +123,7 @@ export function mergeCritical(s: SaveV1, entries: readonly WalEntry[]): SaveV1 {
         out.world.entries.push({ ...e.payload, wallMs: e.wallMs, orbitSeconds: e.orbitSeconds });
         break;
       case 'cargo':
+        // Only the beacon's own jettison-all: a voluntary `jettison` is not the beacon's (plan 6 §7.4).
         if (e.payload.action.kind === 'jettison-all') jettisonedKg = e.payload.result.kgOut;
         break;
       case 'emergency':
@@ -157,7 +162,7 @@ export function mergeCritical(s: SaveV1, entries: readonly WalEntry[]): SaveV1 {
   return out;
 }
 
-function readLegacyLog(): SaveV1['log'] | null {
+function readLegacyLog(): Save['log'] | null {
   try {
     const text = (globalThis as { localStorage?: Storage }).localStorage?.getItem(LEGACY_LOG_KEY) ?? null;
     if (!text) return null;
@@ -171,11 +176,11 @@ function readLegacyLog(): SaveV1['log'] | null {
   }
 }
 
-function readWal(wal: Wal): { snapshot: SaveV1 | null; critical: TaggedEntry[] } {
+function readWal(wal: Wal): { snapshot: Save | null; critical: TaggedEntry[] } {
   try {
     const r = wal.readTagged();
     // `read` runs the snapshot through migrate already.
-    return { snapshot: (r.snapshot as SaveV1 | null) ?? null, critical: r.critical };
+    return { snapshot: (r.snapshot as Save | null) ?? null, critical: r.critical };
   } catch {
     return { snapshot: null, critical: [] };
   }
@@ -210,7 +215,7 @@ export async function loadForBootResult(store: SaveStore, wal: Wal, opts: LoadOp
   const writer = opts.writer !== false;
   const w = readWal(wal);
   let walApplied = false;
-  const merged = (s: SaveV1 | null): SaveV1 | null => {
+  const merged = (s: Save | null): Save | null => {
     if (!s) return null;
     const m = mergeCritical(s, w.critical);
     walApplied = m !== s;
@@ -230,7 +235,7 @@ export async function loadForBootResult(store: SaveStore, wal: Wal, opts: LoadOp
   }
 
   /** Every valid save found, with what to shelve if it loses (the raw slot value, or the WAL snapshot). */
-  const valid: Array<{ save: SaveV1; raw: unknown }> = [];
+  const valid: Array<{ save: Save; raw: unknown }> = [];
   if (w.snapshot) valid.push({ save: w.snapshot, raw: w.snapshot });
   let anyStored = w.snapshot !== null;
   let notice: string | null = null;
@@ -242,13 +247,15 @@ export async function loadForBootResult(store: SaveStore, wal: Wal, opts: LoadOp
       valid.push({ save: m.save, raw });
       continue;
     }
-    notice = SAVE_UNREADABLE_TEXT;
+    // A broken save is the louder news: it wins over a newer one at the same boot.
+    if (m.reason === 'newer-build') notice ??= SAVE_NEWER_TEXT;
+    else notice = SAVE_UNREADABLE_TEXT;
     if (!writer) continue;
     // Kept in its slot until a save overwrites it if this fails; the notice still says so.
     await tryStore(() => store.keepCorrupt(raw, Date.now()));
   }
 
-  let best: SaveV1 | null = null;
+  let best: Save | null = null;
   for (const v of valid) best = newestOf(best, v.save);
 
   // R26: a save of ANOTHER game that loses is kept on the shelf — a later save
@@ -290,7 +297,7 @@ export async function replaceGame(
   opts: ReplaceOptions = {},
 ): Promise<{ afterRevision: number; kept: boolean }> {
   if (!load.save) return { afterRevision: 0, kept: false };
-  const old: SaveV1 = { ...load.save, revision: load.save.revision + 1 };
+  const old: Save = { ...load.save, revision: load.save.revision + 1 };
   const useStore = opts.storeAvailable !== false;
   // The copy first; if it fails the old game is still written back below.
   const kept = useStore && (await tryStore(() => store.keepCorrupt(old, Date.now())));
@@ -305,7 +312,7 @@ export async function replaceGame(
 }
 
 /** The log a boot starts with. NEW GAME over a save starts empty: the legacy entries belong to the old game. */
-export function openingLog(load: BootLoad, start: 'continue' | 'new'): SaveV1['log'] {
+export function openingLog(load: BootLoad, start: 'continue' | 'new'): Save['log'] {
   if (start === 'continue' && load.save) return load.save.log;
   if (!load.save && load.legacyLog) return load.legacyLog;
   return { time: 0, entries: [] };
@@ -320,7 +327,7 @@ function seedOf(universeId: string): number | undefined {
 }
 
 /** The Universe a boot builds: the save's universe and place, or the route's seed for a new game. */
-export function universeOptionsFor(route: Route, save: SaveV1 | null): UniverseOptions {
+export function universeOptionsFor(route: Route, save: Save | null): UniverseOptions {
   if (!save) return route.universeSeed !== undefined ? { seed: route.universeSeed } : {};
   const p = save.player;
   const seed = seedOf(save.universeId);

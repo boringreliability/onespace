@@ -22,6 +22,8 @@ export const REPAIR_METAL_KG = 600;
 export const REPAIR_SILICATE_KG = 400;
 /** Tank capacity-loss fraction one repair restores. */
 export const REPAIR_RESTORE_FRAC = 0.04;
+/** kg one press of the resource screen's jettison throws out (one beam bite). */
+export const JETTISON_STEP_KG = 250;
 /** Least cargo worth burning for propellant, kg. */
 export const CANNIBALIZE_CARGO_MIN_KG = 1_000;
 /** Cargo cannibalization gives this share of the tank's BASE capacity. */
@@ -104,7 +106,9 @@ export type CargoAction =
   | { kind: 'refine' }
   | { kind: 'repair' }
   | { kind: 'jettison-all' }
-  | { kind: 'cannibalize-cargo' };
+  | { kind: 'cannibalize-cargo' }
+  /** Throw out up to `kg` of one resource; `kgOut` is what really left. */
+  | { kind: 'jettison'; resource: Resource; kg: number };
 
 export interface CargoResult {
   ok: boolean;
@@ -189,6 +193,17 @@ function run(cargo: Cargo, tank: Propellant | null, a: CargoAction): CargoResult
       if (total <= 0) return refuse('empty');
       for (const r of RESOURCES) take(cargo, r, cargo.kg(r));
       return result(true, { kgOut: total });
+    }
+    case 'jettison': {
+      // A whitelist of resources too: the action may come from outside (a save, a test).
+      if (!RESOURCES.includes(a.resource) || !Number.isFinite(a.kg) || a.kg <= 0) return refuse('invalid');
+      const held = cargo.kg(a.resource);
+      if (held <= 0) return refuse('empty');
+      let kg = Math.min(a.kg, held);
+      // R18: dust left over leaves with it (take() snaps it to 0), so kgOut is what really left.
+      if (held - kg < EPS_KG) kg = held;
+      take(cargo, a.resource, kg);
+      return result(true, { kgOut: kg });
     }
     case 'cannibalize-cargo': {
       const total = cargo.totalKg;

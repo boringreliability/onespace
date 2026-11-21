@@ -54,7 +54,7 @@ import { modes } from '@/core/Modes';
 import { MAX_ACTIONS } from '@/save/actionJournal';
 import { STORE_UNAVAILABLE_TEXT } from '@/save/bootLoad';
 import { buildSave, type SaveWorld } from '@/save/capture';
-import type { SaveV1 } from '@/save/schema';
+import type { Save } from '@/save/schema';
 import { STORE_TIMEOUT_MS, withTimeout, type SaveStore } from '@/save/store';
 import type { Wal } from '@/save/wal';
 import type { WriterLock } from '@/save/writerLock';
@@ -93,7 +93,7 @@ export interface SaveGameOptions {
    * timed-out write, a WAL-only write or a reader tab. Must return at once
    * (the sync client only schedules); a throw here never breaks saving.
    */
-  readonly onStored?: (s: SaveV1) => void;
+  readonly onStored?: (s: Save) => void;
 }
 
 /** Triggers that wait for the gap, in the order they are tried. */
@@ -117,10 +117,10 @@ export class SaveGame implements GameModule {
   private readonly lock: WriterLock;
   private readonly page: SavePage | null;
   private readonly storeAvailable: boolean;
-  private readonly onStored: ((s: SaveV1) => void) | null;
+  private readonly onStored: ((s: Save) => void) | null;
 
   /** The last save built — durable or not; the next one continues it. */
-  private prev: SaveV1 | null = null;
+  private prev: Save | null = null;
   /** NEW GAME (Task 6): a first save goes above this revision, so it outranks the old game. */
   private revisionFloor = 0;
   /** R16: the highest seq already copied to the WAL by `critical`. */
@@ -162,7 +162,7 @@ export class SaveGame implements GameModule {
    * Task 6: the save the game was loaded from (or null for a new game). The
    * next save continues it — same saveId, revision + 1, its log as prefix.
    */
-  continueFrom(save: SaveV1 | null): void {
+  continueFrom(save: Save | null): void {
     this.prev = save;
     this.revisionFloor = 0;
     if (!save) this.newSaveId = crypto.randomUUID();
@@ -360,7 +360,7 @@ export class SaveGame implements GameModule {
   }
 
   /** Build the next save and keep it as prev (the journal was drained into it). */
-  private capture(leaving = false): SaveV1 | null {
+  private capture(leaving = false): Save | null {
     if (!this.mayWrite(leaving)) return null;
     // R14 M2: a tank swapped since the last tick starts the books now, not as thrust.
     this.syncBaseline(false);

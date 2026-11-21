@@ -603,7 +603,7 @@ describe('jettison — one resource, a chosen amount (plan 6 task 1)', () => {
     t.capacityLossFrac = 0.1;
     const r = applyCargoAction(hold({ metal: 900 }), t, jettison('metal', 250));
     expect(r.ok).toBe(true);
-    expect(t.massKg).toBeCloseTo(0.3 * 20_000 * 0.9, 6);
+    expect(t.massKg).toBe(0.3 * 20_000);
     expect(t.capacityLossFrac).toBe(0.1);
   });
 

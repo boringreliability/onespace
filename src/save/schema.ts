@@ -1,5 +1,5 @@
 /**
- * The save format, v1 (v4 sub-plan 3).
+ * The save format (v4 sub-plan 3; format 2: sub-plan 6).
  *
  * A seeded universe regenerates everything except what the player did, so this
  * is the one record that cannot be rebuilt — and the one that arrives from
@@ -12,12 +12,24 @@
  * against its source (P3). Quaternions are normalised after parsing, so a save
  * that drifted off unit length loads as the same rotation.
  *
- * FORMAT RULE (R4): format 1 is frozen. ANY change to this shape — a renamed
- * or removed field, a new enum value, a new action source, even an added
- * OPTIONAL field — needs a new format number (CURRENT_FORMAT + 1) and an
- * explicit step in migrate.ts `UPGRADES`. That is what lets `migrate` call a
- * format-1 save with unknown keys `newer-build` instead of `invalid`: under
- * this rule only a newer build can have written them.
+ * FORMAT RULE (R4): a released format is frozen. ANY change to the shape — a
+ * renamed or removed field, a new enum value, a new action kind or source,
+ * even an added OPTIONAL field — needs a new format number (CURRENT_FORMAT +
+ * 1), a new save schema here, and an explicit step in migrate.ts `UPGRADES`;
+ * the old schema stays exactly as it was. `migrate` checks a stored save
+ * against the schema of the format it CLAIMS before it lifts it, so:
+ *  - a save that claims a known format and fails ONLY because of unknown keys
+ *    can only have been written by a build that knows more fields than this
+ *    one: `newer-build`, not `invalid`;
+ *  - a field or action of a newer format never gets in by way of a save that
+ *    claims an older one (a format-1 save with a `jettison` is `invalid`).
+ *
+ * Formats:
+ *  - 1 (`SaveV1Schema`, sub-plan 3): read only by `migrate`, before the lift.
+ *  - 2 (`SaveV2Schema`, CURRENT, sub-plan 6): format 1 plus the cargo action
+ *    `jettison` (one resource, kg) and `ship.beamResource` (the resource the
+ *    mining beam takes). `Save` and `ActionEntry` are format 2 — what the rest
+ *    of the code means by "a save".
  *
  * The "Mirrors X" schemas are held to their runtime types by
  * schemaDrift.test.ts (type level in `tsc`, and real outputs at runtime).
@@ -27,7 +39,7 @@
 // locale (~260 kB minified); `* as z` lets the bundler drop them.
 import * as z from 'zod';
 
-export const CURRENT_FORMAT = 1;
+export const CURRENT_FORMAT = 2;
 
 // --- primitives --------------------------------------------------------------
 
@@ -131,13 +143,26 @@ const PropellantActionSchema = z.discriminatedUnion('kind', [
   z.strictObject({ kind: z.literal('spool-refund'), kg: amount }),
 ]);
 
-/** Mirrors `CargoAction` (src/ship/cargo.ts). */
-const CargoActionSchema = z.discriminatedUnion('kind', [
+/** The cargo actions of format 1. Frozen (R4). */
+const CARGO_ACTIONS_V1 = [
   z.strictObject({ kind: z.literal('mine'), asteroidId, resource: ResourceSchema, kg: amount }),
   z.strictObject({ kind: z.literal('refine') }),
   z.strictObject({ kind: z.literal('repair') }),
   z.strictObject({ kind: z.literal('jettison-all') }),
   z.strictObject({ kind: z.literal('cannibalize-cargo') }),
+] as const;
+
+/** Format 1's `CargoAction` (read only by `migrate`, before its lift). */
+const CargoActionSchemaV1 = z.discriminatedUnion('kind', [...CARGO_ACTIONS_V1]);
+
+/**
+ * Mirrors `CargoAction` (src/ship/cargo.ts). Format 2: format 1's actions plus
+ * `jettison` of one resource; `kg` is what was ASKED for, `result.kgOut` what
+ * really left the hold.
+ */
+const CargoActionSchema = z.discriminatedUnion('kind', [
+  ...CARGO_ACTIONS_V1,
+  z.strictObject({ kind: z.literal('jettison'), resource: ResourceSchema, kg: amount }),
 ]);
 
 /** Mirrors `CargoResult` (src/ship/cargo.ts). */
@@ -167,90 +192,149 @@ function entry<S extends string, P extends z.ZodType>(source: S, payload: P) {
   return z.strictObject({ seq: z.number().int().min(1), source: z.literal(source), payload, ...clocks });
 }
 
-export const ActionEntrySchema = z.discriminatedUnion('source', [
-  /** `propellant:action`. */
-  /** R7: `tankDeltaKg` is signed — negative for a spend, positive for a refund or a gain. */
-  entry('propellant', z.strictObject({ action: PropellantActionSchema, ok: z.boolean(), kg: amount, tankDeltaKg: num })),
-  /** `cargo:action` (only `result.ok` is logged). */
-  entry('cargo', z.strictObject({ action: CargoActionSchema, result: CargoResultSchema })),
-  /** `emergency:used`. */
-  entry(
-    'emergency',
-    z.strictObject({
-      kind: z.enum(['cannibalize', 'cannibalize-cargo', 'beacon']),
-      timesUsed: count.optional(),
-    }),
-  ),
-  /** `WorldState.recordMined` (P2: who mined it). */
-  entry(
-    'mined',
-    z.strictObject({ id: asteroidId, by: z.literal('local'), resource: ResourceSchema, kg: amount }),
-  ),
-  /** Unannounced burns, aggregated once per save so the tank's books balance. */
-  entry('thrust', z.strictObject({ kg: amount })),
-  /**
-   * The oldest entries, compacted (MAX_ACTIONS). R8: it carries the NET effect
-   * of everything it absorbed, so replaying [checkpoint, …rest] recomputes the
-   * same ship as replaying the full log (src/save/replay.ts).
-   */
-  entry(
-    'checkpoint',
-    z.strictObject({
-      upToSeq: count,
-      /** Signed change to the tank's mass. */
-      tankNetKg: num,
-      /** Signed change to the capacity loss (cannibalizations up, repairs down). */
-      capacityLossNetFrac: num,
-      /** Signed change to the hold, per resource. */
-      cargoNetKg: perResource(num),
-      /** Depletion added, per asteroid id. */
-      minedByAsteroid: asteroidRecord(perResource(amount)),
-      emergency: z.strictObject({ cannibalize: count, cannibalizeCargo: count, beacon: count }),
-      /** The latest cannibalization's timesUsed in what was folded (carried over). */
-      lastCannibalizeTimesUsed: count,
-    }),
-  ),
-]);
+/**
+ * The action entry union over one format's cargo actions; every other source
+ * is the same in format 1 and 2.
+ */
+function actionEntrySchema<C extends z.ZodType>(cargoAction: C) {
+  return z.discriminatedUnion('source', [
+    /** `propellant:action`. */
+    /** R7: `tankDeltaKg` is signed — negative for a spend, positive for a refund or a gain. */
+    entry('propellant', z.strictObject({ action: PropellantActionSchema, ok: z.boolean(), kg: amount, tankDeltaKg: num })),
+    /** `cargo:action` (only `result.ok` is logged). */
+    entry('cargo', z.strictObject({ action: cargoAction, result: CargoResultSchema })),
+    /** `emergency:used`. */
+    entry(
+      'emergency',
+      z.strictObject({
+        kind: z.enum(['cannibalize', 'cannibalize-cargo', 'beacon']),
+        timesUsed: count.optional(),
+      }),
+    ),
+    /** `WorldState.recordMined` (P2: who mined it). */
+    entry(
+      'mined',
+      z.strictObject({ id: asteroidId, by: z.literal('local'), resource: ResourceSchema, kg: amount }),
+    ),
+    /** Unannounced burns, aggregated once per save so the tank's books balance. */
+    entry('thrust', z.strictObject({ kg: amount })),
+    /**
+     * The oldest entries, compacted (MAX_ACTIONS). R8: it carries the NET effect
+     * of everything it absorbed, so replaying [checkpoint, …rest] recomputes the
+     * same ship as replaying the full log (src/save/replay.ts).
+     */
+    entry(
+      'checkpoint',
+      z.strictObject({
+        upToSeq: count,
+        /** Signed change to the tank's mass. */
+        tankNetKg: num,
+        /** Signed change to the capacity loss (cannibalizations up, repairs down). */
+        capacityLossNetFrac: num,
+        /** Signed change to the hold, per resource. */
+        cargoNetKg: perResource(num),
+        /** Depletion added, per asteroid id. */
+        minedByAsteroid: asteroidRecord(perResource(amount)),
+        emergency: z.strictObject({ cannibalize: count, cannibalizeCargo: count, beacon: count }),
+        /** The latest cannibalization's timesUsed in what was folded (carried over). */
+        lastCannibalizeTimesUsed: count,
+      }),
+    ),
+  ]);
+}
+
+/** Format 1's action entries (read only by `migrate`, before its lift). */
+const ActionEntrySchemaV1 = actionEntrySchema(CargoActionSchemaV1);
+
+/** The current format's action entries: the save, the WAL and the journal. */
+export const ActionEntrySchema = actionEntrySchema(CargoActionSchema);
 
 export type ActionEntry = z.infer<typeof ActionEntrySchema>;
 
 // --- the save ----------------------------------------------------------------
 
+// The parts formats 1 and 2 share. Shared by reference, so they cannot drift
+// apart; a part that changes in a later format gets its own copy there (R4).
+
+const savedAt = z.strictObject(clocks);
+
+const PlayerSchema = z.strictObject({
+  system: z.strictObject({
+    id: z.string().min(1),
+    seed: count,
+    name: z.string(),
+    positionLy: vec3,
+  }),
+  parentId: z.string().min(1).nullable(),
+  flight: z.strictObject({
+    position: vec3,
+    velocity: vec3,
+    orientation: quaternion,
+    grounded: z.boolean(),
+    flightAssist: z.boolean(),
+  }),
+});
+
+const PropellantStateSchema = z.strictObject({ massKg: amount, capacityLossFrac: z.number().min(0).max(1) });
+
+const WorldSchema = z.strictObject({ universeId, entries: z.array(MinedEntrySchema) });
+
+/** The save's world must be of the save's own universe. */
+const inOwnUniverse = (s: { universeId: string; world: { universeId: string } }): boolean =>
+  s.world.universeId === s.universeId;
+const otherUniverse = () => ({ message: 'world belongs to another universe', path: ['world', 'universeId'] });
+
+/** Format 1. Frozen (R4): only `migrate` reads it, to check a format-1 save before lifting it. */
 export const SaveV1Schema = z
   .strictObject({
-    format: z.literal(CURRENT_FORMAT),
+    format: z.literal(1),
     saveId: z.uuid(),
     universeId,
     revision: z.number().int().min(1),
-    savedAt: z.strictObject(clocks),
-    player: z.strictObject({
-      system: z.strictObject({
-        id: z.string().min(1),
-        seed: count,
-        name: z.string(),
-        positionLy: vec3,
-      }),
-      parentId: z.string().min(1).nullable(),
-      flight: z.strictObject({
-        position: vec3,
-        velocity: vec3,
-        orientation: quaternion,
-        grounded: z.boolean(),
-        flightAssist: z.boolean(),
-      }),
-    }),
+    savedAt,
+    player: PlayerSchema,
     ship: z.strictObject({
-      propellant: z.strictObject({ massKg: amount, capacityLossFrac: z.number().min(0).max(1) }),
+      propellant: PropellantStateSchema,
       cargo: perResource(amount),
       emergencyTimesUsed: count,
     }),
     log: LogSchema,
-    world: z.strictObject({ universeId, entries: z.array(MinedEntrySchema) }),
+    world: WorldSchema,
+    actions: z.array(ActionEntrySchemaV1),
+  })
+  .refine(inOwnUniverse, otherUniverse());
+
+/** Format 2, the current one: format 1 plus `jettison` and `ship.beamResource`. */
+export const SaveV2Schema = z
+  .strictObject({
+    format: z.literal(2),
+    saveId: z.uuid(),
+    universeId,
+    revision: z.number().int().min(1),
+    savedAt,
+    player: PlayerSchema,
+    ship: z.strictObject({
+      propellant: PropellantStateSchema,
+      cargo: perResource(amount),
+      emergencyTimesUsed: count,
+      /** The resource the mining beam takes (sub-plan 6). A lifted format-1 save gets 'ice'. */
+      beamResource: ResourceSchema,
+    }),
+    log: LogSchema,
+    world: WorldSchema,
     actions: z.array(ActionEntrySchema),
   })
-  .refine((s) => s.world.universeId === s.universeId, {
-    message: 'world belongs to another universe',
-    path: ['world', 'universeId'],
-  });
+  .refine(inOwnUniverse, otherUniverse());
 
-export type SaveV1 = z.infer<typeof SaveV1Schema>;
+/** A save in the current format: what the rest of the code means by "a save". */
+export type Save = z.infer<typeof SaveV2Schema>;
+
+/** A format-1 save, as `SaveV1Schema` reads it. Only `migrate` (before its lift) and its tests deal in these. */
+export type SaveFormat1 = z.infer<typeof SaveV1Schema>;
+
+/**
+ * @deprecated The old name of {@link Save}, kept so code and tests written
+ * before format 2 still compile. It is the CURRENT format, not format 1 — a
+ * format-1 save is {@link SaveFormat1}. New code says `Save`.
+ */
+export type SaveV1 = Save;

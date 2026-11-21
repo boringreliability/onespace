@@ -23,7 +23,7 @@ function goldenCopy(): SaveV1 {
 
 describe('SaveV1Schema — the golden save', () => {
   it('Given the current format constant, Then it is 1', () => {
-    expect(CURRENT_FORMAT).toBe(1);
+    expect(CURRENT_FORMAT).toBe(2);
   });
 
   it('Given the golden v1 save, Then it parses and round-trips through JSON unchanged', () => {

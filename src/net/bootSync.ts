@@ -12,7 +12,7 @@
  */
 
 import { loadForBootResult } from '@/save/bootLoad';
-import type { SaveV1 } from '@/save/schema';
+import type { Save } from '@/save/schema';
 import type { SaveStore } from '@/save/store';
 import type { Wal } from '@/save/wal';
 
@@ -28,7 +28,7 @@ export interface BootSyncDeps {
 
 /** The boot's sync result, with the local save it was given (the conflict screen's THIS DEVICE card). */
 export interface BootSyncResult extends BootSync {
-  readonly local: SaveV1 | null;
+  readonly local: Save | null;
 }
 
 export async function runBootSync(d: BootSyncDeps): Promise<BootSyncResult> {

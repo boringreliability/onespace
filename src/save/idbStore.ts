@@ -12,7 +12,7 @@
  * be blocked forever) and reopened on the next call.
  */
 
-import type { SaveV1 } from './schema';
+import type { Save } from './schema';
 import { rawKey, type SaveStore } from './store';
 
 const DB_VERSION = 1;
@@ -121,7 +121,7 @@ export function idbStore(name = 'onespace'): SaveStore {
       });
     },
 
-    save(s: SaveV1) {
+    save(s: Save) {
       return run<void>(SLOTS, 'readwrite', (tx, _done, fail) => {
         const slots = tx.objectStore(SLOTS);
         const cur = slots.get('current');
@@ -137,7 +137,7 @@ export function idbStore(name = 'onespace'): SaveStore {
       });
     },
 
-    replaceAll(s: SaveV1 | null) {
+    replaceAll(s: Save | null) {
       // R34: one transaction — the new current (or none) and no previous, or nothing at all.
       return run<void>(SLOTS, 'readwrite', (tx) => {
         const slots = tx.objectStore(SLOTS);
