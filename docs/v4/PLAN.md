@@ -27,6 +27,7 @@ tank op, og det huskes efter genindlæsning.*
 | 2 | [Asteroider og mining](plan-2-mining.md) ✅ | bælter, asteroider, scanning, udvinding, last, raffinering, reparation, start-system med bælte og 60 % tank | 1 |
 | 3 | [Gemt spil (lokalt)](plan-3-save.md) ✅ | versioneret format v1, snapshot plus handlingslog, IndexedDB, autosave, Continue, migrering af logbog | 1, 2 |
 | 4 | [Backend og sky](plan-4-backend.md) — design: [DESIGN-4-backend.md](DESIGN-4-backend.md) | API, Postgres, Discord-login med rolle-adgang, gæst → konto, sync med revisioner, én origin, Railway-klar | 3 |
+| 5 | [Mining man kan se](plan-5-mining-feel.md) — design: [DESIGN-5-mining-feel.md](DESIGN-5-mining-feel.md) | løbende udvinding (`B` start/stop, én ressource ad gangen), handlingsblok i HUD'en, stråle og småsten, slid og opbrud af sten, lyd, pause-arkets taster og lektionerne `L — APPROACH` / `U — REFINE` | 2, 3 |
 
 **Rækkefølge:** delplan 2-4 skrives først, når den forrige er landet. De skal bygge på den faktiske
 kode og ikke på gæt.

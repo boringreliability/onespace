@@ -227,6 +227,9 @@ Begge veje er spillerens bevidste valg via en tydelig prompt, aldrig automatiske
 - **Udvinding:**
   - Inden for en rækkevidde og under en relativ fart.
   - Udvinding tager kort tid og er en handling, ikke at holde en tast nede i minutter.
+  - **Ændret i delplan 5:** udvinding er nu løbende: `B` starter og stopper, 150 kg/s, én
+    ressource pr. udvinding, og en fuld last tager ~53 s. Se DECISIONS D53 og
+    [`DESIGN-5-mining-feel.md`](DESIGN-5-mining-feel.md).
   - Man får ressourcer i lasten, begrænset af kapaciteten.
   - Asteroiden tømmes gradvist (verdens-tilstand, P2).
 - **Ressourcer, første sæt [Claude]:**
