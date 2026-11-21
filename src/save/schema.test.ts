@@ -504,3 +504,146 @@ describe('save format 2 — the schema (plan 6 task 1)', () => {
     expect(v2Schema().safeParse(s).success).toBe(true);
   });
 });
+
+// =============================================================================
+// v4 sub-plan 6 — review fix for I-1 (task-2-review.md): the quaternion
+// transform is idempotent. What the schema ACCEPTS does not change: a (near)
+// zero quaternion is refused with the same message, every result is unit
+// length, a far-from-unit quaternion is normalised to its direction. What
+// changes: a quaternion already unit length within a few ulp (≤ 4 ε from 1)
+// comes back exactly as given — dividing it by its length again moved it in
+// the last bit, so a migrated save did not migrate to itself.
+// =============================================================================
+
+type Q4 = [number, number, number, number];
+
+/** mulberry32: a tiny deterministic PRNG (no Math.random in tests). */
+function prng(seed: number): () => number {
+  let a = seed | 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** 2 000 seeded orientations, components in [-1, 1) scaled by 10^[-6, 6). */
+function seededQuats(n = 2_000, seed = 0xc0ffee): Q4[] {
+  const rnd = prng(seed);
+  const out: Q4[] = [];
+  while (out.length < n) {
+    const scale = 10 ** (rnd() * 12 - 6);
+    const q: Q4 = [(rnd() * 2 - 1) * scale, (rnd() * 2 - 1) * scale, (rnd() * 2 - 1) * scale, (rnd() * 2 - 1) * scale];
+    if (Math.hypot(...q) > 1e-8) out.push(q);
+  }
+  return out;
+}
+
+/** What both save schemas' safeParse give, narrowed to what these tests read. */
+type QuatParse =
+  | { success: true; data: { player: { flight: { orientation: readonly number[] } } } }
+  | { success: false; error: { issues: ReadonlyArray<{ path: PropertyKey[]; message: string }> } };
+
+/** Both save schemas share the quaternion: format 1 (frozen) and format 2 (current). */
+const QUAT_SCHEMAS: Array<[string, (q: Q4) => QuatParse]> = [
+  [
+    'format 1',
+    (q) => {
+      const s = goldenCopy();
+      s.player.flight.orientation = [...q];
+      return SaveV1Schema.safeParse(s);
+    },
+  ],
+  [
+    'format 2',
+    (q) => {
+      const s = goldenCopy();
+      s.player.flight.orientation = [...q];
+      return schemaModule.SaveV2Schema.safeParse({ ...s, format: 2, ship: { ...s.ship, beamResource: 'ice' } });
+    },
+  ],
+];
+
+const orientationOf = (r: QuatParse): Q4 => {
+  if (!r.success) throw new Error(`refused: ${r.error.issues.map((i) => i.message).join('; ')}`);
+  return r.data.player.flight.orientation as Q4;
+};
+
+/** Normalised by hand ([1, 2, 3, 4] / √30): unit within half an ulp, yet dividing by its length moves it. */
+const N1234: Q4 = [0.18257418583505536, 0.3651483716701107, 0.5477225575051661, 0.7302967433402214];
+
+describe('Review fix I-1 (plan 6) — the quaternion: acceptance unchanged, an already-unit quaternion is kept exactly', () => {
+  describe.each(QUAT_SCHEMAS)('%s', (_fmt, parse) => {
+    it('Guard: Given 2 000 seeded orientations and the hand-picked ones, When parsed, Then every result is unit length within 1e-12', () => {
+      const off: Array<{ q: Q4; length: number }> = [];
+      for (const q of [...seededQuats(), [1, 2, 3, 4], [1e-8, 2e-8, 3e-8, 4e-8], [1.5e300, -2e300, 1e300, 3e300], N1234] as Q4[]) {
+        const length = Math.hypot(...orientationOf(parse(q)));
+        if (Math.abs(length - 1) > 1e-12) off.push({ q, length });
+      }
+      expect(off).toEqual([]);
+    });
+
+    it.each<[string, Q4]>([
+      ['all zero', [0, 0, 0, 0]],
+      ['length 1e-10', [1e-10, 0, 0, 0]],
+      ['length ≈ 7.1e-10', [5e-10, -5e-10, 0, 0]],
+      ['length exactly QUAT_MIN_LENGTH (1e-9)', [1e-9, 0, 0, 0]],
+    ])('Guard: Given a quaternion that is %s, When parsed, Then it is still refused at player.flight.orientation with "quaternion has (near) zero length"', (_what, q) => {
+      const r = parse(q);
+      expect(r.success).toBe(false);
+      if (r.success) return;
+      const issue = r.error.issues.find((i) => i.path.join('.') === 'player.flight.orientation');
+      expect(issue?.message).toBe('quaternion has (near) zero length');
+    });
+
+    it('Guard: Given a quaternion just above the floor (length 2e-9), When parsed, Then it is accepted and normalised to [1, 0, 0, 0]', () => {
+      expect(orientationOf(parse([2e-9, 0, 0, 0]))).toEqual([1, 0, 0, 0]);
+    });
+
+    it.each<[Q4, Q4]>([
+      [[0, 0, 0, 2], [0, 0, 0, 1]],
+      [[-3, 0, 4, 0], [-0.6, 0, 0.8, 0]],
+      [[0, 1e8, 0, 0], [0, 1, 0, 0]],
+    ])('Guard: Given the far-from-unit quaternion %j, When parsed, Then it is normalised to %j exactly', (q, want) => {
+      expect(orientationOf(parse(q))).toEqual(want);
+    });
+
+    it.each<[string, Q4]>([
+      ['[1, 2, 3, 4]', [1, 2, 3, 4]],
+      ['[0.1, 0.2, 0.3, 0.4]', [0.1, 0.2, 0.3, 0.4]],
+      ['[-1e8, 2e8, -3e8, 4e8]', [-1e8, 2e8, -3e8, 4e8]],
+      ['[1e-8, -2e-8, 3e-8, -4e-8]', [1e-8, -2e-8, 3e-8, -4e-8]],
+    ])('Guard: Given the far-from-unit quaternion %s, When parsed, Then it points the same way: each component is q/|q| within 1e-15, signs kept', (_what, q) => {
+      const l = Math.hypot(...q);
+      const got = orientationOf(parse(q));
+      got.forEach((c, i) => {
+        expect(Math.abs(c - q[i]! / l)).toBeLessThanOrEqual(1e-15);
+        expect(Math.sign(c)).toBe(Math.sign(q[i]!));
+      });
+    });
+
+    it.each<[string, Q4]>([
+      ['normalise([1, 2, 3, 4]) (length 1 − ε/2)', N1234],
+      ['−normalise([1, 2, 3, 4])', N1234.map((c) => -c) as Q4],
+      ['[1 + 2ε, 0, 0, 0] (length 1 + 2ε)', [1 + 2 * Number.EPSILON, 0, 0, 0]],
+      ['[1 − ε, 0, 0, 0] (length 1 − ε)', [1 - Number.EPSILON, 0, 0, 0]],
+      ['[0, 0, −(1 + 2ε), 0]', [0, 0, -(1 + 2 * Number.EPSILON), 0]],
+      ['[0.5, −0.5, 0.5, 0.5] (the fixture: exactly unit)', [0.5, -0.5, 0.5, 0.5]],
+    ])('Given a quaternion already unit length within 4 ulp, %s, When parsed, Then it comes back exactly as given', (_what, q) => {
+      expect(Math.abs(Math.hypot(...q) - 1), 'precondition: unit within 4 ε').toBeLessThanOrEqual(4 * Number.EPSILON);
+      const got = orientationOf(parse(q));
+      got.forEach((c, i) => expect(Object.is(c, q[i]), `component ${i}: ${c} vs ${q[i]}`).toBe(true));
+    });
+
+    it('Given 2 000 seeded orientations, When each is parsed and its result parsed again, Then the second result is exactly the first (the transform is idempotent)', () => {
+      const moved: Array<{ q: Q4; once: Q4; twice: Q4 }> = [];
+      for (const q of seededQuats()) {
+        const once = orientationOf(parse(q));
+        const twice = orientationOf(parse(once));
+        if (!twice.every((c, i) => Object.is(c, once[i]))) moved.push({ q, once, twice });
+      }
+      expect(moved.length, `${moved.length} of 2 000 move on the second pass; first: ${JSON.stringify(moved[0])}`).toBe(0);
+    });
+  });
+});

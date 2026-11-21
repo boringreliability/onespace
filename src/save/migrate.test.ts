@@ -524,3 +524,131 @@ describe('migrate — a save from a newer version is named as one (plan 6 task 1
     expect(r.reason).toBe('newer-build');
   });
 });
+
+// =============================================================================
+// v4 sub-plan 6 — review fix for I-1 (task-2-review.md): migrate is idempotent.
+//
+// A pending resolve (R69) stores its device body verbatim, and at a boot
+// conflict that body IS the boot's migrated local. SyncClient compares it with
+// the next boot's `migrate(raw)` after lifting it again (`lifted()`), so
+// `migrate(migrate(x))` must be bit-for-bit `migrate(x)` — or the same game
+// state counts as progress and the player meets the conflict screen again.
+// The golden fixture's orientation [0.5, -0.5, 0.5, 0.5] normalises exactly
+// and hid this: these tests use orientations that do not.
+// =============================================================================
+
+/** mulberry32: a tiny deterministic PRNG (no Math.random in tests). */
+function mulberry32(seed: number): () => number {
+  let a = seed | 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+type Quat4 = [number, number, number, number];
+
+/** Orientations picked by hand: off-unit, tiny and huge (above QUAT_MIN_LENGTH 1e-9), negative, exact. */
+const HAND_PICKED: Quat4[] = [
+  [1, 2, 3, 4],
+  [0.1, 0.2, 0.3, 0.4],
+  [-1, -2, -3, -4],
+  [0.3, -0.7, 0.2, -0.1],
+  [1e-8, 2e-8, 3e-8, 4e-8],
+  [3e-9, -4e-9, 5e-9, 1e-9],
+  [1e8, -2e8, 3e8, -4e8],
+  [1.5e300, -2e300, 1e300, 3e300],
+  [0.5, -0.5, 0.5, 0.5], // the fixture's: exactly unit
+  [0, 0, 0, 1],
+  [0.6, 0.8, 0, 0],
+  // normalise([1, 2, 3, 4]) — unit within an ulp, and dividing it by its length again changes it
+  [0.18257418583505536, 0.3651483716701107, 0.5477225575051661, 0.7302967433402214],
+  [1 + 2 * Number.EPSILON, 0, 0, 0],
+  [1 - Number.EPSILON, 0, 0, 0],
+];
+
+/** 2 000 orientations from a fixed seed, components in [-1, 1) scaled by 10^[-6, 6). */
+function sweep(n = 2_000, seed = 0x5eed): Quat4[] {
+  const rnd = mulberry32(seed);
+  const out: Quat4[] = [];
+  while (out.length < n) {
+    const scale = 10 ** (rnd() * 12 - 6);
+    const q: Quat4 = [(rnd() * 2 - 1) * scale, (rnd() * 2 - 1) * scale, (rnd() * 2 - 1) * scale, (rnd() * 2 - 1) * scale];
+    if (Math.hypot(...q) > 1e-8) out.push(q);
+  }
+  return out;
+}
+
+/** The golden save (format 1) with `q` as its orientation. */
+function formatOneWith(q: Quat4): SaveV1 {
+  const s = goldenCopy();
+  s.player.flight.orientation = [...q];
+  return s;
+}
+
+/** The golden save written as format 2 (beam on ice) with `q` as its orientation. */
+function formatTwoWith(q: Quat4): LooseSave {
+  const s = formatOneWith(q) as unknown as LooseSave;
+  s.format = 2;
+  s.ship = { ...s.ship, beamResource: 'ice' };
+  return s;
+}
+
+/** The orientations for which `migrate(migrate(x)).save` is not deep-equal `migrate(x).save`. */
+function notIdempotent(qs: Quat4[], make: (q: Quat4) => unknown): Array<{ q: Quat4; once: unknown; twice: unknown }> {
+  const bad: Array<{ q: Quat4; once: unknown; twice: unknown }> = [];
+  for (const q of qs) {
+    const once = migrate(make(q));
+    if (!once.ok) throw new Error(`migrate refused ${JSON.stringify(q)}: ${once.issues.join('; ')}`);
+    // Fed back in as storage hands it back: through JSON (exact for doubles).
+    const twice = migrate(JSON.parse(JSON.stringify(once.save)));
+    if (!twice.ok) throw new Error(`migrate refused its own output for ${JSON.stringify(q)}: ${twice.issues.join('; ')}`);
+    if (JSON.stringify(twice.save) !== JSON.stringify(once.save)) {
+      bad.push({ q, once: once.save.player.flight.orientation, twice: twice.save.player.flight.orientation });
+    }
+  }
+  return bad;
+}
+
+describe('Review fix I-1 (plan 6) — migrate is idempotent: a migrated save migrates to itself, bit for bit', () => {
+  it('Given the deterministic sweep, Then it holds 2 000 orientations, all of them above the zero-length floor (the precondition of the sweep tests)', () => {
+    const qs = sweep();
+    expect(qs).toHaveLength(2_000);
+    expect(qs.every((q) => Math.hypot(...q) > 1e-8)).toBe(true);
+    // Deterministic: the same seed gives the same orientations.
+    expect(sweep()).toEqual(qs);
+  });
+
+  it.each<[string, (q: Quat4) => unknown]>([
+    ['format 2', formatTwoWith],
+    ['format 1 (lifted on the first pass)', formatOneWith],
+  ])(
+    'Given a %s save with each hand-picked orientation (off-unit, tiny, huge, negative, exactly unit, unit within an ulp), When its migrated save is migrated again, Then the second result is deep-equal the first',
+    (_fmt, make) => {
+      expect(notIdempotent(HAND_PICKED, make)).toEqual([]);
+    },
+  );
+
+  it.each<[string, (q: Quat4) => unknown]>([
+    ['format 2', formatTwoWith],
+    ['format 1 (lifted on the first pass)', formatOneWith],
+  ])('Given a %s save with each of 2 000 seeded orientations, When its migrated save is migrated again, Then the second result is deep-equal the first for every one', (_fmt, make) => {
+    const bad = notIdempotent(sweep(), make);
+    expect(bad.length, `${bad.length} of 2 000 orientations change on the second pass; first: ${JSON.stringify(bad[0])}`).toBe(0);
+  });
+
+  it('Given a format 1 save with orientation [1, 2, 3, 4], When it is migrated, migrated again and a third time, Then all three results are deep-equal (a fixed point from the first pass on)', () => {
+    const r1 = migrate(formatOneWith([1, 2, 3, 4]));
+    expect(r1.ok).toBe(true);
+    if (!r1.ok) return;
+    const r2 = migrate(JSON.parse(JSON.stringify(r1.save)));
+    const r3 = r2.ok ? migrate(JSON.parse(JSON.stringify(r2.save))) : r2;
+    expect(r2.ok && r3.ok).toBe(true);
+    if (!r2.ok || !r3.ok) return;
+    expect(r2.save).toEqual(r1.save);
+    expect(r3.save).toEqual(r1.save);
+    expect(r2.migratedFrom).toBe(2);
+  });
+});
