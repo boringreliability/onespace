@@ -18,7 +18,11 @@
  *
  * A bite is resolved against the operations at the moment it is emitted (the
  * last bite of a rock is emitted just before Mining ends the extraction in
- * the same update, and must still throw pebbles).
+ * the same update, and must still throw pebbles). Mining emits a bite BEFORE
+ * it places the operation for the frame, so on a rock this module already
+ * draws, the operation still holds the endpoints of the last update: the
+ * puff is carried on by the rock's velocity times the orbit time since then,
+ * to be born where the impact is now.
  *
  * CLOCK: `universe.orbitSeconds`, as the break-up in Asteroids. The fade and
  * the pebbles advance only by orbit time, so a frozen clock (pause, chart)
@@ -28,8 +32,14 @@
  * RIDING THE FIELD. A fading beam keeps its last endpoints, and a pebble
  * flies from where it was thrown; in a belt the rock (and the ship beside it)
  * orbit at ~18 km/s, so both are carried on with the rock's velocity when a
- * Belt is given (`belt.asteroidVelocity`, read once per beam end / bite).
- * Without one (tests) they stay put in the world.
+ * Belt is given (`belt.asteroidVelocity`). It is read for every live beam on
+ * every update and cached in the beam's slot (as Asteroids caches it per
+ * slot): the Belt forgets an emptied rock before its last bite is emitted,
+ * and the last puff and the fading beam still ride with the velocity the
+ * rock had while alive. A beam fades from the frame its operation is gone,
+ * already carried on to that frame. A live beam is never moved: it sits on
+ * the operation's endpoints. Without a Belt, or a velocity it ever knew
+ * (tests), they stay put in the world.
  *
  * CAMERA-RELATIVE (ruling R15, as Asteroids): every instance translation is
  * `world − cameraWorld` in float64 on the CPU, the root a pure translation at
@@ -314,6 +324,8 @@ export class MiningBeams implements GameModule {
   // One row more than the slots: the row a bite's own endpoints are copied into.
   private readonly ends = new Float64Array((MAX_BEAMS + 1) * 6);
   private readonly drift = new Float64Array((MAX_BEAMS + 1) * 3);
+  // The rock's velocity last known while the beam was live (zero if never known).
+  private readonly vel = new Float64Array(MAX_BEAMS * 3);
   private readonly pulseT = new Float64Array(MAX_BEAMS).fill(Number.NEGATIVE_INFINITY);
 
   // Pebbles: a ring of records; `alive` marks the used ones.
@@ -460,17 +472,26 @@ export class MiningBeams implements GameModule {
         this.rock[k] = op.asteroidId;
         this.fade[k] = 0;
         this.pulseT[k] = Number.NEGATIVE_INFINITY;
+        this.vel[k * 3] = 0;
+        this.vel[k * 3 + 1] = 0;
+        this.vel[k * 3 + 2] = 0;
       }
       this.seen[k] = 1;
       this.copyEnds(k, op);
+      this.cacheVelocity(k);
     }
 
     for (let b = 0; b < MAX_BEAMS; b++) {
       const st = this.state[b]!;
       if (st === LIVE && this.seen[b] === 0) {
-        // The operation is gone: fade out where it was, riding with its rock.
+        // The operation is gone: fade out from where it was, riding with its
+        // rock at the velocity cached while live, carried on to this frame.
         this.state[b] = FADING;
-        this.readDrift(this.rock[b]!, b);
+        const d = b * 3;
+        this.drift[d] = this.vel[d]!;
+        this.drift[d + 1] = this.vel[d + 1]!;
+        this.drift[d + 2] = this.vel[d + 2]!;
+        this.carry(b, step);
       } else if (st === FADING) {
         if (back) {
           this.free(b);
@@ -481,12 +502,7 @@ export class MiningBeams implements GameModule {
           this.free(b);
           continue;
         }
-        const e = b * 6;
-        const d = b * 3;
-        for (let j = 0; j < 3; j++) {
-          this.ends[e + j] = this.ends[e + j]! + this.drift[d + j]! * step;
-          this.ends[e + 3 + j] = this.ends[e + 3 + j]! + this.drift[d + j]! * step;
-        }
+        this.carry(b, step);
       }
     }
 
@@ -612,8 +628,21 @@ export class MiningBeams implements GameModule {
     const t = this.orbitNow();
     const at = MAX_BEAMS; // a scratch row past the slots: the bite's own endpoints
     this.copyEnds(at, op);
-    this.readDrift(e.asteroidId, at);
-    if (k >= 0) this.pulseT[k] = t;
+    if (!this.readDrift(e.asteroidId, at) && k >= 0) {
+      // The Belt has forgotten the rock (its last bite): the velocity it had while alive.
+      const d = at * 3;
+      const c = k * 3;
+      this.drift[d] = this.vel[c]!;
+      this.drift[d + 1] = this.vel[c + 1]!;
+      this.drift[d + 2] = this.vel[c + 2]!;
+    }
+    if (k >= 0) {
+      // The beam's rock was placed at the last update and the bite comes before
+      // this frame's placement: carry the endpoints on to where they are now.
+      this.pulseT[k] = t;
+      const last = this.lastT;
+      this.carry(at, t > last ? t - last : 0);
+    }
     this.puff(at, t);
     const pebbles = this.countPebbles();
     this.pebbles.count = pebbles;
@@ -824,6 +853,28 @@ export class MiningBeams implements GameModule {
     e[o + 3] = op.impact.x;
     e[o + 4] = op.impact.y;
     e[o + 5] = op.impact.z;
+  }
+
+  /** Move both endpoints of row `row` of `ends` by its `drift` times `dt` seconds. */
+  private carry(row: number, dt: number): void {
+    if (!(dt > 0)) return;
+    const e = row * 6;
+    const d = row * 3;
+    for (let j = 0; j < 3; j++) {
+      this.ends[e + j] = this.ends[e + j]! + this.drift[d + j]! * dt;
+      this.ends[e + 3 + j] = this.ends[e + 3 + j]! + this.drift[d + j]! * dt;
+    }
+  }
+
+  /** A live beam's rock velocity, cached in its slot; an unknown rock keeps the last known one. */
+  private cacheVelocity(b: number): void {
+    if (!this.belt || !this.rock[b]) return;
+    const ok = this.belt.asteroidVelocity(this.rock[b]!, this.v) === true;
+    if (!ok || !Number.isFinite(this.v.x) || !Number.isFinite(this.v.y) || !Number.isFinite(this.v.z)) return;
+    const c = b * 3;
+    this.vel[c] = this.v.x;
+    this.vel[c + 1] = this.v.y;
+    this.vel[c + 2] = this.v.z;
   }
 
   /** The rock's velocity into row `row` of `drift`; zero without a Belt or a known rock. */
