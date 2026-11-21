@@ -66,6 +66,7 @@ import { Hints } from '@/ui/Hints';
 import { Emergency } from '@/game/Emergency'; // [v4-fuel]
 import { Mining } from '@/game/Mining'; // [v4-mining]
 import { ActionFeed } from '@/game/ActionFeed'; // [v4-mining] plan 5
+import { MiningBeams, registerMiningBeamShots } from '@/render/MiningBeams'; // [v4-mining] plan 5 task 6
 // -- v4 sub-plan 3: the save -----------------------------------------------------
 import { SaveGame } from '@/game/SaveGame';
 import { ActionJournal } from '@/save/actionJournal';
@@ -560,6 +561,10 @@ export async function registerModules(engine: Engine, progress: ProgressFn, boot
   // [v4-mining] plan 5: the HUD's action block and VEL's mining tone, from this
   // frame's Mining (so after it; Instruments runs before Mining exists).
   await engine.add(new ActionFeed({ hud, mining, targeting }));
+  // [v4-mining] plan 5 task 6: the beam, its glow and pebbles, from this frame's
+  // operations (after Mining); the Belt carries them along with the field.
+  const miningBeams = new MiningBeams({ mining, universe, belt });
+  await engine.add(miningBeams);
   // [v4-save] After Emergency and Mining: one writing tab (navigator.locks),
   // IndexedDB (memory where it is missing), the WAL on localStorage.
   progress(0.87, 'opening the logbook vault');
@@ -655,6 +660,7 @@ export async function registerModules(engine: Engine, progress: ProgressFn, boot
   registerStarShots();
   registerPlanetShots();
   registerAsteroidShots(asteroids); // [v4-mining] plan 5 task 5: wear and break-up
+  registerMiningBeamShots(miningBeams, asteroids, pilot.ship); // [v4-mining] plan 5 task 6: the beam
   registerHudShots(hud);
   registerWarpShots(warp);
   registerCameraShots(pilot.rig);
