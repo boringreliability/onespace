@@ -52,6 +52,13 @@ export interface SaveWorld {
    * choice, else DEFAULT_BEAM_RESOURCE.
    */
   readonly beamResource?: () => Resource;
+  /**
+   * Plan 6 Task 2: the way back — applySave hands the save's
+   * `ship.beamResource` to it on every load (ice included, so a lifted format 1
+   * save resets a choice the replaced game had). Absent: a world without a
+   * beam (a showroom, older tests) loads as before.
+   */
+  readonly setBeamResource?: (r: Resource) => void;
 }
 
 /** The beam's resource when nothing has chosen one (a new game; format 1's lift says the same). */
@@ -302,6 +309,7 @@ export function applySave(w: SaveWorld, s: Save, opts: ApplyOptions = {}): boole
   if (tank) tank.restore(s.ship.propellant);
   u.cargo.restore(s.ship.cargo);
   w.emergency.timesUsed = s.ship.emergencyTimesUsed;
+  w.setBeamResource?.(s.ship.beamResource);
   w.worldState.restore(s.world.entries);
   // R6: after the Universe restore, so its ARRIVED visit is overwritten.
   w.shipLog.importState(s.log);

@@ -22,8 +22,8 @@ import {
   REFINE_ACTION_S,
   REFUSAL_LOG,
   REPAIR_ACTION_S,
-  chooseResource,
   formatKg,
+  hasResource,
   mayMine,
   minedLog,
   refinedLog,
@@ -142,30 +142,30 @@ describe('mayMine — each reason at its exact boundary', () => {
   });
 });
 
-describe('chooseResource — ice, then rare, then metal, then silicate', () => {
-  it('Given every resource present, Then ice', () => {
-    expect(chooseResource(all(1, 1, 1, 1))).toBe('ice');
+// Plan 6 Task 2 (DESIGN-6 §7.2): chooseResource and its order are gone — no
+// function picks a resource for the player. hasResource only answers whether
+// the rock has the chosen one (owner-approved rewrite of the chooseResource tests).
+describe('hasResource — the rock has the chosen resource (plan 6 task 2)', () => {
+  it('Given every resource present, Then each one is there', () => {
+    for (const r of ['ice', 'metal', 'silicate', 'rare'] as const) expect(hasResource(all(1, 1, 1, 1), r), r).toBe(true);
   });
 
-  it('Given no ice, Then rare; no ice or rare, Then metal; only silicate, Then silicate', () => {
-    expect(chooseResource(all(0, 5, 5, 5))).toBe('rare');
-    expect(chooseResource(all(0, 5, 5, 0))).toBe('metal');
-    expect(chooseResource(all(0, 0, 5, 0))).toBe('silicate');
+  it('Given no ice, Then ice is not there, and the others still are (nothing falls through to them)', () => {
+    expect(hasResource(all(0, 5, 5, 5), 'ice')).toBe(false);
+    expect(hasResource(all(0, 5, 5, 5), 'rare')).toBe(true);
+    expect(hasResource(all(0, 5, 5, 5), 'metal')).toBe(true);
+    expect(hasResource(all(0, 5, 5, 5), 'silicate')).toBe(true);
   });
 
-  it('Given nothing left, Then null', () => {
-    expect(chooseResource(all(0, 0, 0, 0))).toBeNull();
+  it('Given nothing left, Then no resource is there', () => {
+    for (const r of ['ice', 'metal', 'silicate', 'rare'] as const) expect(hasResource(all(0, 0, 0, 0), r), r).toBe(false);
   });
 
-  it('Given a preferred resource that is present, Then it; absent, Then the usual order', () => {
-    expect(chooseResource(all(5, 5, 5, 5), 'metal')).toBe('metal');
-    expect(chooseResource(all(5, 0, 5, 5), 'metal')).toBe('ice');
-  });
-
-  it('Given NaN or negative amounts, Then they count as nothing (never chosen, no NaN out)', () => {
-    expect(chooseResource(all(Number.NaN, -5, 3, -1))).toBe('silicate');
-    expect(chooseResource(all(Number.NaN, Number.NaN, Number.NaN, Number.NaN))).toBeNull();
-    expect(chooseResource(all(Number.NaN, 0, 0, 0), 'ice')).toBeNull();
+  it('Given NaN or negative amounts, Then they count as nothing', () => {
+    expect(hasResource(all(Number.NaN, -5, 3, -1), 'ice')).toBe(false);
+    expect(hasResource(all(Number.NaN, -5, 3, -1), 'metal')).toBe(false);
+    expect(hasResource(all(Number.NaN, -5, 3, -1), 'rare')).toBe(false);
+    expect(hasResource(all(Number.NaN, -5, 3, -1), 'silicate')).toBe(true);
   });
 });
 
@@ -237,13 +237,14 @@ describe('one hold-full rule; dust is depleted (R18)', () => {
     expect(mayMine({ ...OK, remainingKg: 0.5 })).toEqual({ ok: true });
   });
 
-  it('Given 0.3 kg of every resource, Then chooseResource finds nothing (null)', () => {
-    expect(chooseResource(all(0.3, 0.3, 0.3, 0.3))).toBeNull();
+  it('Given 0.3 kg of every resource, Then hasResource finds none of them (dust)', () => {
+    for (const r of ['ice', 'metal', 'silicate', 'rare'] as const) expect(hasResource(all(0.3, 0.3, 0.3, 0.3), r), r).toBe(false);
   });
 
-  it('Given 0.4 kg ice and 0.5 kg silicate, Then chooseResource skips the ice dust and takes silicate', () => {
-    expect(chooseResource(all(0.4, 0, 0.5, 0))).toBe('silicate');
-    expect(chooseResource(all(0.4, 0, 0.5, 0), 'ice')).toBe('silicate');
+  it('Given 0.4 kg ice and 0.5 kg silicate, Then the ice is dust (not there) and the silicate, at exactly MINE_MIN_KG, is', () => {
+    expect(hasResource(all(0.4, 0, 0.5, 0), 'ice')).toBe(false);
+    expect(hasResource(all(0.4, 0, 0.5, 0), 'silicate')).toBe(true);
+    expect(hasResource(all(MINE_MIN_KG, 0, 0, 0), 'ice')).toBe(true);
   });
 });
 

@@ -9,11 +9,17 @@
  * long for the panel; running is the kilograms this extraction has given, or
  * the whole seconds left, with a bar.
  *
- * `actionRows(status)` is what the HUD is handed each frame. It reuses three row
- * objects and rebuilds a row's text only when what it shows changed (kind,
- * reason, resource, whole kilogram, whole second): an extraction's text changes
- * with every kilogram, which is the only per-frame string it builds. The rows
- * are overwritten by the next call: read them, do not keep them.
+ * `actionRows(status, beam)` is what the HUD is handed each frame. It reuses
+ * three row objects and rebuilds a row's text only when what it shows changed
+ * (kind, reason, resource, whole kilogram, whole second, the beam's choice): an
+ * extraction's text changes with every kilogram, which is the only per-frame
+ * string it builds. The rows are overwritten by the next call: read them, do
+ * not keep them.
+ *
+ * Plan 6 Task 2 (DESIGN-6 §7.2): the beam's choice is shown on the MINE row at
+ * rest (`▸ READY · RARE`), and a rock without it is `NO RARE HERE`
+ * (`notHereText`). A running extraction shows its own resource, not the choice.
+ * REFINE and REPAIR never show it.
  *
  * ActionState objects are Mining's, preallocated and mutated in place (and a
  * ready/blocked state's numbers live on its prototype): fields are read
@@ -23,7 +29,7 @@
 import { MINING_KEYS } from '@/core/Input';
 import type { Resource } from '@/gen/belt';
 import type { ActionState, MiningKind } from '@/game/Mining';
-import { ACTION_HINT, OCCUPIED_TEXT, REFUSAL_LOG, formatKg, type MiningRefusal } from '@/game/miningRules';
+import { ACTION_HINT, OCCUPIED_TEXT, REFUSAL_LOG, formatKg, notHereText, type MiningRefusal } from '@/game/miningRules';
 
 export type ActionLabel = 'MINE' | 'REFINE' | 'REPAIR';
 export type ActionTone = 'ready' | 'blocked' | 'running';
@@ -64,7 +70,7 @@ const OVERRIDE: Readonly<Partial<Record<BlockedReason, string>>> = {
 /** Every blocked reason's row text, built once. */
 const BLOCKED_TEXT: Readonly<Record<string, string>> = (() => {
   const out: Record<string, string> = {};
-  for (const r of Object.keys(REFUSAL_LOG) as MiningRefusal[]) {
+  for (const r of Object.keys(REFUSAL_LOG) as Array<Exclude<MiningRefusal, 'not-here'>>) {
     const hint = ACTION_HINT[r];
     out[r] = hint !== undefined ? `${REFUSAL_LOG[r]} — ${hint}` : REFUSAL_LOG[r];
   }
@@ -72,8 +78,25 @@ const BLOCKED_TEXT: Readonly<Record<string, string>> = (() => {
   return out;
 })();
 
-function blockedText(reason: BlockedReason): string {
-  return BLOCKED_TEXT[reason] ?? REFUSAL_LOG[reason as MiningRefusal] ?? String(reason).toUpperCase();
+/** The MINE row at rest: `▸ READY · ICE`, one string per resource, built once. */
+const READY_WITH_BEAM: Readonly<Record<Resource, string>> = {
+  ice: `${READY_TEXT} · ${RESOURCE_NAME.ice}`,
+  metal: `${READY_TEXT} · ${RESOURCE_NAME.metal}`,
+  silicate: `${READY_TEXT} · ${RESOURCE_NAME.silicate}`,
+  rare: `${READY_TEXT} · ${RESOURCE_NAME.rare}`,
+};
+
+/** `NO ICE HERE`, one string per resource, built once (the log says the same: Mining logs notHereText). */
+const NOT_HERE_TEXT: Readonly<Record<Resource, string>> = {
+  ice: notHereText('ice'),
+  metal: notHereText('metal'),
+  silicate: notHereText('silicate'),
+  rare: notHereText('rare'),
+};
+
+function blockedText(reason: BlockedReason, beam: Resource | undefined): string {
+  if (reason === 'not-here') return NOT_HERE_TEXT[beam ?? 'ice'] ?? NOT_HERE_TEXT.ice;
+  return BLOCKED_TEXT[reason] ?? String(reason).toUpperCase();
 }
 
 /** The whole kilograms formatKg prints (its rounding, sign kept). */
@@ -102,20 +125,24 @@ function clampFill(p: number): number {
   return p > 0 ? (p < 1 ? p : 1) : 0; // NaN → 0
 }
 
-function textOf(kind: MiningKind, state: ActionState): string {
-  if (state.kind === 'ready') return READY_TEXT;
-  if (state.kind === 'blocked') return blockedText(state.reason);
+function textOf(kind: MiningKind, state: ActionState, beam: Resource | undefined): string {
+  if (state.kind === 'ready') return kind === 'mine' && beam !== undefined ? (READY_WITH_BEAM[beam] ?? READY_TEXT) : READY_TEXT;
+  if (state.kind === 'blocked') return blockedText(state.reason, beam);
   return kind === 'mine' ? mineText(state.resource, state.shownKg) : secondsText(wholeS(state.leftS));
 }
 
-/** One row for one action. A new object per call; nothing in `state` is kept. */
-export function actionRow(kind: MiningKind, state: ActionState): ActionRow {
+/**
+ * One row for one action. A new object per call; nothing in `state` is kept.
+ * `beam` (the beam's choice) only shapes the MINE row at rest and 'not-here';
+ * without it a ready row is `▸ READY` and 'not-here' names ice (the default).
+ */
+export function actionRow(kind: MiningKind, state: ActionState, beam?: Resource): ActionRow {
   const running = state.kind === 'running';
   return {
     label: LABEL[kind],
     key: KEY[kind],
     tone: state.kind,
-    text: textOf(kind, state),
+    text: textOf(kind, state, beam),
     fill: running ? clampFill(state.progress) : null,
   };
 }
@@ -138,12 +165,14 @@ const builtTone: Array<ActionTone | ''> = ['', '', ''];
 const builtReason: Array<BlockedReason | null> = [null, null, null];
 const builtResource: Array<Resource | null> = [null, null, null];
 const builtNumber: number[] = [Number.NaN, Number.NaN, Number.NaN];
+const builtBeam: Array<Resource | null> = [null, null, null];
 
 /**
- * The three rows — mine, refine, repair, asked in that order. The returned
- * tuple and its rows are reused by the next call.
+ * The three rows — mine, refine, repair, asked in that order. `beam` is the
+ * beam's choice (Mining.beamResource). The returned tuple and its rows are
+ * reused by the next call.
  */
-export function actionRows(status: (kind: MiningKind) => ActionState): readonly [ActionRow, ActionRow, ActionRow] {
+export function actionRows(status: (kind: MiningKind) => ActionState, beam: Resource): readonly [ActionRow, ActionRow, ActionRow] {
   for (let i = 0; i < 3; i++) {
     const kind = KINDS[i]!;
     const s = status(kind);
@@ -161,12 +190,19 @@ export function actionRows(status: (kind: MiningKind) => ActionState): readonly 
         n = wholeS(s.leftS);
       }
     }
-    if (tone !== builtTone[i] || reason !== builtReason[i] || resource !== builtResource[i] || n !== builtNumber[i]) {
+    if (
+      tone !== builtTone[i] ||
+      reason !== builtReason[i] ||
+      resource !== builtResource[i] ||
+      n !== builtNumber[i] ||
+      beam !== builtBeam[i]
+    ) {
       builtTone[i] = tone;
       builtReason[i] = reason;
       builtResource[i] = resource;
       builtNumber[i] = n;
-      row.text = textOf(kind, s);
+      builtBeam[i] = beam;
+      row.text = textOf(kind, s, beam);
     }
     row.tone = tone;
     row.fill = tone === 'running' ? clampFill(s.progress) : null;

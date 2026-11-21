@@ -346,6 +346,7 @@ describe('mine (B)', () => {
     const r = rig();
     r.worldState.recordMined(r.ast.id, 'ice', r.ast.composition.ice, 'local');
     r.worldState.recordMined(r.ast.id, 'rare', r.ast.composition.rare, 'local');
+    choose(r, 'metal'); // plan 6 task 2: B takes the choice (owner-approved)
     r.press(MINING_KEYS.mine);
     r.tick(240); // 600 kg accrued: two bites
     expect(r.started).toEqual([{ asteroidId: r.ast.id, resource: 'metal' }]);
@@ -1069,9 +1070,10 @@ describe('which resource an extraction takes — one, and it does not switch', (
     [['ice', 'rare', 'metal'], 'silicate'],
   ];
   for (const [gone, want] of cases) {
-    it(`Given ${gone.length ? gone.join(', ') + ' mined out' : 'every resource'}, When B, Then the extraction takes ${want} (order: ice, rare, metal, silicate)`, () => {
+    it(`Given ${gone.length ? gone.join(', ') + ' mined out' : 'every resource'} and the choice ${want}, When B, Then the extraction takes ${want} (plan 6 task 2: the choice X takes X)`, () => {
       const r = rig();
       for (const res of gone) leave(r, res, 0);
+      choose(r, want);
       r.press(MINING_KEYS.mine);
       expect(r.started).toEqual([{ asteroidId: r.ast.id, resource: want }]);
       r.tick(100);
@@ -1099,15 +1101,16 @@ describe('which resource an extraction takes — one, and it does not switch', (
     expect(r.belt.isDestroyed(r.ast.id)).toBe(false);
   });
 
-  it('Given the ice ran out, When B again, Then a new extraction starts on the next resource (rare)', () => {
+  it('Given the ice ran out, When B again, Then no new extraction starts: "NO ICE HERE" (plan 6 task 2: never the next resource)', () => {
     const r = rig();
     leave(r, 'ice', 300);
     r.press(MINING_KEYS.mine);
     r.tick(120);
     r.press(MINING_KEYS.mine);
-    expect(r.started.map((s) => s.resource)).toEqual(['ice', 'rare']);
+    expect(r.started.map((s) => s.resource)).toEqual(['ice']);
+    expect(r.logs).toEqual(['MINED · 300 KG ICE — ICE DEPLETED', 'NO ICE HERE']);
     r.tick(100);
-    expect(r.cargo.kg('rare')).toBe(250);
+    expect(r.cargo.kg('rare')).toBe(0);
   });
 });
 
@@ -1515,7 +1518,7 @@ describe('B in the frame an extraction ends by itself', () => {
     expectNothingMore(r, 'MINING STOPPED — MATCH SPEED · 250 KG ICE', 'speed', 250);
   });
 
-  it('Given the ice ran out in frame 100 and B was swallowed, When B is pressed in the next frame, Then it behaves as a normal press: a new extraction starts on the next resource (rare)', () => {
+  it('Given the ice ran out in frame 100 and B was swallowed, When B is pressed in the next frame, Then it behaves as a normal press: "NO ICE HERE", nothing starts (plan 6 task 2: never the next resource)', () => {
     const r = rig();
     leave(r, 'ice', 250);
     r.press(MINING_KEYS.mine);
@@ -1523,11 +1526,11 @@ describe('B in the frame an extraction ends by itself', () => {
     pressInThisFrame(r);
     expect(r.started).toHaveLength(1);
     r.press(MINING_KEYS.mine);
-    expect(r.started.map((s) => s.resource)).toEqual(['ice', 'rare']);
-    expect(r.mining.status('mine').kind).toBe('running');
-    expect(r.logs).toEqual(['MINED · 250 KG ICE — ICE DEPLETED']);
+    expect(r.started.map((s) => s.resource)).toEqual(['ice']);
+    expect(r.mining.status('mine').kind).not.toBe('running');
+    expect(r.logs).toEqual(['MINED · 250 KG ICE — ICE DEPLETED', 'NO ICE HERE']);
     r.tick(100);
-    expect(r.cargo.kg('rare')).toBe(250);
+    expect(r.cargo.kg('rare')).toBe(0);
   });
 
   it('Given the hold filled in frame 100 and B was swallowed, When B is pressed in the next frame, Then it behaves as a normal press: the refusal "HOLD FULL" is logged once, nothing starts', () => {

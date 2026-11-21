@@ -243,7 +243,7 @@ describe('actionRows — the three rows the HUD is handed each frame', () => {
     const rows = actionRows((k) => {
       asked.push(k);
       return states[k];
-    });
+    }, 'ice');
     expect(asked).toEqual(['mine', 'refine', 'repair']);
     expect(rows).toHaveLength(3);
     expect(rows.map((r) => r.label)).toEqual(['MINE', 'REFINE', 'REPAIR']);

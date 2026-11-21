@@ -65,6 +65,7 @@ import { Pause } from '@/ui/Pause';
 import { Hints } from '@/ui/Hints';
 import { Emergency } from '@/game/Emergency'; // [v4-fuel]
 import { Mining } from '@/game/Mining'; // [v4-mining]
+import type { Resource } from '@/gen/belt'; // [v4-resources] plan 6 task 2: the beam's choice in the save
 import { ActionFeed } from '@/game/ActionFeed'; // [v4-mining] plan 5
 import { MiningBeams, registerMiningBeamShots } from '@/render/MiningBeams'; // [v4-mining] plan 5 task 6
 // -- v4 sub-plan 3: the save -----------------------------------------------------
@@ -569,7 +570,8 @@ export async function registerModules(engine: Engine, progress: ProgressFn, boot
   // IndexedDB (memory where it is missing), the WAL on localStorage.
   progress(0.87, 'opening the logbook vault');
   saveGame = new SaveGame({
-    world: { universe, worldState, shipLog, emergency, journal, cruise, input: engine.input },
+    // [v4-resources] plan 6 task 2: the beam's choice is saved (beamResource) and loaded back (setBeamResource).
+    world: { universe, worldState, shipLog, emergency, journal, cruise, input: engine.input, beamResource: () => mining.beamResource, setBeamResource: (r: Resource) => mining.setBeamResource(r) },
     store: boot.store,
     wal,
     lock: boot.lock,
@@ -579,7 +581,7 @@ export async function registerModules(engine: Engine, progress: ProgressFn, boot
   });
   await engine.add(saveGame);
   // The same world, for applySave: what the save holds goes back into these.
-  const saveWorld = { universe, worldState, shipLog, emergency, journal, cruise, input: engine.input };
+  const saveWorld = { universe, worldState, shipLog, emergency, journal, cruise, input: engine.input, beamResource: () => mining.beamResource, setBeamResource: (r: Resource) => mining.setBeamResource(r) };
   // [v4-save] Task 6: put the save back and continue it — before flight starts,
   // so revisions go on and nothing the boot queued saves the opening world.
   const notices: string[] = [...boot.notices];

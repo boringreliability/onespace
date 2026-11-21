@@ -6,6 +6,12 @@
  * (plan 5: the pace is MINE_RATE_KG_S / MINE_BITE_KG in extraction.ts).
  * Precedence, first failure wins: busy → no-target → range → speed →
  * hold-full → depleted. Every limit is inclusive; NaN never passes.
+ *
+ * Plan 6 Task 2 (DESIGN-6 §7.2): the beam takes the resource the player
+ * chose and nothing else. A rock without it is refused 'not-here', ranked
+ * after everything the gate checks; Mining decides it (`hasResource`) after
+ * `mayMine` passes, so the gate itself is unchanged. Its text is built from
+ * the resource (`notHereText`): `NO RARE HERE`.
  */
 
 import type { Resource } from '@/gen/belt';
@@ -25,7 +31,12 @@ export const REFINE_ACTION_S = 8;
 /** One repair, sim seconds. */
 export const REPAIR_ACTION_S = 10;
 
-export type MayMineReason = 'no-target' | 'range' | 'speed' | 'hold-full' | 'depleted' | 'busy';
+/**
+ * `'not-here'` (plan 6): the rock lacks the chosen resource. `mayMine` never
+ * returns it — Mining decides it after the gate passes (`hasResource`), so it
+ * ranks last.
+ */
+export type MayMineReason = 'no-target' | 'range' | 'speed' | 'hold-full' | 'depleted' | 'busy' | 'not-here';
 
 export interface MineGate {
   readonly paused: boolean;
@@ -54,6 +65,7 @@ const REFUSED: Readonly<Record<MayMineReason, MayMineResult>> = {
   speed: NO('speed'),
   'hold-full': NO('hold-full'),
   depleted: NO('depleted'),
+  'not-here': NO('not-here'),
 };
 
 /** Nothing else owns the ship: not paused, frozen, cruising or mid-warp. */
@@ -74,17 +86,18 @@ export function mayMine(s: MineGate): MayMineResult {
   return OK;
 }
 
-/** Preference order when nothing (or nothing present) is preferred. */
-const ORDER: readonly Resource[] = ['ice', 'rare', 'metal', 'silicate'];
-
 /**
- * The resource a mine takes: `prefer` if present, else ice, rare, metal,
- * silicate. Less than MINE_MIN_KG counts as absent (R18). Null when none is left.
+ * The rock has `r` to mine: at least MINE_MIN_KG of it (R18: less is dust;
+ * NaN and negatives are nothing). Only answers for the player's choice — no
+ * function picks a resource for the player (DESIGN-6 §7.2).
  */
-export function chooseResource(remaining: Readonly<Record<Resource, number>>, prefer?: Resource): Resource | null {
-  if (prefer !== undefined && remaining[prefer] >= MINE_MIN_KG) return prefer;
-  for (const r of ORDER) if (remaining[r] >= MINE_MIN_KG) return r;
-  return null;
+export function hasResource(remaining: Readonly<Record<Resource, number>>, r: Resource): boolean {
+  return remaining[r] >= MINE_MIN_KG;
+}
+
+/** The refusal when the rock lacks the chosen resource: `NO RARE HERE`. */
+export function notHereText(r: Resource): string {
+  return `NO ${r.toUpperCase()} HERE`;
 }
 
 /** Whole kilograms, grouped by thousands with a space: 2000 → "2 000". */
@@ -117,8 +130,13 @@ export function repairedLog(restoredFrac: number): string {
 
 export type MiningRefusal = MayMineReason | NonNullable<CargoResult['reason']>;
 
-/** One log line per refusal reason, the gate's and the hold's. */
-export const REFUSAL_LOG: Readonly<Record<MiningRefusal, string>> = {
+/**
+ * One log line per refusal reason, the gate's and the hold's. `'not-here'` is
+ * not in it: its text names the beam's resource, `notHereText(beam)` (see
+ * `refusalText`). The `'not-here'?: never` member only says so to the type
+ * checker — indexing by any MiningRefusal compiles, and that key is never there.
+ */
+export const REFUSAL_LOG: Readonly<Record<Exclude<MiningRefusal, 'not-here'>, string>> & { readonly 'not-here'?: never } = {
   busy: 'BUSY',
   'no-target': 'NO ASTEROID TARGETED',
   range: 'OUT OF RANGE',
@@ -134,6 +152,11 @@ export const REFUSAL_LOG: Readonly<Record<MiningRefusal, string>> = {
   'no-tank': 'NO TANK',
   invalid: 'INVALID AMOUNT',
 };
+
+/** The log line (and row text) for any refusal; `'not-here'` names the beam's resource. */
+export function refusalText(reason: MiningRefusal, beam: Resource): string {
+  return reason === 'not-here' ? notHereText(beam) : REFUSAL_LOG[reason];
+}
 
 /**
  * What a press refused for cruise or a jump logs, and what the action row
