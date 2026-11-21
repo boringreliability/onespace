@@ -412,6 +412,17 @@ async function targetIceRock(page, note) {
 async function mineAndRefine(page, note) {
   await page.keyboard.press('KeyB');
   await waitState(page, (x) => x.mineKind === 'running', 'the extraction to start', 5_000);
+  // R8 / final review I-3: the MINE row on screen says what Mining says.
+  const mineRow = await page
+    .waitForFunction(() => {
+      const row = document.querySelectorAll('.os-hud .os-act')[0];
+      const text = row?.querySelector('.os-act-text')?.textContent ?? '';
+      return row && row.dataset.tone === 'running' && row.classList.contains('os-act-bar') && /^ICE [\d ]+ KG$/.test(text) ? text : false;
+    }, null, { timeout: 2_000 })
+    .then((h) => h.jsonValue())
+    .catch(() => null);
+  assert(mineRow, `the MINE row does not show the extraction (${await page.evaluate(() => { const r = document.querySelectorAll('.os-hud .os-act')[0]; return JSON.stringify({ tone: r?.dataset.tone, cls: r?.className, text: r?.querySelector('.os-act-text')?.textContent }); })})`);
+  note(`MINE row: ${mineRow}`);
   // Plan 5: 150 kg/s in 250 kg bites; wait on kilograms, not seconds (it may end by itself first).
   await waitState(page, (x) => x.mineKind !== 'running' || x.mineShownKg >= 500, '500 kg to be mined', 30_000);
   if ((await state(page)).mineKind === 'running') await page.keyboard.press('KeyB');
@@ -422,6 +433,11 @@ async function mineAndRefine(page, note) {
     await page.keyboard.press('KeyB');
     await waitState(page, (x) => x.mineKind !== 'running', 'the extraction to end', 10_000);
   }
+  const refineRow = await page.evaluate(() => {
+    const r = document.querySelectorAll('.os-hud .os-act')[1];
+    return { tone: r?.dataset.tone, text: r?.querySelector('.os-act-text')?.textContent ?? null };
+  });
+  assert(refineRow.tone === 'ready' && refineRow.text === '▸ READY', `the REFINE row after mining: ${JSON.stringify(refineRow)}`);
   const mined = await page.evaluate(() => window.__e2eLog.filter((l) => l.startsWith('MINED')).at(-1) ?? null);
   assert(mined && mined.includes(' KG ICE'), `the mine did not yield ice (log: ${mined})`);
   note(mined);
