@@ -22,6 +22,8 @@
  *    changes nothing.
  */
 
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Quaternion, Vector3 } from 'three';
 
@@ -29,10 +31,12 @@ import { bus } from '@/core/EventBus';
 import type { EngineContext } from '@/core/Engine';
 import type { ActionName } from '@/core/Input';
 import { Emergency } from '@/game/Emergency';
+import { Mining, type MiningOptions } from '@/game/Mining';
 import { ShipLog, type LogState } from '@/game/Log';
 import { Universe } from '@/game/Universe';
 import { fyssField, nodeCtx } from '@/game/testing/beltFixture';
 import { WorldState, type MinedEntry } from '@/game/worldState';
+import type { Resource } from '@/gen/belt';
 import { applyCargoAction } from '@/ship/cargo';
 import { EXHAUST_VELOCITY_KMS } from '@/ship/propellant';
 import { payBeacon } from '@/ship/emergency';
@@ -1291,5 +1295,107 @@ describe('R21: a save is where the clock says, not a frame behind', () => {
     const b = live();
     expect(applySave(b.w, throughStorage(s))).toBe(true);
     expect(b.u.flight.grounded).toBe(true);
+  });
+});
+
+// =============================================================================
+// v4 sub-plan 6, Task 2 (phase A) — the beam's choice is saved and restored.
+//
+// DESIGN-6 §7.2: the choice is saved in `ship.beamResource` (format 2); a
+// format 1 save, lifted by the upgrade, gives ice. Task 1 gave buildSave the
+// seam `SaveWorld.beamResource?: () => Resource`. Assumed for the way back
+// (not there yet, wired through a cast): `SaveWorld.setBeamResource?: (r:
+// Resource) => void`, which applySave calls with `s.ship.beamResource` on
+// every load — ice included, so a lifted format 1 save resets a choice the
+// fresh game had. The registry feeds both from its Mining.
+// =============================================================================
+
+type BeamMining = { readonly beamResource: Resource; setBeamResource(r: Resource): void };
+
+/** A Mining with stubbed surroundings: only its beam's choice is used here. */
+function beamMining(): BeamMining {
+  const m = new Mining({
+    universe: { paused: false, frozen: false, simulatedSeconds: 0, cargo: null, flight: { propellant: null, worldPosition: new Vector3(), velocity: new Vector3() }, shipParent: null },
+    belt: {} as never,
+    worldState: { recordMined: () => undefined },
+    targeting: { targetId: null },
+    cruise: { busy: false },
+    warp: { phase: 'idle' },
+  } as unknown as MiningOptions);
+  const b = m as unknown as Partial<BeamMining>;
+  expect(typeof b.setBeamResource, 'Mining.setBeamResource exists').toBe('function');
+  return m as unknown as BeamMining;
+}
+
+/** The save world wired to `m` both ways, as the registry wires it. */
+function wiredTo(w: SaveWorld, m: BeamMining): SaveWorld {
+  return { ...w, beamResource: () => m.beamResource, setBeamResource: (r: Resource) => m.setBeamResource(r) } as SaveWorld;
+}
+
+describe('the beam\'s choice through a save (plan 6 task 2)', () => {
+  it('Given a Mining whose choice is metal, When buildSave, Then ship.beamResource is metal', () => {
+    const g = live();
+    const m = beamMining();
+    m.setBeamResource('metal');
+    const s = buildSave(wiredTo(g.w, m), null);
+    expect(s.ship.beamResource).toBe('metal');
+    expect(SaveV2Schema.safeParse(s).success).toBe(true);
+  });
+
+  it('Given the choice metal saved, When buildSave → JSON → migrate → applySave into a fresh game whose Mining is on ice, Then that Mining\'s choice is metal', () => {
+    const a = live();
+    const ma = beamMining();
+    ma.setBeamResource('metal');
+    const s = buildSave(wiredTo(a.w, ma), null);
+    a.dispose();
+    vi.stubGlobal('localStorage', new MemoryStorage());
+    const loaded = throughStorage(s);
+    expect(loaded.ship.beamResource).toBe('metal');
+
+    const b = live();
+    const mb = beamMining();
+    expect(mb.beamResource, 'precondition: a fresh Mining is on ice').toBe('ice');
+    expect(applySave(wiredTo(b.w, mb), loaded)).toBe(true);
+    expect(mb.beamResource).toBe('metal');
+    // …and the next save keeps it.
+    expect(buildSave(wiredTo(b.w, mb), loaded).ship.beamResource).toBe('metal');
+  });
+
+  it('Given a format 1 save (no beamResource), When it is lifted and applied to a game whose Mining was set to rare, Then the choice is ice', () => {
+    const a = live();
+    const built = buildSave(a.w, null);
+    a.dispose();
+    vi.stubGlobal('localStorage', new MemoryStorage());
+    // The same save as a format 1 build wrote it: no beamResource, no jettison.
+    const v1 = structuredClone(built) as unknown as { format: number; ship: Record<string, unknown> };
+    v1.format = 1;
+    delete v1.ship.beamResource;
+    const m = migrate(JSON.parse(JSON.stringify(v1)));
+    expect(m.ok).toBe(true);
+    if (!m.ok) return;
+    expect(m.migratedFrom, 'precondition: it was format 1').toBe(1);
+    expect(m.save.ship.beamResource).toBe('ice');
+
+    const b = live();
+    const mb = beamMining();
+    mb.setBeamResource('rare');
+    expect(mb.beamResource, 'precondition: the game was on rare').toBe('rare');
+    expect(applySave(wiredTo(b.w, mb), m.save)).toBe(true);
+    expect(mb.beamResource).toBe('ice');
+  });
+
+  it('Given a save world without the setBeamResource seam (a showroom, the old tests), When applySave, Then it still loads (the seam is optional)', () => {
+    const a = live();
+    const s = throughStorage(buildSave(a.w, null));
+    a.dispose();
+    vi.stubGlobal('localStorage', new MemoryStorage());
+    const b = live();
+    expect(applySave(b.w, s)).toBe(true);
+  });
+
+  it('Given the registry, Then it feeds the save from the Mining\'s choice and gives a load back to it (mining.beamResource and mining.setBeamResource)', () => {
+    const src = readFileSync(fileURLToPath(new URL('../game/registry.ts', import.meta.url)), 'utf8');
+    expect(src).toContain('mining.beamResource');
+    expect(src).toContain('mining.setBeamResource');
   });
 });

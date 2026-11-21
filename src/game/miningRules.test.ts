@@ -320,3 +320,44 @@ describe('ACTION_HINT — the next key for a refusal you can act on', () => {
     expect(Object.keys(ACTION_HINT).sort()).toEqual(['range', 'speed']);
   });
 });
+
+// ---------------------------------------------------------------------------
+// v4 sub-plan 6, Task 2 (phase A) — the beam takes what the player chose.
+//
+// DESIGN-6 §7.2: no function may choose for the player any more; a rock
+// without the chosen resource is refused with a new reason, 'not-here', whose
+// text is built from the resource: notHereText('rare') → 'NO RARE HERE'.
+// Assumed API (not there yet, read through the module namespace):
+//   notHereText(r: Resource): string; chooseResource removed (or replaced by
+//   hasResource(remaining, r): boolean, which chooses nothing).
+// ---------------------------------------------------------------------------
+
+describe('notHereText — the refusal when the rock lacks the chosen resource (plan 6 task 2)', () => {
+  const notHereText = (r: Resource): string => {
+    const fn = (miningRules as unknown as { notHereText?: (r: Resource) => string }).notHereText;
+    expect(typeof fn, 'miningRules.notHereText exists').toBe('function');
+    return fn!(r);
+  };
+
+  it('Given rare, Then "NO RARE HERE" (the resource\'s name in capitals)', () => {
+    expect(notHereText('rare')).toBe('NO RARE HERE');
+  });
+
+  it('Given each resource, Then "NO <RESOURCE> HERE"', () => {
+    expect(notHereText('ice')).toBe('NO ICE HERE');
+    expect(notHereText('metal')).toBe('NO METAL HERE');
+    expect(notHereText('silicate')).toBe('NO SILICATE HERE');
+  });
+
+  it('Given each resource, Then its text differs from every other refusal line (it is unambiguous)', () => {
+    // Whatever REFUSAL_LOG holds under 'not-here' itself is not an "other" line.
+    const others = new Set(Object.entries(REFUSAL_LOG).filter(([k]) => k !== 'not-here').map(([, v]) => v));
+    for (const r of ['ice', 'rare', 'metal', 'silicate'] as const) expect(others.has(notHereText(r)), r).toBe(false);
+  });
+});
+
+describe('the old order can no longer choose for the player (plan 6 task 2, DESIGN-6 §7.2)', () => {
+  it('Given miningRules, Then it no longer exports chooseResource', () => {
+    expect('chooseResource' in miningRules).toBe(false);
+  });
+});
