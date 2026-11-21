@@ -23,7 +23,7 @@
  * Task 7: a refine or repair is announced — `action:started` in the frame of
  * the accepted press, and exactly one `action:ended` (ok: true on completion,
  * false on every abort, a lost tank or hold, or a refused completion). A
- * refusal at the press announces nothing; dispose() announces nothing (F5).
+ * refusal at the press announces nothing; dispose() announces nothing, as for an extraction.
  *
  * Paused or frozen, the keys are silent. A hull without a tank or a hold is
  * inert. update() allocates nothing on a frame without a bite (a bite's

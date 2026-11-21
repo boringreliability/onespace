@@ -106,7 +106,7 @@ export interface GameEvents {
   'asteroid:destroyed': { asteroidId: string };
   /** [v4-mining] Plan 5: a refine (U) or repair (N) began, in the frame of the accepted press. */
   'action:started': { kind: 'refine' | 'repair' };
-  /** [v4-mining] Plan 5: exactly once per `action:started`; `ok` false on every abort or refused completion. */
+  /** [v4-mining] Plan 5: exactly once per `action:started`, except that `Mining.dispose()` mid-action emits none; `ok` false on every abort or refused completion. */
   'action:ended': { kind: 'refine' | 'repair'; ok: boolean };
 
   /** The star map's open transition started/ended. Flight input should stand down. */

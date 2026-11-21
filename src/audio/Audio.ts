@@ -126,8 +126,10 @@ const DRONE_ROOT = 41.2;
 
 // --- v4 plan 5 T7: mining, refining and repair. -----------------------------
 // A full hold can take ~53 s of beam, so the held tones sit under the engine:
-// quiet, filtered soft, and always moving a little. Gate levels are the whole
-// mix of each tone; the voices behind the gate sum to roughly 1.
+// quiet, filtered soft, and always moving a little. A gate level scales the
+// whole tone, but the voices behind it do not sum to 1: about 1.6 for the
+// mining tone and 1.2 for the action tone, before the lowpass, a little more
+// at the top of the tremolo or pump. Trim by ear, not by the constant alone.
 const MINE_LEVEL = 0.05;
 const ACTION_LEVEL = 0.042;
 /** Gate time constants: a beam that swells in, and lets go a little faster. */
