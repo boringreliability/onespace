@@ -62,6 +62,9 @@ export const MODULE_MODES: Readonly<Record<string, readonly Mode[]>> = {
   belt: FLIGHT,
   // v4 sub-plan 2: B/U/N only in flight (never mid-chart); leaving flight aborts.
   mining: ['flight'],
+  // v4 sub-plan 5: the HUD's action rows read Mining every frame, so the feed
+  // sleeps exactly when Mining does (a sleeping Mining's status is stale).
+  'action-feed': ['flight'],
   // v4 sub-plan 3: SaveGame's TICK (the interval and the gapped landing / mine /
   // system triggers) runs only while piloting. The event-driven saves are not
   // gated by this table: hidden, pagehide and SAVE also write in the Yard (the

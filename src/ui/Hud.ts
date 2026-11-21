@@ -2519,11 +2519,15 @@ const CSS = /* css */ `
   border-radius: 2px;
   box-shadow: var(--os-etch-shadow);
 }
-.os-hud .os-act-track { display: none; position: relative; flex: none; width: 34px; height: 3px; background: rgba(255, 255, 255, 0.08); overflow: hidden; }
-.os-hud .os-act.os-act-bar .os-act-track { display: block; }
+/* The track always takes its place (hidden, not removed), so the three rows share one text column. */
+.os-hud .os-act-track { visibility: hidden; position: relative; flex: none; width: 34px; height: 3px; background: rgba(255, 255, 255, 0.08); overflow: hidden; }
+.os-hud .os-act.os-act-bar .os-act-track { visibility: visible; }
 .os-hud .os-act-fill { position: absolute; inset: 0; background: currentColor; transform-origin: left center; transform: scaleX(var(--fill, 0)); }
 .os-hud .os-act[data-tone='ready'] { opacity: 0.9; }
-.os-hud .os-act[data-tone='blocked'] { opacity: 0.62; }
+/* blocked: label and key step back, the reason stays readable (it is the instruction). */
+.os-hud .os-act[data-tone='blocked'] .os-act-label,
+.os-hud .os-act[data-tone='blocked'] .os-act-key { opacity: 0.62; }
+.os-hud .os-act[data-tone='blocked'] .os-act-text { opacity: 0.88; }
 .os-hud .os-act[data-tone='running'] { color: var(--os-amber-hi); text-shadow: var(--os-glow); }
 .os-hud .os-act[data-tone='running'] .os-act-label { color: var(--os-amber); }
 .os-hud .os-act[data-tone='running'] .os-act-key { border-color: var(--os-amber); }
