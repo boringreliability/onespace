@@ -1133,3 +1133,276 @@ describe('MiningBeams — sleeps whenever Mining sleeps, and is registered (plan
     expect(src.slice(beams, src.indexOf(')', beams))).toMatch(/\bmining\b/);
   });
 });
+
+// ===========================================================================
+// Riding a moving rock (plan 5 task 6, review fix I1 / I2)
+//
+// In a belt the rock, and the ship beside it, orbit the star at ~18 km/s: one
+// frame (1/60 s) is ~300 m. Mining emits a bite BEFORE it places the operation
+// at this frame's endpoints (Mining.ts: the bite loop, then placeOperation),
+// and on the last bite of a rock the Belt has already forgotten it
+// (recordMined runs before the bite), then the extraction ends without a
+// placeOperation. The rig below runs frames in exactly that order.
+// ===========================================================================
+
+/** The rock's (and ship's) velocity in the star frame, km/s: ~17.9 km/s. */
+const ROCK_V = new Vector3(-11, 4, 13.6);
+/** Orbit time per frame in the moving rig. */
+const STEP = 1 / 60;
+/** A pebble is born within 50 m of the impact (as the existing bite tests). */
+const BIRTH_TOL_KM = 0.05;
+/** A fading beam rides with its rock to within 5 m. */
+const RIDE_TOL_KM = 0.005;
+/** Pebbles leave the surface at under 20 m/s: allowed spread per second of age. */
+const PEBBLE_SPREAD_KM_S = 0.02;
+
+/** A Belt look-alike: a constant velocity for the rocks it knows; false once a rock is forgotten (destroyed). */
+class FakeBelt {
+  calls = 0;
+  private readonly known = new Set<string>();
+
+  constructor(
+    private readonly v: Vector3,
+    ids: readonly string[] = [],
+  ) {
+    for (const id of ids) this.known.add(id);
+  }
+
+  /** The rock is destroyed: the Belt no longer knows it. */
+  forget(id: string): void {
+    this.known.delete(id);
+  }
+
+  asteroidVelocity(id: string, out: { x: number; y: number; z: number }): boolean {
+    this.calls++;
+    if (!this.known.has(id)) return false;
+    out.x = this.v.x;
+    out.y = this.v.y;
+    out.z = this.v.z;
+    return true;
+  }
+}
+
+interface MovingFrame {
+  /** The Belt forgets the rock (recordMined of the last bite), before the bite. */
+  forget?: boolean;
+  /** Mining emits a bite on the rock, while the operation still holds last frame's endpoints. */
+  bite?: boolean;
+  /** Mining ends the extraction this frame: the list empties and the operation is not placed again. */
+  end?: boolean;
+}
+
+/**
+ * One operation on ROCK_A whose rock and ship move together at `velocity`
+ * (ROCK_V by default; zero for a still rig). `sourceAt(t)` / `impactAt(t)` are
+ * where the nose and the impact truly are at orbit time t. The camera rides
+ * with the ship, as the chase camera does.
+ */
+function movingRig(opts: { belt?: FakeBelt; velocity?: Vector3 } = {}) {
+  const mining = new FakeMining();
+  const universe = { system: startSystem() as unknown, orbitSeconds: 1_000 };
+  const ctx = nodeCtx();
+  ctx.origin.setTo(SHIP.clone().add(new Vector3(37, -12, 5)));
+  ctx.origin.toRender(SHIP, ctx.camera.position).add(CAM_FROM_SHIP);
+  const beams = new MiningBeams({
+    mining,
+    universe,
+    ...(opts.belt ? { belt: opts.belt } : {}),
+  } as unknown as ConstructorParameters<typeof MiningBeams>[0]);
+  live.push(beams);
+  beams.init(ctx);
+  const vel = opts.velocity ?? ROCK_V;
+  const t0 = universe.orbitSeconds;
+  const op = opToward(ROCK_A, new Vector3(0.3, 0.6, -0.7));
+  const source0 = vec(op.source);
+  const impact0 = vec(op.impact);
+  const sourceAt = (t: number): Vector3 => source0.clone().addScaledVector(vel, t - t0);
+  const impactAt = (t: number): Vector3 => impact0.clone().addScaledVector(vel, t - t0);
+  let running = true;
+  mining.set([op]);
+  const now = (): number => universe.orbitSeconds;
+  /**
+   * One frame in the game's order: the orbit clock advances → (Belt forgets
+   * the rock) → Mining emits the bite, the operation still at LAST frame's
+   * endpoints → Mining ends the extraction, or else places the operation at
+   * this frame's endpoints → the camera rides along → update → lateUpdate.
+   */
+  const frame = (f: MovingFrame = {}): void => {
+    universe.orbitSeconds += STEP;
+    if (f.forget) opts.belt?.forget(ROCK_A);
+    if (f.bite) bite(ROCK_A);
+    if (f.end) {
+      mining.clear();
+      running = false;
+    } else if (running) {
+      Object.assign(op.source, v3(sourceAt(now())));
+      Object.assign(op.impact, v3(impactAt(now())));
+    }
+    ctx.camera.position.addScaledVector(vel, STEP);
+    beams.update(STEP, ctx);
+    (beams as GameModule).lateUpdate?.(STEP, ctx);
+  };
+  return { mining, universe, ctx, beams, op, frame, now, sourceAt, impactAt };
+}
+
+describe('MiningBeams — pebbles and a fading beam ride with a moving rock (plan 5 task 6, review fix I1 / I2)', () => {
+  it("Given a live beam on a rock moving at ~18 km/s (the Belt knows its velocity), When a bite is emitted before Mining places the operation for this frame (the game's order), Then every pebble is born within 50 m of THIS frame's impact, not a frame (~300 m) behind it", () => {
+    const belt = new FakeBelt(ROCK_V, [ROCK_A]);
+    const r = movingRig({ belt });
+    for (let i = 0; i < 20; i++) r.frame();
+    const tPrev = r.now();
+    r.frame({ bite: true });
+    const t = r.now();
+    // The scenario means something: one frame carries the impact well past the tolerance.
+    expect(r.impactAt(t).distanceTo(r.impactAt(tPrev))).toBeGreaterThan(3 * BIRTH_TOL_KM);
+    expect(vec(r.op.impact).distanceTo(r.impactAt(t))).toBeLessThanOrEqual(1e-9);
+    const ps = pebblesAt(r.beams, r.ctx);
+    expect(ps.length).toBeGreaterThan(0);
+    for (const p of ps) expect(p.distanceTo(r.impactAt(t)), 'pebble born behind the impact').toBeLessThanOrEqual(BIRTH_TOL_KM);
+  });
+
+  it('Given pebbles thrown off a rock moving at ~18 km/s, When the next second of frames runs, Then every pebble stays near the moving impact (50 m plus its own flight), riding with the rock instead of falling behind', () => {
+    const belt = new FakeBelt(ROCK_V, [ROCK_A]);
+    const r = movingRig({ belt });
+    for (let i = 0; i < 20; i++) r.frame();
+    r.frame({ bite: true });
+    const tBite = r.now();
+    for (let i = 1; i <= 60; i++) {
+      r.frame();
+      const t = r.now();
+      const age = t - tBite;
+      const tol = BIRTH_TOL_KM + PEBBLE_SPREAD_KM_S * age;
+      const ps = pebblesAt(r.beams, r.ctx);
+      expect(ps.length, `frame ${i}`).toBeGreaterThan(0);
+      for (const p of ps) expect(p.distanceTo(r.impactAt(t)), `frame ${i}`).toBeLessThanOrEqual(tol);
+    }
+    // The scenario means something: the impact moved far past the widest tolerance used.
+    const widest = BIRTH_TOL_KM + PEBBLE_SPREAD_KM_S * (r.now() - tBite);
+    expect(r.impactAt(r.now()).distanceTo(r.impactAt(tBite))).toBeGreaterThan(3 * widest);
+  });
+
+  it('Given a full live beam on a rock moving at ~18 km/s, When the operation disappears (the extraction is stopped), Then from the first fading frame until it is gone the beam runs from where the ship\'s nose is to where the impact is now (to 5 m), not a frame (~300 m) behind', () => {
+    const belt = new FakeBelt(ROCK_V, [ROCK_A]);
+    const r = movingRig({ belt });
+    for (let i = 0; i < 30; i++) r.frame(); // fully faded in
+    expect(beamsDrawn(r.beams, r.ctx)[0]!.fade).toBeGreaterThanOrEqual(0.999);
+    r.frame({ end: true });
+    let checked = 0;
+    for (let i = 0; i < 40 && !noBeams(r.beams, r.ctx); i++) {
+      const t = r.now();
+      const drawn = beamsDrawn(r.beams, r.ctx);
+      expect(drawn, `fading frame ${i}`).toHaveLength(1);
+      expect(drawn[0]!.from.distanceTo(r.sourceAt(t)), `fading frame ${i}: nose`).toBeLessThanOrEqual(RIDE_TOL_KM);
+      expect(drawn[0]!.to.distanceTo(r.impactAt(t)), `fading frame ${i}: impact`).toBeLessThanOrEqual(RIDE_TOL_KM);
+      const glows = glowsAt(r.beams, r.ctx);
+      expect(glows).toHaveLength(1);
+      expect(glows[0]!.distanceTo(r.impactAt(t)), `fading frame ${i}: glow`).toBeLessThanOrEqual(RIDE_TOL_KM + 0.001);
+      checked++;
+      r.frame();
+    }
+    expect(checked, 'the fade lasted most of BEAM_FADE_S').toBeGreaterThanOrEqual(10);
+    // The scenario means something: one frame moves the impact far past the tolerance.
+    expect(r.impactAt(r.now()).distanceTo(r.impactAt(r.now() - STEP))).toBeGreaterThan(3 * RIDE_TOL_KM);
+  });
+
+  it('Given the last bite of a rock moving at ~18 km/s (the Belt forgets the rock before the bite and the extraction ends that frame), Then the last puff of pebbles still rides with the velocity the rock had while alive, and was born at this frame\'s impact', () => {
+    const belt = new FakeBelt(ROCK_V, [ROCK_A]);
+    const r = movingRig({ belt });
+    for (let i = 0; i < 20; i++) r.frame();
+    r.frame({ forget: true, bite: true, end: true });
+    const tBite = r.now();
+    // The scenario means something: the Belt really has forgotten the rock.
+    expect(belt.asteroidVelocity(ROCK_A, { x: 0, y: 0, z: 0 })).toBe(false);
+    const born = pebblesAt(r.beams, r.ctx);
+    expect(born.length).toBeGreaterThan(0);
+    for (let i = 1; i <= 30; i++) {
+      r.frame();
+      const age = r.now() - tBite;
+      const ps = pebblesAt(r.beams, r.ctx);
+      expect(ps, `frame ${i}: no pebble ended this early`).toHaveLength(born.length);
+      const carried = ROCK_V.clone().multiplyScalar(age);
+      for (let k = 0; k < ps.length; k++) {
+        const moved = ps[k]!.clone().sub(born[k]!);
+        expect(moved.distanceTo(carried), `frame ${i}, pebble ${k}: did not ride with the rock`).toBeLessThanOrEqual(PEBBLE_SPREAD_KM_S * age + 1e-4);
+      }
+    }
+    // The scenario means something: the rock moved far past the spread allowed.
+    expect(ROCK_V.length() * (r.now() - tBite)).toBeGreaterThan(3 * (PEBBLE_SPREAD_KM_S * (r.now() - tBite) + BIRTH_TOL_KM));
+    for (const p of born) expect(p.distanceTo(r.impactAt(tBite)), 'last puff born behind the impact').toBeLessThanOrEqual(BIRTH_TOL_KM);
+  });
+
+  it('Given the last bite of a rock moving at ~18 km/s (the Belt forgets the rock before the bite and the extraction ends that frame), Then the fading beam still rides with the velocity the rock had while alive, at the nose and the impact as they are now (to 5 m)', () => {
+    const belt = new FakeBelt(ROCK_V, [ROCK_A]);
+    const r = movingRig({ belt });
+    for (let i = 0; i < 30; i++) r.frame();
+    r.frame({ forget: true, bite: true, end: true });
+    expect(belt.asteroidVelocity(ROCK_A, { x: 0, y: 0, z: 0 })).toBe(false);
+    const tFirst = r.now();
+    const first = beamsDrawn(r.beams, r.ctx);
+    expect(first, 'the fading beam is drawn').toHaveLength(1);
+    const seen: Array<{ t: number; beam: Beam }> = [];
+    for (let i = 0; i < 40 && !noBeams(r.beams, r.ctx); i++) {
+      const drawn = beamsDrawn(r.beams, r.ctx);
+      expect(drawn, `fading frame ${i}`).toHaveLength(1);
+      seen.push({ t: r.now(), beam: drawn[0]! });
+      r.frame();
+    }
+    expect(seen.length, 'the fade lasted most of BEAM_FADE_S').toBeGreaterThanOrEqual(10);
+    // It rides: moved by the rock's velocity since the first fading frame (checked over the whole fade first).
+    seen.forEach(({ t, beam }, i) => {
+      const carried = ROCK_V.clone().multiplyScalar(t - tFirst);
+      expect(beam.to.clone().sub(first[0]!.to).distanceTo(carried), `fading frame ${i}: impact did not ride`).toBeLessThanOrEqual(2 * RIDE_TOL_KM);
+      expect(beam.from.clone().sub(first[0]!.from).distanceTo(carried), `fading frame ${i}: nose did not ride`).toBeLessThanOrEqual(2 * RIDE_TOL_KM);
+    });
+    // And it is where the ship and the rock are now.
+    seen.forEach(({ t, beam }, i) => {
+      expect(beam.from.distanceTo(r.sourceAt(t)), `fading frame ${i}: nose`).toBeLessThanOrEqual(RIDE_TOL_KM);
+      expect(beam.to.distanceTo(r.impactAt(t)), `fading frame ${i}: impact`).toBeLessThanOrEqual(RIDE_TOL_KM);
+    });
+    expect(ROCK_V.length() * STEP).toBeGreaterThan(3 * RIDE_TOL_KM);
+  });
+
+  it('Given a Belt and a live beam on a rock moving at ~18 km/s, with bites, Then every frame the beam is exactly at the operation\'s current endpoints (to 1 m) and the glow at its impact (to 5 m): no velocity added on top of a live beam', () => {
+    const belt = new FakeBelt(ROCK_V, [ROCK_A]);
+    const r = movingRig({ belt });
+    const start = r.impactAt(r.now());
+    for (let i = 0; i < 40; i++) {
+      r.frame({ bite: i % 5 === 2 });
+      expect(beamsDrawn(r.beams, r.ctx), `frame ${i}`).toHaveLength(1);
+      expect(beamFor(r.beams, r.ctx, r.op), `frame ${i}: the live beam left the operation`).toBeDefined();
+      const glows = glowsAt(r.beams, r.ctx);
+      expect(glows).toHaveLength(1);
+      expect(glows[0]!.distanceTo(vec(r.op.impact)), `frame ${i}: glow`).toBeLessThanOrEqual(5e-3);
+    }
+    // The scenario means something: the operation moved far past the tolerance.
+    expect(vec(r.op.impact).distanceTo(start)).toBeGreaterThan(3 * 5e-3);
+  });
+
+  it('Given no Belt, or a Belt that never knows the rock, and a still operation, When the last bite ends it, Then the fading beam stays at its last endpoints (to 1 m) and the pebbles stay near the impact, as without a Belt', () => {
+    const variants: Array<[string, FakeBelt | undefined]> = [
+      ['no belt', undefined],
+      ['a belt that never knows the rock', new FakeBelt(ROCK_V, [])],
+    ];
+    for (const [name, belt] of variants) {
+      const r = movingRig({ ...(belt ? { belt } : {}), velocity: new Vector3() });
+      for (let i = 0; i < 30; i++) r.frame();
+      const last = { source: { ...r.op.source }, impact: { ...r.op.impact } };
+      r.frame({ bite: true, end: true });
+      const tEnd = r.now();
+      let checked = 0;
+      for (let i = 0; i < 40 && !noBeams(r.beams, r.ctx); i++) {
+        expect(beamFor(r.beams, r.ctx, last), `${name}, fading frame ${i}: the beam moved`).toBeDefined();
+        checked++;
+        r.frame();
+      }
+      expect(checked, `${name}: the fade lasted most of BEAM_FADE_S`).toBeGreaterThanOrEqual(10);
+      for (let i = 0; i < 30; i++) r.frame();
+      const age = r.now() - tEnd;
+      const ps = pebblesAt(r.beams, r.ctx);
+      expect(ps.length, name).toBeGreaterThan(0);
+      for (const p of ps) expect(p.distanceTo(vec(last.impact)), `${name}: a pebble drifted off`).toBeLessThanOrEqual(BIRTH_TOL_KM + PEBBLE_SPREAD_KM_S * age);
+      // The scenario means something: at belt speed this much time would have carried them kilometres.
+      expect(ROCK_V.length() * age).toBeGreaterThan(3 * (BIRTH_TOL_KM + PEBBLE_SPREAD_KM_S * age));
+    }
+  });
+});
