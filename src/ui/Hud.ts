@@ -26,7 +26,9 @@ import { MAX_CONTACT_BRACKETS, edgePlace, type EdgePlacement } from '@/game/cont
 import type { CruiseReadout } from '@/game/cruiseReadout';
 import { gReadout } from '@/ui/gReadout';
 import { effectiveThrottle, propellantTone, type PropellantTone } from '@/ui/propellantReadout';
-import { cargoLineText, cargoTotalText, type CargoReadout } from '@/ui/cargoReadout'; // [v4-mining]
+import { cargoLineText, cargoTotalText, createCargoReadout, type CargoReadout } from '@/ui/cargoReadout'; // [v4-mining]
+import { speedTone, type ActionRow } from '@/ui/actionRows'; // [v4-mining] plan 5
+import { MINING_KEYS } from '@/core/Input';
 import type { Resource } from '@/gen/belt';
 import { createLadderFade, stepLadderFade } from '@/ui/ladderFade';
 import {
@@ -634,6 +636,16 @@ export class Hud implements GameModule {
   private cargoShownCap = Number.NaN;
   private readonly cargoShownRes: Array<Resource | null> = [null, null, null, null];
   private readonly cargoShownKg: number[] = [Number.NaN, Number.NaN, Number.NaN, Number.NaN];
+  // [v4-mining] plan 5: the action block under CARGO — MINE / REFINE / REPAIR,
+  // always three rows. Built once; setActions writes text, tone and the bar only.
+  private readonly actEls: HTMLElement[] = [];
+  private readonly actText: TextSlot[] = [];
+  private readonly actFill: CssVar[] = [];
+  private readonly actTone: string[] = [];
+  private readonly actBar: boolean[] = [];
+  // VEL's tone (setSpeedOk): ok while a targeted rock's speed allows mining.
+  private elVel: HTMLElement | null = null;
+  private velTone = '';
   private vThrottleIdx!: CssVar;
 
   private speedTape!: Tape;
@@ -875,6 +887,41 @@ export class Hud implements GameModule {
       this.cargoRes[i] = r.resources[i]!;
       this.cargoKg[i] = r.kg[i]!;
     }
+  }
+
+  /**
+   * [v4-mining] plan 5: the action block's three rows (ui/actionRows.ts), mine,
+   * refine, repair. Only text, the tone and the bar's fill are written, each
+   * only when it changed; no node is made. The rows are not kept.
+   */
+  setActions(rows: readonly [ActionRow, ActionRow, ActionRow]): void {
+    const n = Math.min(rows.length, this.actEls.length);
+    for (let i = 0; i < n; i++) {
+      const r = rows[i]!;
+      const row = this.actEls[i]!;
+      this.actText[i]!.set(r.text);
+      if (r.tone !== this.actTone[i]) {
+        this.actTone[i] = r.tone;
+        row.dataset.tone = r.tone;
+      }
+      const bar = r.fill !== null;
+      if (bar !== this.actBar[i]) {
+        this.actBar[i] = bar;
+        row.classList.toggle('os-act-bar', bar);
+      }
+      if (bar) this.actFill[i]!.set(r.fill!);
+    }
+  }
+
+  /**
+   * [v4-mining] plan 5: VEL's tone. true: a rock is targeted and the speed
+   * relative to it is within the mining limit; false: too fast; null: no rock.
+   */
+  setSpeedOk(ok: boolean | null): void {
+    const tone = speedTone(ok);
+    if (tone === this.velTone || !this.elVel) return;
+    this.velTone = tone;
+    this.elVel.dataset.tone = tone;
   }
 
   /** [v4-fuel] No tank on this hull: no readout, the gauge as in v3. */
@@ -1561,6 +1608,21 @@ export class Hud implements GameModule {
       this.elCargoLines.push(line);
       this.tCargoLines.push(new TextSlot(line));
     }
+    // [v4-mining] plan 5: the action block — its own box, so it stays when the
+    // hold is empty and CARGO hides. Label, key cap, bar (running only), text.
+    const acts = el('div', 'os-thr-acts', p);
+    for (const kind of ['mine', 'refine', 'repair'] as const) {
+      const row = el('div', 'os-act', acts);
+      row.dataset.tone = 'blocked';
+      el('span', 'os-act-label', row, kind);
+      el('span', 'os-act-key', row, MINING_KEYS[kind].replace(/^Key/, ''));
+      const track = el('span', 'os-act-track', row);
+      this.actFill.push(new CssVar(el('i', 'os-act-fill', track), '--fill', 0.002, 3));
+      this.actText.push(new TextSlot(el('span', 'os-act-text', row)));
+      this.actEls.push(row);
+      this.actTone.push('blocked');
+      this.actBar.push(false);
+    }
     // v3: the G meter lives here now, off the hull and the plume it used to
     // sit on in the middle of the frame.
     const g = el('div', 'os-thr-g', p);
@@ -1573,7 +1635,10 @@ export class Hud implements GameModule {
   private buildRight(root: HTMLElement): void {
     const p = this.panel('os-right', root, 320);
 
-    const spd = el('div', 'os-gauge', p);
+    const spd = el('div', 'os-gauge os-vel', p);
+    this.elVel = spd;
+    spd.dataset.tone = 'normal';
+    this.velTone = 'normal';
     const velLabel = el('div', 'os-label', spd, 'vel ');
     // v3: VEL names its frame when that is not the body ALT names.
     this.tVelFrame = new TextSlot(el('span', 'os-alt-body', velLabel));
@@ -2019,6 +2084,143 @@ export function registerHudShots(hud: Hud): void {
       }
     },
   });
+
+  registerActionShots(hud);
+}
+
+/**
+ * [v4-mining] plan 5, Task 4: the action block under CARGO. Three shots, judged
+ * at 1280×700 (DESIGN-5 §7.3): the block must clear the log with a full hold
+ * and the longest reasons on every row.
+ */
+function registerActionShots(hud: Hud): void {
+  const row = (label: ActionRow['label'], key: string, tone: ActionRow['tone'], text: string, fill: number | null = null): ActionRow => ({
+    label,
+    key,
+    tone,
+    text,
+    fill,
+  });
+  const LONGEST = 'OUT OF RANGE — L TO APPROACH';
+  const blank: readonly [ActionRow, ActionRow, ActionRow] = [
+    row('MINE', 'B', 'blocked', ''),
+    row('REFINE', 'U', 'blocked', ''),
+    row('REPAIR', 'N', 'blocked', ''),
+  ];
+  const vitals: HudVitals = { throttle: 0, speedKmS: 0.003, altitudeKm: null, pitchRad: 0, rollRad: 0, gLoad: 1 };
+  const inst: HudInstruments = {
+    hasVelocity: true,
+    proX: 0,
+    proY: 0,
+    proBehind: false,
+    retroX: 0,
+    retroY: 0,
+    retroBehind: true,
+    vsiKmS: null,
+    ttiS: null,
+    altitudeKm: null,
+    altBody: null,
+    location: 'kesh belt',
+    velFrame: 'field',
+    speedKmS: 0.003,
+  };
+  const target: HudTarget = { id: 'ast:demo', name: 'ast 14-0392', x: 0, y: 0, behind: false, distanceKm: 0.42, kind: 'asteroid — ice' };
+  const cargo = createCargoReadout();
+
+  /** The hold: kg per resource in CARGO_LINE_ORDER (ice, metal, silicate, rare), zeros skipped. */
+  const fillHold = (kg: readonly [number, number, number, number]): void => {
+    cargo.count = 0;
+    cargo.totalKg = 0;
+    cargo.capacityKg = 8000;
+    const order: readonly Resource[] = ['ice', 'metal', 'silicate', 'rare'];
+    for (let i = 0; i < 4; i++) {
+      if (!(kg[i]! > 0)) continue;
+      cargo.resources[cargo.count] = order[i]!;
+      cargo.kg[cargo.count] = kg[i]!;
+      cargo.count++;
+      cargo.totalKg += kg[i]!;
+    }
+    cargo.visible = cargo.count > 0;
+    hud.setCargo(cargo);
+  };
+
+  const stage = (
+    ctx: EngineContext,
+    hold: readonly [number, number, number, number],
+    rows: readonly [ActionRow, ActionRow, ActionRow],
+    speedOk: boolean | null,
+  ): void => {
+    hud.setVisible(true);
+    hud.powerOn();
+    bus.emit('scale:changed', { from: 'system', to: 'orbit' });
+    // A full log: six lines, the most it ever shows.
+    bus.emit('log', { text: 'entered kesh belt field', tone: 'normal' });
+    bus.emit('log', { text: 'target ast 14-0392', tone: 'normal' });
+    bus.emit('log', { text: 'out of range', tone: 'warn' });
+    bus.emit('log', { text: 'matched · holding station', tone: 'good' });
+    bus.emit('log', { text: 'mined · 1 240 kg ice', tone: 'good' });
+    bus.emit('log', { text: 'hold full', tone: 'warn' });
+    hud.setVitals(vitals);
+    hud.setInstruments(inst);
+    hud.setPropellant(0.46, 3.1, false);
+    target.x = ctx.width * 0.5 + 180;
+    target.y = ctx.height * 0.5 - 60;
+    hud.setTarget(target);
+    fillHold(hold);
+    hud.setActions(rows);
+    hud.setSpeedOk(speedOk);
+  };
+
+  const teardown = (): void => {
+    fillHold([0, 0, 0, 0]);
+    hud.setActions(blank);
+    hud.setSpeedOk(null);
+    hud.setTarget(null);
+  };
+
+  const longest: readonly [ActionRow, ActionRow, ActionRow] = [
+    row('MINE', 'B', 'blocked', LONGEST),
+    row('REFINE', 'U', 'blocked', LONGEST),
+    row('REPAIR', 'N', 'blocked', LONGEST),
+  ];
+  registerShot({
+    name: 'hud-actions-blocked',
+    description:
+      'Action block, worst case for space: a full hold (CARGO and four resource lines) and the longest reason, OUT OF RANGE — L TO APPROACH, on all three rows, with a full six-line log. Judge at 1280×700: the block must not touch the log or be clipped.',
+    apply(ctx) {
+      stage(ctx, [3100, 2400, 1800, 700], longest, false);
+    },
+    teardown,
+  });
+
+  const mining: readonly [ActionRow, ActionRow, ActionRow] = [
+    row('MINE', 'B', 'running', 'ICE 1 240 KG', 0.155),
+    row('REFINE', 'U', 'blocked', 'TANK FULL'),
+    row('REPAIR', 'N', 'ready', '▸ READY'),
+  ];
+  registerShot({
+    name: 'hud-actions-mining',
+    description:
+      'Action block while mining: MINE running (ICE 1 240 KG, the bar at the hold’s 15 % fill), REFINE blocked (TANK FULL), REPAIR ready. VEL is lit: a rock is targeted and the speed is within the mining limit.',
+    apply(ctx) {
+      stage(ctx, [1240, 0, 0, 0], mining, true);
+    },
+    teardown,
+  });
+
+  const refining: readonly [ActionRow, ActionRow, ActionRow] = [
+    row('MINE', 'B', 'blocked', 'BUSY'),
+    row('REFINE', 'U', 'running', '5 S', 0.475),
+    row('REPAIR', 'N', 'blocked', 'BUSY'),
+  ];
+  registerShot({
+    name: 'hud-actions-refine',
+    description: 'Action block while refining: REFINE running with 5 S left and its bar near half; MINE and REPAIR blocked (BUSY).',
+    apply(ctx) {
+      stage(ctx, [2600, 900, 600, 0], refining, false);
+    },
+    teardown,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -2187,7 +2389,10 @@ const CSS = /* css */ `
 
 /* Throttle ---------------------------------------------------------------- */
 .os-hud .os-thr { left: 64px; top: 50%; transform: translateY(-50%); }
-.os-hud .os-thr-body { display: flex; gap: 8px; margin: 8px 0 6px; height: 230px; }
+/* The ladder gives way on a short window (plan 5, DESIGN-5 §7.3): the panel is
+   centred, so with a full hold and the action block it would reach the log's
+   six lines below ~800 px. 230 px from a 800 px window up; 130 px at 700. */
+.os-hud .os-thr-body { display: flex; gap: 8px; margin: 8px 0 6px; height: clamp(120px, calc(100vh - 570px), 230px); }
 .os-hud .os-thr-ladder {
   display: flex;
   flex-direction: column;
@@ -2293,6 +2498,38 @@ const CSS = /* css */ `
 .os-hud .os-thr-cargo.os-void, .os-hud .os-cargo-line.os-void { display: none; }
 .os-hud .os-cargo-line { margin-top: 2px; opacity: 0.85; }
 .os-hud .os-thr-prop[data-tone='warning'] { color: var(--os-warn); text-shadow: var(--os-shadow), 0 0 8px rgba(255, 95, 86, 0.4); }
+/* [v4-mining] plan 5: the action block. Amber (the ship's systems), never cyan.
+   Compact rows: three lines that never hide, under CARGO, clear of the log at
+   a 700 px window. ready calm, blocked muted, running brightest with its bar. */
+/* contain: inline-size — the longest reason may run past the panel's edge, but
+   must not widen the panel (the PROP bar spans it). */
+.os-hud .os-thr-acts { margin-top: 7px; font-size: 9px; letter-spacing: 0.12em; line-height: 12px; white-space: nowrap; contain: inline-size; }
+.os-hud .os-act { display: flex; align-items: center; gap: 6px; color: var(--os-amber); text-shadow: var(--os-shadow); transition: opacity 0.25s linear; }
+.os-hud .os-act + .os-act { margin-top: 1px; }
+.os-hud .os-act-label { width: 4.9em; color: var(--os-dim); letter-spacing: 0.22em; flex: none; }
+.os-hud .os-act-key {
+  flex: none;
+  min-width: 9px;
+  padding: 0 2px;
+  line-height: 10px;
+  font-size: 8px;
+  letter-spacing: 0;
+  text-align: center;
+  border: 1px solid var(--os-etch);
+  border-radius: 2px;
+  box-shadow: var(--os-etch-shadow);
+}
+.os-hud .os-act-track { display: none; position: relative; flex: none; width: 34px; height: 3px; background: rgba(255, 255, 255, 0.08); overflow: hidden; }
+.os-hud .os-act.os-act-bar .os-act-track { display: block; }
+.os-hud .os-act-fill { position: absolute; inset: 0; background: currentColor; transform-origin: left center; transform: scaleX(var(--fill, 0)); }
+.os-hud .os-act[data-tone='ready'] { opacity: 0.9; }
+.os-hud .os-act[data-tone='blocked'] { opacity: 0.62; }
+.os-hud .os-act[data-tone='running'] { color: var(--os-amber-hi); text-shadow: var(--os-glow); }
+.os-hud .os-act[data-tone='running'] .os-act-label { color: var(--os-amber); }
+.os-hud .os-act[data-tone='running'] .os-act-key { border-color: var(--os-amber); }
+/* VEL while a targeted rock is slow enough to mine: the box lights up. */
+.os-hud .os-vel[data-tone='ok'] .os-gauge-box { border-color: var(--os-amber); box-shadow: 0 0 18px rgba(0, 0, 0, 0.55), inset 0 0 8px rgba(255, 180, 84, 0.28); }
+.os-hud .os-vel[data-tone='ok'] .os-num { color: var(--os-amber-hi); }
 .os-thr-fa {
   margin-top: 6px;
   font-size: 9px;

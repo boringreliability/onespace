@@ -65,6 +65,7 @@ import { Pause } from '@/ui/Pause';
 import { Hints } from '@/ui/Hints';
 import { Emergency } from '@/game/Emergency'; // [v4-fuel]
 import { Mining } from '@/game/Mining'; // [v4-mining]
+import { ActionFeed } from '@/game/ActionFeed'; // [v4-mining] plan 5
 // -- v4 sub-plan 3: the save -----------------------------------------------------
 import { SaveGame } from '@/game/SaveGame';
 import { ActionJournal } from '@/save/actionJournal';
@@ -286,7 +287,9 @@ class ReviewGuard implements GameModule {
     // the title is not flight either (review-p1: its menu sat under the
     // pitch ladder). Title/boot are excluded by this whitelist.
     const flightMode = modes.base === 'flight' || modes.base === 'map' || modes.base === 'review';
-    this.hud.setVisible((!owned || shot === 'hud-full') && !this.mapOpen && flightMode);
+    // [v4-mining] plan 5: the action block's shots are HUD shots too.
+    const hudShot = shot === 'hud-full' || (shot?.startsWith('hud-actions-') ?? false);
+    this.hud.setVisible((!owned || hudShot) && !this.mapOpen && flightMode);
     this.gallery.root.visible = shot !== null && GALLERY_SHOTS.has(shot);
 
     // Planet shots build a fixture and only clear it for each other. Leaving
@@ -553,6 +556,9 @@ export async function registerModules(engine: Engine, progress: ProgressFn, boot
   // Cruise and the emergency exit; its in-range flag drives the 'mine' hint.
   const mining = new Mining({ universe, belt, worldState, targeting, cruise, warp });
   await engine.add(mining);
+  // [v4-mining] plan 5: the HUD's action block and VEL's mining tone, from this
+  // frame's Mining (so after it; Instruments runs before Mining exists).
+  await engine.add(new ActionFeed({ hud, mining, targeting }));
   // [v4-save] After Emergency and Mining: one writing tab (navigator.locks),
   // IndexedDB (memory where it is missing), the WAL on localStorage.
   progress(0.87, 'opening the logbook vault');
