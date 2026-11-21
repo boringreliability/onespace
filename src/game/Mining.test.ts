@@ -1433,3 +1433,110 @@ describe('the bus — one started and one ended per extraction', () => {
     expect(r.ended.map((e) => e.minedKg)).toEqual([500, 250]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Review fix (plan 5, task 3) — B in the frame an extraction ends by itself.
+// The extraction step runs before the key handling, so that B was read as
+// "start": a second mining:started, or a second (refusal) log line. Ruling: a B
+// press in the frame an extraction ended — for any reason — does nothing. A B
+// press in the NEXT frame behaves normally.
+// ---------------------------------------------------------------------------
+
+describe('B in the frame an extraction ends by itself', () => {
+  type R = ReturnType<typeof rig>;
+
+  /** Press B in this frame: the one frame, with `before` applied first. */
+  function pressInThisFrame(r: R, before: (r: R) => void = () => undefined): void {
+    before(r);
+    r.press(MINING_KEYS.mine);
+  }
+
+  function expectNothingMore(r: R, text: string, end: ExtractionEnd, kg: number): void {
+    expect(r.logs).toEqual([text]);
+    expect(r.started).toHaveLength(1);
+    expect(r.ended).toEqual([{ asteroidId: r.ast.id, resource: 'ice', minedKg: kg, end }]);
+    expect(r.mining.status('mine').kind).not.toBe('running');
+    expect(r.cargo.kg('ice')).toBe(kg);
+    expect(r.cargo.totalKg).toBeGreaterThanOrEqual(kg);
+  }
+
+  it('Given the last 250 kg of ice (other material left), When B is pressed in frame 100, the frame of the last bite, Then it ends "MINED · 250 KG ICE — ICE DEPLETED", and B starts nothing: one started, no new extraction', () => {
+    const r = rig();
+    leave(r, 'ice', 250);
+    r.press(MINING_KEYS.mine);
+    r.tick(99);
+    pressInThisFrame(r);
+    expectNothingMore(r, 'MINED · 250 KG ICE — ICE DEPLETED', 'resource-depleted', 250);
+    expect(r.cargo.snapshot()).toEqual({ ice: 250, metal: 0, silicate: 0, rare: 0 });
+    r.tick(600); // and nothing mines on by itself
+    expect(r.started).toHaveLength(1);
+    expect(r.cargo.totalKg).toBe(250);
+    expect(r.logs).toEqual(['MINED · 250 KG ICE — ICE DEPLETED']);
+  });
+
+  it('Given 250 kg of room in the hold, When B is pressed in frame 100, the frame the hold fills, Then it ends "MINED · 250 KG ICE — HOLD FULL" and no second "HOLD FULL" line follows', () => {
+    const r = rig();
+    r.cargo.restore({ silicate: CARGO_CAPACITY_KG - 250 });
+    r.press(MINING_KEYS.mine);
+    r.tick(99);
+    pressInThisFrame(r);
+    expectNothingMore(r, 'MINED · 250 KG ICE — HOLD FULL', 'hold-full', 250);
+    expect(r.cargo.freeKg).toBe(0);
+  });
+
+  it('Given only 250 kg of ice and nothing else left in the rock, When B is pressed in frame 100, the frame its last bite destroys the rock, Then it ends "MINED · 250 KG ICE — DEPLETED" and no "NO ASTEROID TARGETED" follows', () => {
+    const r = rig();
+    for (const res of ALL) leave(r, res, res === 'ice' ? 250 : 0);
+    r.press(MINING_KEYS.mine);
+    r.tick(99);
+    pressInThisFrame(r);
+    expectNothingMore(r, 'MINED · 250 KG ICE — DEPLETED', 'rock-depleted', 250);
+    expect(r.destroyed).toEqual([{ asteroidId: r.ast.id }]);
+  });
+
+  it('Given an extraction with one bite, When the ship drifts out of range and B is pressed in that same frame, Then it ends "MINING STOPPED — OUT OF RANGE · 250 KG ICE" and no "OUT OF RANGE" refusal follows', () => {
+    const r = rig();
+    r.press(MINING_KEYS.mine);
+    r.tick(119);
+    expect(r.cargo.kg('ice')).toBe(250);
+    pressInThisFrame(r, (x) => x.placeAt(MINE_RANGE_KM + 0.1));
+    expectNothingMore(r, 'MINING STOPPED — OUT OF RANGE · 250 KG ICE', 'range', 250);
+  });
+
+  it('Given an extraction with one bite, When the ship goes 0.006 km/s relative to the rock and B is pressed in that same frame, Then it ends "MINING STOPPED — MATCH SPEED · 250 KG ICE" and no "MATCH SPEED" refusal follows', () => {
+    const r = rig();
+    r.press(MINING_KEYS.mine);
+    r.tick(119);
+    expect(r.cargo.kg('ice')).toBe(250);
+    pressInThisFrame(r, (x) => x.world.flight.velocity.add(new Vector3(0, 0.006, 0)));
+    expectNothingMore(r, 'MINING STOPPED — MATCH SPEED · 250 KG ICE', 'speed', 250);
+  });
+
+  it('Given the ice ran out in frame 100 and B was swallowed, When B is pressed in the next frame, Then it behaves as a normal press: a new extraction starts on the next resource (rare)', () => {
+    const r = rig();
+    leave(r, 'ice', 250);
+    r.press(MINING_KEYS.mine);
+    r.tick(99);
+    pressInThisFrame(r);
+    expect(r.started).toHaveLength(1);
+    r.press(MINING_KEYS.mine);
+    expect(r.started.map((s) => s.resource)).toEqual(['ice', 'rare']);
+    expect(r.mining.status('mine').kind).toBe('running');
+    expect(r.logs).toEqual(['MINED · 250 KG ICE — ICE DEPLETED']);
+    r.tick(100);
+    expect(r.cargo.kg('rare')).toBe(250);
+  });
+
+  it('Given the hold filled in frame 100 and B was swallowed, When B is pressed in the next frame, Then it behaves as a normal press: the refusal "HOLD FULL" is logged once, nothing starts', () => {
+    const r = rig();
+    r.cargo.restore({ silicate: CARGO_CAPACITY_KG - 250 });
+    r.press(MINING_KEYS.mine);
+    r.tick(99);
+    pressInThisFrame(r);
+    expect(r.logs).toEqual(['MINED · 250 KG ICE — HOLD FULL']);
+    r.press(MINING_KEYS.mine);
+    expect(r.logs).toEqual(['MINED · 250 KG ICE — HOLD FULL', 'HOLD FULL']);
+    expect(r.started).toHaveLength(1);
+    expect(r.mining.status('mine').kind).not.toBe('running');
+  });
+});
