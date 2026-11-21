@@ -135,7 +135,7 @@ const ACTION_LEVEL = 0.042;
 /** Gate time constants: a beam that swells in, and lets go a little faster. */
 const TC_TONE_ON = 0.22;
 const TC_TONE_OFF = 0.16;
-/** Bites arrive in bursts under time compression; one chip per this many seconds at most. */
+/** Several bites can land in one long frame (a hitch, a tab coming back); one chip per this many seconds at most. */
 const BITE_MIN_GAP_S = 0.06;
 /** A chip's pitch by what is being cut: ice rings bright, metal low and hard. */
 const BITE_PITCH: Readonly<Record<Resource, number>> = { ice: 1.15, metal: 0.82, silicate: 1, rare: 1.3 };
@@ -1022,7 +1022,7 @@ export class Audio implements GameModule {
   /**
    * One bite: a chip off the rock — a short band of noise falling in pitch
    * with a small tonal knock under it. At most one per BITE_MIN_GAP_S, so a
-   * burst of bites in one compressed frame is one chip, not a machine gun.
+   * burst of bites in one long frame is one chip, not a machine gun.
    */
   private biteVoice(resource: Resource): void {
     const ac = this.ac;

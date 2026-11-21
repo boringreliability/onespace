@@ -260,7 +260,9 @@ void main() {
   vec3 n = normalize(vNormal);
   vec3 albedo = vSurface.rgb;
   float specK = vSurface.a;
-  // Screen derivatives are taken outside any branch (uniform control flow).
+  // The position derivatives are taken outside any branch (uniform control
+  // flow). The scar's own derivatives sit inside the wear branch, which is
+  // safe because the wear is constant across an instance.
   vec3 sx = dFdx(vRel);
   vec3 sy = dFdy(vRel);
   // Wear 0 skips all of this: an untouched rock is drawn exactly as before.
