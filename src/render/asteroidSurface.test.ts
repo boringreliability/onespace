@@ -16,13 +16,14 @@
  * Contract asserted here (pure, no WebGL):
  *   asteroidSurface(composition) → { albedo: [r, g, b], spec, metalness, specColor: [r, g, b] }
  *   ASTEROID_SPEC_EXPONENT — the Blinn exponent the shader uses
+ *   wearVisual(wear) — plan 5 task 5 (see the block at the end)
  */
 
 import { describe, expect, it } from 'vitest';
 
 import type { Resource } from '@/gen/belt';
 
-import { ASTEROID_SPEC_EXPONENT, asteroidSurface } from './asteroidSurface';
+import { ASTEROID_SPEC_EXPONENT, asteroidSurface, wearVisual } from './asteroidSurface';
 
 const PURE: Readonly<Record<Resource, Record<Resource, number>>> = {
   ice: { ice: 1e6, metal: 0, silicate: 0, rare: 0 },
@@ -111,5 +112,73 @@ describe('asteroidSurface — metal is a grey that reads, tinted like a metal (I
 
   it('Given an empty composition (all zero), Then it reads as silicate, as before', () => {
     expect(asteroidSurface({ ice: 0, metal: 0, silicate: 0, rare: 0 })).toEqual(asteroidSurface(PURE.silicate));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v4 sub-plan 5, Task 5 — visible wear. `wearVisual(wear)` maps the derived
+// wear (mined mass / original mass, Belt.wear) to how worn the rock LOOKS,
+// 0..1. Not linear: 2 000 kg off a 65 000 kg rock must already show
+// ("synligt fra første bid"), so the curve rises fast and flattens (concave).
+// The renderer writes it per rock into the `aWear` instance attribute.
+//
+// Contract asserted here (pure):
+//   wearVisual(wear: number): number — 0 → 0, 1 → 1, strictly increasing,
+//   concave, wearVisual(2000/65000) ≥ 0.15, clamped (< 0, NaN → 0; > 1 → 1)
+// ---------------------------------------------------------------------------
+
+/** Wear values from a first bite to an empty rock. */
+const WEAR_TABLE: readonly number[] = [
+  0, 0.0005, 0.001, 0.0039, 0.005, 0.01, 2_000 / 65_000, 0.05, 0.08, 0.1, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7,
+  0.8, 0.9, 0.95, 0.99, 1,
+];
+
+describe('wearVisual — the look of a worn rock (plan 5 task 5)', () => {
+  it('Given no wear, Then the look is exactly 0; given a rock mined empty, Then exactly 1', () => {
+    expect(wearVisual(0)).toBe(0);
+    expect(wearVisual(1)).toBe(1);
+  });
+
+  it('Given the table of wear values, Then every look is finite and within 0..1', () => {
+    for (const w of WEAR_TABLE) {
+      const v = wearVisual(w);
+      expect(Number.isFinite(v), `wear ${w}`).toBe(true);
+      expect(v, `wear ${w}`).toBeGreaterThanOrEqual(0);
+      expect(v, `wear ${w}`).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it('Given the table of wear values in order, Then the look is strictly increasing', () => {
+    for (let i = 1; i < WEAR_TABLE.length; i++) {
+      const a = WEAR_TABLE[i - 1]!;
+      const b = WEAR_TABLE[i]!;
+      expect(wearVisual(b), `wearVisual(${b}) > wearVisual(${a})`).toBeGreaterThan(wearVisual(a));
+    }
+  });
+
+  it('Given any two wear values a < b from the table, Then the look at their midpoint is at least the mean of their looks (concave)', () => {
+    for (let i = 0; i < WEAR_TABLE.length; i++) {
+      for (let j = i + 1; j < WEAR_TABLE.length; j++) {
+        const a = WEAR_TABLE[i]!;
+        const b = WEAR_TABLE[j]!;
+        const mid = wearVisual((a + b) / 2);
+        const mean = (wearVisual(a) + wearVisual(b)) / 2;
+        expect(mid, `a ${a}, b ${b}`).toBeGreaterThanOrEqual(mean - 1e-12);
+      }
+    }
+  });
+
+  it('Given 2 000 kg mined from a 65 000 kg rock, Then the look is at least 0.15 (visible from the first bites)', () => {
+    expect(wearVisual(2_000 / 65_000)).toBeGreaterThanOrEqual(0.15);
+  });
+
+  it('Given a wear below 0, -Infinity or NaN, Then the look is 0; above 1 or +Infinity, Then 1', () => {
+    expect(wearVisual(-0.5)).toBe(0);
+    expect(wearVisual(-1e-9)).toBe(0);
+    expect(wearVisual(Number.NEGATIVE_INFINITY)).toBe(0);
+    expect(wearVisual(Number.NaN)).toBe(0);
+    expect(wearVisual(1.5)).toBe(1);
+    expect(wearVisual(1 + 1e-9)).toBe(1);
+    expect(wearVisual(Number.POSITIVE_INFINITY)).toBe(1);
   });
 });
