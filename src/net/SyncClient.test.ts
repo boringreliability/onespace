@@ -52,7 +52,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { loadForBoot } from '@/save/bootLoad';
-import type { SaveV1 } from '@/save/schema';
+import golden from '@/save/fixtures/v1-golden.json';
+import { migrate } from '@/save/migrate';
+import { SaveV1Schema, type SaveFormat1, type SaveV1 } from '@/save/schema';
+import { rawKey } from '@/save/store';
 import { createWal, type Wal } from '@/save/wal';
 
 import {
@@ -2488,6 +2491,241 @@ describe('Ruling R84 — a replay answered 409 with resolvedAs', () => {
       expect(r.state().lastSeenCloud).toEqual({ saveId: GAME_X, revision: 7 });
       expect(r.state().pendingResolve ?? null).toBeNull();
       expect(r.ts.calls).toEqual([]);
+    },
+  );
+});
+
+// =============================================================================
+//  v4 sub-plan 6, Task 1 — review fix I1: no false conflict across the format
+//  change. A pending resolve (R69) keeps its device save verbatim; written by
+//  the previous build it is a FORMAT 1 body, while the local save after the
+//  update is that save lifted by `migrate` (format 2, beamResource 'ice').
+//  The same game state in two formats is NOT progress (R75): the committed
+//  resolve is applied exactly as when both are format 2. The body itself is
+//  still re-sent verbatim (R69). Real progress is still detected, in both
+//  formats. A device body `migrate` refuses (garbage, a newer format) never
+//  throws: the server refuses it (400 — the entry is cleared, the boot decides
+//  afresh, as R69 already does); and should a result ever come back for it,
+//  it is compared raw, i.e. counted as advanced — the local save is kept (R75).
+//
+//  Story (as conflictRig): bound to B, L r7, cloud r8, local r9 = the device
+//  save of the pending body; the resolve committed r10.
+// =============================================================================
+
+/** The golden save as the previous build wrote it (format 1, no beamResource), at `revision`. */
+function formatOne(revision: number): SaveFormat1 {
+  const g = structuredClone(golden) as unknown as SaveFormat1;
+  g.saveId = GAME_X;
+  g.revision = revision;
+  return g;
+}
+
+/** `v1` lifted by migrate — what bootLoad hands the boot after the update. */
+function lifted(v1: SaveFormat1): SaveV1 {
+  const m = migrate(structuredClone(v1));
+  if (!m.ok) throw new Error(`migrate refused the format 1 twin: ${m.reason}`);
+  return m.save;
+}
+
+/** Precondition: `v1` is a real format 1 body whose lift is deep-equal `v2`, and the raw bodies differ. */
+function expectFormatOneTwinOf(v1: SaveFormat1, v2: SaveV1): void {
+  expect(v1.format, 'precondition: format 1').toBe(1);
+  expect('beamResource' in v1.ship, 'precondition: no beamResource').toBe(false);
+  expect(SaveV1Schema.safeParse(v1).success, 'precondition: a valid format 1 save').toBe(true);
+  const m = migrate(structuredClone(v1));
+  expect(m.ok, 'precondition: migrate lifts it').toBe(true);
+  if (!m.ok) return;
+  expect(m.migratedFrom).toBe(1);
+  expect(m.save, 'precondition: the lift is deep-equal the format 2 save').toEqual(v2);
+  expect(rawKey(v1), 'precondition: the raw bodies differ (a raw comparison would call it progress)').not.toBe(rawKey(v2));
+}
+
+const pendingBody = (device: unknown): ResolveBody =>
+  ({ deviceId: DEVICE_ID, keep: 'device', device, base: { saveId: GAME_X, revision: 7 }, cloud: { saveId: GAME_X, revision: 8 } }) as ResolveBody;
+
+/** A boot with `body` pending (sent as B) and `local` in the store. */
+async function pendingRig(body: ResolveBody, local: SaveV1, api: Partial<FakeApi['reply']>): Promise<Rig> {
+  const r = rig({ state: boundB(save({ revision: 7 }), { conflict: true, pendingResolve: body, pendingResolveFor: ACCT_B.id }), api });
+  await r.ts.store.save(local);
+  r.ts.calls.length = 0;
+  return r;
+}
+
+/** The device save of the pending body: the same r9 game state, as format 2 (control) or as the previous build wrote it. */
+const DEVICES: Array<[string, () => { device: SaveV1 | SaveFormat1; local: SaveV1 }]> = [
+  ['format 2 (both sides the same format — the control)', () => ({ device: save({ revision: 9 }), local: save({ revision: 9 }) })],
+  [
+    'format 1 (written by the previous build; local = its lift)',
+    () => {
+      const device = formatOne(9);
+      const local = lifted(device);
+      expectFormatOneTwinOf(device, save({ revision: 9 }));
+      expect(local).toEqual(save({ revision: 9 }));
+      return { device, local };
+    },
+  ],
+];
+
+describe('Review fix I1 (plan 6 task 1) — a pending resolve across the format change is not a false conflict', () => {
+  it.each(DEVICES)(
+    'Given a pending resolve whose device save is %s and the local save NOT advanced past it, When the next boot replays it and gets the result r10, Then the result is applied — in sync, store = r10, L = r10, no conflict, no unmergedCloud, entry cleared — and the body was re-sent verbatim',
+    async (_what, make) => {
+      const { device, local } = make();
+      const result = save({ revision: 10, tank: 5_000 });
+      const body = pendingBody(device);
+      const r = await pendingRig(body, local, { getSave: () => cloudReply(result), resolve: () => ok(200, { revision: 10, save: result }) });
+      const b = await r.sync.boot(local);
+      expect(r.api.resolves).toEqual([body]);
+      expect(r.api.resolves[0]!.device.format).toBe(device.format);
+      expect(b.decision).toEqual({ kind: 'in-sync' });
+      expect(await r.ts.current()).toEqual(result);
+      expect(r.state()).toMatchObject({ lastSeenCloud: { saveId: GAME_X, revision: 10 }, conflict: false });
+      expect(r.state().unmergedCloud ?? null).toBeNull();
+      expect(r.state().pendingResolve ?? null).toBeNull();
+      expect(r.state().pendingResolveFor ?? null).toBeNull();
+      expect(r.sync.status()).toBe('synced');
+    },
+  );
+
+  it.each(DEVICES)(
+    'Ruling R84 across the format change: Given a pending resolve whose device save is %s and the local save NOT advanced, When the boot replay answers 409 with resolvedAs r10 and the cloud is r11, Then use-cloud — the store holds r11, L = r11, entry cleared, no conflict, synced',
+    async (_what, make) => {
+      const { device, local } = make();
+      const bR11 = save({ revision: 11, tank: 7_500 });
+      const r = await pendingRig(pendingBody(device), local, {
+        getSave: () => cloudReply(bR11),
+        resolve: () => fail(409, { body: { cloud: { revision: 11, save: bR11 }, resolvedAs: { saveId: GAME_X, revision: 10 } } }),
+      });
+      const b = await r.sync.boot(local);
+      expect(b.decision).toEqual({ kind: 'use-cloud' });
+      expect(await r.ts.current()).toEqual(bR11);
+      expect(r.state()).toMatchObject({ lastSeenCloud: { saveId: GAME_X, revision: 11 }, conflict: false });
+      expect(r.state().unmergedCloud ?? null).toBeNull();
+      expect(r.state().pendingResolve ?? null).toBeNull();
+      expect(r.sync.status()).toBe('synced');
+    },
+  );
+
+  it.each(DEVICES)(
+    'In session: Given a pending resolve whose device save is %s, a boot whose replay failed (503, local-only) and the game NOT advanced, When resolve() re-sends the body and it commits r10, Then the result is applied normally — ok, store = r10, L = r10, no conflict, no unmergedCloud, synced',
+    async (_what, make) => {
+      const { device, local } = make();
+      const result = save({ revision: 10, tank: 5_000 });
+      const body = pendingBody(device);
+      const r = await pendingRig(body, local, { getSave: () => cloudReply(save({ revision: 8 })), resolve: () => fail(503) });
+      expect((await r.sync.boot(local)).decision.kind).toBe('local-only');
+      expect(r.state().pendingResolve, 'precondition: the body is still pending').toEqual(body);
+      r.api.reply.resolve = () => ok(200, { revision: 10, save: result });
+      expect(await r.sync.resolve('device')).toEqual({ ok: true, save: result });
+      expect(r.api.resolves.at(-1)).toEqual(body);
+      expect(await r.ts.current()).toEqual(result);
+      expect(r.state()).toMatchObject({ lastSeenCloud: { saveId: GAME_X, revision: 10 }, conflict: false });
+      expect(r.state().unmergedCloud ?? null).toBeNull();
+      expect(r.state().pendingResolve ?? null).toBeNull();
+      expect(r.sync.status()).toBe('synced');
+    },
+  );
+
+  // ---------------------------------------------------------------------------
+  // Guards: real progress is still progress, in both formats (R75).
+
+  const ADVANCED: Array<[string, string, () => SaveV1 | SaveFormat1, () => SaveV1]> = [];
+  for (const [fmt, dev] of [
+    ['format 2', () => save({ revision: 9 })],
+    [
+      'format 1',
+      () => {
+        const d = formatOne(9);
+        expectFormatOneTwinOf(d, save({ revision: 9 }));
+        return d;
+      },
+    ],
+  ] as Array<[string, () => SaveV1 | SaveFormat1]>) {
+    ADVANCED.push([fmt, 'a higher revision (r11)', dev, () => save({ revision: 11, tank: 4_000 })]);
+    ADVANCED.push([fmt, 'the same revision with other content (r9, another tank)', dev, () => save({ revision: 9, tank: 4_000 })]);
+  }
+
+  it.each(ADVANCED)(
+    'R75 guard: Given a pending resolve whose device save is r9 in %s and a local save at %s, When the boot replay commits r10, Then the result is NOT applied — store untouched, nothing written, L = unmergedCloud = r10, entry cleared, conflict kept',
+    async (_fmt, _adv, dev, adv) => {
+      const advanced = adv();
+      const result = save({ revision: 10, tank: 5_000 });
+      const r = await pendingRig(pendingBody(dev()), advanced, { getSave: () => cloudReply(result), resolve: () => ok(200, { revision: 10, save: result }) });
+      const b = await r.sync.boot(advanced);
+      expect(r.ts.calls).toEqual([]);
+      expect(await r.ts.current()).toEqual(advanced);
+      expect(r.state().lastSeenCloud).toEqual({ saveId: GAME_X, revision: 10 });
+      expect(r.state().unmergedCloud).toEqual({ saveId: GAME_X, revision: 10 });
+      expect(r.state().pendingResolve ?? null).toBeNull();
+      expect(r.state().conflict).toBe(true);
+      expect(b.decision.kind).toBe('conflict-same');
+      expect(r.sync.status()).toBe('conflict');
+    },
+  );
+
+  it('R75 guard (in session, format 1): Given a pending format 1 body for device r9 and the game has stored r11 since, When the re-sent resolve commits r10, Then "moved" with the result as cloud, store untouched, unmergedCloud = L = r10', async () => {
+    const device = formatOne(9);
+    expectFormatOneTwinOf(device, save({ revision: 9 }));
+    const local = lifted(device);
+    const result = save({ revision: 10, tank: 5_000 });
+    const advanced = save({ revision: 11, tank: 4_000 });
+    const r = await pendingRig(pendingBody(device), local, { getSave: () => cloudReply(save({ revision: 8 })), resolve: () => fail(503) });
+    expect((await r.sync.boot(local)).decision.kind).toBe('local-only');
+    r.sync.onStored(advanced);
+    await r.ts.store.save(advanced);
+    r.ts.calls.length = 0;
+    r.api.reply.resolve = () => ok(200, { revision: 10, save: result });
+    expect(await r.sync.resolve('device')).toEqual({ ok: false, reason: 'moved', cloud: result });
+    expect(r.ts.calls).toEqual([]);
+    expect(await r.ts.current()).toEqual(advanced);
+    expect(r.state().unmergedCloud).toEqual({ saveId: GAME_X, revision: 10 });
+    expect(r.state().lastSeenCloud).toEqual({ saveId: GAME_X, revision: 10 });
+    expect(r.state().conflict).toBe(true);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Guards: a device body migrate refuses never throws.
+
+  const UNUSABLE: Array<[string, () => Record<string, unknown>, 'invalid' | 'newer-build']> = [
+    ['garbage (saveId and revision, nothing else readable)', () => ({ saveId: GAME_X, revision: 9, junk: true }), 'invalid'],
+    ['a newer format (3)', () => ({ ...save({ revision: 9 }), format: 3 }), 'newer-build'],
+  ];
+
+  it.each(UNUSABLE)(
+    'Unusable body guard: Given a pending resolve whose device body is %s, When the boot replay answers 400 (the server refuses it), Then boot does not throw, the entry is cleared and boot decides afresh (conflict-same against the cloud r11), nothing written',
+    async (_what, make, reason) => {
+      const device = make();
+      const m = migrate(structuredClone(device));
+      expect(m.ok, 'precondition: migrate refuses it').toBe(false);
+      if (!m.ok) expect(m.reason).toBe(reason);
+      const local = save({ revision: 9 });
+      const r = await pendingRig(pendingBody(device), local, { getSave: () => cloudReply(save({ revision: 11 })), resolve: () => fail(400, { body: { error: 'invalid' } }) });
+      const b = await r.sync.boot(local);
+      expect(r.api.resolves).toEqual([pendingBody(device)]);
+      expect(r.state().pendingResolve ?? null).toBeNull();
+      expect(b.decision).toEqual({ kind: 'conflict-same' });
+      expect(r.ts.calls).toEqual([]);
+    },
+  );
+
+  it.each(UNUSABLE)(
+    'Unusable body guard: Given a pending resolve whose device body is %s, When the boot replay nevertheless commits r10, Then boot does not throw and the body counts as advanced past (R75: it cannot be read, so the local save is kept) — store untouched, unmergedCloud = L = r10, entry cleared, conflict kept',
+    async (_what, make, reason) => {
+      const device = make();
+      const m = migrate(structuredClone(device));
+      expect(m.ok, 'precondition: migrate refuses it').toBe(false);
+      if (!m.ok) expect(m.reason).toBe(reason);
+      const local = save({ revision: 9 });
+      const result = save({ revision: 10, tank: 5_000 });
+      const r = await pendingRig(pendingBody(device), local, { getSave: () => cloudReply(result), resolve: () => ok(200, { revision: 10, save: result }) });
+      const b = await r.sync.boot(local);
+      expect(r.ts.calls).toEqual([]);
+      expect(await r.ts.current()).toEqual(local);
+      expect(r.state().unmergedCloud).toEqual({ saveId: GAME_X, revision: 10 });
+      expect(r.state().lastSeenCloud).toEqual({ saveId: GAME_X, revision: 10 });
+      expect(r.state().pendingResolve ?? null).toBeNull();
+      expect(r.state().conflict).toBe(true);
+      expect(b.decision.kind).toBe('conflict-same');
     },
   );
 });

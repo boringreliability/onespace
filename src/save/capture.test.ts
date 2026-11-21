@@ -1399,3 +1399,54 @@ describe('the beam\'s choice through a save (plan 6 task 2)', () => {
     expect(src).toContain('mining.setBeamResource');
   });
 });
+
+// =============================================================================
+// v4 sub-plan 6, Task 1 — review fix M3: the beam's choice is whitelisted on
+// save. SaveGame does not check the schema when it writes, so a seam value
+// outside the four resources would make every later save `invalid` at the
+// next boot. buildSave writes the seam's value only when it is one of
+// ice/metal/silicate/rare; anything else falls back to the previous save's
+// value, else 'ice' — and the built save always passes SaveV2Schema.
+// =============================================================================
+
+describe('buildSave — the beam\'s choice is whitelisted (plan 6 task 1, review fix)', () => {
+  const INVALID: Array<[string, unknown]> = [
+    ["'gold' (not a resource)", 'gold'],
+    ["'' (the empty string)", ''],
+    ["'ICE' (wrong case)", 'ICE'],
+    ['undefined', undefined],
+    ['null', null],
+    ['42 (a number)', 42],
+  ];
+
+  /** The save world with a seam that returns `v`, whatever its type. */
+  const seamed = (w: SaveWorld, v: unknown): SaveWorld => ({ ...w, beamResource: () => v as Resource });
+
+  it.each(INVALID)('Given the seam returns %s and a previous save whose choice is metal, When buildSave, Then ship.beamResource is metal and the save passes SaveV2Schema', (_what, v) => {
+    const g = live();
+    const s1 = buildSave(g.w, null);
+    const prev: SaveV1 = { ...s1, ship: { ...s1.ship, beamResource: 'metal' } };
+    expect(prev.ship.beamResource, 'precondition: the previous save chose metal').toBe('metal');
+    const s = buildSave(seamed(g.w, v), prev);
+    expect(s.ship.beamResource).toBe('metal');
+    expect(SaveV2Schema.safeParse(s).success).toBe(true);
+  });
+
+  it.each(INVALID)('Given the seam returns %s and no previous save, When buildSave, Then ship.beamResource is ice and the save passes SaveV2Schema', (_what, v) => {
+    const g = live();
+    const s = buildSave(seamed(g.w, v), null);
+    expect(s.ship.beamResource).toBe('ice');
+    expect(SaveV2Schema.safeParse(s).success).toBe(true);
+  });
+
+  it.each<Resource>(['ice', 'metal', 'silicate', 'rare'])('Given the seam returns %s (a resource) and a previous save whose choice is something else, When buildSave, Then ship.beamResource is the seam\'s value', (r) => {
+    const g = live();
+    const s1 = buildSave(g.w, null);
+    const other: Resource = r === 'metal' ? 'rare' : 'metal';
+    const prev: SaveV1 = { ...s1, ship: { ...s1.ship, beamResource: other } };
+    expect(prev.ship.beamResource, 'precondition: the previous save chose another resource').not.toBe(r);
+    const s = buildSave(seamed(g.w, r), prev);
+    expect(s.ship.beamResource).toBe(r);
+    expect(SaveV2Schema.safeParse(s).success).toBe(true);
+  });
+});
