@@ -8,7 +8,7 @@
  */
 
 import type { SyncStatus } from '@/net/SyncClient';
-import { EMERGENCY_KEYS, MINING_KEYS } from '@/core/Input';
+import { EMERGENCY_KEYS, MINING_KEYS, RESOURCES_KEY } from '@/core/Input';
 import { FORMATION_KEY } from '@/ship/formation';
 import { signedInText, type AccountView } from './accountMenu';
 
@@ -71,7 +71,10 @@ export function returnToOrbitLabel(hasTank: boolean, cargoKg = 0): string {
 // line with it. Pause.ts renders this list and keeps none of its own.
 // =============================================================================
 
-/** The key maps the sheet reads: `MINING_KEYS`, `EMERGENCY_KEYS` (core/Input) and `FORMATION_KEY` (ship/formation). */
+/**
+ * The key maps the sheet reads: `MINING_KEYS`, `EMERGENCY_KEYS`, `RESOURCES_KEY`
+ * (core/Input) and `FORMATION_KEY` (ship/formation).
+ */
 export interface PauseKeyMap {
   readonly mining: { readonly mine: string; readonly refine: string; readonly repair: string };
   readonly emergency: {
@@ -81,9 +84,11 @@ export interface PauseKeyMap {
     readonly cannibalizeCargo: string;
   };
   readonly formation: string;
+  /** [v4-resources] The resources screen's key. Absent (a map from before plan 6): `RESOURCES_KEY`. */
+  readonly resources?: string;
 }
 
-const GAME_KEYS: PauseKeyMap = { mining: MINING_KEYS, emergency: EMERGENCY_KEYS, formation: FORMATION_KEY };
+const GAME_KEYS: PauseKeyMap = { mining: MINING_KEYS, emergency: EMERGENCY_KEYS, formation: FORMATION_KEY, resources: RESOURCES_KEY };
 
 /** What the sheet prints for a key code: the code without its Key / Digit prefix (as Emergency.ts writes it). */
 function keyLabel(code: string): string {
@@ -118,6 +123,8 @@ export function pauseControls(keys: PauseKeyMap = GAME_KEYS): ReadonlyArray<read
     [keyLabel(mining.mine), 'MINE (AGAIN TO STOP)'],
     [keyLabel(mining.refine), 'REFINE ICE TO PROPELLANT'],
     [keyLabel(mining.repair), 'REPAIR THE TANK'],
+    // [v4-resources] plan 6: the hold, the beam's choice and jettison (DESIGN-6 §7.5).
+    [keyLabel(keys.resources ?? RESOURCES_KEY), 'RESOURCES — HOLD, BEAM, JETTISON'],
     // [v4-fuel]
     [
       `${keyLabel(emergency.open)} · ${keyLabel(emergency.cannibalize)} / ${keyLabel(emergency.beacon)} / ${keyLabel(emergency.cannibalizeCargo)}`,

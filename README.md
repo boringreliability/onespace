@@ -73,10 +73,26 @@ once you have used it a couple of times.
 | `U` | refine the ice in the hold into propellant |
 | `N` | repair the tank (600 kg metal and 400 kg silicate restore 4 % of its capacity) |
 | `H`, then `1` / `2` / `3` | emergency exit, offered only with an empty tank: `1` cannibalizes the tank, `2` fires the beacon (the hold is jettisoned), `3` burns the cargo (from 1 000 kg) |
+| `I` | resources screen: the hold, the beam's choice and what the cargo can become (refine, repair). Time stands still while it is open; not in cruise, a jump or the beacon's recovery |
 
 Mining takes one resource per extraction, 150 kg a second, into an 8 000 kg
 hold, and stops by itself when the hold is full or the resource runs out. The
-pause sheet lists every key.
+beam takes only the resource chosen on the resources screen (ice to begin with);
+a rock without it says `NO METAL HERE` (or whichever was chosen) and nothing
+starts. The pause sheet lists every key.
+
+On the resources screen:
+
+| | |
+|---|---|
+| `↑` / `↓` | select a resource |
+| `Enter` | the beam takes the selected resource (the HUD's MINE row shows it, e.g. `▸ READY · METAL`) |
+| `O` | jettison 250 kg of it (or what is left) |
+| `Shift+O` | jettison all of it |
+| `I` / `Esc` | close |
+
+Jettisoned cargo is gone, and the rock gets nothing back: the log says
+`JETTISONED · 250 KG ICE`, and the jettison is kept in the save.
 
 Crashing, or flying into the star, fades to black and puts the ship back in a
 stable orbit, 0.6 radii above the nearest world, with the nose prograde. The

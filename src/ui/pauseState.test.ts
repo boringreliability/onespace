@@ -563,7 +563,7 @@ describe('plan 5 Task 8 — the pause sheet lists every key (§7.7)', () => {
     const at = before.map((b) => lines.findIndex((l) => l[0] === b[0] && l[1] === b[1]));
     expect(at.filter((i) => i < 0), JSON.stringify(before.filter((_, j) => at[j] < 0))).toEqual([]);
     expect([...at].sort((a, b) => a - b)).toEqual(at);
-    expect(lines.length).toBe(before.length + 5);
+    expect(lines.length).toBe(before.length + 6);
     expect(new Set(lines.map(([k]) => k)).size).toBe(lines.length);
   });
 
