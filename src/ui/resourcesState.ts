@@ -11,8 +11,10 @@
  * `resourcesKey(key, state)` turns a keydown into an event:
  *  - ↑ / ↓ move the selection (a held arrow repeats); at either end nothing.
  *    From a corrupt selection (counted as ice) ↑ selects ice, ↓ rare.
- *  - Enter: the beam takes the selected resource (held: nothing). The choice
- *    does not depend on the hold — choosing what the hold lacks is the point.
+ *  - Enter (or NumpadEnter, the same key: open choice 3): the beam takes the
+ *    selected resource (held: nothing). Neither is bound in flight (D14). The
+ *    choice does not depend on the hold — choosing what the hold lacks is the
+ *    point.
  *  - O: throw out JETTISON_STEP_KG of the selected resource — always the step;
  *    the cargo rule throws out min(kg, held) and its result's kgOut is what the
  *    log reports. Shift+O: exactly what is held. Nothing of it (below what the
@@ -187,6 +189,7 @@ export function resourcesKey(k: ResourcesKeyInput, s: ResourcesKeyState): Resour
   const selected = RESOURCE_ORDER[i]!;
   switch (k.code) {
     case 'Enter':
+    case 'NumpadEnter':
       return act({ kind: 'beam', resource: selected });
     case RESOURCES_KEY:
     case 'Escape':

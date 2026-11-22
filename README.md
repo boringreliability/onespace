@@ -86,7 +86,7 @@ On the resources screen:
 | | |
 |---|---|
 | `↑` / `↓` | select a resource |
-| `Enter` | the beam takes the selected resource (the HUD's MINE row shows it, e.g. `▸ READY · METAL`) |
+| `Enter` | the beam takes the selected resource (the HUD's MINE row shows it, e.g. `▸ READY · METAL`). The numpad's Enter does the same |
 | `O` | jettison 250 kg of it (or what is left) |
 | `Shift+O` | jettison all of it |
 | `I` / `Esc` | close |
