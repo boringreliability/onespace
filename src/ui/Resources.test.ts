@@ -55,18 +55,29 @@ import { Vector3 } from 'three';
 
 import { bus } from '@/core/EventBus';
 import type { EngineContext, GameModule } from '@/core/Engine';
-import { EMERGENCY_KEYS, MINING_KEYS, RESOURCES_KEY, actionForKey, type ActionName } from '@/core/Input';
+import { EMERGENCY_KEYS, Input, MINING_KEYS, RESOURCES_KEY, actionForKey, type ActionName } from '@/core/Input';
 import { modes, type BaseMode, type Mode } from '@/core/Modes';
 import { tickModules } from '@/core/tick';
 import type { AsteroidSpec, Resource } from '@/gen/belt';
 import { ActionFeed, type ActionFeedOptions } from '@/game/ActionFeed';
+import { clearShot, setShot } from '@/game/Shots';
 import { MODULE_MODES, applyGating } from '@/game/gating';
-import { Mining, type MiningWorld } from '@/game/Mining';
+import { Mining, type ActionState, type MiningWorld } from '@/game/Mining';
 import { OCCUPIED_TEXT, formatKg, notHereText } from '@/game/miningRules';
 import { beltRig, fyssField } from '@/game/testing/beltFixture';
-import { CARGO_CAPACITY_KG, Cargo, JETTISON_STEP_KG, type CargoAction, type CargoResult } from '@/ship/cargo';
+import {
+  CARGO_CAPACITY_KG,
+  Cargo,
+  JETTISON_STEP_KG,
+  refineRefusal,
+  repairRefusal,
+  type CargoAction,
+  type CargoResult,
+} from '@/ship/cargo';
 import { PROBE_TANK_CAPACITY_KG, Propellant } from '@/ship/propellant';
-import type { ActionRow } from './actionRows';
+import { READY_TEXT, type ActionRow } from './actionRows';
+import { createCargoReadout, readCargo } from './cargoReadout';
+import { resourcesView, type ResourcesViewInput } from './resourcesState';
 
 // -----------------------------------------------------------------------------
 // The module under test, loaded without the type checker following the path.
@@ -85,6 +96,7 @@ interface Mod {
   Resources?: new (o: ResourcesOptions) => ResourcesModule;
   RESOURCES_TITLE?: string;
   RESOURCES_COLUMNS?: readonly string[];
+  registerResourcesShots?: (screen: { showShot(i: ResourcesViewInput): void; hideShot(): void }) => void;
 }
 
 const MODULE = './Resources';
@@ -215,6 +227,12 @@ type Ended = { asteroidId: string; resource: Resource; minedKg: number; end: str
 interface GameOpts {
   hold?: Partial<Record<Resource, number>>;
   fill?: number;
+  /**
+   * Task 4 review fix (M-5): the real Input (on a fake DOM) in the frame, as
+   * the Engine runs it — `input.update(dt)` before the modules, `endFrame()`
+   * after. Absent: the stub, as before.
+   */
+  realInput?: Input;
 }
 
 function game(o: GameOpts = {}) {
@@ -260,7 +278,7 @@ function game(o: GameOpts = {}) {
   applyGating(mods);
 
   const input = new StubInput();
-  const ctx = { input, elapsed: 0 } as unknown as EngineContext;
+  const ctx = { input: o.realInput ?? input, elapsed: 0 } as unknown as EngineContext;
   mining.init?.(ctx);
   offs.push(() => mining.dispose?.());
   offs.push(modes.onChange((from: Mode, to: Mode) => {
@@ -283,8 +301,10 @@ function game(o: GameOpts = {}) {
     for (let i = 0; i < n; i++) {
       world.simulatedSeconds = world.paused || world.frozen || modes.overlay ? 0 : H;
       b.frame();
+      o.realInput?.update(H);
       tickModules(mods, { base: modes.base, overlay: modes.overlay }, H, ctx);
       input.endFrame();
+      o.realInput?.endFrame();
     }
   };
 
@@ -817,5 +837,384 @@ describe('registry.ts and the review shots', () => {
     }
     expect(names.has('hud-actions-mining')).toBe(true);
     for (const n of ['resources-empty', 'resources-full', 'hud-beam-choice']) expect(names.has(n), n).toBe(true);
+  });
+});
+
+// =============================================================================
+// Task 4 review fix (phase A) — .superpowers/sdd/plan-6-resources/task-4-review.md.
+// The approved tests above are untouched; these pin the fixed behaviour.
+
+/** The HUD blocks rule (I-1, R11), loaded without the type checker following the path. */
+interface HudBlocks {
+  readonly cargo: boolean;
+  readonly actions: boolean;
+  readonly log: boolean;
+}
+const HUD_BLOCKS = './hudBlocks';
+let hudBlocksMod: { hudBlocks?: (base: BaseMode) => HudBlocks } = {};
+let hudBlocksError: unknown = null;
+beforeAll(async () => {
+  try {
+    hudBlocksMod = (await import(/* @vite-ignore */ HUD_BLOCKS)) as typeof hudBlocksMod;
+  } catch (e) {
+    hudBlocksError = e;
+  }
+});
+function hudBlocks(base: BaseMode): HudBlocks {
+  expect(hudBlocksError, 'src/ui/hudBlocks.ts must exist').toBeNull();
+  expect(hudBlocksMod.hudBlocks, 'hudBlocks.ts must export hudBlocks').toBeDefined();
+  return hudBlocksMod.hudBlocks!(base);
+}
+
+/** What the open sheet shows, from the same live sources Resources.liveView reads. */
+function sheetNow(g: ReturnType<typeof game>, selected: Resource = 'ice') {
+  return resourcesView({
+    cargo: g.cargo.snapshot(),
+    capacityKg: g.cargo.capacityKg,
+    selected,
+    beam: g.mining.beamResource,
+    refine: g.mining.status('refine'),
+    repair: g.mining.status('repair'),
+  });
+}
+
+describe('I-1 (R11): the HUD never contradicts the open sheet (DESIGN-6 §7.1: USES and the HUD rows never say different things)', () => {
+  it('Given 1 000 kg ice and a half tank, When I and then Shift+O on ICE, Then while the sheet says HOLD 0 the HUD shows no CARGO block and no action rows — only the log, which says JETTISONED', () => {
+    const g = screenGame({ hold: { ice: 1_000 }, fill: 0.5 });
+    g.frame();
+    // Before: the HUD's REFINE row is READY, as the sheet will be.
+    expect(g.rows.at(-1)![1]).toBe(READY_TEXT);
+    g.open();
+    expect(sheetNow(g).uses[0]!.status).toBe(READY_TEXT);
+    g.key(JETTISON, { shift: true });
+    expect(modes.base).toBe(RESOURCES_MODE);
+    expect(g.cargo.totalKg).toBe(0);
+    expect(sheetNow(g).header).toBe('HOLD 0 / 8 000 KG');
+    expect(sheetNow(g).uses[0]!.status).not.toBe(READY_TEXT);
+    // The HUD behind the sheet: its frozen CARGO 1 000 and REFINE ▸ READY are not shown …
+    const open = hudBlocks(modes.base);
+    expect(open.cargo).toBe(false);
+    expect(open.actions).toBe(false);
+    // … but the log is, so the jettison can be read.
+    expect(open.log).toBe(true);
+    expect(g.logs.at(-1)).toBe('JETTISONED · 1 000 KG ICE');
+  });
+
+  it('Given the same jettison, When I closes the sheet and one flight frame runs, Then the HUD shows its blocks again and they agree with the hold: no CARGO, REFINE says what the sheet said (not READY)', () => {
+    const g = screenGame({ hold: { ice: 1_000 }, fill: 0.5 });
+    g.open();
+    g.key(JETTISON, { shift: true });
+    const sheetSaid = sheetNow(g).uses[0]!.status;
+    g.key(RESOURCES_KEY);
+    expect(modes.base).toBe('flight');
+    g.rows.length = 0;
+    g.frame();
+    // The rows and the CARGO block are fed live again (ActionFeed, Instruments → readCargo).
+    expect(g.rows.at(-1)![1]).toBe(sheetSaid);
+    expect(g.rows.at(-1)![1]).not.toBe(READY_TEXT);
+    expect(readCargo(g.cargo, createCargoReadout()).visible).toBe(false);
+    // … and shown again.
+    const shown = hudBlocks(modes.base);
+    expect(shown.cargo).toBe(true);
+    expect(shown.actions).toBe(true);
+    expect(shown.log).toBe(true);
+  });
+});
+
+// -----------------------------------------------------------------------------
+// M-2: the review shot must show what a player can really see.
+
+describe('M-2: the resources shots show statuses a player can really see with that hold', () => {
+  /** The view each resources-* shot hands the screen, captured through a stand-in screen. */
+  let captured: Map<string, ResourcesViewInput> | null = null;
+  async function shotInputs(): Promise<Map<string, ResourcesViewInput>> {
+    if (captured) return captured;
+    const register = need('registerResourcesShots');
+    const seen = new Map<string, ResourcesViewInput>();
+    let current = '';
+    register({ showShot: (i) => void seen.set(current, i), hideShot: () => undefined });
+    const ctx = {} as EngineContext;
+    for (const name of ['resources-empty', 'resources-full']) {
+      current = name;
+      await setShot(name, ctx);
+      clearShot(ctx);
+    }
+    captured = seen;
+    return seen;
+  }
+
+  /** null = ready; else the blocked reason. */
+  const reasonOf = (s: ActionState): string | null => (s.kind === 'ready' ? null : s.kind === 'blocked' ? s.reason : `running:${s.kind}`);
+
+  /** The tanks a ship with this hold can have: none, or half / full, whole / damaged. */
+  function tanks(): Array<Propellant | null> {
+    const out: Array<Propellant | null> = [null];
+    for (const fill of [0.5, 1]) {
+      for (const loss of [0, 0.3]) {
+        const t = new Propellant(PROBE_TANK_CAPACITY_KG, 1);
+        t.restore({ massKg: fill * PROBE_TANK_CAPACITY_KG * (1 - loss), capacityLossFrac: loss });
+        out.push(t);
+      }
+    }
+    return out;
+  }
+
+  for (const name of ['resources-empty', 'resources-full']) {
+    it(`Given the ${name} shot, Then its REFINE and REPAIR statuses are never IN CRUISE / IN JUMP / BUSY (the screen cannot open there; opening ends a running action)`, async () => {
+      const input = (await shotInputs()).get(name);
+      expect(input, `${name} must hand the screen a view`).toBeDefined();
+      for (const s of [input!.refine, input!.repair]) {
+        expect(s.kind).not.toBe('running');
+        if (s.kind === 'blocked') expect(['cruise', 'jump', 'busy']).not.toContain(s.reason);
+      }
+    });
+
+    it(`Given the ${name} shot, Then its REFINE and REPAIR statuses are what the rules say for that very hold and one real tank (no NEED METAL · SILICATE beside a hold that has them)`, async () => {
+      const input = (await shotInputs()).get(name)!;
+      expect(input).toBeDefined();
+      const cargo = new Cargo(CARGO_CAPACITY_KG);
+      cargo.restore(input.cargo);
+      const want = { refine: reasonOf(input.refine), repair: reasonOf(input.repair) };
+      const possible = tanks().map((t) => ({ refine: refineRefusal(cargo, t), repair: repairRefusal(cargo, t) }));
+      expect(possible, `${name}: ${JSON.stringify(want)} for hold ${JSON.stringify(input.cargo)}`).toContainEqual(want);
+    });
+  }
+});
+
+// -----------------------------------------------------------------------------
+// M-4 and M-5 need the DOM Resources.init builds and the window Input binds to.
+// There is no jsdom: a fake with just the surface those two touch, and a window
+// that runs capture listeners first (Resources) and the others (Input) only if
+// no capture listener stopped the key — as the browser does on window.
+
+type Listener = (e: unknown) => void;
+
+class FakeTarget {
+  readonly listeners: Array<{ type: string; fn: Listener; capture: boolean }> = [];
+  addEventListener(type: string, fn: Listener, opt?: boolean | { capture?: boolean }): void {
+    const capture = opt === true || (typeof opt === 'object' && opt?.capture === true);
+    this.listeners.push({ type, fn, capture });
+  }
+  removeEventListener(type: string, fn: Listener, opt?: boolean | { capture?: boolean }): void {
+    const capture = opt === true || (typeof opt === 'object' && opt?.capture === true);
+    const i = this.listeners.findIndex((l) => l.type === type && l.fn === fn && l.capture === capture);
+    if (i >= 0) this.listeners.splice(i, 1);
+  }
+  /** A key at the window: capture listeners, then the rest unless it was stopped. */
+  key(e: Key): void {
+    for (const l of this.listeners.filter((x) => x.type === 'keydown' && x.capture)) l.fn(e);
+    if (e.stopped) return;
+    for (const l of this.listeners.filter((x) => x.type === 'keydown' && !x.capture)) l.fn(e);
+  }
+  keyup(code: string): void {
+    for (const l of this.listeners.filter((x) => x.type === 'keyup')) l.fn({ code });
+  }
+}
+
+class FakeEl extends FakeTarget {
+  className = '';
+  id = '';
+  textContent: string | null = '';
+  readonly children: FakeEl[] = [];
+  parent: FakeEl | null = null;
+  readonly dataset: Record<string, string> = {};
+  readonly style: Record<string, unknown> & { setProperty(k: string, v: string): void } = {
+    setProperty(k: string, v: string): void {
+      (this as Record<string, unknown>)[k] = v;
+    },
+  };
+  private readonly added = new Set<string>();
+  readonly classList = {
+    contains: (c: string): boolean => this.className.split(/\s+/).includes(c) || this.added.has(c),
+    add: (c: string): void => void this.added.add(c),
+    remove: (c: string): void => {
+      this.added.delete(c);
+      this.className = this.className.split(/\s+/).filter((x) => x !== c).join(' ');
+    },
+    toggle: (c: string, force?: boolean): boolean => {
+      const on = force ?? !this.classList.contains(c);
+      if (on) this.classList.add(c);
+      else this.classList.remove(c);
+      return on;
+    },
+  };
+  constructor(readonly tagName: string) {
+    super();
+  }
+  appendChild(c: FakeEl): FakeEl {
+    c.parent = this;
+    this.children.push(c);
+    return c;
+  }
+  append(...cs: FakeEl[]): void {
+    for (const c of cs) this.appendChild(c);
+  }
+  setAttribute(): void {}
+  remove(): void {
+    if (!this.parent) return;
+    this.parent.children.splice(this.parent.children.indexOf(this), 1);
+    this.parent = null;
+  }
+  requestPointerLock(): void {}
+}
+
+class FakeDocument extends FakeTarget {
+  readonly body = new FakeEl('body');
+  readonly head = new FakeEl('head');
+  pointerLockElement: unknown = null;
+  createElement(tag: string): FakeEl {
+    return new FakeEl(tag.toUpperCase());
+  }
+  getElementById(): null {
+    return null;
+  }
+  exitPointerLock(): void {
+    this.pointerLockElement = null;
+  }
+}
+
+const DOM_GLOBALS = ['window', 'document', 'localStorage'] as const;
+
+/**
+ * Install the fake window / document / storage. `restore` must run after every
+ * dispose that still touches them: push it to `offs` last.
+ */
+function fakeDom() {
+  const g = globalThis as unknown as Record<string, unknown>;
+  const saved = DOM_GLOBALS.map((k) => [k, Object.getOwnPropertyDescriptor(globalThis, k)] as const);
+  const win = new FakeTarget();
+  const doc = new FakeDocument();
+  const store = new Map<string, string>();
+  const storage = { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => void store.set(k, v) };
+  for (const [k, v] of [['window', win], ['document', doc], ['localStorage', storage]] as const) {
+    Object.defineProperty(g, k, { value: v, configurable: true, writable: true });
+  }
+  const restore = (): void => {
+    for (const [k, d] of saved) {
+      if (d) Object.defineProperty(globalThis, k, d);
+      else delete g[k];
+    }
+  };
+  const canvas = new FakeEl('CANVAS');
+  /** The screen's root (class os-res) under the body. */
+  const sheet = (): FakeEl => {
+    const r = doc.body.children.find((c) => c.classList.contains('os-res'));
+    if (!r) throw new Error('Resources.init built no .os-res under the body');
+    return r;
+  };
+  return { win, doc, canvas, sheet, restore };
+}
+
+/** The sheet catches clicks: pointer-events auto, by its live class or inline. */
+function catchesClicks(root: FakeEl): boolean {
+  return root.classList.contains('is-live') || root.style.pointerEvents === 'auto';
+}
+
+describe('M-4: from the moment the screen is open the sheet catches clicks (a click in the fade-in cannot lock the pointer)', () => {
+  function domGame() {
+    const dom = fakeDom();
+    const g = screenGame();
+    g.screen!.init?.({} as EngineContext);
+    offs.push(() => g.screen!.dispose?.(), dom.restore);
+    return { dom, g };
+  }
+
+  it('Given flight, When I opens the screen, Then on that very frame — the fade-in barely begun — the sheet already catches clicks', () => {
+    const { dom, g } = domGame();
+    g.open();
+    expect(modes.base).toBe(RESOURCES_MODE);
+    const root = dom.sheet();
+    // The fade-in is under way, far from done (FADE 0.18 s; one 60 Hz frame).
+    expect(Number(root.style['--os-res-t'])).toBeLessThan(0.5);
+    expect(catchesClicks(root)).toBe(true);
+  });
+
+  it('Given flight before I, Then the sheet does not catch clicks (the canvas takes them) — guard', () => {
+    const { dom, g } = domGame();
+    g.frame(3);
+    expect(catchesClicks(dom.sheet())).toBe(false);
+  });
+
+  it('Given the screen open and then closed, When the fade-out is over, Then the sheet no longer catches clicks (one click on the canvas takes the controls again) — guard', () => {
+    const { dom, g } = domGame();
+    g.open();
+    g.frame(30);
+    g.key(RESOURCES_KEY);
+    g.frame(60);
+    expect(modes.base).toBe('flight');
+    expect(catchesClicks(dom.sheet())).toBe(false);
+  });
+});
+
+describe('M-5: keys held when the screen opens do not keep acting', () => {
+  it('Given W held in flight, When I opens the screen and W stays down for 2 s, Then the throttle does not climb while the screen is open', () => {
+    const dom = fakeDom();
+    const real = new Input(dom.canvas as unknown as HTMLElement);
+    const g = screenGame({ realInput: real });
+    g.screen!.init?.({} as EngineContext);
+    offs.push(() => g.screen!.dispose?.(), () => real.dispose(), dom.restore);
+    const press = (code: string): void => {
+      dom.win.key(keydown(code));
+      g.frame();
+    };
+
+    dom.win.key(keydown(letter('W')));
+    g.frame(12); // the lever's target ≈ 0.18
+    press(RESOURCES_KEY);
+    expect(modes.base).toBe(RESOURCES_MODE);
+    let most = real.axes.throttle;
+    for (let i = 0; i < 120; i++) {
+      g.frame();
+      most = Math.max(most, real.axes.throttle);
+    }
+    // Held for 2 s it would reach full lever; time stands still on the screen.
+    expect(most).toBeLessThan(0.25);
+  });
+
+  it('Given W held across the opening and let go while the screen is open, When I closes it, Then the lever is not stuck climbing: 2 s of flight later it is where it was', () => {
+    const dom = fakeDom();
+    const real = new Input(dom.canvas as unknown as HTMLElement);
+    const g = screenGame({ realInput: real });
+    g.screen!.init?.({} as EngineContext);
+    offs.push(() => g.screen!.dispose?.(), () => real.dispose(), dom.restore);
+
+    dom.win.key(keydown(letter('W')));
+    g.frame(12);
+    dom.win.key(keydown(RESOURCES_KEY));
+    g.frame();
+    expect(modes.base).toBe(RESOURCES_MODE);
+    g.frame(120);
+    dom.win.keyup(letter('W'));
+    const e = keydown(RESOURCES_KEY);
+    dom.win.key(e);
+    expect(e.stopped).toBe(true);
+    g.frame();
+    expect(modes.base).toBe('flight');
+    let most = real.axes.throttle;
+    for (let i = 0; i < 120; i++) {
+      g.frame();
+      most = Math.max(most, real.axes.throttle);
+    }
+    expect(most).toBeLessThan(0.25);
+  });
+
+  it('Given ↓ held in flight (pitch) when I opens the screen, When its auto-repeat reaches the sheet, Then the selection does not move: Enter still sets ICE', () => {
+    const g = screenGame();
+    g.mining.setBeamResource('rare');
+    g.key('ArrowDown'); // pressed in flight: the flight's key
+    g.open();
+    for (let i = 0; i < 3; i++) g.key('ArrowDown', { repeat: true });
+    g.key('Enter');
+    expect(g.mining.beamResource).toBe('ice');
+  });
+
+  it('Given the screen open, When ↓ is pressed on it and held (repeat), Then the selection still runs (Task 3: a held arrow repeats) — guard', () => {
+    const g = screenGame();
+    g.open();
+    g.key('ArrowDown'); // rare
+    g.key('ArrowDown', { repeat: true }); // metal
+    g.key('ArrowDown', { repeat: true }); // silicate
+    g.key('Enter');
+    expect(g.mining.beamResource).toBe('silicate');
   });
 });

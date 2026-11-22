@@ -152,3 +152,76 @@ describe('FlightSense: K does not carry across modes', () => {
     expect(r.fs.formation).toBe('ship:companion');
   });
 });
+
+// v4 sub-plan 6, Task 4 review fix (phase A) — I-2 (R12). The resources screen
+// is flight paused, not flight left: time stands still there (DESIGN-6 §7.1,
+// §8), so opening and closing it must not change the flight. A formation hold
+// (K) survives I … I, the FA reference stays, and nothing is logged. Really
+// leaving flight (the title, the Yard) still clears as before.
+// (The chart is not "leaving": 'map' is in FlightSense's own activeIn.)
+describe('FlightSense: the resources screen is not leaving flight (plan 6 task 4, I-2)', () => {
+  function holding() {
+    const r = rockRig({ distanceKm: 10 });
+    r.pressK();
+    expect(r.fs.formation).toBe(AST_ID);
+    const want = r.astVel.clone().sub(r.parentVel!);
+    expect(r.fm.assistReferenceVelocity!.distanceTo(want)).toBeLessThan(1e-9);
+    r.logs.length = 0;
+    return { ...r, want };
+  }
+
+  it('Given formation held on an asteroid, When the resources screen opens, Then the formation is still held, the FA reference is the rock\'s, and nothing is logged', () => {
+    const r = holding();
+    r.fs.onModeChange('flight', 'resources');
+    expect(r.fs.formation).toBe(AST_ID);
+    expect(r.fm.assistReferenceVelocity).not.toBeNull();
+    expect(r.fm.assistReferenceVelocity!.distanceTo(r.want)).toBeLessThan(1e-9);
+    expect(r.logs).toEqual([]);
+  });
+
+  it('Given formation held, When the screen opens and closes (I … I) and flight runs on, Then the formation still holds on the same rock with the same reference, and no FORMATION line was logged', () => {
+    const r = holding();
+    r.fs.onModeChange('flight', 'resources');
+    r.fs.onModeChange('resources', 'flight');
+    r.frame();
+    r.frame();
+    expect(r.fs.formation).toBe(AST_ID);
+    expect(r.fm.assistReferenceVelocity!.distanceTo(r.want)).toBeLessThan(1e-9);
+    expect(r.logs).toEqual([]);
+  });
+
+  it('Given formation held on a vessel, When I … I, Then it is still held on that vessel', () => {
+    const r = rig();
+    (r.fs as unknown as { wantToggle: boolean }).wantToggle = true;
+    r.frame();
+    expect(r.fs.formation).toBe('ship:companion');
+    r.logs.length = 0;
+    r.fs.onModeChange('flight', 'resources');
+    expect(r.fs.formation).toBe('ship:companion');
+    expect(r.fm.assistReferenceVelocity).not.toBeNull();
+    r.fs.onModeChange('resources', 'flight');
+    r.frame();
+    expect(r.fs.formation).toBe('ship:companion');
+    expect(r.logs).toEqual([]);
+  });
+
+  it('Given no formation, When a K was latched while the screen was open, Then closing it does not engage formation (the stale-key rule still holds) — guard', () => {
+    const r = rockRig({ distanceKm: 10 });
+    r.fs.onModeChange('flight', 'resources');
+    (r.fs as unknown as { wantToggle: boolean }).wantToggle = true;
+    r.fs.onModeChange('resources', 'flight');
+    r.frame();
+    expect(r.fs.formation).toBeNull();
+    expect(r.logs).not.toContain('FORMATION — HOLDING ON TARGET');
+  });
+
+  for (const to of ['title', 'yard'] as const) {
+    it(`Given formation held, When flight is really left for ${to}, Then the formation is released silently and the FA reference cleared, as before — guard`, () => {
+      const r = holding();
+      r.fs.onModeChange('flight', to);
+      expect(r.fs.formation).toBeNull();
+      expect(r.fm.assistReferenceVelocity).toBeNull();
+      expect(r.logs).toEqual([]);
+    });
+  }
+});
