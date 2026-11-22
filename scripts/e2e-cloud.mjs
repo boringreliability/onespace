@@ -750,6 +750,8 @@ async function run() {
     const synced = await waitState(page, (x) => x.sync === 'synced', 'sync to finish', 30_000);
     const head = await cloudHead(ctx);
     assert(head.status === 200 && head.revision === synced.revision, `cloud head ${JSON.stringify(head)} vs local revision ${synced.revision}`);
+    // The save that was pushed is the one written after the jettison and the beam's choice.
+    assert(synced.revision >= s.revision, `synced revision ${synced.revision} is older than the save made after the resources screen (${s.revision})`);
     assert(Math.abs(head.tankKg - s.tankKg) < 0.5, `cloud tank ${kg(head.tankKg)} vs saved ${kg(s.tankKg)}`);
     note(`cloud holds revision ${head.revision}, tank ${kg(head.tankKg)}, system ${head.system}`);
     Object.assign(saved, { tankKg: s.tankKg, system: s.system, revision: head.revision });
@@ -768,20 +770,16 @@ async function run() {
     assert(Math.abs((r.hold?.ice ?? NaN) - res.ice) <= 1, `hold ice after reload ${kg(r.hold?.ice)} ≠ saved ${kg(res.ice)}`);
     assert(r.beam === 'metal', `beam after reload ${r.beam}, not metal`);
     note(`after reload: hold ice ${kg(r.hold.ice)} (saved ${kg(res.ice)}), beam ${r.beam}`);
-    // Back to ice, so scenario 3 mines ice as before (the selection starts on ICE after a reload).
-    await openResources(page);
-    assert((await sheetSelected(page)) === 'ICE', `after the reload the sheet opened on ${await sheetSelected(page)}`);
-    await page.keyboard.press('Enter');
-    await waitState(page, (x) => x.beam === 'ice', 'the beam to take ICE again', 3_000);
-    await closeResources(page);
-    note('beam set back to ICE for the scenarios that follow');
+    // Scenario 2 reads these from the cloud: the beam METAL and the hold after the jettison.
+    saved.ice = res.ice;
+    saved.beam = res.beam;
   });
 
   // ---------------------------------------------------------------- scenario 2
   const two = { ctx: null, page: null };
   await step(
     '2',
-    'a second browser context, same account → CONTINUE gives the same system and the same tank',
+    'a second browser context, same account → CONTINUE gives the same system, the same tank, the beam METAL and the same hold',
     async (note) => {
       Object.assign(two, await newPage('device-2'));
       const { page } = two;
@@ -796,7 +794,10 @@ async function run() {
       const s = await state(page);
       assert(s.system === saved.system, `system ${s.system} ≠ ${saved.system}`);
       assert(Math.abs(s.tankKg - saved.tankKg) < 1, `tank ${kg(s.tankKg)} ≠ ${kg(saved.tankKg)}`);
-      note(`device 2: ${s.system}, tank ${kg(s.tankKg)}, revision ${s.revision}, sync ${s.sync}`);
+      // Plan 6: the beam's choice and the hold (after the jettison) come from the cloud too.
+      assert(s.beam === 'metal', `device 2's beam is ${s.beam}, not metal`);
+      assert(Math.abs((s.hold?.ice ?? NaN) - saved.ice) <= 1, `device 2's hold ice ${kg(s.hold?.ice)} ≠ device 1's ${kg(saved.ice)}`);
+      note(`device 2: ${s.system}, tank ${kg(s.tankKg)}, hold ice ${kg(s.hold.ice)}, beam ${s.beam}, revision ${s.revision}, sync ${s.sync}`);
     },
     { requires: ['1'] },
   );
@@ -811,8 +812,16 @@ async function run() {
       await setOffline('device-2', two.ctx, true);
       note('both contexts offline');
 
-      // Device 1 gains fuel offline: mine + refine again at the same rock.
+      // Device 1 gains fuel offline: mine + refine again at the same rock. Its beam is
+      // still METAL from scenario 1: back to ICE first (the selection starts on ICE
+      // after a reload), so it mines ice as before.
       const p1 = one.page;
+      await openResources(p1);
+      assert((await sheetSelected(p1)) === 'ICE', `the sheet opened on ${await sheetSelected(p1)}, not ICE`);
+      await p1.keyboard.press('Enter');
+      await waitState(p1, (x) => x.beam === 'ice', 'the beam to take ICE again', 3_000);
+      await closeResources(p1);
+      note('device 1: beam set back to ICE');
       await targetIceRock(p1, (s) => note(`device 1: ${s}`));
       const gain = await mineAndRefine(p1, (s) => note(`device 1: ${s}`));
       const s1 = await pauseSave(p1);

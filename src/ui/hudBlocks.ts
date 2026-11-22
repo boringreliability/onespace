@@ -8,7 +8,10 @@
  * the sheet's HOLD 0 after a jettison. DESIGN-6 §7.1: the sheet and the HUD
  * rows never say different things. So those two blocks are hidden while the
  * sheet is open; the log stays (the JETTISONED line is read there), and so does
- * the rest of the HUD (instruments, PROP), which the sheet does not change.
+ * the rest of the HUD (instruments, PROP). PROP's Δv depends on the hold's mass
+ * (`extraMassKg`, which only Universe's tick updates), so after a jettison it
+ * stands still behind the sheet and jumps when the screen closes; the sheet
+ * itself shows no Δv, so the two never contradict each other.
  * Whether the HUD shows at all is ReviewGuard's (`flightMode`), not this rule's.
  */
 

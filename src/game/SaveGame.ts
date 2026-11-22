@@ -4,17 +4,18 @@
  * When:
  *  - autosave after a landing (`planet:landed`), a completed mine (the tick
  *    after `cargo:action`, so `recordMined` has run and both halves of the mine
- *    are in the journal), a system entry, the emergency exit, every
+ *    are in the journal), a system entry, a jettison (`jettison`, from the resources
+ *    screen), the emergency exit, every
  *    AUTOSAVE_INTERVAL_S of piloting (counted from the last save), and a
  *    hidden tab;
- *  - a landing, mine or system entry inside AUTOSAVE_MIN_GAP_S of the last
+ *  - a landing, mine, jettison or system entry inside AUTOSAVE_MIN_GAP_S of the last
  *    save is DEFERRED (R13): it saves once the gap has passed;
  *  - manually from the pause sheet (`saveNow('manual')`, logs SAVED).
  *
  * How (the order is the point):
  *    capture (buildSave) → wal.writeSnapshot | wal.markCovered → store.save (IndexedDB) → wal.clear(revision)
  *  - R25 I4a: hidden, emergency, leave and SAVE write the whole snapshot;
- *    interval, landing, mine and system entry only tag WAL coverage. A failed
+ *    interval, landing, mine, jettison and system entry only tag WAL coverage. A failed
  *    tag-only save writes its snapshot after all (C2);
  *  - R25 I3: a store write gets STORE_TIMEOUT_MS, then it is SAVE FAILED;
  *  - R25 I2: with `storeAvailable: false` (the store failed at boot) every

@@ -348,8 +348,8 @@ export class Mining implements GameModule {
   }
 
   /**
-   * Gated to flight (game/gating.ts). Leaving flight for map, Yard or title
-   * puts this module to sleep (core/tick.ts `moduleDt` returns -1); the photo
+   * Gated to flight (game/gating.ts). Leaving flight for map, Yard, title or the
+   * resources screen (opening it ends an extraction) puts this module to sleep (core/tick.ts `moduleDt` returns -1); the photo
    * overlay does not, it ticks with dt = 0 while Pause freezes the world. In
    * every case the extraction is ended here (interrupted) and a refine or
    * repair aborted, at the mode change: photo (P) ends them as pause does, so
