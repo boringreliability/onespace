@@ -79,6 +79,13 @@ export const EMERGENCY_KEYS = {
  */
 export const MINING_KEYS = { mine: 'KeyB', refine: 'KeyU', repair: 'KeyN' } as const;
 
+/**
+ * [v4-resources] Opens and closes the resources screen (DESIGN-6 §7.1). I was
+ * free. Plan 6 Task 3 reads it in the screen's rules (src/ui/resourcesState.ts);
+ * binding it to a flight action is Task 4's.
+ */
+export const RESOURCES_KEY = 'KeyI';
+
 const KEY_ACTIONS: Record<string, ActionName> = {
   ShiftLeft: 'boost',
   ShiftRight: 'boost',
