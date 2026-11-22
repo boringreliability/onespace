@@ -1218,3 +1218,71 @@ describe('M-5: keys held when the screen opens do not keep acting', () => {
     expect(g.mining.beamResource).toBe('silicate');
   });
 });
+
+// =============================================================================
+// v4 sub-plan 6 — open choice 3 (phase A, for the owner's approval; Task 3
+// review m-5): NumpadEnter on the open screen, through the real DOM key path.
+// The approved tests above are untouched.
+
+describe('open choice 3 — Enter on the numpad sets the beam too', () => {
+  const NUMPAD_ENTER = 'NumpadEnter';
+
+  it('Given the screen open on ice, When ↓ ↓ and NumpadEnter, Then mining.beamResource is metal, the key is stopped and its default prevented, and the screen stays open', () => {
+    const g = screenGame();
+    g.open();
+    g.key('ArrowDown');
+    g.key('ArrowDown');
+    const e = g.key(NUMPAD_ENTER);
+    expect(g.mining.beamResource).toBe('metal');
+    expect(e.stopped).toBe(true);
+    expect(e.defaultPrevented).toBe(true);
+    expect(modes.base).toBe(RESOURCES_MODE);
+  });
+
+  it('Given the screen open with rare selected, When Ctrl / Cmd / Alt + NumpadEnter, Then the beam is not set, the key is stopped from the flight and the browser keeps its default', () => {
+    const g = screenGame();
+    g.open();
+    g.key('ArrowDown'); // rare
+    for (const mods of [{ ctrl: true }, { meta: true }, { alt: true }]) {
+      const e = g.key(NUMPAD_ENTER, mods);
+      expect(e.stopped, JSON.stringify(mods)).toBe(true);
+      expect(e.defaultPrevented, JSON.stringify(mods)).toBe(false);
+    }
+    expect(g.mining.beamResource).toBe('ice');
+  });
+
+  it('Given the screen open with rare selected, When NumpadEnter is held (repeat), Then the beam is not set', () => {
+    const g = screenGame();
+    g.open();
+    g.key('ArrowDown'); // rare
+    g.key(NUMPAD_ENTER, { repeat: true });
+    expect(g.mining.beamResource).toBe('ice');
+  });
+
+  it('Given the screen open, When Enter and NumpadEnter on the same line, Then both leave the same beam and the same default prevented', () => {
+    const g = screenGame();
+    g.open();
+    g.key('ArrowDown'); // rare
+    const a = g.key('Enter');
+    const afterEnter = g.mining.beamResource;
+    g.mining.setBeamResource('ice');
+    const b = g.key(NUMPAD_ENTER);
+    expect(afterEnter).toBe('rare');
+    expect(g.mining.beamResource).toBe(afterEnter);
+    expect(b.defaultPrevented).toBe(a.defaultPrevented);
+  });
+
+  it('Guard: Given flight with the screen closed, When ↓ and NumpadEnter, Then the beam is unchanged and the key is not taken from the flight', () => {
+    const g = screenGame();
+    g.key('ArrowDown');
+    const e = g.key(NUMPAD_ENTER);
+    expect(g.mining.beamResource).toBe('ice');
+    expect(e.stopped).toBe(false);
+    expect(e.defaultPrevented).toBe(false);
+  });
+
+  it('Guard (D14): Given Input, Then NumpadEnter is bound to nothing in flight — like Enter, it means something only on a screen', () => {
+    expect(actionForKey(NUMPAD_ENTER)).toBeUndefined();
+    expect(actionForKey('Enter')).toBeUndefined();
+  });
+});

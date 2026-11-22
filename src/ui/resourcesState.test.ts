@@ -688,3 +688,53 @@ describe('open choice 2 — the hold\'s total is the sum of the numbers shown', 
     expect(v.header).toBe('HOLD 1 000 / 8 000 KG');
   });
 });
+
+// =============================================================================
+// v4 sub-plan 6 — open choice 3 (phase A, for the owner's approval; Task 3
+// review m-5): Enter on the numpad (`NumpadEnter`) does exactly what Enter
+// does on the screen — the beam takes the selected line, the default is
+// prevented, a held key does nothing, and the Ctrl / Meta / Alt chords stay
+// the browser's. No approved test pins NumpadEnter today (it is in no key list
+// above), so nothing above changes.
+// =============================================================================
+
+describe('open choice 3 — NumpadEnter sets the beam too', () => {
+  const NUMPAD_ENTER = 'NumpadEnter';
+
+  it.each(SCREEN_ORDER)('Given %s selected, When NumpadEnter, Then the beam takes that line, default prevented', (r) => {
+    expect(need('resourcesKey')(key(NUMPAD_ENTER), { selected: r, cargo: cargo() })).toEqual({ event: { kind: 'beam', resource: r }, preventDefault: true });
+  });
+
+  it('Given a held NumpadEnter (repeat), Then no event, but kept from the browser (as a held Enter)', () => {
+    expect(need('resourcesKey')(key(NUMPAD_ENTER, { repeat: true }), { selected: 'rare', cargo: SKETCH })).toEqual(NONE);
+  });
+
+  it('Given a selection outside the four, When NumpadEnter, Then beam ice', () => {
+    expect(need('resourcesKey')(key(NUMPAD_ENTER), { selected: GOLD, cargo: SKETCH })).toEqual({ event: { kind: 'beam', resource: 'ice' }, preventDefault: true });
+  });
+
+  it.each([
+    ['Ctrl', { ctrl: true }],
+    ['Meta', { meta: true }],
+    ['Alt', { alt: true }],
+    ['Ctrl+Shift', { ctrl: true, shift: true }],
+  ] as const)('Given %s+NumpadEnter, Then no event and the browser keeps its default, as with Enter', (_label, mods) => {
+    expect(need('resourcesKey')(key(NUMPAD_ENTER, mods), { selected: 'metal', cargo: SKETCH })).toEqual(BROWSER);
+  });
+
+  it('Given every selection (valid or corrupt) and every modifier combination, plain or held, Then NumpadEnter gives exactly what Enter gives', () => {
+    const k = need('resourcesKey');
+    const selections: readonly Resource[] = [...SCREEN_ORDER, GOLD];
+    const flags = [false, true];
+    let n = 0;
+    for (const selected of selections) {
+      for (const shift of flags) for (const repeat of flags) for (const ctrl of flags) for (const meta of flags) for (const alt of flags) {
+        const mods = { shift, repeat, ctrl, meta, alt };
+        const s = { selected, cargo: SKETCH };
+        expect(k(key(NUMPAD_ENTER, mods), s), `${String(selected)} ${JSON.stringify(mods)}`).toEqual(k(key('Enter', mods), s));
+        n++;
+      }
+    }
+    expect(n).toBe(5 * 32); // precondition: the loop judged every combination
+  });
+});
