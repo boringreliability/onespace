@@ -57,6 +57,8 @@ type Quat = [number, number, number, number];
 /** Below this a quaternion has no direction to normalise to. */
 const QUAT_MIN_LENGTH = 1e-9;
 
+const quatLength = (q: readonly number[]): number => Math.hypot(q[0]!, q[1]!, q[2]!, q[3]!);
+
 /**
  * Unit length within a few ulp: already normalised, returned exactly as given.
  * Dividing such a quaternion by its length again moves its last bit in about a
@@ -67,13 +69,31 @@ const QUAT_MIN_LENGTH = 1e-9;
  */
 const QUAT_UNIT_TOLERANCE = 4 * Number.EPSILON;
 
+/**
+ * Valid: a length that is finite and above QUAT_MIN_LENGTH. Plan 6, open
+ * choice 4: finite components can still overflow `hypot` (four of 9e307 give
+ * Infinity). Such a quaternion is refused on the FIRST parse; it used to pass
+ * here, be divided by Infinity into zeros, and be refused only when that result
+ * was parsed again. It is not rescued by scaling before `hypot`: an orientation
+ * no build writes is invalid. A large but finite length (1e150 ×4, MAX_VALUE
+ * alone) stays valid and is normalised as before.
+ */
 const quaternion = z
   .tuple([num, num, num, num])
-  .refine((q) => Math.hypot(q[0], q[1], q[2], q[3]) > QUAT_MIN_LENGTH, {
-    message: 'quaternion has (near) zero length',
-  })
+  .refine(
+    (q) => {
+      const l = quatLength(q);
+      return Number.isFinite(l) && l > QUAT_MIN_LENGTH;
+    },
+    {
+      error: (iss) =>
+        Array.isArray(iss.input) && !Number.isFinite(quatLength(iss.input as number[]))
+          ? 'quaternion length overflows'
+          : 'quaternion has (near) zero length',
+    },
+  )
   .transform((q): Quat => {
-    const l = Math.hypot(q[0], q[1], q[2], q[3]);
+    const l = quatLength(q);
     // Idempotent: parse(parse(x)) === parse(x), bit for bit (shared by client and server).
     if (Math.abs(l - 1) <= QUAT_UNIT_TOLERANCE) return [q[0], q[1], q[2], q[3]];
     return [q[0] / l, q[1] / l, q[2] / l, q[3] / l];
