@@ -165,7 +165,13 @@ export function refusalText(reason: MiningRefusal, beam: Resource): string {
  * [v4-resources] `recovery`: the resources screen refused while the beacon's
  * recovery runs (ui/Resources.ts); the action rows never show it.
  */
-export const OCCUPIED_TEXT = { cruise: 'IN CRUISE', jump: 'IN JUMP', recovery: 'IN RECOVERY' } as const;
+export const OCCUPIED_TEXT = {
+  cruise: 'IN CRUISE',
+  jump: 'IN JUMP',
+  recovery: 'IN RECOVERY',
+  /** Plan 6, open choice 1: I while the emergency choice menu is up. */
+  emergency: 'IN EMERGENCY',
+} as const;
 
 /** The next key for a refusal the player can act on. */
 export const ACTION_HINT: Readonly<Partial<Record<MiningRefusal, string>>> = {

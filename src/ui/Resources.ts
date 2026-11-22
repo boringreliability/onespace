@@ -4,8 +4,9 @@
  * resourcesState.ts (Task 3); this file is the module, the DOM and the wiring.
  *
  *  - Opened by I (the 'resources' action) from free flight. Refused in cruise,
- *    in a jump and during the beacon's recovery, with one warn line saying why
- *    (OCCUPIED_TEXT). Over the chart, under the pause sheet and in photo the
+ *    in a jump, during the beacon's recovery and while the emergency choice
+ *    menu is up (open choice 1: one O there could throw out the hold the menu's
+ *    CANNIBALIZE CARGO needs), with one warn line saying why (OCCUPIED_TEXT). Over the chart, under the pause sheet and in photo the
  *    press does nothing and logs nothing.
  *  - While open it is its own mode ('resources'): everything that moves the
  *    world sleeps (gating.ts), and opening ends an extraction and aborts a
@@ -72,6 +73,11 @@ export interface ResourcesOptions {
   readonly cruise: { readonly busy: boolean };
   readonly warp: { readonly phase: string };
   readonly recovery: { readonly active: boolean };
+  /**
+   * The emergency choice menu (`Emergency` satisfies it). Optional: a screen
+   * built without one never refuses for it; registry.ts passes it.
+   */
+  readonly emergency?: { readonly open: boolean };
 }
 
 const EMPTY_HOLD: Readonly<Record<Resource, number>> = Object.freeze({ ice: 0, rare: 0, metal: 0, silicate: 0 });
@@ -195,13 +201,14 @@ export class Resources implements GameModule {
 
   /** I in flight: open, or say why not. */
   private tryOpen(): void {
-    const { universe, cruise, warp, recovery } = this.opts;
+    const { universe, cruise, warp, recovery, emergency } = this.opts;
     // The chart is up over flight: the press is the chart's, not ours.
     if (universe.paused) return;
     // Before `frozen`: the recovery freezes the world too, and it says why.
     if (recovery.active) return this.refuse(OCCUPIED_TEXT.recovery);
     // The pause sheet: it owns the keyboard; nothing to say.
     if (universe.frozen) return;
+    if (emergency?.open) return this.refuse(OCCUPIED_TEXT.emergency);
     if (cruise.busy) return this.refuse(OCCUPIED_TEXT.cruise);
     if (warp.phase !== 'idle') return this.refuse(OCCUPIED_TEXT.jump);
     if (!modes.can('resources')) return;

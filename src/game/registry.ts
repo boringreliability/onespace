@@ -568,8 +568,9 @@ export async function registerModules(engine: Engine, progress: ProgressFn, boot
   const mining = new Mining({ universe, belt, worldState, targeting, cruise, warp });
   await engine.add(mining);
   // [v4-resources] plan 6 task 4: I opens the hold, O jettisons, Enter sets the
-  // beam. After Mining (opening ends its extraction), ahead of the feed.
-  const resources = new Resources({ universe, mining, cruise, warp, recovery });
+  // beam. After Mining (opening ends its extraction), ahead of the feed. Refused
+  // while Emergency's choice menu is up (IN EMERGENCY).
+  const resources = new Resources({ universe, mining, cruise, warp, recovery, emergency });
   await engine.add(resources);
   // [v4-mining] plan 5: the HUD's action block and VEL's mining tone, from this
   // frame's Mining (so after it; Instruments runs before Mining exists).
