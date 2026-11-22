@@ -652,3 +652,75 @@ describe('Review fix I-1 (plan 6) — migrate is idempotent: a migrated save mig
     expect(r2.migratedFrom).toBe(2);
   });
 });
+
+// =============================================================================
+// v4 sub-plan 6 — open choice 4 (phase A, for the owner's approval; Task 3
+// review m-1): a save whose orientation's length overflows (finite components,
+// Math.hypot = Infinity) is reported by `migrate` on the FIRST read like any
+// other invalid save — not accepted as orientation [0, 0, 0, 0] and refused
+// only when read again. Large quaternions with a finite length stay valid and
+// idempotent.
+// =============================================================================
+
+describe('open choice 4 — migrate refuses an overflowing orientation the first time', () => {
+  const OVERFLOWING: Quat4[] = [
+    [9e307, 9e307, 9e307, 9e307],
+    [8.84e307, -9.36e307, 9.49e307, -9.38e307],
+  ];
+  const LARGE_FINITE: Quat4[] = [
+    [1e150, 1e150, 1e150, 1e150],
+    [-1e200, 2e200, -3e200, 4e200],
+    [1e308, 1e308, 0, 0],
+    [Number.MAX_VALUE, 0, 0, 0],
+  ];
+
+  it('Given the examples, Then the overflowing ones have finite components and an infinite length, the large ones a finite length (precondition)', () => {
+    for (const q of OVERFLOWING) {
+      expect(q.every(Number.isFinite)).toBe(true);
+      expect(Math.hypot(...q)).toBe(Number.POSITIVE_INFINITY);
+    }
+    for (const q of LARGE_FINITE) expect(Number.isFinite(Math.hypot(...q))).toBe(true);
+  });
+
+  it.each<[string, (q: Quat4) => unknown]>([
+    ['format 2', formatTwoWith],
+    ['format 1', formatOneWith],
+  ])('Given a %s save whose orientation overflows, When migrated the first time, Then it is reported invalid at player.flight.orientation, never thrown, and the raw save is untouched', (_fmt, make) => {
+    for (const q of OVERFLOWING) {
+      const raw = make(q);
+      const before = structuredClone(raw);
+      let r: ReturnType<typeof migrate> | undefined;
+      expect(() => (r = migrate(raw))).not.toThrow();
+      expect(r!.ok, JSON.stringify(q)).toBe(false);
+      if (r!.ok) continue;
+      expect(r!.reason).toBe('invalid');
+      expect(hasPath(r!.issues, 'player.flight.orientation')).toBe(true);
+      expect(raw).toEqual(before);
+    }
+  });
+
+  it.each<[string, (q: Quat4) => unknown]>([
+    ['format 2', formatTwoWith],
+    ['format 1 (lifted on the first pass)', formatOneWith],
+  ])('Guard: Given a %s save with each large orientation of finite length, When migrated and migrated again, Then both are accepted, unit length, and deep-equal', (_fmt, make) => {
+    expect(notIdempotent(LARGE_FINITE, make)).toEqual([]);
+    for (const q of LARGE_FINITE) {
+      const r = migrate(make(q));
+      expect(r.ok).toBe(true);
+      if (!r.ok) continue;
+      expect(Math.abs(Math.hypot(...r.save.player.flight.orientation) - 1)).toBeLessThanOrEqual(1e-12);
+    }
+  });
+
+  it('Guard: Given four components of 1e150, When migrated, Then the orientation is [0.5, 0.5, 0.5, 0.5]', () => {
+    const r = migrate(formatTwoWith([1e150, 1e150, 1e150, 1e150]));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.save.player.flight.orientation).toEqual([0.5, 0.5, 0.5, 0.5]);
+  });
+
+  it('Guard: Given the hand-picked and the 2 000 seeded orientations (all of finite length), When migrated, Then none is refused', () => {
+    const refused = [...HAND_PICKED, ...sweep()].filter((q) => !migrate(formatTwoWith(q)).ok);
+    expect(refused).toEqual([]);
+  });
+});

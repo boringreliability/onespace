@@ -647,3 +647,62 @@ describe('Review fix I-1 (plan 6) — the quaternion: acceptance unchanged, an a
     });
   });
 });
+
+// =============================================================================
+// v4 sub-plan 6 — open choice 4 (phase A, for the owner's approval; Task 3
+// review m-1): a quaternion whose components are finite but whose LENGTH is
+// not (Math.hypot overflows to Infinity) is refused on the first parse. Today
+// the refine lets it through (Infinity > 1e-9), the transform divides every
+// component by Infinity and the save comes back with orientation [0, 0, 0, 0]
+// — which the next parse refuses. Every quaternion with a finite length above
+// the floor stays valid; the refusal's message is left to the implementation.
+// =============================================================================
+
+describe('open choice 4 — a quaternion whose length overflows is refused the first time it is read', () => {
+  /** Finite components, infinite length. */
+  const OVERFLOWING: Array<[string, Q4]> = [
+    ['four components of 9e307', [9e307, 9e307, 9e307, 9e307]],
+    ['the review\'s sweep find [8.84e307, −9.36e307, 9.49e307, −9.38e307]', [8.84e307, -9.36e307, 9.49e307, -9.38e307]],
+    ['two components of 1.3e308', [1.3e308, 1.3e308, 0, 0]],
+    ['−MAX_VALUE and MAX_VALUE', [-Number.MAX_VALUE, Number.MAX_VALUE, 0, 0]],
+  ];
+  /** Huge components, finite length: valid today, and must stay so. */
+  const LARGE_FINITE: Array<[string, Q4]> = [
+    ['four components of 1e150', [1e150, 1e150, 1e150, 1e150]],
+    ['[−1e200, 2e200, −3e200, 4e200]', [-1e200, 2e200, -3e200, 4e200]],
+    ['two components of 1e308 (length ≈ 1.41e308)', [1e308, 1e308, 0, 0]],
+    ['[MAX_VALUE, 0, 0, 0]', [Number.MAX_VALUE, 0, 0, 0]],
+  ];
+
+  it('Given the examples, Then every component is finite, and the overflowing ones have an infinite length, the large ones a finite one (precondition)', () => {
+    for (const [what, q] of [...OVERFLOWING, ...LARGE_FINITE]) expect(q.every(Number.isFinite), what).toBe(true);
+    for (const [what, q] of OVERFLOWING) expect(Math.hypot(...q), what).toBe(Number.POSITIVE_INFINITY);
+    for (const [what, q] of LARGE_FINITE) expect(Number.isFinite(Math.hypot(...q)), what).toBe(true);
+  });
+
+  describe.each(QUAT_SCHEMAS)('%s', (_fmt, parse) => {
+    it.each(OVERFLOWING)('Given a quaternion with %s, When parsed the first time, Then it is refused at player.flight.orientation', (_what, q) => {
+      const r = parse(q);
+      expect(r.success).toBe(false);
+      if (r.success) return;
+      expect(r.error.issues.some((i) => i.path.join('.') === 'player.flight.orientation')).toBe(true);
+    });
+
+    it('Guard: Given four components of 1e150, When parsed, Then it is accepted and normalised to [0.5, 0.5, 0.5, 0.5] exactly', () => {
+      expect(orientationOf(parse([1e150, 1e150, 1e150, 1e150]))).toEqual([0.5, 0.5, 0.5, 0.5]);
+    });
+
+    it.each(LARGE_FINITE)('Guard: Given a quaternion with %s, When parsed, Then it is accepted, unit length within 1e-12, signs kept, and parsing the result again gives it back bit for bit', (_what, q) => {
+      const once = orientationOf(parse(q));
+      expect(Math.abs(Math.hypot(...once) - 1)).toBeLessThanOrEqual(1e-12);
+      once.forEach((c, i) => expect(Math.sign(c)).toBe(Math.sign(q[i]!)));
+      const twice = orientationOf(parse(once));
+      twice.forEach((c, i) => expect(Object.is(c, once[i]), `component ${i}`).toBe(true));
+    });
+
+    it('Guard: Given 2 000 seeded orientations (lengths finite, 1e-6 to 1e6 scale), When parsed, Then none is refused', () => {
+      const refused = seededQuats().filter((q) => !parse(q).success);
+      expect(refused).toEqual([]);
+    });
+  });
+});

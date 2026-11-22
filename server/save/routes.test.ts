@@ -1242,3 +1242,76 @@ describe('save format 2 (plan 6 task 1)', () => {
     expect(await res.json()).toEqual({ revision: 4 });
   });
 });
+
+// =============================================================================
+// v4 sub-plan 6 — open choice 4 (phase A, for the owner's approval; Task 3
+// review m-1): `validateSave` runs `migrate`, so a save whose orientation's
+// length overflows (finite components, Math.hypot = Infinity) must be refused
+// on the way IN — 400 invalid-save, nothing stored — instead of being stored
+// as orientation [0, 0, 0, 0], which the next client to read it refuses
+// (SAVE UNREADABLE). Large orientations of finite length are still accepted
+// and stored normalised.
+// =============================================================================
+
+describe('open choice 4 — an orientation whose length overflows is refused by the server', () => {
+  const OVERFLOWING: [number, number, number, number] = [9e307, 9e307, 9e307, 9e307];
+  const withOrientation = (s: SaveV1, q: readonly number[]): SaveV1 => {
+    s.player.flight.orientation = [...q] as SaveV1['player']['flight']['orientation'];
+    return s;
+  };
+
+  it('Given the example, Then its components are finite and survive JSON, and its length is infinite (precondition)', () => {
+    expect(OVERFLOWING.every(Number.isFinite)).toBe(true);
+    expect(Math.hypot(...OVERFLOWING)).toBe(Number.POSITIVE_INFINITY);
+    expect(JSON.parse(JSON.stringify(OVERFLOWING))).toEqual(OVERFLOWING);
+  });
+
+  it('Given a stored save, When a save whose orientation overflows is PUT, Then 400 { error: "invalid-save" } and nothing changes', async () => {
+    const a = await mkUser('a');
+    const s = mk({ revision: 1 });
+    expect((await put(a, s, null)).status).toBe(200);
+    const before = await snapshot(a.id);
+    const res = await put(a, withOrientation(mk({ revision: 2 }), OVERFLOWING), head(s));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'invalid-save' });
+    expect(await snapshot(a.id)).toEqual(before);
+  });
+
+  it('Given an empty cloud, When a save whose orientation overflows is PUT, Then 400 invalid-save and nothing is stored', async () => {
+    const a = await mkUser('a');
+    const res = await put(a, withOrientation(mk({ revision: 1 }), OVERFLOWING), null);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'invalid-save' });
+    expect((await get(a)).status).toBe(404);
+  });
+
+  it('Given a stored save, When a device save whose orientation overflows is resolved, Then 400 invalid-save and nothing changes', async () => {
+    const a = await mkUser('a');
+    const s = mk({ revision: 1 });
+    expect((await put(a, s, null)).status).toBe(200);
+    const before = await snapshot(a.id);
+    const res = await resolve(a, 'device', withOrientation(mk({ revision: 2 }), OVERFLOWING), head(s), head(s));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'invalid-save' });
+    expect(await snapshot(a.id)).toEqual(before);
+  });
+
+  it('Guard: Given an empty cloud, When a save with orientation [1e150, 1e150, 1e150, 1e150] (finite length) is PUT, Then 200, and the stored and returned orientation is [0.5, 0.5, 0.5, 0.5]', async () => {
+    const a = await mkUser('a');
+    const res = await put(a, withOrientation(mk({ revision: 1 }), [1e150, 1e150, 1e150, 1e150]), null);
+    expect(res.status).toBe(200);
+    expect((await headRow(a.id))?.body.player.flight.orientation).toEqual([0.5, 0.5, 0.5, 0.5]);
+    const got = (await (await get(a)).json()) as { save: SaveV1 };
+    expect(got.save.player.flight.orientation).toEqual([0.5, 0.5, 0.5, 0.5]);
+  });
+
+  it('Guard: Given the stored 1e150 save read back, When it is migrated again on a client, Then it is accepted and unchanged (idempotent through the server)', async () => {
+    const a = await mkUser('a');
+    expect((await put(a, withOrientation(mk({ revision: 1 }), [1e150, 1e150, 1e150, 1e150]), null)).status).toBe(200);
+    const got = (await (await get(a)).json()) as { save: SaveV1 };
+    const again = migrateSave(got.save);
+    expect(again.ok).toBe(true);
+    if (!again.ok) return;
+    expect(again.save).toEqual(got.save);
+  });
+});
