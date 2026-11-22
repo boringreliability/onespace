@@ -604,3 +604,87 @@ describe('resourcesKey — the selection is always one of the four, and the inpu
     expect(JSON.stringify(s)).toBe(before);
   });
 });
+
+// =============================================================================
+// v4 sub-plan 6 — open choice 2 (phase A, for the owner's approval; Task 3
+// review m-4): the header's total is the sum of the numbers the four lines
+// show, not the rounded sum of the raw kilograms. Refining draws ice
+// continuously, so fractions are normal: ice 100.4 + metal 100.4 showed
+// `ICE 100 KG`, `METAL 100 KG` under `HOLD 201 / 8 000 KG`. Amounts below
+// 0.5 kg show as 0 KG (and count as empty: dim line, O does nothing); with
+// this rule they add 0 to the header too. The approved header tests above
+// all use whole numbers and are unchanged by it.
+// =============================================================================
+
+describe('open choice 2 — the hold\'s total is the sum of the numbers shown', () => {
+  /** The number a line or the header prints, spaces removed ("1 234" → 1234). */
+  const shown = (s: string, re: RegExp): number => {
+    const m = re.exec(s);
+    expect(m, s).not.toBeNull();
+    return Number(m![1]!.replace(/ /g, ''));
+  };
+  const lineKg = (text: string): number => shown(text, /([\d ]+) KG\s*$/);
+  const headerKg = (header: string): number => shown(header, /^HOLD ([\d ]+) \//);
+
+  it('Given ice 100.4 kg and metal 100.4 kg, Then the lines show 100 and 100 and the header is HOLD 200 / 8 000 KG', () => {
+    const v = need('resourcesView')(input({ cargo: cargo({ ice: 100.4, metal: 100.4 }) }));
+    expect(v.hold[0]!.text).toMatch(/^\s*ICE\s+100 KG\s*$/);
+    expect(v.hold[2]!.text).toMatch(/^\s*METAL\s+100 KG\s*$/);
+    expect(v.header).toBe('HOLD 200 / 8 000 KG');
+  });
+
+  it('Given ice 100.6 kg and metal 100.6 kg, Then the lines show 101 and 101 and the header is HOLD 202 / 8 000 KG (rounding up adds up too)', () => {
+    const v = need('resourcesView')(input({ cargo: cargo({ ice: 100.6, metal: 100.6 }) }));
+    expect(v.hold[0]!.text).toMatch(/^\s*ICE\s+101 KG\s*$/);
+    expect(v.hold[2]!.text).toMatch(/^\s*METAL\s+101 KG\s*$/);
+    expect(v.header).toBe('HOLD 202 / 8 000 KG');
+  });
+
+  it('Given dust on all four lines (0.4 kg each, each shown as 0 KG and counted as empty), Then the header is HOLD 0 / 8 000 KG — not 2', () => {
+    expect(formatKg(0.4)).toBe('0'); // precondition: the line says 0 KG
+    const v = need('resourcesView')(input({ cargo: cargo({ ice: 0.4, rare: 0.4, metal: 0.4, silicate: 0.4 }) }));
+    for (const l of v.hold) expect(l.text, l.resource).toMatch(lineRe(l.resource, 0));
+    expect(v.header).toBe('HOLD 0 / 8 000 KG');
+  });
+
+  it('Given 0.5 kg ice (shown as 1 KG: formatKg rounds a half up), Then the header is HOLD 1 / 8 000 KG', () => {
+    expect(formatKg(0.5)).toBe('1'); // precondition
+    expect(need('resourcesView')(input({ cargo: cargo({ ice: 0.5 }) })).header).toBe('HOLD 1 / 8 000 KG');
+  });
+
+  it.each<[string, Partial<Record<Resource, number>>]>([
+    ['fractions below a half', { ice: 1234.4, rare: 0.3, metal: 999.2, silicate: 10.4 }],
+    ['fractions above a half', { ice: 1234.6, rare: 0.7, metal: 999.8, silicate: 10.5 }],
+    ['mixed', { ice: 4321.49, rare: 12.51, metal: 0.49, silicate: 2000.5 }],
+    ['one line only', { metal: 777.7 }],
+  ])('Given a hold with %s, Then the header\'s number is exactly the sum of the four lines\' numbers', (_what, o) => {
+    const v = need('resourcesView')(input({ cargo: cargo(o) }));
+    const sum = v.hold.reduce((a, l) => a + lineKg(l.text), 0);
+    expect(headerKg(v.header)).toBe(sum);
+  });
+
+  it('Guard: Given whole numbers (the sketch\'s hold) and an empty hold, Then the header is what it was: HOLD 6 250 / 8 000 KG and HOLD 0 / 8 000 KG', () => {
+    const view = need('resourcesView');
+    expect(view(input({ cargo: SKETCH })).header).toBe('HOLD 6 250 / 8 000 KG');
+    expect(view(input()).header).toBe('HOLD 0 / 8 000 KG');
+  });
+
+  it('Guard: Given a full hold in whole numbers, or full with one fraction below a half (ice 7 999.6 + rare 0.4), Then the header is HOLD 8 000 / 8 000 KG', () => {
+    const view = need('resourcesView');
+    expect(view(input({ cargo: cargo({ ice: 5000, rare: 500, metal: 1500, silicate: 1000 }) })).header).toBe('HOLD 8 000 / 8 000 KG');
+    expect(view(input({ cargo: cargo({ ice: 7999.6, rare: 0.4 }) })).header).toBe('HOLD 8 000 / 8 000 KG');
+  });
+
+  it('Consequence, for the owner: Given a hold exactly full whose lines each round up (ice 5 000.6 + metal 1 999.7 + silicate 999.7 = 8 000 kg), Then the lines show 5 001, 2 000 and 1 000 and the header says HOLD 8 001 / 8 000 KG — more than the capacity', () => {
+    const v = need('resourcesView')(input({ cargo: cargo({ ice: 5000.6, metal: 1999.7, silicate: 999.7 }) }));
+    expect(v.hold[0]!.text).toMatch(/^\s*ICE\s+5 001 KG\s*$/);
+    expect(v.hold[2]!.text).toMatch(/^\s*METAL\s+2 000 KG\s*$/);
+    expect(v.hold[3]!.text).toMatch(/^\s*SILICATE\s+1 000 KG\s*$/);
+    expect(v.header).toBe('HOLD 8 001 / 8 000 KG');
+  });
+
+  it('Guard: Given NaN and negative amounts beside 1 000 kg metal, Then they add nothing: HOLD 1 000 / 8 000 KG', () => {
+    const v = need('resourcesView')(input({ cargo: cargo({ ice: Number.NaN, rare: -50, metal: 1000, silicate: -0.4 }) }));
+    expect(v.header).toBe('HOLD 1 000 / 8 000 KG');
+  });
+});
