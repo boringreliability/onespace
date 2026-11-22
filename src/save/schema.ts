@@ -57,6 +57,16 @@ type Quat = [number, number, number, number];
 /** Below this a quaternion has no direction to normalise to. */
 const QUAT_MIN_LENGTH = 1e-9;
 
+/**
+ * Unit length within a few ulp: already normalised, returned exactly as given.
+ * Dividing such a quaternion by its length again moves its last bit in about a
+ * third of orientations, so parsing a parsed save would not give the same save
+ * (plan 6 review fix I-1: SyncClient re-migrates migrated bodies and compares
+ * them bitwise; a moved bit was a false conflict). What is valid is unchanged —
+ * only the refine below decides that.
+ */
+const QUAT_UNIT_TOLERANCE = 4 * Number.EPSILON;
+
 const quaternion = z
   .tuple([num, num, num, num])
   .refine((q) => Math.hypot(q[0], q[1], q[2], q[3]) > QUAT_MIN_LENGTH, {
@@ -64,6 +74,8 @@ const quaternion = z
   })
   .transform((q): Quat => {
     const l = Math.hypot(q[0], q[1], q[2], q[3]);
+    // Idempotent: parse(parse(x)) === parse(x), bit for bit (shared by client and server).
+    if (Math.abs(l - 1) <= QUAT_UNIT_TOLERANCE) return [q[0], q[1], q[2], q[3]];
     return [q[0] / l, q[1] / l, q[2] / l, q[3] / l];
   });
 

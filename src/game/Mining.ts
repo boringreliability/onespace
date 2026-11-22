@@ -471,20 +471,28 @@ export class Mining implements GameModule {
     // It belongs to the rock it started on.
     if (this.targetAsteroid !== null && this.targetAsteroid !== e.asteroidId) return 'interrupted';
     if (m.ok) return null;
-    switch (m.reason) {
+    // A refusal always has a reason; were it missing, it falls to the default and fails closed.
+    const reason = m.reason!;
+    switch (reason) {
       case 'no-target':
       case 'range':
       case 'speed':
       case 'hold-full':
-        return m.reason;
+        return reason;
       case 'depleted':
         // Every resource under MINE_MIN_KG (such a rock is already gone).
         return 'resource-depleted';
-      default:
-        // Anything else — 'not-here' included — is not this gate's to end: the running
-        // extraction keeps its own resource (the beam's choice applies from the next B),
-        // and that resource running out ends it in extract() as 'resource-depleted'.
+      case 'not-here':
+        // Not this gate's to end: the running extraction keeps its own resource (the
+        // beam's choice applies from the next B), and that resource running out ends
+        // it in extract() as 'resource-depleted'.
         return null;
+      default: {
+        // Fail closed: a reason nobody anticipated ends the extraction (R16, one gate).
+        const unexpected: never = reason;
+        void unexpected;
+        return 'interrupted';
+      }
     }
   }
 
