@@ -12,7 +12,7 @@ import { MINING_KEYS } from '@/core/Input';
 import type { ActionState, MiningKind } from '@/game/Mining';
 import { ACTION_HINT, REFUSAL_LOG, formatKg, type MiningRefusal } from '@/game/miningRules';
 import { CARGO_CAPACITY_KG } from '@/ship/cargo';
-import { actionRow, actionRows, speedTone } from './actionRows';
+import { actionRow, actionRows, speedTone, type ActionRow } from './actionRows';
 
 type Blocked = Extract<ActionState, { kind: 'blocked' }>;
 type BlockedReason = Blocked['reason'];
@@ -243,7 +243,7 @@ describe('actionRows — the three rows the HUD is handed each frame', () => {
     const rows = actionRows((k) => {
       asked.push(k);
       return states[k];
-    });
+    }, 'ice');
     expect(asked).toEqual(['mine', 'refine', 'repair']);
     expect(rows).toHaveLength(3);
     expect(rows.map((r) => r.label)).toEqual(['MINE', 'REFINE', 'REPAIR']);
@@ -262,5 +262,134 @@ describe('speedTone — VEL says when the ship is slow enough to mine', () => {
 
   it('Given no rock targeted (null), Then "normal"', () => {
     expect(speedTone(null)).toBe('normal');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v4 sub-plan 6, Task 2 (phase A) — the MINE row shows the beam's choice.
+//
+// DESIGN-6 §7.2: at rest the MINE row says `▸ READY · <RESOURCE>` (the choice
+// is visible without opening the screen); blocked rows say their reason as
+// today; 'not-here' says `NO <RESOURCE> HERE`. No row may get wider than the
+// longest text the rows can show today.
+// Assumed API (not there yet, read through a cast): actionRows(status, beam).
+// ---------------------------------------------------------------------------
+
+type Beam = 'ice' | 'rare' | 'metal' | 'silicate';
+type RowsWithBeam = (status: (kind: MiningKind) => ActionState, beam: Beam) => readonly [ActionRow, ActionRow, ActionRow];
+const rowsWithBeam = actionRows as unknown as RowsWithBeam;
+const BEAMS: readonly Beam[] = ['ice', 'rare', 'metal', 'silicate'];
+const BEAM_NAME: Readonly<Record<Beam, string>> = { ice: 'ICE', rare: 'RARE', metal: 'METAL', silicate: 'SILICATE' };
+
+/** Every state ready. */
+const allReady = (): ActionState => ready;
+/** MINE blocked for `reason`, the others ready. */
+const mineBlocked =
+  (reason: string) =>
+  (k: MiningKind): ActionState =>
+    k === 'mine' ? blocked(reason as BlockedReason) : ready;
+
+/** Today's reasons: REFUSAL_LOG's keys and cruise/jump, without the new one. */
+const TODAY_REASONS: readonly BlockedReason[] = ALL_REASONS.filter((r) => (r as string) !== 'not-here');
+
+describe('actionRows(status, beam) — the MINE row at rest shows the choice (plan 6 task 2)', () => {
+  it('Given MINE ready and the beam on ice, Then the MINE row says "▸ READY · ICE", tone ready, no bar', () => {
+    const [mine] = rowsWithBeam(allReady, 'ice');
+    expect(mine.text).toBe('▸ READY · ICE');
+    expect(mine.tone).toBe('ready');
+    expect(mine.fill).toBeNull();
+  });
+
+  it('Given MINE ready and each beam, Then "▸ READY · <RESOURCE>" (rare → "▸ READY · RARE")', () => {
+    for (const b of BEAMS) expect(rowsWithBeam(allReady, b)[0].text, b).toBe(`▸ READY · ${BEAM_NAME[b]}`);
+    expect(rowsWithBeam(allReady, 'rare')[0].text).toBe('▸ READY · RARE');
+  });
+
+  it('Given REFINE and REPAIR ready, Then they still say "▸ READY" whatever the beam', () => {
+    for (const b of BEAMS) {
+      const rows = rowsWithBeam(allReady, b);
+      expect(rows[1].text, b).toBe('▸ READY');
+      expect(rows[2].text, b).toBe('▸ READY');
+    }
+  });
+
+  it('Given the same ready status on two frames and the beam changed between them, Then the MINE row\'s text follows the beam (the reused row is rebuilt)', () => {
+    expect(rowsWithBeam(allReady, 'ice')[0].text).toBe('▸ READY · ICE');
+    expect(rowsWithBeam(allReady, 'metal')[0].text).toBe('▸ READY · METAL');
+    expect(rowsWithBeam(allReady, 'metal')[0].text).toBe('▸ READY · METAL');
+    expect(rowsWithBeam(allReady, 'ice')[0].text).toBe('▸ READY · ICE');
+  });
+});
+
+describe('actionRows(status, beam) — not-here and the other blocked rows (plan 6 task 2)', () => {
+  it('Given MINE blocked \'not-here\' and the beam on rare, Then "NO RARE HERE", tone blocked, no bar', () => {
+    const [mine] = rowsWithBeam(mineBlocked('not-here'), 'rare');
+    expect(mine.text).toBe('NO RARE HERE');
+    expect(mine.tone).toBe('blocked');
+    expect(mine.fill).toBeNull();
+  });
+
+  it('Given MINE blocked \'not-here\', Then the text names the beam\'s resource, and follows it when the beam changes', () => {
+    for (const b of BEAMS) expect(rowsWithBeam(mineBlocked('not-here'), b)[0].text, b).toBe(`NO ${BEAM_NAME[b]} HERE`);
+    expect(rowsWithBeam(mineBlocked('not-here'), 'ice')[0].text).toBe('NO ICE HERE');
+    expect(rowsWithBeam(mineBlocked('not-here'), 'silicate')[0].text).toBe('NO SILICATE HERE');
+  });
+
+  it('Given every reason of today, Then the MINE row says exactly what actionRow says today, whatever the beam (blocked rows are unchanged)', () => {
+    for (const reason of TODAY_REASONS) {
+      const today = actionRow('mine', blocked(reason)).text;
+      for (const b of BEAMS) expect(rowsWithBeam(mineBlocked(reason), b)[0].text, `${reason}/${b}`).toBe(today);
+    }
+  });
+
+  it('Given an extraction of ice running and the beam moved to metal, Then the MINE row shows the running extraction ("ICE 1 240 KG"), not the choice', () => {
+    const states = (k: MiningKind): ActionState => (k === 'mine' ? mining(1240, 'ice', 0.4) : ready);
+    expect(rowsWithBeam(states, 'metal')[0].text).toBe('ICE 1 240 KG');
+    expect(rowsWithBeam(states, 'metal')[0].tone).toBe('running');
+  });
+});
+
+describe('actionRows(status, beam) — no row wider than today (plan 6 task 2, DESIGN-6 §7.2)', () => {
+  /** The longest text the three rows can show today (as the width test above measures it). */
+  function todayLongest(): string {
+    const texts: string[] = [];
+    for (const k of KINDS) {
+      for (const reason of TODAY_REASONS) texts.push(actionRow(k, blocked(reason)).text);
+      texts.push(actionRow(k, ready).text);
+      for (const res of BEAMS) {
+        texts.push(actionRow(k, mining(CARGO_CAPACITY_KG, res)).text);
+        texts.push(actionRow(k, mining(0, res)).text);
+      }
+      for (const left of [0, 0.01, 4.2, 8, 10]) texts.push(actionRow(k, timed(left)).text);
+    }
+    return texts.reduce((a, b) => (b.length > a.length ? b : a), '');
+  }
+
+  it('Given today\'s rows, Then their longest text is a real one (the measure is not empty)', () => {
+    expect(todayLongest().length).toBeGreaterThan(0);
+  });
+
+  it('Given each beam, Then "▸ READY · <RESOURCE>" and "NO <RESOURCE> HERE" are no longer, in characters, than today\'s longest row text', () => {
+    const max = todayLongest().length;
+    for (const b of BEAMS) {
+      const readyText = rowsWithBeam(allReady, b)[0].text;
+      const notHereText = rowsWithBeam(mineBlocked('not-here'), b)[0].text;
+      expect(readyText, b).toBe(`▸ READY · ${BEAM_NAME[b]}`);
+      expect(notHereText, b).toBe(`NO ${BEAM_NAME[b]} HERE`);
+      expect(readyText.length, `${readyText} vs ${todayLongest()}`).toBeLessThanOrEqual(max);
+      expect(notHereText.length, `${notHereText} vs ${todayLongest()}`).toBeLessThanOrEqual(max);
+    }
+  });
+
+  it('Given every state with every beam, Then no row of the three is wider than today\'s longest', () => {
+    const max = todayLongest().length;
+    const states: Array<(k: MiningKind) => ActionState> = [allReady, mineBlocked('not-here')];
+    for (const reason of TODAY_REASONS) states.push(() => blocked(reason));
+    for (const res of BEAMS) states.push((k) => (k === 'mine' ? mining(CARGO_CAPACITY_KG, res) : timed(10)));
+    for (const s of states) {
+      for (const b of BEAMS) {
+        for (const row of rowsWithBeam(s, b)) expect(row.text.length, row.text).toBeLessThanOrEqual(max);
+      }
+    }
   });
 });

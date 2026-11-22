@@ -45,10 +45,12 @@ import { ActionJournal } from '@/save/actionJournal';
 import { replay, zeroState } from '@/save/replay';
 import { CARGO_CAPACITY_KG, Cargo, type CargoAction, type CargoResult } from '@/ship/cargo';
 import { PROBE_TANK_CAPACITY_KG, Propellant } from '@/ship/propellant';
-import { actionRow } from '@/ui/actionRows';
+import { actionRow, actionRows, type ActionRow } from '@/ui/actionRows';
+import { miningHintFacts } from '@/ui/hintRules';
 import { extractionLog, type ExtractionEnd } from './extraction';
-import { Mining, type MiningWorld } from './Mining';
-import { MINE_RANGE_KM } from './miningRules';
+import { Mining, type ActionState, type MiningKind, type MiningWorld } from './Mining';
+import * as miningRules from './miningRules';
+import { MINE_MIN_KG, MINE_RANGE_KM } from './miningRules';
 import { beltRig, fyssField } from './testing/beltFixture';
 
 const CAP = PROBE_TANK_CAPACITY_KG;
@@ -344,6 +346,7 @@ describe('mine (B)', () => {
     const r = rig();
     r.worldState.recordMined(r.ast.id, 'ice', r.ast.composition.ice, 'local');
     r.worldState.recordMined(r.ast.id, 'rare', r.ast.composition.rare, 'local');
+    choose(r, 'metal'); // plan 6 task 2: B takes the choice (owner-approved)
     r.press(MINING_KEYS.mine);
     r.tick(240); // 600 kg accrued: two bites
     expect(r.started).toEqual([{ asteroidId: r.ast.id, resource: 'metal' }]);
@@ -1067,9 +1070,10 @@ describe('which resource an extraction takes — one, and it does not switch', (
     [['ice', 'rare', 'metal'], 'silicate'],
   ];
   for (const [gone, want] of cases) {
-    it(`Given ${gone.length ? gone.join(', ') + ' mined out' : 'every resource'}, When B, Then the extraction takes ${want} (order: ice, rare, metal, silicate)`, () => {
+    it(`Given ${gone.length ? gone.join(', ') + ' mined out' : 'every resource'} and the choice ${want}, When B, Then the extraction takes ${want} (plan 6 task 2: the choice X takes X)`, () => {
       const r = rig();
       for (const res of gone) leave(r, res, 0);
+      choose(r, want);
       r.press(MINING_KEYS.mine);
       expect(r.started).toEqual([{ asteroidId: r.ast.id, resource: want }]);
       r.tick(100);
@@ -1097,15 +1101,16 @@ describe('which resource an extraction takes — one, and it does not switch', (
     expect(r.belt.isDestroyed(r.ast.id)).toBe(false);
   });
 
-  it('Given the ice ran out, When B again, Then a new extraction starts on the next resource (rare)', () => {
+  it('Given the ice ran out, When B again, Then no new extraction starts: "NO ICE HERE" (plan 6 task 2: never the next resource)', () => {
     const r = rig();
     leave(r, 'ice', 300);
     r.press(MINING_KEYS.mine);
     r.tick(120);
     r.press(MINING_KEYS.mine);
-    expect(r.started.map((s) => s.resource)).toEqual(['ice', 'rare']);
+    expect(r.started.map((s) => s.resource)).toEqual(['ice']);
+    expect(r.logs).toEqual(['MINED · 300 KG ICE — ICE DEPLETED', 'NO ICE HERE']);
     r.tick(100);
-    expect(r.cargo.kg('rare')).toBe(250);
+    expect(r.cargo.kg('rare')).toBe(0);
   });
 });
 
@@ -1513,7 +1518,7 @@ describe('B in the frame an extraction ends by itself', () => {
     expectNothingMore(r, 'MINING STOPPED — MATCH SPEED · 250 KG ICE', 'speed', 250);
   });
 
-  it('Given the ice ran out in frame 100 and B was swallowed, When B is pressed in the next frame, Then it behaves as a normal press: a new extraction starts on the next resource (rare)', () => {
+  it('Given the ice ran out in frame 100 and B was swallowed, When B is pressed in the next frame, Then it behaves as a normal press: "NO ICE HERE", nothing starts (plan 6 task 2: never the next resource)', () => {
     const r = rig();
     leave(r, 'ice', 250);
     r.press(MINING_KEYS.mine);
@@ -1521,11 +1526,11 @@ describe('B in the frame an extraction ends by itself', () => {
     pressInThisFrame(r);
     expect(r.started).toHaveLength(1);
     r.press(MINING_KEYS.mine);
-    expect(r.started.map((s) => s.resource)).toEqual(['ice', 'rare']);
-    expect(r.mining.status('mine').kind).toBe('running');
-    expect(r.logs).toEqual(['MINED · 250 KG ICE — ICE DEPLETED']);
+    expect(r.started.map((s) => s.resource)).toEqual(['ice']);
+    expect(r.mining.status('mine').kind).not.toBe('running');
+    expect(r.logs).toEqual(['MINED · 250 KG ICE — ICE DEPLETED', 'NO ICE HERE']);
     r.tick(100);
-    expect(r.cargo.kg('rare')).toBe(250);
+    expect(r.cargo.kg('rare')).toBe(0);
   });
 
   it('Given the hold filled in frame 100 and B was swallowed, When B is pressed in the next frame, Then it behaves as a normal press: the refusal "HOLD FULL" is logged once, nothing starts', () => {
@@ -1948,5 +1953,344 @@ describe('a press refused for cruise or a jump logs what the row shows (plan 5 f
     expect(actionRow('mine', r.mining.status('mine')).text).toBe('BUSY');
     expect(actionRow('repair', r.mining.status('repair')).text).toBe('BUSY');
     expect(r.mining.busy?.kind).toBe('refine');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v4 sub-plan 6, Task 2 (phase A) — the beam takes what the player chose.
+//
+// DESIGN-6 §7.2: the player picks ONE resource; the choice is fixed. B takes
+// the chosen resource and nothing else. A rock without it starts nothing: the
+// row and the log say `NO <RESOURCE> HERE` (reason 'not-here'). D53 d is
+// unchanged: an extraction ends when its resource runs out, and a new B takes
+// the SAME choice, never the next in the old order. The default is ice.
+//
+// Assumed API (docs/v4/plan-6-resources.md, Task 2 Interfaces), not there yet
+// — read through casts so `npm run typecheck` stays clean:
+//   Mining.beamResource: Resource (default 'ice'); Mining.setBeamResource(r)
+//   (does not change a running extraction; applies from the next B);
+//   miningRules.notHereText(r) → 'NO RARE HERE'; ActionState's blocked reason
+//   gains 'not-here'; actionRows(status, beam).
+//
+// Choices (phase A, for the owner):
+//   - 'not-here' ranks LAST, after 'depleted' (mayMine's order: busy →
+//     no-target → range → speed → hold-full → depleted → not-here): a full
+//     hold says HOLD FULL, out of range says OUT OF RANGE, cruise IN CRUISE.
+//   - setBeamResource with a value that is not one of the four resources is
+//     ignored (the choice stays where it was).
+//   - A ready status stays exactly { kind: 'ready' }: the choice is shown by
+//     the row (actionRows' beam), not carried in the state.
+//   - The choice is not checked against the running extraction: choosing a
+//     resource the rock lacks mid-extraction does not end it.
+// ---------------------------------------------------------------------------
+
+type BeamApi = { readonly beamResource: Resource; setBeamResource(r: Resource): void };
+
+/** The beam API, after checking it exists. */
+function beamOf(m: Mining): BeamApi {
+  const b = m as unknown as Partial<BeamApi>;
+  expect(typeof b.setBeamResource, 'Mining.setBeamResource exists').toBe('function');
+  return m as unknown as BeamApi;
+}
+
+function choose(r: ReturnType<typeof rig>, res: Resource): void {
+  beamOf(r.mining).setBeamResource(res);
+}
+
+/** notHereText from miningRules, after checking it exists. */
+function notHere(res: Resource): string {
+  const fn = (miningRules as unknown as { notHereText?: (r: Resource) => string }).notHereText;
+  expect(typeof fn, 'miningRules.notHereText exists').toBe('function');
+  return fn!(res);
+}
+
+type RowsWithBeam = (status: (kind: MiningKind) => ActionState, beam: Resource) => readonly [ActionRow, ActionRow, ActionRow];
+const rowsWithBeam = actionRows as unknown as RowsWithBeam;
+
+const NAME: Readonly<Record<Resource, string>> = { ice: 'ICE', metal: 'METAL', silicate: 'SILICATE', rare: 'RARE' };
+
+/** The rig's rock still has at least `kg` of `res`. */
+function has(r: ReturnType<typeof rig>, res: Resource, kg = MINE_MIN_KG): boolean {
+  return r.belt.remainingKg(r.ast.id, res) >= kg;
+}
+
+/** A rig whose rock has no rare (and plenty of the rest), checked. */
+function noRareRig(rareLeftKg = 0): ReturnType<typeof rig> {
+  const r = rig();
+  leave(r, 'rare', rareLeftKg);
+  r.tick();
+  expect(has(r, 'rare'), 'precondition: no minable rare left').toBe(false);
+  for (const res of ['ice', 'metal', 'silicate'] as const) expect(has(r, res, 1_000), `precondition: ≥ 1 t ${res}`).toBe(true);
+  expect(r.belt.isDestroyed(r.ast.id), 'precondition: the rock exists').toBe(false);
+  // With the default choice (ice) B could start: only the choice is wrong.
+  expect(r.mining.status('mine'), 'precondition: ready on ice').toEqual({ kind: 'ready' });
+  return r;
+}
+
+describe('the beam\'s choice — Mining.beamResource and setBeamResource (plan 6 task 2)', () => {
+  it('Given a new Mining, Then beamResource is ice (the default: a new game behaves as before)', () => {
+    const r = rig();
+    expect((r.mining as unknown as Partial<BeamApi>).beamResource).toBe('ice');
+  });
+
+  it('Given setBeamResource with each of the four resources, Then beamResource says it', () => {
+    const r = rig();
+    for (const res of ['rare', 'metal', 'silicate', 'ice'] as const) {
+      choose(r, res);
+      expect(beamOf(r.mining).beamResource, res).toBe(res);
+    }
+  });
+
+  it('Given the choice metal, When setBeamResource is handed something that is not a resource ("gold", "", undefined, null), Then it is ignored and the choice stays metal', () => {
+    const r = rig();
+    choose(r, 'metal');
+    for (const bad of ['gold', '', undefined, null, 'ICE']) {
+      beamOf(r.mining).setBeamResource(bad as unknown as Resource);
+      expect(beamOf(r.mining).beamResource, String(bad)).toBe('metal');
+    }
+  });
+
+  it('Given the choice metal at a rock with metal, Then status(mine) is still exactly { kind: ready } (the row shows the choice, not the state)', () => {
+    const r = rig();
+    expect(has(r, 'metal', 1_000)).toBe(true);
+    choose(r, 'metal');
+    r.tick();
+    expect(r.mining.status('mine')).toEqual({ kind: 'ready' });
+  });
+
+  it('Given setBeamResource with nothing running, Then nothing is logged and nothing starts', () => {
+    const r = rig();
+    choose(r, 'silicate');
+    r.tick();
+    expect(r.logs).toEqual([]);
+    expect(r.started).toEqual([]);
+  });
+});
+
+describe('B takes the chosen resource and nothing else (plan 6 task 2)', () => {
+  it('Given the choice metal at a rock with ice AND metal, When B, Then the extraction takes metal: mining:started carries metal, the bite, the hold and the operation are metal, no ice', () => {
+    const r = rig();
+    expect(has(r, 'ice', 1_000), 'precondition: the rock has ice').toBe(true);
+    expect(has(r, 'metal', 1_000), 'precondition: the rock has metal').toBe(true);
+    choose(r, 'metal');
+    r.press(MINING_KEYS.mine);
+    expect(r.started).toEqual([{ asteroidId: r.ast.id, resource: 'metal' }]);
+    const s = r.mining.status('mine');
+    expect(s.kind).toBe('running');
+    expect(s.resource).toBe('metal');
+    expect(r.mining.operations[0]).toMatchObject({ asteroidId: r.ast.id, resource: 'metal' });
+    r.tick(100);
+    expect(r.bites).toEqual([{ asteroidId: r.ast.id, resource: 'metal', kg: 250 }]);
+    expect(r.actions.map((a) => a.action)).toEqual([{ kind: 'mine', asteroidId: r.ast.id, resource: 'metal', kg: 250 }]);
+    expect(r.cargo.snapshot()).toEqual({ ice: 0, metal: 250, silicate: 0, rare: 0 });
+  });
+
+  for (const res of ['ice', 'rare', 'metal', 'silicate'] as const) {
+    it(`Given every resource in the rock and the choice ${res}, When B, Then the extraction takes ${res} (whatever the old order said)`, () => {
+      const r = rig();
+      for (const x of ALL) expect(has(r, x, 250), `precondition: ≥ 250 kg ${x}`).toBe(true);
+      choose(r, res);
+      r.press(MINING_KEYS.mine);
+      expect(r.started).toEqual([{ asteroidId: r.ast.id, resource: res }]);
+      r.tick(100);
+      expect(r.bites).toEqual([{ asteroidId: r.ast.id, resource: res, kg: 250 }]);
+      expect(r.cargo.kg(res)).toBe(250);
+      expect(r.cargo.totalKg).toBe(250);
+    });
+  }
+
+  it('Given the default choice (ice) at a rock with no ice but metal, When B, Then "NO ICE HERE" and nothing starts (it no longer falls through to metal)', () => {
+    const r = rig();
+    leave(r, 'ice', 0);
+    r.tick();
+    expect(has(r, 'ice')).toBe(false);
+    expect(has(r, 'metal', 1_000)).toBe(true);
+    r.press(MINING_KEYS.mine);
+    expect(r.started).toEqual([]);
+    expect(r.logs).toEqual(['NO ICE HERE']);
+    expect(r.mining.status('mine')).toEqual({ kind: 'blocked', reason: 'not-here' });
+  });
+});
+
+describe('the choice is a resource the rock does not have (plan 6 task 2, Review Focus 4)', () => {
+  it('Given the choice rare at a rock with ice, metal and silicate but no rare, Then status(mine) is blocked \'not-here\'', () => {
+    const r = noRareRig();
+    choose(r, 'rare');
+    r.tick();
+    expect(r.mining.status('mine')).toEqual({ kind: 'blocked', reason: 'not-here' });
+  });
+
+  it('Given the choice rare at a rock without rare, When B, Then nothing starts and the log says "NO RARE HERE" (notHereText(rare))', () => {
+    const r = noRareRig();
+    choose(r, 'rare');
+    r.press(MINING_KEYS.mine);
+    expect(r.logs).toEqual(['NO RARE HERE']);
+    expect(r.logs).toEqual([notHere('rare')]);
+    expect(r.started).toEqual([]);
+    expect(r.mining.status('mine').kind).not.toBe('running');
+    expect(r.mining.operations).toEqual([]);
+  });
+
+  it('Given the choice rare at a rock without rare, When B is pressed ten times, Then no mining:started ever comes — for rare or any other resource — nothing is mined, and every press logs "NO RARE HERE"', () => {
+    const r = noRareRig();
+    const entries = r.worldState.entries().length;
+    choose(r, 'rare');
+    for (let i = 0; i < 10; i++) {
+      r.press(MINING_KEYS.mine);
+      r.tick(30);
+    }
+    expect(r.started).toEqual([]);
+    expect(r.bites).toEqual([]);
+    expect(r.ended).toEqual([]);
+    expect(r.actions).toEqual([]);
+    expect(r.cargo.totalKg).toBe(0);
+    expect(r.worldState.entries()).toHaveLength(entries);
+    expect(r.logs).toEqual(Array.from({ length: 10 }, () => 'NO RARE HERE'));
+  });
+
+  it('Given the choice rare at a rock without rare, Then the MINE row says "NO RARE HERE" — the same text as the log', () => {
+    const r = noRareRig();
+    choose(r, 'rare');
+    r.press(MINING_KEYS.mine);
+    const row = rowsWithBeam((k) => r.mining.status(k), beamOf(r.mining).beamResource)[0];
+    expect(row.tone).toBe('blocked');
+    expect(row.text).toBe('NO RARE HERE');
+    expect(row.text).toBe(r.logs[0]);
+  });
+
+  it('Given the choice rare at a rock without rare, Then the B — MINE lesson is not offered (minable is false: B would start nothing)', () => {
+    const r = noRareRig();
+    choose(r, 'rare');
+    r.tick();
+    expect(miningHintFacts(r.mining.status('mine'), r.mining.status('refine')).minable).toBe(false);
+  });
+
+  it('Given only 0.3 kg of rare left (dust, R18) and the choice rare, When B, Then "NO RARE HERE" — never "MINED · 0 KG" and no dust record', () => {
+    const r = noRareRig(0.3);
+    expect(r.belt.remainingKg(r.ast.id, 'rare')).toBeGreaterThan(0);
+    const entries = r.worldState.entries().length;
+    choose(r, 'rare');
+    r.press(MINING_KEYS.mine);
+    r.tick(300);
+    expect(r.logs).toEqual(['NO RARE HERE']);
+    expect(r.started).toEqual([]);
+    expect(r.worldState.entries()).toHaveLength(entries);
+  });
+
+  it('Given the choice rare at a rock without rare, When the choice goes back to ice and B, Then ice is mined (the refusal kept nothing)', () => {
+    const r = noRareRig();
+    choose(r, 'rare');
+    r.press(MINING_KEYS.mine);
+    choose(r, 'ice');
+    r.tick();
+    expect(r.mining.status('mine')).toEqual({ kind: 'ready' });
+    r.press(MINING_KEYS.mine);
+    expect(r.started).toEqual([{ asteroidId: r.ast.id, resource: 'ice' }]);
+  });
+
+  // Choice (phase A): 'not-here' ranks after every other reason of the gate.
+  it('Given the choice not here AND a full hold, Then status(mine) is hold-full and B logs "HOLD FULL" (not-here ranks last)', () => {
+    const r = noRareRig();
+    r.cargo.restore({ metal: CARGO_CAPACITY_KG });
+    choose(r, 'rare');
+    r.press(MINING_KEYS.mine);
+    expect(r.mining.status('mine')).toEqual({ kind: 'blocked', reason: 'hold-full' });
+    expect(r.logs).toEqual(['HOLD FULL']);
+  });
+
+  it('Given the choice not here AND the ship 0.6 km from the surface, Then range ("OUT OF RANGE"); and too fast, Then speed ("MATCH SPEED")', () => {
+    const r = noRareRig();
+    choose(r, 'rare');
+    r.placeAt(0.6);
+    r.press(MINING_KEYS.mine);
+    expect(r.mining.status('mine')).toEqual({ kind: 'blocked', reason: 'range' });
+    r.placeAt(0.2);
+    r.world.flight.velocity.add(new Vector3(0, 0.006, 0));
+    r.press(MINING_KEYS.mine);
+    expect(r.mining.status('mine')).toEqual({ kind: 'blocked', reason: 'speed' });
+    expect(r.logs).toEqual(['OUT OF RANGE', 'MATCH SPEED']);
+  });
+
+  it('Given the choice not here AND cruise, Then "IN CRUISE" on the row and in the log', () => {
+    const r = noRareRig();
+    choose(r, 'rare');
+    r.cruise.busy = true;
+    r.press(MINING_KEYS.mine);
+    expect(r.mining.status('mine')).toEqual({ kind: 'blocked', reason: 'cruise' });
+    expect(r.logs).toEqual(['IN CRUISE']);
+  });
+});
+
+describe('the chosen resource runs out mid-extraction (plan 6 task 2, D53 d)', () => {
+  it('Given 300 kg of ice left (and plenty of the rest) and the choice ice, When the extraction empties the ice, Then it ends as today ("MINED · 300 KG ICE — ICE DEPLETED"), and a new B gives "NO ICE HERE", not the next resource', () => {
+    const r = rig();
+    leave(r, 'ice', 300);
+    expect(has(r, 'rare', 250) && has(r, 'metal', 1_000) && has(r, 'silicate', 1_000), 'precondition: the rest is there').toBe(true);
+    r.press(MINING_KEYS.mine);
+    r.tick(120);
+    expect(r.ended).toEqual([{ asteroidId: r.ast.id, resource: 'ice', minedKg: 300, end: 'resource-depleted' }]);
+    expect(r.logs).toEqual(['MINED · 300 KG ICE — ICE DEPLETED']);
+    expect(r.belt.isDestroyed(r.ast.id)).toBe(false);
+    expect(r.mining.status('mine')).toEqual({ kind: 'blocked', reason: 'not-here' });
+    r.press(MINING_KEYS.mine);
+    expect(r.started.map((s) => s.resource)).toEqual(['ice']);
+    expect(r.logs).toEqual(['MINED · 300 KG ICE — ICE DEPLETED', 'NO ICE HERE']);
+    r.tick(600);
+    expect(r.cargo.snapshot()).toEqual({ ice: 300, metal: 0, silicate: 0, rare: 0 });
+  });
+
+  it('Given the ice ran out in frame 100 and B in that frame was swallowed, When B in the next frame, Then "NO ICE HERE" and no second extraction', () => {
+    const r = rig();
+    leave(r, 'ice', 250);
+    r.press(MINING_KEYS.mine);
+    r.tick(99);
+    r.press(MINING_KEYS.mine); // frame 100: the last bite, the end, and B swallowed
+    expect(r.logs).toEqual(['MINED · 250 KG ICE — ICE DEPLETED']);
+    r.press(MINING_KEYS.mine);
+    expect(r.started).toHaveLength(1);
+    expect(r.logs).toEqual(['MINED · 250 KG ICE — ICE DEPLETED', 'NO ICE HERE']);
+    expect(r.mining.status('mine').kind).not.toBe('running');
+  });
+});
+
+describe('setBeamResource during an extraction (plan 6 task 2)', () => {
+  it('Given an extraction of ice running, When the choice becomes metal, Then the running one stays ice (bites, status, operation); after B stops it, the next B takes metal', () => {
+    const r = rig();
+    r.press(MINING_KEYS.mine);
+    r.tick(50);
+    choose(r, 'metal');
+    expect(beamOf(r.mining).beamResource).toBe('metal');
+    r.tick(50); // 100 frames since B: the first bite
+    expect(r.bites).toEqual([{ asteroidId: r.ast.id, resource: 'ice', kg: 250 }]);
+    const s = r.mining.status('mine');
+    expect(s.kind).toBe('running');
+    expect(s.resource).toBe('ice');
+    expect(r.mining.operations[0]).toMatchObject({ resource: 'ice' });
+    expect(r.started).toHaveLength(1);
+    expect(r.logs).toEqual([]);
+    r.press(MINING_KEYS.mine); // stop
+    expect(r.ended).toEqual([{ asteroidId: r.ast.id, resource: 'ice', minedKg: 250, end: 'stopped' }]);
+    r.press(MINING_KEYS.mine); // start: the new choice
+    expect(r.started.map((x) => x.resource)).toEqual(['ice', 'metal']);
+    r.tick(100);
+    expect(r.cargo.snapshot()).toEqual({ ice: 250, metal: 250, silicate: 0, rare: 0 });
+  });
+
+  it('Given an extraction of ice running at a rock without rare, When the choice becomes rare, Then the extraction is not ended by it (no not-here mid-run) and keeps biting ice', () => {
+    const r = noRareRig();
+    r.press(MINING_KEYS.mine);
+    r.tick(10);
+    choose(r, 'rare');
+    r.tick(190); // 200 frames since B: two bites
+    expect(r.ended).toEqual([]);
+    expect(r.mining.status('mine').kind).toBe('running');
+    expect(r.bites.map((b) => [b.resource, b.kg])).toEqual([
+      ['ice', 250],
+      ['ice', 250],
+    ]);
+    r.press(MINING_KEYS.mine); // stop
+    r.press(MINING_KEYS.mine); // now the choice counts
+    expect(r.started).toHaveLength(1);
+    expect(r.logs).toEqual(['MINED · 500 KG ICE', 'NO RARE HERE']);
   });
 });

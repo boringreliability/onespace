@@ -83,3 +83,32 @@ describe('shouldAutosave — before the first save', () => {
     }
   });
 });
+
+// v4 sub-plan 6, Task 4 (phase A) — a jettison asks for a save (DESIGN-6 §7.3):
+// SaveReason 'jettison', with the same rule as 'mined' (AUTOSAVE_MIN_GAP_S).
+// Not in SaveReason yet: spelled through a cast so the type check stays clean.
+describe("shouldAutosave — 'jettison' waits for the 5 s gap, as 'mined' does (plan 6 task 4)", () => {
+  const JETTISON = 'jettison' as string as SaveReason;
+
+  it("Given a save 4.999 s ago, When the reason is 'jettison', Then it does not save", () => {
+    expect(shouldAutosave({ sinceLastS: 4.999, reason: JETTISON })).toBe(false);
+  });
+
+  it("Given a save exactly 5 s ago, When the reason is 'jettison', Then it saves (≥, not >)", () => {
+    expect(shouldAutosave({ sinceLastS: AUTOSAVE_MIN_GAP_S, reason: JETTISON })).toBe(true);
+  });
+
+  it("Given nothing saved yet (+Infinity), When the reason is 'jettison', Then it saves", () => {
+    expect(shouldAutosave({ sinceLastS: Number.POSITIVE_INFINITY, reason: JETTISON })).toBe(true);
+  });
+
+  it("Given a broken clock (NaN or negative), When the reason is 'jettison', Then it does not save", () => {
+    for (const bad of [Number.NaN, -1]) expect(shouldAutosave({ sinceLastS: bad, reason: JETTISON }), String(bad)).toBe(false);
+  });
+
+  it("Given any sinceLastS, Then 'jettison' answers exactly as 'mined'", () => {
+    for (const s of [0, 1, 4.999, 5, 6, 119, 120, 1e9, Number.POSITIVE_INFINITY, Number.NaN, -1]) {
+      expect(shouldAutosave({ sinceLastS: s, reason: JETTISON }), String(s)).toBe(shouldAutosave({ sinceLastS: s, reason: 'mined' }));
+    }
+  });
+});

@@ -20,7 +20,7 @@
 import { bootPlan, parseRoute, type BootPlan, type Route } from '@/core/Route';
 import { loadForBootResult, openingLog, replaceGame, type BootLoad } from './bootLoad';
 import { consumeNewGameNonce, type SessionLike } from './newGameNonce';
-import type { SaveV1 } from './schema';
+import type { Save } from './schema';
 import type { SaveStore } from './store';
 import type { Wal } from './wal';
 import type { WriterLock } from './writerLock';
@@ -126,6 +126,6 @@ export async function restartAfterRestoreFail(d: {
 }
 
 /** The log a boot imports before the Universe exists: always the new game's opening log. */
-export function logBeforeWorld(load: BootLoad): SaveV1['log'] {
+export function logBeforeWorld(load: BootLoad): Save['log'] {
   return openingLog(load, 'new');
 }

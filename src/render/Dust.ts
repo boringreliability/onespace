@@ -30,7 +30,7 @@ import {
 } from 'three';
 
 import type { EngineContext, GameModule } from '@/core/Engine';
-import type { Mode } from '@/core/Modes';
+import { FLIGHT_PAUSED, type Mode } from '@/core/Modes';
 import { Rng } from '@/math/rng';
 import type { Universe } from '@/game/Universe';
 import {
@@ -211,7 +211,9 @@ export class Dust implements GameModule {
   }
 
   onModeChange(_from: Mode, to: Mode): void {
-    if (!ACTIVE.includes(to)) this.mesh.visible = false;
+    // [v4-resources] Not on the resources screen: flight paused, the field stays
+    // in view behind the sheet (it sleeps there) and does not pop back on close.
+    if (!ACTIVE.includes(to) && !FLIGHT_PAUSED.includes(to)) this.mesh.visible = false;
   }
 
   update(dt: number, ctx: EngineContext): void {

@@ -11,11 +11,16 @@
  * `{version: 1, time, entries}`) once, into the first save.
  */
 
+import { readFileSync, readdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { describe, expect, it } from 'vitest';
 
 import golden from './fixtures/v1-golden.json';
 import legacy from './fixtures/v0-legacy-log.json';
 import { legacyLogToV1, migrate } from './migrate';
+import { replay, zeroState } from './replay';
 import { SaveV1Schema, type SaveV1 } from './schema';
 
 function goldenCopy(): SaveV1 {
@@ -42,13 +47,13 @@ const ctx = {
 };
 
 describe('migrate — a v1 save', () => {
-  it('Given the golden v1 save, Then migrate returns it unchanged, from format 1', () => {
+  it('Given the golden v1 save, Then migrate lifts it to format 2 (beamResource ice, nothing else changed), from format 1', () => {
     const r = migrate(goldenCopy());
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.migratedFrom).toBe(1);
-    expect(r.save).toEqual(golden);
-    expect(JSON.parse(JSON.stringify(r.save))).toEqual(golden);
+    expect(r.save).toEqual({ ...golden, format: 2, ship: { ...golden.ship, beamResource: 'ice' } });
+    expect(JSON.parse(JSON.stringify(r.save))).toEqual({ ...golden, format: 2, ship: { ...golden.ship, beamResource: 'ice' } });
   });
 
   it('Given a deep-frozen golden save, Then migrate neither throws nor needs to write into it', () => {
@@ -101,13 +106,13 @@ describe('migrate — a v1 save', () => {
 });
 
 describe('migrate — an unknown format is never silently discarded', () => {
-  it('Given format 99, Then unknown-format, and the raw save is handed back untouched for the caller to keep', () => {
+  it('Given format 99, Then newer-build, and the raw save is handed back untouched for the caller to keep', () => {
     const raw = { ...goldenCopy(), format: 99 };
     const before = structuredClone(raw);
     const r = migrate(raw);
     expect(r.ok).toBe(false);
     if (r.ok) return;
-    expect(r.reason).toBe('unknown-format');
+    expect(r.reason).toBe('newer-build');
     expect(r.issues.join('\n')).toContain('99');
     expect(raw).toEqual(before);
   });
@@ -293,5 +298,429 @@ describe('migrate — messages and reasons pinned by mutation testing (Task 7)',
     if (r.ok) return;
     expect(r.reason).toBe('newer-build');
     expect(r.issues.some((i) => i.startsWith('(root):'))).toBe(true);
+  });
+});
+
+// =============================================================================
+// v4 sub-plan 6, Task 1 (phase A) — save format 2 and its upgrade.
+//
+// Assumed API (docs/v4/plan-6-resources.md, Task 1 Interfaces):
+//   CURRENT_FORMAT = 2; UPGRADES[1] sets `format: 2` and `ship.beamResource:
+//   'ice'` and changes nothing else; a format number ABOVE CURRENT_FORMAT is
+//   `newer-build`, one below OLDEST_FORMAT still `unknown-format`.
+// Review Focus 1: every format 1 fixture in src/save/fixtures/ (the golden
+// save, and v1-long-checkpoint.json: a 1 001-entry log a format 1 build
+// compacted to a checkpoint + 249 entries) comes out with the same hold, tank,
+// capacity loss and world, and `migrate` never writes into its input.
+// =============================================================================
+
+type LooseSave = Record<string, unknown> & {
+  format: unknown;
+  ship: Record<string, unknown> & Omit<SaveV1['ship'], 'beamResource'>;
+  actions: Array<{ source: string; payload: Record<string, unknown> }>;
+  world: SaveV1['world'];
+};
+
+const FIXTURE_DIR = join(dirname(fileURLToPath(import.meta.url)), 'fixtures');
+
+/** Every fixture file that is a save claiming format 1 (the legacy logbook has no `format`). */
+function formatOneFixtures(): Array<{ name: string; raw: LooseSave }> {
+  return readdirSync(FIXTURE_DIR)
+    .filter((n) => n.endsWith('.json'))
+    .map((n) => ({ name: n, raw: JSON.parse(readFileSync(join(FIXTURE_DIR, n), 'utf8')) as LooseSave }))
+    .filter((f) => f.raw.format === 1);
+}
+
+const JETTISON = {
+  seq: 13,
+  source: 'cargo',
+  payload: {
+    action: { kind: 'jettison', resource: 'ice', kg: 250 },
+    result: { ok: true, kgIn: 0, kgOut: 250, fuelKg: 0, restoredFrac: 0 },
+  },
+  wallMs: 1762891300000,
+  orbitSeconds: 5500,
+};
+
+/** The golden save written as format 2 (beam on metal, a jettison after its log). */
+function goldenV2(): LooseSave {
+  const s = goldenCopy() as unknown as LooseSave;
+  s.format = 2;
+  s.ship = { ...s.ship, beamResource: 'metal' };
+  s.actions = [...s.actions, structuredClone(JETTISON)];
+  return s;
+}
+
+describe('migrate — format 1 is lifted to format 2 (plan 6 task 1, Review Focus 1)', () => {
+  it('Given the fixtures folder, Then it holds at least two format 1 saves, one with a checkpoint and a long log (the precondition of the upgrade tests)', () => {
+    const fx = formatOneFixtures();
+    expect(fx.map((f) => f.name).sort()).toEqual(expect.arrayContaining(['v1-golden.json', 'v1-long-checkpoint.json']));
+    const long = fx.find((f) => f.name === 'v1-long-checkpoint.json')!.raw;
+    expect(long.actions.length).toBeGreaterThanOrEqual(200);
+    expect(long.actions[0]!.source).toBe('checkpoint');
+    for (const f of fx) expect(SaveV1Schema.safeParse(f.raw).success, f.name).toBe(true);
+  });
+
+  for (const f of formatOneFixtures()) {
+    describe(f.name, () => {
+      it(`Given ${f.name} (format 1), When migrated, Then it is format 2, migratedFrom 1, beamResource "ice", and nothing else changed`, () => {
+        const before = SaveV1Schema.parse(structuredClone(f.raw));
+        const r = migrate(structuredClone(f.raw));
+        expect(r.ok, r.ok ? '' : r.issues.join('; ')).toBe(true);
+        if (!r.ok) return;
+        expect(r.migratedFrom).toBe(1);
+        const out = structuredClone(r.save) as unknown as LooseSave;
+        expect(out.format).toBe(2);
+        expect(out.ship.beamResource).toBe('ice');
+        delete out.ship.beamResource;
+        out.format = 1;
+        expect(out).toEqual(before);
+      });
+
+      it(`Given ${f.name}, When migrated, Then hold, tank mass, capacity loss and world entries are exactly as before`, () => {
+        const before = SaveV1Schema.parse(structuredClone(f.raw));
+        const r = migrate(structuredClone(f.raw));
+        expect(r.ok).toBe(true);
+        if (!r.ok) return;
+        expect((r.save as { format: unknown }).format, 'the save was lifted to format 2').toBe(2);
+        expect(r.save.ship.cargo).toEqual(before.ship.cargo);
+        expect(r.save.ship.propellant.massKg).toBe(before.ship.propellant.massKg);
+        expect(r.save.ship.propellant.capacityLossFrac).toBe(before.ship.propellant.capacityLossFrac);
+        expect(r.save.ship.emergencyTimesUsed).toBe(before.ship.emergencyTimesUsed);
+        expect(r.save.world).toEqual(before.world);
+      });
+
+      it(`Given ${f.name}, When its log is replayed before and after the upgrade, Then the hold, tank, capacity loss and depletion are the same — no action was rewritten`, () => {
+        const before = SaveV1Schema.parse(structuredClone(f.raw));
+        const r = migrate(structuredClone(f.raw));
+        expect(r.ok).toBe(true);
+        if (!r.ok) return;
+        expect((r.save as { format: unknown }).format, 'the save was lifted to format 2').toBe(2);
+        expect(r.save.actions).toEqual(before.actions);
+        const s0 = { ...zeroState(), tank: { ...before.ship.propellant } };
+        const a = replay(s0, before.actions);
+        const b = replay(s0, r.save.actions);
+        expect(b.tank).toEqual(a.tank);
+        expect(b.cargo).toEqual(a.cargo);
+        expect(JSON.parse(JSON.stringify(b.depletion))).toEqual(JSON.parse(JSON.stringify(a.depletion)));
+        expect(b.emergency).toEqual(a.emergency);
+      });
+
+      it(`Given ${f.name} deep-frozen, When migrated, Then migrate neither throws nor writes into its input, and the input still equals the file`, () => {
+        const pristine = structuredClone(f.raw);
+        const frozen = deepFreeze(structuredClone(f.raw));
+        let r: ReturnType<typeof migrate> | undefined;
+        expect(() => (r = migrate(frozen))).not.toThrow();
+        expect(r!.ok, r!.ok ? '' : r!.issues.join('; ')).toBe(true);
+        expect(r!.ok && (r!.save as { format: unknown }).format, 'the save was lifted to format 2').toBe(2);
+        expect(frozen).toEqual(pristine);
+        expect(frozen.format).toBe(1);
+        expect('beamResource' in frozen.ship).toBe(false);
+      });
+    });
+  }
+
+  it('Given the long fixture, When migrated, Then its checkpoint is carried over unchanged and still leads the log', () => {
+    const raw = formatOneFixtures().find((x) => x.name === 'v1-long-checkpoint.json')!.raw;
+    const r = migrate(structuredClone(raw));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect((r.save as { format: unknown }).format, 'the save was lifted to format 2').toBe(2);
+    expect(r.save.actions[0]).toEqual(SaveV1Schema.parse(structuredClone(raw)).actions[0]);
+    expect(r.save.actions[0]!.source).toBe('checkpoint');
+  });
+});
+
+describe('migrate — format 2 itself (plan 6 task 1)', () => {
+  it('Given a format 2 save with a jettison and beamResource "metal", When migrated, Then it comes back unchanged, migratedFrom 2', () => {
+    const s = goldenV2();
+    const r = migrate(structuredClone(s));
+    expect(r.ok, r.ok ? '' : r.issues.join('; ')).toBe(true);
+    if (!r.ok) return;
+    expect(r.migratedFrom).toBe(2);
+    expect(r.save).toEqual(s);
+  });
+
+  it('Given a format 2 save, When migrated twice (the result fed back in), Then it is a fixed point', () => {
+    const r1 = migrate(goldenV2());
+    expect(r1.ok).toBe(true);
+    if (!r1.ok) return;
+    const r2 = migrate(JSON.parse(JSON.stringify(r1.save)));
+    expect(r2.ok).toBe(true);
+    if (!r2.ok) return;
+    expect(r2.save).toEqual(r1.save);
+    expect(r2.migratedFrom).toBe(2);
+  });
+
+  it('Given a format 2 save with only an extra key, Then newer-build (R4 holds for the current format), and the raw save is untouched', () => {
+    const s = { ...goldenV2(), pets: [] };
+    const before = structuredClone(s);
+    const r = migrate(s);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toBe('newer-build');
+    expect(r.issues.some((i) => i.includes('pets'))).toBe(true);
+    expect(s).toEqual(before);
+  });
+
+  it('Given a format 2 save whose beamResource is "gold", Then invalid with the path ship.beamResource', () => {
+    const s = goldenV2();
+    s.ship.beamResource = 'gold';
+    const r = migrate(s);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toBe('invalid');
+    expect(hasPath(r.issues, 'ship.beamResource')).toBe(true);
+  });
+});
+
+describe('migrate — the new action never stands in a format 1 save (plan 6 task 1, R4)', () => {
+  // These pass today already (format 1 cannot hold either); they guard the
+  // upgrade: lifting first and checking against format 2 would let both in.
+  it('Given a save that says format 1 but holds a jettison entry, Then invalid — the upgrade does not make it valid', () => {
+    const s = goldenCopy() as unknown as LooseSave;
+    s.actions = [...s.actions, structuredClone(JETTISON)];
+    const r = migrate(s);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toBe('invalid');
+  });
+
+  it('Given a save that says format 1 but carries ship.beamResource "rare", Then it is refused — the upgrade never overwrites it with "ice"', () => {
+    const s = goldenCopy() as unknown as LooseSave;
+    s.ship = { ...s.ship, beamResource: 'rare' };
+    const r = migrate(s);
+    expect(r.ok).toBe(false);
+  });
+});
+
+describe('migrate — a save from a newer version is named as one (plan 6 task 1)', () => {
+  for (const f of [3, 99]) {
+    it(`Given format ${f}, Then newer-build (not unknown-format), the issue names ${f}, and the raw save is untouched`, () => {
+      const raw = { ...goldenV2(), format: f };
+      const before = structuredClone(raw);
+      const r = migrate(raw);
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.reason).toBe('newer-build');
+      expect(r.issues.join('\n')).toContain(String(f));
+      expect(raw).toEqual(before);
+    });
+  }
+
+  it('Given format 0 or -1 (below the oldest), Then still unknown-format', () => {
+    for (const f of [0, -1]) {
+      const r = migrate({ ...goldenCopy(), format: f });
+      expect(r.ok).toBe(false);
+      if (r.ok) continue;
+      expect(r.reason).toBe('unknown-format');
+    }
+  });
+
+  it('Given format 3 with garbage inside (the content is never read), Then still newer-build', () => {
+    const r = migrate({ format: 3, ship: 'whatever' });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toBe('newer-build');
+  });
+});
+
+// =============================================================================
+// v4 sub-plan 6 — review fix for I-1 (task-2-review.md): migrate is idempotent.
+//
+// A pending resolve (R69) stores its device body verbatim, and at a boot
+// conflict that body IS the boot's migrated local. SyncClient compares it with
+// the next boot's `migrate(raw)` after lifting it again (`lifted()`), so
+// `migrate(migrate(x))` must be bit-for-bit `migrate(x)` — or the same game
+// state counts as progress and the player meets the conflict screen again.
+// The golden fixture's orientation [0.5, -0.5, 0.5, 0.5] normalises exactly
+// and hid this: these tests use orientations that do not.
+// =============================================================================
+
+/** mulberry32: a tiny deterministic PRNG (no Math.random in tests). */
+function mulberry32(seed: number): () => number {
+  let a = seed | 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+type Quat4 = [number, number, number, number];
+
+/** Orientations picked by hand: off-unit, tiny and huge (above QUAT_MIN_LENGTH 1e-9), negative, exact. */
+const HAND_PICKED: Quat4[] = [
+  [1, 2, 3, 4],
+  [0.1, 0.2, 0.3, 0.4],
+  [-1, -2, -3, -4],
+  [0.3, -0.7, 0.2, -0.1],
+  [1e-8, 2e-8, 3e-8, 4e-8],
+  [3e-9, -4e-9, 5e-9, 1e-9],
+  [1e8, -2e8, 3e8, -4e8],
+  [1.5e300, -2e300, 1e300, 3e300],
+  [0.5, -0.5, 0.5, 0.5], // the fixture's: exactly unit
+  [0, 0, 0, 1],
+  [0.6, 0.8, 0, 0],
+  // normalise([1, 2, 3, 4]) — unit within an ulp, and dividing it by its length again changes it
+  [0.18257418583505536, 0.3651483716701107, 0.5477225575051661, 0.7302967433402214],
+  [1 + 2 * Number.EPSILON, 0, 0, 0],
+  [1 - Number.EPSILON, 0, 0, 0],
+];
+
+/** 2 000 orientations from a fixed seed, components in [-1, 1) scaled by 10^[-6, 6). */
+function sweep(n = 2_000, seed = 0x5eed): Quat4[] {
+  const rnd = mulberry32(seed);
+  const out: Quat4[] = [];
+  while (out.length < n) {
+    const scale = 10 ** (rnd() * 12 - 6);
+    const q: Quat4 = [(rnd() * 2 - 1) * scale, (rnd() * 2 - 1) * scale, (rnd() * 2 - 1) * scale, (rnd() * 2 - 1) * scale];
+    if (Math.hypot(...q) > 1e-8) out.push(q);
+  }
+  return out;
+}
+
+/** The golden save (format 1) with `q` as its orientation. */
+function formatOneWith(q: Quat4): SaveV1 {
+  const s = goldenCopy();
+  s.player.flight.orientation = [...q];
+  return s;
+}
+
+/** The golden save written as format 2 (beam on ice) with `q` as its orientation. */
+function formatTwoWith(q: Quat4): LooseSave {
+  const s = formatOneWith(q) as unknown as LooseSave;
+  s.format = 2;
+  s.ship = { ...s.ship, beamResource: 'ice' };
+  return s;
+}
+
+/** The orientations for which `migrate(migrate(x)).save` is not deep-equal `migrate(x).save`. */
+function notIdempotent(qs: Quat4[], make: (q: Quat4) => unknown): Array<{ q: Quat4; once: unknown; twice: unknown }> {
+  const bad: Array<{ q: Quat4; once: unknown; twice: unknown }> = [];
+  for (const q of qs) {
+    const once = migrate(make(q));
+    if (!once.ok) throw new Error(`migrate refused ${JSON.stringify(q)}: ${once.issues.join('; ')}`);
+    // Fed back in as storage hands it back: through JSON (exact for doubles).
+    const twice = migrate(JSON.parse(JSON.stringify(once.save)));
+    if (!twice.ok) throw new Error(`migrate refused its own output for ${JSON.stringify(q)}: ${twice.issues.join('; ')}`);
+    if (JSON.stringify(twice.save) !== JSON.stringify(once.save)) {
+      bad.push({ q, once: once.save.player.flight.orientation, twice: twice.save.player.flight.orientation });
+    }
+  }
+  return bad;
+}
+
+describe('Review fix I-1 (plan 6) — migrate is idempotent: a migrated save migrates to itself, bit for bit', () => {
+  it('Given the deterministic sweep, Then it holds 2 000 orientations, all of them above the zero-length floor (the precondition of the sweep tests)', () => {
+    const qs = sweep();
+    expect(qs).toHaveLength(2_000);
+    expect(qs.every((q) => Math.hypot(...q) > 1e-8)).toBe(true);
+    // Deterministic: the same seed gives the same orientations.
+    expect(sweep()).toEqual(qs);
+  });
+
+  it.each<[string, (q: Quat4) => unknown]>([
+    ['format 2', formatTwoWith],
+    ['format 1 (lifted on the first pass)', formatOneWith],
+  ])(
+    'Given a %s save with each hand-picked orientation (off-unit, tiny, huge, negative, exactly unit, unit within an ulp), When its migrated save is migrated again, Then the second result is deep-equal the first',
+    (_fmt, make) => {
+      expect(notIdempotent(HAND_PICKED, make)).toEqual([]);
+    },
+  );
+
+  it.each<[string, (q: Quat4) => unknown]>([
+    ['format 2', formatTwoWith],
+    ['format 1 (lifted on the first pass)', formatOneWith],
+  ])('Given a %s save with each of 2 000 seeded orientations, When its migrated save is migrated again, Then the second result is deep-equal the first for every one', (_fmt, make) => {
+    const bad = notIdempotent(sweep(), make);
+    expect(bad.length, `${bad.length} of 2 000 orientations change on the second pass; first: ${JSON.stringify(bad[0])}`).toBe(0);
+  });
+
+  it('Given a format 1 save with orientation [1, 2, 3, 4], When it is migrated, migrated again and a third time, Then all three results are deep-equal (a fixed point from the first pass on)', () => {
+    const r1 = migrate(formatOneWith([1, 2, 3, 4]));
+    expect(r1.ok).toBe(true);
+    if (!r1.ok) return;
+    const r2 = migrate(JSON.parse(JSON.stringify(r1.save)));
+    const r3 = r2.ok ? migrate(JSON.parse(JSON.stringify(r2.save))) : r2;
+    expect(r2.ok && r3.ok).toBe(true);
+    if (!r2.ok || !r3.ok) return;
+    expect(r2.save).toEqual(r1.save);
+    expect(r3.save).toEqual(r1.save);
+    expect(r2.migratedFrom).toBe(2);
+  });
+});
+
+// =============================================================================
+// v4 sub-plan 6 — open choice 4 (phase A, for the owner's approval; Task 3
+// review m-1): a save whose orientation's length overflows (finite components,
+// Math.hypot = Infinity) is reported by `migrate` on the FIRST read like any
+// other invalid save — not accepted as orientation [0, 0, 0, 0] and refused
+// only when read again. Large quaternions with a finite length stay valid and
+// idempotent.
+// =============================================================================
+
+describe('open choice 4 — migrate refuses an overflowing orientation the first time', () => {
+  const OVERFLOWING: Quat4[] = [
+    [9e307, 9e307, 9e307, 9e307],
+    [8.84e307, -9.36e307, 9.49e307, -9.38e307],
+  ];
+  const LARGE_FINITE: Quat4[] = [
+    [1e150, 1e150, 1e150, 1e150],
+    [-1e200, 2e200, -3e200, 4e200],
+    [1e308, 1e308, 0, 0],
+    [Number.MAX_VALUE, 0, 0, 0],
+  ];
+
+  it('Given the examples, Then the overflowing ones have finite components and an infinite length, the large ones a finite length (precondition)', () => {
+    for (const q of OVERFLOWING) {
+      expect(q.every(Number.isFinite)).toBe(true);
+      expect(Math.hypot(...q)).toBe(Number.POSITIVE_INFINITY);
+    }
+    for (const q of LARGE_FINITE) expect(Number.isFinite(Math.hypot(...q))).toBe(true);
+  });
+
+  it.each<[string, (q: Quat4) => unknown]>([
+    ['format 2', formatTwoWith],
+    ['format 1', formatOneWith],
+  ])('Given a %s save whose orientation overflows, When migrated the first time, Then it is reported invalid at player.flight.orientation, never thrown, and the raw save is untouched', (_fmt, make) => {
+    for (const q of OVERFLOWING) {
+      const raw = make(q);
+      const before = structuredClone(raw);
+      let r: ReturnType<typeof migrate> | undefined;
+      expect(() => (r = migrate(raw))).not.toThrow();
+      expect(r!.ok, JSON.stringify(q)).toBe(false);
+      if (r!.ok) continue;
+      expect(r!.reason).toBe('invalid');
+      expect(hasPath(r!.issues, 'player.flight.orientation')).toBe(true);
+      expect(raw).toEqual(before);
+    }
+  });
+
+  it.each<[string, (q: Quat4) => unknown]>([
+    ['format 2', formatTwoWith],
+    ['format 1 (lifted on the first pass)', formatOneWith],
+  ])('Guard: Given a %s save with each large orientation of finite length, When migrated and migrated again, Then both are accepted, unit length, and deep-equal', (_fmt, make) => {
+    expect(notIdempotent(LARGE_FINITE, make)).toEqual([]);
+    for (const q of LARGE_FINITE) {
+      const r = migrate(make(q));
+      expect(r.ok).toBe(true);
+      if (!r.ok) continue;
+      expect(Math.abs(Math.hypot(...r.save.player.flight.orientation) - 1)).toBeLessThanOrEqual(1e-12);
+    }
+  });
+
+  it('Guard: Given four components of 1e150, When migrated, Then the orientation is [0.5, 0.5, 0.5, 0.5]', () => {
+    const r = migrate(formatTwoWith([1e150, 1e150, 1e150, 1e150]));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.save.player.flight.orientation).toEqual([0.5, 0.5, 0.5, 0.5]);
+  });
+
+  it('Guard: Given the hand-picked and the 2 000 seeded orientations (all of finite length), When migrated, Then none is refused', () => {
+    const refused = [...HAND_PICKED, ...sweep()].filter((q) => !migrate(formatTwoWith(q)).ok);
+    expect(refused).toEqual([]);
   });
 });

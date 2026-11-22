@@ -18,7 +18,8 @@
  *    meant "the old snapshot is intact", so all three are simply compared);
  *  - nothing is discarded silently: an unreadable slot (invalid, unknown
  *    format, newer build) is kept with `store.keepCorrupt(raw, Date.now())`
- *    and the notice is `SAVE UNREADABLE — KEPT A COPY`;
+ *    and the notice is `SAVE UNREADABLE — KEPT A COPY`, or
+ *    `SAVE IS FROM A NEWER VERSION — KEPT, NOT LOADED` for a newer build;
  *  - a store that cannot be opened (an IDB `VersionError` after another tab
  *    upgraded the database) never crashes the boot: the WAL snapshot is used
  *    if there is one, else a new game, and the notice is
@@ -45,14 +46,16 @@ import { parseRoute } from '@/core/Route';
 import { PROBE_TANK_CAPACITY_KG } from '@/ship/propellant';
 import { BEACON_FILL_FRAC, BEACON_NOTE_TITLE, cannibalizeLossFrac } from '@/ship/emergency';
 import { compactEntries } from './actionJournal';
-import { loadForBoot, mergeCritical, openingLog, replaceGame, universeOptionsFor } from './bootLoad';
+import { loadForBoot, mergeCritical, SAVE_NEWER_TEXT, openingLog, replaceGame, universeOptionsFor } from './bootLoad';
+import * as bootLoadModule from './bootLoad';
 import golden from './fixtures/v1-golden.json';
 import legacy from './fixtures/v0-legacy-log.json';
 import { idbStore } from './idbStore';
 import { memoryStore } from './memoryStore';
 import { migrate } from './migrate';
 import { replay, zeroState, type ReplayState } from './replay';
-import { SaveV1Schema, type ActionEntry, type SaveV1 } from './schema';
+import { SaveV2Schema, type ActionEntry, type SaveV1 } from './schema';
+import * as schemaModule from './schema';
 import type { SaveStore } from './store';
 import { WAL_SNAPSHOT_KEY, createWal, type Wal } from './wal';
 
@@ -224,7 +227,7 @@ describe('loadForBoot — which save wins', () => {
     const store = await storeWith(future);
     const r = await loadForBoot(store, wal);
     expect(r.save).toBeNull();
-    expect(r.notice).toBe(UNREADABLE);
+    expect(r.notice).toBe(SAVE_NEWER_TEXT);
     expect(store.corrupt).toEqual([{ wallMs: WALL, raw: future }]);
   });
 
@@ -233,13 +236,13 @@ describe('loadForBoot — which save wins', () => {
     const store = await storeWith(newer);
     const r = await loadForBoot(store, wal);
     expect(r.save).toBeNull();
-    expect(r.notice).toBe(UNREADABLE);
+    expect(r.notice).toBe(SAVE_NEWER_TEXT);
     expect(store.corrupt.map((c) => c.raw)).toEqual([newer]);
   });
 
-  it('Given the loaded save, Then it is a valid SaveV1 (it came through migrate)', async () => {
+  it('Given the loaded save, Then it is a valid SaveV2 (it came through migrate)', async () => {
     const r = await loadForBoot(await storeWith(save(7)), wal);
-    expect(SaveV1Schema.safeParse(r.save).success).toBe(true);
+    expect(SaveV2Schema.safeParse(r.save).success).toBe(true);
   });
 });
 
@@ -319,7 +322,7 @@ describe('loadForBoot — WAL critical entries, dedup by seq (carried obligation
     expect(notes[0]).toMatchObject({ key: 'beacon:1', kind: 'note', system: G.player.system.name, visits: 1 });
     expect(notes[0]!.body.join(' ')).toContain(`${Math.round(GOLD_CARGO_KG)} kg`);
     expect(s.world).toEqual(G.world);
-    expect(SaveV1Schema.safeParse(s).success).toBe(true);
+    expect(SaveV2Schema.safeParse(s).success).toBe(true);
   });
 
   it('Given that merged beacon, Then the books balance: replaying the appended entries over the saved ship gives the merged ship', async () => {
@@ -773,7 +776,7 @@ describe('R25 I3 — the store gets 3 s at boot', () => {
     await vi.advanceTimersByTimeAsync(3_000);
     expect(r).not.toBeNull();
     expect(r!.save?.revision).toBe(6);
-    expect(r!.notice).toBe(UNREADABLE);
+    expect(r!.notice).toBe(SAVE_NEWER_TEXT);
   });
 
   it('Given NEW GAME over save 7 and a store whose writes never settle, When replaceGame runs, Then it resolves within 3 s per write, above the old game', async () => {
@@ -895,5 +898,161 @@ describe('Ruling R36 — BootLoad.walApplied', () => {
     const r = await loadForBoot(broken, wal);
     expect(r.notice).toBe(UNAVAILABLE);
     expect((r as WithWalApplied).walApplied).toBe(true);
+  });
+});
+
+// =============================================================================
+// v4 sub-plan 6, Task 1 (phase A) — save format 2 at boot.
+//
+// Assumed API (docs/v4/plan-6-resources.md, Task 1 Interfaces):
+//   SAVE_NEWER_TEXT = 'SAVE IS FROM A NEWER VERSION — KEPT, NOT LOADED', the
+//   notice when `migrate` answers 'newer-build'; the copy still goes on the
+//   shelf with keepCorrupt, untouched. A broken save keeps SAVE_UNREADABLE_TEXT.
+//   The beacon's "hold jettisoned" note keeps reading only `jettison-all`
+//   (bootLoad.ts:122): a voluntary `jettison` is never reported as the
+//   beacon's. A WAL `jettison` merges by the replay rules, once (Review Focus 3).
+// New names are read through casts so `tsc` stays green until they exist.
+// =============================================================================
+
+
+const NEWER = 'SAVE IS FROM A NEWER VERSION — KEPT, NOT LOADED';
+
+function newerText(): string {
+  const t = (bootLoadModule as unknown as Record<string, unknown>).SAVE_NEWER_TEXT;
+  expect(t, 'bootLoad.ts exports SAVE_NEWER_TEXT').toBe(NEWER);
+  return t as string;
+}
+
+type Parser = { safeParse(x: unknown): { success: boolean } };
+function v2Valid(s: unknown): boolean {
+  const p = (schemaModule as unknown as Record<string, unknown>).SaveV2Schema as Parser | undefined;
+  expect(typeof p?.safeParse, 'schema.ts exports SaveV2Schema').toBe('function');
+  return p!.safeParse(s).success;
+}
+
+const jettisonEntry = (seq: number, resource: 'ice' | 'metal' | 'silicate' | 'rare', kg: number, kgOut: number) =>
+  ({
+    seq,
+    source: 'cargo',
+    payload: {
+      action: { kind: 'jettison', resource, kg },
+      result: { ok: true, kgIn: 0, kgOut, fuelKg: 0, restoredFrac: 0 },
+    },
+    ...at,
+  }) as unknown as ActionEntry;
+
+describe('loadForBoot — a save from a newer version (plan 6 task 1)', () => {
+  it('Given the bootLoad module, Then SAVE_NEWER_TEXT is exported with the exact wording', () => {
+    expect(newerText()).toBe(NEWER);
+  });
+
+  it('Given a format 3 save and nothing else, Then the notice is SAVE_NEWER_TEXT, keepCorrupt got the raw save unchanged, and it is a new game', async () => {
+    const text = newerText();
+    const future = { ...save(12), format: 3 };
+    const pristine = structuredClone(future);
+    const store = await storeWith(future);
+    const r = await loadForBoot(store, wal);
+    expect(r.save).toBeNull();
+    expect(r.notice).toBe(text);
+    expect(store.corrupt).toEqual([{ wallMs: WALL, raw: pristine }]);
+    expect(future).toEqual(pristine);
+  });
+
+  it('Given a format 3 save as current and a valid previous (revision 6), Then previous is continued, the newer one is kept, and the notice is SAVE_NEWER_TEXT', async () => {
+    const text = newerText();
+    const future = { ...save(9), format: 3 };
+    const store = await storeWith(save(6), future);
+    const r = await loadForBoot(store, wal);
+    expect(r.save?.revision).toBe(6);
+    expect(r.notice).toBe(text);
+    expect(store.corrupt.map((c) => c.raw)).toEqual([future]);
+  });
+
+  it('Given a reader tab and a format 3 save, Then the notice is SAVE_NEWER_TEXT but nothing is copied (readers never write)', async () => {
+    const text = newerText();
+    const store = await storeWith({ ...save(12), format: 3 });
+    const r = await loadForBoot(store, wal, { writer: false });
+    expect(r.notice).toBe(text);
+    expect(store.corrupt).toHaveLength(0);
+  });
+
+  it('Given a broken save (ship: "gone"), Then the notice is still SAVE UNREADABLE — KEPT A COPY, not the newer-version text', async () => {
+    const bad = { ...save(9), ship: 'gone' };
+    const store = await storeWith(bad);
+    const r = await loadForBoot(store, wal);
+    expect(r.save).toBeNull();
+    expect(r.notice).toBe(UNREADABLE);
+    expect(r.notice).not.toBe(NEWER);
+    expect(store.corrupt).toEqual([{ wallMs: WALL, raw: bad }]);
+  });
+});
+
+describe('loadForBoot — a stored format 1 save is continued as format 2 (plan 6 task 1)', () => {
+  it('Given the raw golden format 1 save in IndexedDB, When the game boots, Then it continues as format 2 with beamResource "ice" and the same ship and world', async () => {
+    const raw = structuredClone(golden);
+    expect(raw.format).toBe(1);
+    const r = await loadForBoot(await storeWith(raw), wal);
+    const s = r.save as unknown as { format: number; ship: SaveV1['ship'] & { beamResource?: string }; world: SaveV1['world'] };
+    expect(r.notice).toBeNull();
+    expect(s.format).toBe(2);
+    expect(s.ship.beamResource).toBe('ice');
+    expect(s.ship.cargo).toEqual(golden.ship.cargo);
+    expect(s.ship.propellant).toEqual(golden.ship.propellant);
+    expect(s.world).toEqual(golden.world);
+    expect(v2Valid(s)).toBe(true);
+  });
+});
+
+describe('loadForBoot — a WAL jettison and the beacon note (plan 6 task 1)', () => {
+  it('Given a jettison of 250 kg ice paid after the last save (tab closed at once), When the game boots, Then the hold is 250 kg lighter in ice, once, and the merged save is a valid format 2 save', async () => {
+    append([jettisonEntry(13, 'ice', 250, 250)]);
+    const r = await loadForBoot(await storeWith(save(7)), wal);
+    const s = r.save!;
+    expect(s.ship.cargo).toEqual({ ...G.ship.cargo, ice: G.ship.cargo.ice - 250 });
+    expect(s.actions.map((e) => e.seq)).toEqual([...G.actions.map((e) => e.seq), 13]);
+    expect(beaconNotes(s)).toHaveLength(0);
+    expect(v2Valid(s)).toBe(true);
+  });
+
+  it('Given that merged save is saved (revision 8) before the WAL is cleared, When the game boots again, Then the jettison is not applied a second time', async () => {
+    append([jettisonEntry(13, 'ice', 250, 250)]);
+    const store = await storeWith(save(7));
+    const first = (await loadForBoot(store, wal)).save!;
+    expect(first.ship.cargo.ice).toBe(G.ship.cargo.ice - 250);
+    await store.save({ ...first, revision: 8 });
+    const again = (await loadForBoot(store, wal)).save!;
+    expect(again.revision).toBe(8);
+    expect(again.ship.cargo.ice).toBe(G.ship.cargo.ice - 250);
+    expect(again.actions).toHaveLength(first.actions.length);
+  });
+
+  it('Given a voluntary jettison of 250 kg ice and then a beacon that jettisons the rest, Then the note reports only the beacon\'s jettison-all, not the sum', async () => {
+    const rest = GOLD_CARGO_KG - 250;
+    const entries = beaconAfterGolden(14).map((e) =>
+      e.source === 'cargo' ? ({ ...e, payload: { ...e.payload, result: { ...e.payload.result, kgOut: rest } } } as ActionEntry) : e,
+    );
+    append([jettisonEntry(13, 'ice', 250, 250), ...entries]);
+    const s = (await loadForBoot(await storeWith(save(7)), wal)).save!;
+    expect(s.ship.cargo).toEqual({ ice: 0, metal: 0, silicate: 0, rare: 0 });
+    const notes = beaconNotes(s);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]!.body).toContain(`hold jettisoned · ${Math.round(rest)} kg`);
+    expect(notes[0]!.body.join(' ')).not.toContain(`${Math.round(GOLD_CARGO_KG)} kg`);
+  });
+
+  it('Given the hold emptied by voluntary jettisons and then a beacon (no jettison-all: the hold was empty), Then the note says the hold was empty — nothing jettisoned', async () => {
+    const out = [
+      jettisonEntry(13, 'ice', 1_000, G.ship.cargo.ice),
+      jettisonEntry(14, 'metal', 1_000, G.ship.cargo.metal),
+      jettisonEntry(15, 'silicate', 1_000, G.ship.cargo.silicate),
+      jettisonEntry(16, 'rare', 1_000, G.ship.cargo.rare),
+    ];
+    const beacon = beaconAfterGolden(17).filter((e) => e.source !== 'cargo');
+    append([...out, ...beacon]);
+    const s = (await loadForBoot(await storeWith(save(7)), wal)).save!;
+    expect(s.ship.cargo).toEqual({ ice: 0, metal: 0, silicate: 0, rare: 0 });
+    const notes = beaconNotes(s);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]!.body).toContain('hold empty · nothing jettisoned');
   });
 });

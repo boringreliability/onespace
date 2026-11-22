@@ -4,9 +4,13 @@
  *
  * - B on a targeted asteroid within MINE_RANGE_KM of its SURFACE, matched to
  *   within MINE_MAX_REL_KMS, with room in the hold, starts an extraction of ONE
- *   resource (chooseResource). From the next frame on it accrues sim time into
- *   bites (extraction.ts); each bite goes through `applyCargoAction` and
- *   `worldState.recordMined` like any mine, and is announced as `mining:bite`.
+ *   resource: the beam's choice (`beamResource`, plan 6 Task 2, DESIGN-6
+ *   §7.2), and nothing else. A rock without it is refused 'not-here'
+ *   (`NO RARE HERE`), ranked after every reason of the gate. Choosing never
+ *   touches an extraction underway: it applies from the next B. From the
+ *   next frame on it accrues sim time into bites (extraction.ts); each bite
+ *   goes through `applyCargoAction` and `worldState.recordMined` like any
+ *   mine, and is announced as `mining:bite`.
  * - It ends — keeping every finished bite — on B again, a full hold, the
  *   resource or the rock running out, or a broken requirement; one log line
  *   (`extractionLog`) and one `mining:ended`. The last bite of a rock also
@@ -61,10 +65,11 @@ import {
   REFUSAL_LOG,
   REPAIR_ABORTED_TEXT,
   REPAIR_ACTION_S,
-  chooseResource,
+  hasResource,
   mayAct,
   mayMine,
   refinedLog,
+  refusalText,
   repairedLog,
   type MiningRefusal,
 } from './miningRules';
@@ -240,6 +245,8 @@ export class Mining implements GameModule {
   };
   private targetAsteroid: string | null = null;
   private inRange = false;
+  /** The resource the beam takes (plan 6 Task 2). A new game: ice. */
+  private beam: Resource = 'ice';
 
   constructor(opts: MiningOptions) {
     this.opts = opts;
@@ -263,6 +270,20 @@ export class Mining implements GameModule {
   /** The relative speed is within MINE_MAX_REL_KMS (meaningful with a rock targeted). */
   get speedOk(): boolean {
     return this.gate.relSpeedKmS <= MINE_MAX_REL_KMS;
+  }
+
+  /** The resource B takes: the player's choice, ice until one is made (DESIGN-6 §7.2). */
+  get beamResource(): Resource {
+    return this.beam;
+  }
+
+  /**
+   * Choose the resource B takes. Anything that is not one of the four
+   * resources is ignored (the choice stays). Logs nothing, and leaves an
+   * extraction underway alone: the choice applies from the next B.
+   */
+  setBeamResource(r: Resource): void {
+    if (RESOURCES.includes(r)) this.beam = r;
   }
 
   /** The extraction underway as an operation (empty or one element). Read `mining.operations` every frame and do not keep the array: it is one of two arrays, and the single `MiningOperation` object is reused and updated in place while an extraction runs. */
@@ -306,10 +327,8 @@ export class Mining implements GameModule {
     else if (this.active || this.ext) reason = 'busy';
     else if (g.cruise) reason = 'cruise';
     else if (g.warpPhase !== 'idle') reason = 'jump';
-    else if (kind === 'mine') {
-      const m = mayMine(g);
-      reason = m.ok ? null : m.reason!;
-    } else if (!mayAct(g)) reason = 'busy';
+    else if (kind === 'mine') reason = this.mineRefusal();
+    else if (!mayAct(g)) reason = 'busy';
     else reason = kind === 'refine' ? refineRefusal(cargo, u.flight.propellant) : repairRefusal(cargo, u.flight.propellant);
     if (reason === null) return READY;
     const s = this.blocked[kind];
@@ -329,8 +348,8 @@ export class Mining implements GameModule {
   }
 
   /**
-   * Gated to flight (game/gating.ts). Leaving flight for map, Yard or title
-   * puts this module to sleep (core/tick.ts `moduleDt` returns -1); the photo
+   * Gated to flight (game/gating.ts). Leaving flight for map, Yard, title or the
+   * resources screen (opening it ends an extraction) puts this module to sleep (core/tick.ts `moduleDt` returns -1); the photo
    * overlay does not, it ticks with dt = 0 while Pause freezes the world. In
    * every case the extraction is ended here (interrupted) and a refine or
    * repair aborted, at the mode change: photo (P) ends them as pause does, so
@@ -452,16 +471,39 @@ export class Mining implements GameModule {
     // It belongs to the rock it started on.
     if (this.targetAsteroid !== null && this.targetAsteroid !== e.asteroidId) return 'interrupted';
     if (m.ok) return null;
-    switch (m.reason) {
+    // A refusal always has a reason; were it missing, it falls to the default and fails closed.
+    const reason = m.reason!;
+    switch (reason) {
       case 'no-target':
       case 'range':
       case 'speed':
       case 'hold-full':
-        return m.reason;
-      default:
-        // 'depleted': every resource under MINE_MIN_KG (such a rock is already gone).
+        return reason;
+      case 'depleted':
+        // Every resource under MINE_MIN_KG (such a rock is already gone).
         return 'resource-depleted';
+      case 'not-here':
+        // Not this gate's to end: the running extraction keeps its own resource (the
+        // beam's choice applies from the next B), and that resource running out ends
+        // it in extract() as 'resource-depleted'.
+        return null;
+      default: {
+        // Fail closed: a reason nobody anticipated ends the extraction (R16, one gate).
+        const unexpected: never = reason;
+        void unexpected;
+        return 'interrupted';
+      }
     }
+  }
+
+  /**
+   * Why B may not start an extraction now, or null: the gate first, then the
+   * beam's choice — 'not-here' ranks after every reason of the gate.
+   */
+  private mineRefusal(): MiningRefusal | null {
+    const m = mayMine(this.gate);
+    if (!m.ok) return m.reason!;
+    return hasResource(this.remaining, this.beam) ? null : 'not-here';
   }
 
   /** One frame of the extraction: the gate, the time, then every bite it pays. */
@@ -565,24 +607,19 @@ export class Mining implements GameModule {
     }
     let refusal: MiningRefusal | null;
     if (kind === 'mine') {
-      const g = mayMine(this.gate);
-      refusal = g.ok ? null : g.reason!;
+      refusal = this.mineRefusal();
     } else if (!mayAct(this.gate)) {
       refusal = 'busy';
     } else {
       refusal = kind === 'refine' ? refineRefusal(cargo, tank) : repairRefusal(cargo, tank);
     }
     if (refusal !== null) {
-      this.log(REFUSAL_LOG[refusal], 'warn');
+      this.log(refusalText(refusal, this.beam), 'warn');
       return;
     }
     if (kind === 'mine') {
-      const r = chooseResource(this.remaining);
-      if (r === null) {
-        // The gate passed on ≥ MINE_MIN_KG in all, so one resource has it; kept for safety.
-        this.log(REFUSAL_LOG.depleted, 'warn');
-        return;
-      }
+      // The player's choice and nothing else (mineRefusal checked the rock has it).
+      const r = this.beam;
       const id = this.targetAsteroid!;
       this.ext = startExtraction(id, r);
       this.op.asteroidId = id;

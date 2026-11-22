@@ -11,7 +11,7 @@
 import { generateGalaxy, sampleSystemsNear } from '@/gen/galaxy';
 import { generateSystem } from '@/gen/system';
 import type { GalaxySpec, PlanetSpec } from '@/gen/types';
-import type { SaveV1 } from '@/save/schema';
+import type { Save } from '@/save/schema';
 
 /** `gx-<base36>:v1` → the universe seed (as bootLoad reads it). */
 function seedOf(universeId: string): number | null {
@@ -25,11 +25,11 @@ function seedOf(universeId: string): number | null {
  * A resolver over the saves the screen may show: a body id is looked up in
  * the system of the save whose parent it is. Generated systems are cached.
  */
-export function bodyNameResolver(saves: ReadonlyArray<SaveV1 | null>): (id: string) => string | null {
+export function bodyNameResolver(saves: ReadonlyArray<Save | null>): (id: string) => string | null {
   const galaxies = new Map<number, GalaxySpec>();
   const names = new Map<string, Map<string, string> | null>();
 
-  const systemNames = (s: SaveV1): Map<string, string> | null => {
+  const systemNames = (s: Save): Map<string, string> | null => {
     const key = `${s.universeId}|${s.player.system.id}`;
     if (names.has(key)) return names.get(key)!;
     let out: Map<string, string> | null = null;

@@ -344,6 +344,9 @@ async function state(page) {
       mineKind: e.get('mining').status('mine').kind,
       mineShownKg: e.get('mining').status('mine').shownKg,
       inRange: e.get('mining').asteroidInRange,
+      // Plan 6: the hold per resource and the beam's choice.
+      hold: u.cargo ? u.cargo.snapshot() : null,
+      beam: e.get('mining').beamResource,
       revision: e.get('save').revision,
       sync: pause.sync ? pause.sync.status() : null,
       syncText: pause.sync ? pause.sync.statusText() : null,
@@ -448,6 +451,84 @@ async function mineAndRefine(page, note) {
   const refined = await page.evaluate(() => window.__e2eLog.filter((l) => l.startsWith('REFINED')).at(-1) ?? null);
   note(`${refined}; tank ${before.toFixed(1)} → ${after.toFixed(1)} kg`);
   return { before, after };
+}
+
+/** B until at least `minKg` more is in the hold, then B to stop (the same race handling as mineAndRefine). */
+async function mineMore(page, note, minKg) {
+  const ice0 = (await state(page)).hold?.ice ?? 0;
+  await page.keyboard.press('KeyB');
+  await waitState(page, (x) => x.mineKind === 'running', 'the extraction to start', 5_000);
+  await waitState(page, (x) => x.mineKind !== 'running' || x.mineShownKg >= minKg, `${minKg} kg to be mined`, 30_000);
+  if ((await state(page)).mineKind === 'running') await page.keyboard.press('KeyB');
+  await waitState(page, (x) => x.mineKind !== 'running', 'the extraction to end', 10_000);
+  await page.waitForTimeout(1_000);
+  if ((await state(page)).mineKind === 'running') {
+    await page.keyboard.press('KeyB');
+    await waitState(page, (x) => x.mineKind !== 'running', 'the extraction to end', 10_000);
+  }
+  const s = await state(page);
+  note(`mined again: hold ice ${kg(ice0)} → ${kg(s.hold?.ice)}`);
+  return s;
+}
+
+const sheetLive = (page) => page.evaluate(() => document.querySelector('.os-res')?.classList.contains('is-live') ?? false);
+const sheetSelected = (page) => page.evaluate(() => document.querySelector('.os-rs-line.is-selected .os-rs-name')?.textContent ?? null);
+
+/** I, and wait for the sheet. */
+async function openResources(page) {
+  await page.keyboard.press('KeyI');
+  await page.waitForFunction(() => document.querySelector('.os-res')?.classList.contains('is-live'), null, { timeout: 5_000 });
+}
+
+/** I again, and wait for the sheet to let go and the flight to be back. */
+async function closeResources(page) {
+  await page.keyboard.press('KeyI');
+  await page.waitForFunction(() => !document.querySelector('.os-res')?.classList.contains('is-live'), null, { timeout: 5_000 });
+  await page.waitForTimeout(300);
+}
+
+/**
+ * Plan 6: the resources screen. I opens it; O jettisons 250 kg ice (the log
+ * says so, the hold drops by 250); ↓↓ selects METAL, Enter sets the beam; I
+ * closes; the HUD's MINE row shows the choice. Returns the hold's ice and the beam.
+ */
+async function resourcesScreen(page, note) {
+  const s0 = await state(page);
+  assert(s0.hold && s0.hold.ice >= 250, `the hold has ${kg(s0.hold?.ice)} ice, < 250 kg`);
+  await openResources(page);
+  assert((await sheetSelected(page)) === 'ICE', `the sheet opened with ${await sheetSelected(page)} selected, not ICE`);
+  note(`I opened the sheet: ${await page.evaluate(() => document.querySelector('.os-rs-total')?.textContent)}`);
+
+  await page.evaluate(() => {
+    window.__e2eLog = window.__e2eLog.filter((l) => !l.startsWith('JETTISONED'));
+  });
+  await page.keyboard.press('KeyO');
+  await waitLog(page, 'JETTISONED · 250 KG ICE', 5_000);
+  const s1 = await state(page);
+  assert(Math.abs(s0.hold.ice - 250 - s1.hold.ice) <= 0.5, `the hold's ice ${kg(s0.hold.ice)} → ${kg(s1.hold.ice)}, not down by 250`);
+  note(`O: JETTISONED · 250 KG ICE; hold ice ${kg(s0.hold.ice)} → ${kg(s1.hold.ice)}`);
+
+  await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('ArrowDown');
+  assert((await sheetSelected(page)) === 'METAL', `↓↓ selected ${await sheetSelected(page)}, not METAL`);
+  await page.keyboard.press('Enter');
+  const s2 = await waitState(page, (x) => x.beam === 'metal', 'the beam to take METAL', 3_000);
+  const beamLine = await page.evaluate(() => document.querySelector('.os-rs-line.is-beam .os-rs-name')?.textContent ?? null);
+  assert(beamLine === 'METAL', `the ◉ is on ${beamLine}, not METAL`);
+  assert(await sheetLive(page), 'the sheet closed on Enter');
+  note(`↓↓ Enter: beam ${s2.beam} (◉ on ${beamLine})`);
+
+  await closeResources(page);
+  const row = await page
+    .waitForFunction(() => {
+      const t = document.querySelectorAll('.os-hud .os-act')[0]?.querySelector('.os-act-text')?.textContent ?? '';
+      return t.endsWith('· METAL') || t === 'NO METAL HERE' ? t : false;
+    }, null, { timeout: 3_000 })
+    .then((h) => h.jsonValue())
+    .catch(() => null);
+  assert(row, `the MINE row after closing: ${JSON.stringify(await page.evaluate(() => document.querySelectorAll('.os-hud .os-act')[0]?.querySelector('.os-act-text')?.textContent))}`);
+  note(`I closed the sheet; MINE row: ${row}`);
+  return { ice: s2.hold.ice, beam: s2.beam };
 }
 
 async function openPause(page) {
@@ -639,7 +720,7 @@ async function run() {
   const one = { ctx: null, page: null };
   const saved = {};
 
-  await step('1', 'test login → belt → mine ice → refine → the tank rises → reload → still filled', async (note) => {
+  await step('1', 'test login → belt → mine ice → refine → the tank rises → resources screen: jettison, beam METAL → reload → still filled, same hold and beam', async (note) => {
     Object.assign(one, await newPage('device-1'));
     const { page, ctx } = one;
     await gotoGame(page);
@@ -660,11 +741,17 @@ async function run() {
     const { before, after } = await mineAndRefine(page, note);
     assert(after > before, `the tank did not rise (${kg(before)} → ${kg(after)})`);
 
+    // Plan 6: the refine used the ice; mine a round more, then the resources screen.
+    await mineMore(page, note, 500);
+    const res = await resourcesScreen(page, note);
+
     const s = await pauseSave(page);
     note(`SAVED revision ${s.revision}, tank ${kg(s.tankKg)}`);
     const synced = await waitState(page, (x) => x.sync === 'synced', 'sync to finish', 30_000);
     const head = await cloudHead(ctx);
     assert(head.status === 200 && head.revision === synced.revision, `cloud head ${JSON.stringify(head)} vs local revision ${synced.revision}`);
+    // The save that was pushed is the one written after the jettison and the beam's choice.
+    assert(synced.revision >= s.revision, `synced revision ${synced.revision} is older than the save made after the resources screen (${s.revision})`);
     assert(Math.abs(head.tankKg - s.tankKg) < 0.5, `cloud tank ${kg(head.tankKg)} vs saved ${kg(s.tankKg)}`);
     note(`cloud holds revision ${head.revision}, tank ${kg(head.tankKg)}, system ${head.system}`);
     Object.assign(saved, { tankKg: s.tankKg, system: s.system, revision: head.revision });
@@ -679,13 +766,20 @@ async function run() {
     assert(Math.abs(r.tankKg - saved.tankKg) < 1, `tank after reload ${kg(r.tankKg)} ≠ saved ${kg(saved.tankKg)}`);
     assert(r.tankKg > before, `tank after reload ${kg(r.tankKg)} not above the pre-refine ${kg(before)}`);
     note(`reloaded + CONTINUE: ${r.system}, tank ${kg(r.tankKg)} (sync ${r.sync})`);
+    // Plan 6: the jettison and the beam's choice were saved.
+    assert(Math.abs((r.hold?.ice ?? NaN) - res.ice) <= 1, `hold ice after reload ${kg(r.hold?.ice)} ≠ saved ${kg(res.ice)}`);
+    assert(r.beam === 'metal', `beam after reload ${r.beam}, not metal`);
+    note(`after reload: hold ice ${kg(r.hold.ice)} (saved ${kg(res.ice)}), beam ${r.beam}`);
+    // Scenario 2 reads these from the cloud: the beam METAL and the hold after the jettison.
+    saved.ice = res.ice;
+    saved.beam = res.beam;
   });
 
   // ---------------------------------------------------------------- scenario 2
   const two = { ctx: null, page: null };
   await step(
     '2',
-    'a second browser context, same account → CONTINUE gives the same system and the same tank',
+    'a second browser context, same account → CONTINUE gives the same system, the same tank, the beam METAL and the same hold',
     async (note) => {
       Object.assign(two, await newPage('device-2'));
       const { page } = two;
@@ -700,7 +794,10 @@ async function run() {
       const s = await state(page);
       assert(s.system === saved.system, `system ${s.system} ≠ ${saved.system}`);
       assert(Math.abs(s.tankKg - saved.tankKg) < 1, `tank ${kg(s.tankKg)} ≠ ${kg(saved.tankKg)}`);
-      note(`device 2: ${s.system}, tank ${kg(s.tankKg)}, revision ${s.revision}, sync ${s.sync}`);
+      // Plan 6: the beam's choice and the hold (after the jettison) come from the cloud too.
+      assert(s.beam === 'metal', `device 2's beam is ${s.beam}, not metal`);
+      assert(Math.abs((s.hold?.ice ?? NaN) - saved.ice) <= 1, `device 2's hold ice ${kg(s.hold?.ice)} ≠ device 1's ${kg(saved.ice)}`);
+      note(`device 2: ${s.system}, tank ${kg(s.tankKg)}, hold ice ${kg(s.hold.ice)}, beam ${s.beam}, revision ${s.revision}, sync ${s.sync}`);
     },
     { requires: ['1'] },
   );
@@ -715,8 +812,16 @@ async function run() {
       await setOffline('device-2', two.ctx, true);
       note('both contexts offline');
 
-      // Device 1 gains fuel offline: mine + refine again at the same rock.
+      // Device 1 gains fuel offline: mine + refine again at the same rock. Its beam is
+      // still METAL from scenario 1: back to ICE first (the selection starts on ICE
+      // after a reload), so it mines ice as before.
       const p1 = one.page;
+      await openResources(p1);
+      assert((await sheetSelected(p1)) === 'ICE', `the sheet opened on ${await sheetSelected(p1)}, not ICE`);
+      await p1.keyboard.press('Enter');
+      await waitState(p1, (x) => x.beam === 'ice', 'the beam to take ICE again', 3_000);
+      await closeResources(p1);
+      note('device 1: beam set back to ICE');
       await targetIceRock(p1, (s) => note(`device 1: ${s}`));
       const gain = await mineAndRefine(p1, (s) => note(`device 1: ${s}`));
       const s1 = await pauseSave(p1);

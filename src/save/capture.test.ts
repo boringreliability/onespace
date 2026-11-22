@@ -22,6 +22,8 @@
  *    changes nothing.
  */
 
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Quaternion, Vector3 } from 'three';
 
@@ -29,10 +31,12 @@ import { bus } from '@/core/EventBus';
 import type { EngineContext } from '@/core/Engine';
 import type { ActionName } from '@/core/Input';
 import { Emergency } from '@/game/Emergency';
+import { Mining, type MiningOptions } from '@/game/Mining';
 import { ShipLog, type LogState } from '@/game/Log';
 import { Universe } from '@/game/Universe';
 import { fyssField, nodeCtx } from '@/game/testing/beltFixture';
 import { WorldState, type MinedEntry } from '@/game/worldState';
+import type { Resource } from '@/gen/belt';
 import { applyCargoAction } from '@/ship/cargo';
 import { EXHAUST_VELOCITY_KMS } from '@/ship/propellant';
 import { payBeacon } from '@/ship/emergency';
@@ -43,7 +47,7 @@ import { ActionJournal, MAX_ACTIONS, compactEntries } from './actionJournal';
 import { applySave, buildSave, type SaveWorld } from './capture';
 import { migrate } from './migrate';
 import { replay, type ReplayState } from './replay';
-import { SaveV1Schema, type ActionEntry, type SaveV1 } from './schema';
+import { SaveV2Schema, type ActionEntry, type SaveV1 } from './schema';
 
 /** Universe steps that need a GPU; everything else in update() runs for real. */
 const RENDER_STEPS = ['streamRenderers', 'updateBodies', 'updateStar', 'publishMotionReference', 'refreshAtmosphere'];
@@ -175,10 +179,10 @@ describe('buildSave — identity', () => {
   it('Given no previous save, Then revision is 1, saveId is a fresh v4 UUID and the save is a valid SaveV1', () => {
     const g = live();
     const s = buildSave(g.w, null);
-    expect(s.format).toBe(1);
+    expect(s.format).toBe(2);
     expect(s.revision).toBe(1);
     expect(s.saveId).toMatch(UUID);
-    expect(SaveV1Schema.safeParse(s).success).toBe(true);
+    expect(SaveV2Schema.safeParse(s).success).toBe(true);
   });
 
   it('Given two first saves, Then they get different saveIds', () => {
@@ -238,6 +242,7 @@ describe('buildSave — player, ship and world, separately (P2)', () => {
       propellant: g.u.flight.propellant!.snapshot(),
       cargo: g.u.cargo.snapshot(),
       emergencyTimesUsed: 3,
+      beamResource: 'ice',
     });
     expect(s.ship.cargo.metal).toBe(700);
   });
@@ -450,7 +455,7 @@ describe('R23: a cruise save orbits the deepest body whose SOI holds the ship', 
     const s = buildSave(g.w, null);
     expect(s.player.parentId).toBeNull();
     expect([...s.player.flight.position, ...s.player.flight.velocity].every(Number.isFinite)).toBe(true);
-    expect(SaveV1Schema.safeParse(s).success).toBe(true);
+    expect(SaveV2Schema.safeParse(s).success).toBe(true);
   });
 });
 
@@ -623,7 +628,7 @@ describe('buildSave — the action log', () => {
     expect(s.actions[0]!.source).toBe('checkpoint');
     expect(s.actions.at(-1)!.seq).toBeGreaterThan(4_999);
     expect(s.actions.filter((e) => e.source === 'emergency')).toHaveLength(3);
-    expect(SaveV1Schema.safeParse(s).success).toBe(true);
+    expect(SaveV2Schema.safeParse(s).success).toBe(true);
   });
 });
 
@@ -646,7 +651,7 @@ describe('R7: the books balance around emergencies and cruise', () => {
       s = buildSave(g.w, null);
     }).not.toThrow();
     const save = s as unknown as SaveV1;
-    expect(SaveV1Schema.safeParse(save).success).toBe(true);
+    expect(SaveV2Schema.safeParse(save).success).toBe(true);
     const { massKg, capacityLossFrac } = save.ship.propellant;
     expect(Number.isFinite(massKg) && massKg >= 0).toBe(true);
     expect(Number.isFinite(capacityLossFrac) && capacityLossFrac >= 0 && capacityLossFrac <= 1).toBe(true);
@@ -1052,7 +1057,7 @@ describe('R8: replay(start, log) recomputes the live ship', () => {
     const c = compactEntries(s2.actions, 5);
     expect(c).toHaveLength(5);
     expectState(replay(startState, c), now);
-    expect(SaveV1Schema.safeParse({ ...s2, actions: c }).success).toBe(true);
+    expect(SaveV2Schema.safeParse({ ...s2, actions: c }).success).toBe(true);
   });
 
   it('Given the log compacted twice (to 12, then to 5), Then replay still equals the live ship', () => {
@@ -1290,5 +1295,158 @@ describe('R21: a save is where the clock says, not a frame behind', () => {
     const b = live();
     expect(applySave(b.w, throughStorage(s))).toBe(true);
     expect(b.u.flight.grounded).toBe(true);
+  });
+});
+
+// =============================================================================
+// v4 sub-plan 6, Task 2 (phase A) — the beam's choice is saved and restored.
+//
+// DESIGN-6 §7.2: the choice is saved in `ship.beamResource` (format 2); a
+// format 1 save, lifted by the upgrade, gives ice. Task 1 gave buildSave the
+// seam `SaveWorld.beamResource?: () => Resource`. Assumed for the way back
+// (not there yet, wired through a cast): `SaveWorld.setBeamResource?: (r:
+// Resource) => void`, which applySave calls with `s.ship.beamResource` on
+// every load — ice included, so a lifted format 1 save resets a choice the
+// fresh game had. The registry feeds both from its Mining.
+// =============================================================================
+
+type BeamMining = { readonly beamResource: Resource; setBeamResource(r: Resource): void };
+
+/** A Mining with stubbed surroundings: only its beam's choice is used here. */
+function beamMining(): BeamMining {
+  const m = new Mining({
+    universe: { paused: false, frozen: false, simulatedSeconds: 0, cargo: null, flight: { propellant: null, worldPosition: new Vector3(), velocity: new Vector3() }, shipParent: null },
+    belt: {} as never,
+    worldState: { recordMined: () => undefined },
+    targeting: { targetId: null },
+    cruise: { busy: false },
+    warp: { phase: 'idle' },
+  } as unknown as MiningOptions);
+  const b = m as unknown as Partial<BeamMining>;
+  expect(typeof b.setBeamResource, 'Mining.setBeamResource exists').toBe('function');
+  return m as unknown as BeamMining;
+}
+
+/** The save world wired to `m` both ways, as the registry wires it. */
+function wiredTo(w: SaveWorld, m: BeamMining): SaveWorld {
+  return { ...w, beamResource: () => m.beamResource, setBeamResource: (r: Resource) => m.setBeamResource(r) } as SaveWorld;
+}
+
+describe('the beam\'s choice through a save (plan 6 task 2)', () => {
+  it('Given a Mining whose choice is metal, When buildSave, Then ship.beamResource is metal', () => {
+    const g = live();
+    const m = beamMining();
+    m.setBeamResource('metal');
+    const s = buildSave(wiredTo(g.w, m), null);
+    expect(s.ship.beamResource).toBe('metal');
+    expect(SaveV2Schema.safeParse(s).success).toBe(true);
+  });
+
+  it('Given the choice metal saved, When buildSave → JSON → migrate → applySave into a fresh game whose Mining is on ice, Then that Mining\'s choice is metal', () => {
+    const a = live();
+    const ma = beamMining();
+    ma.setBeamResource('metal');
+    const s = buildSave(wiredTo(a.w, ma), null);
+    a.dispose();
+    vi.stubGlobal('localStorage', new MemoryStorage());
+    const loaded = throughStorage(s);
+    expect(loaded.ship.beamResource).toBe('metal');
+
+    const b = live();
+    const mb = beamMining();
+    expect(mb.beamResource, 'precondition: a fresh Mining is on ice').toBe('ice');
+    expect(applySave(wiredTo(b.w, mb), loaded)).toBe(true);
+    expect(mb.beamResource).toBe('metal');
+    // …and the next save keeps it.
+    expect(buildSave(wiredTo(b.w, mb), loaded).ship.beamResource).toBe('metal');
+  });
+
+  it('Given a format 1 save (no beamResource), When it is lifted and applied to a game whose Mining was set to rare, Then the choice is ice', () => {
+    const a = live();
+    const built = buildSave(a.w, null);
+    a.dispose();
+    vi.stubGlobal('localStorage', new MemoryStorage());
+    // The same save as a format 1 build wrote it: no beamResource, no jettison.
+    const v1 = structuredClone(built) as unknown as { format: number; ship: Record<string, unknown> };
+    v1.format = 1;
+    delete v1.ship.beamResource;
+    const m = migrate(JSON.parse(JSON.stringify(v1)));
+    expect(m.ok).toBe(true);
+    if (!m.ok) return;
+    expect(m.migratedFrom, 'precondition: it was format 1').toBe(1);
+    expect(m.save.ship.beamResource).toBe('ice');
+
+    const b = live();
+    const mb = beamMining();
+    mb.setBeamResource('rare');
+    expect(mb.beamResource, 'precondition: the game was on rare').toBe('rare');
+    expect(applySave(wiredTo(b.w, mb), m.save)).toBe(true);
+    expect(mb.beamResource).toBe('ice');
+  });
+
+  it('Given a save world without the setBeamResource seam (a showroom, the old tests), When applySave, Then it still loads (the seam is optional)', () => {
+    const a = live();
+    const s = throughStorage(buildSave(a.w, null));
+    a.dispose();
+    vi.stubGlobal('localStorage', new MemoryStorage());
+    const b = live();
+    expect(applySave(b.w, s)).toBe(true);
+  });
+
+  it('Given the registry, Then it feeds the save from the Mining\'s choice and gives a load back to it (mining.beamResource and mining.setBeamResource)', () => {
+    const src = readFileSync(fileURLToPath(new URL('../game/registry.ts', import.meta.url)), 'utf8');
+    expect(src).toContain('mining.beamResource');
+    expect(src).toContain('mining.setBeamResource');
+  });
+});
+
+// =============================================================================
+// v4 sub-plan 6, Task 1 — review fix M3: the beam's choice is whitelisted on
+// save. SaveGame does not check the schema when it writes, so a seam value
+// outside the four resources would make every later save `invalid` at the
+// next boot. buildSave writes the seam's value only when it is one of
+// ice/metal/silicate/rare; anything else falls back to the previous save's
+// value, else 'ice' — and the built save always passes SaveV2Schema.
+// =============================================================================
+
+describe('buildSave — the beam\'s choice is whitelisted (plan 6 task 1, review fix)', () => {
+  const INVALID: Array<[string, unknown]> = [
+    ["'gold' (not a resource)", 'gold'],
+    ["'' (the empty string)", ''],
+    ["'ICE' (wrong case)", 'ICE'],
+    ['undefined', undefined],
+    ['null', null],
+    ['42 (a number)', 42],
+  ];
+
+  /** The save world with a seam that returns `v`, whatever its type. */
+  const seamed = (w: SaveWorld, v: unknown): SaveWorld => ({ ...w, beamResource: () => v as Resource });
+
+  it.each(INVALID)('Given the seam returns %s and a previous save whose choice is metal, When buildSave, Then ship.beamResource is metal and the save passes SaveV2Schema', (_what, v) => {
+    const g = live();
+    const s1 = buildSave(g.w, null);
+    const prev: SaveV1 = { ...s1, ship: { ...s1.ship, beamResource: 'metal' } };
+    expect(prev.ship.beamResource, 'precondition: the previous save chose metal').toBe('metal');
+    const s = buildSave(seamed(g.w, v), prev);
+    expect(s.ship.beamResource).toBe('metal');
+    expect(SaveV2Schema.safeParse(s).success).toBe(true);
+  });
+
+  it.each(INVALID)('Given the seam returns %s and no previous save, When buildSave, Then ship.beamResource is ice and the save passes SaveV2Schema', (_what, v) => {
+    const g = live();
+    const s = buildSave(seamed(g.w, v), null);
+    expect(s.ship.beamResource).toBe('ice');
+    expect(SaveV2Schema.safeParse(s).success).toBe(true);
+  });
+
+  it.each<Resource>(['ice', 'metal', 'silicate', 'rare'])('Given the seam returns %s (a resource) and a previous save whose choice is something else, When buildSave, Then ship.beamResource is the seam\'s value', (r) => {
+    const g = live();
+    const s1 = buildSave(g.w, null);
+    const other: Resource = r === 'metal' ? 'rare' : 'metal';
+    const prev: SaveV1 = { ...s1, ship: { ...s1.ship, beamResource: other } };
+    expect(prev.ship.beamResource, 'precondition: the previous save chose another resource').not.toBe(r);
+    const s = buildSave(seamed(g.w, r), prev);
+    expect(s.ship.beamResource).toBe(r);
+    expect(SaveV2Schema.safeParse(s).success).toBe(true);
   });
 });

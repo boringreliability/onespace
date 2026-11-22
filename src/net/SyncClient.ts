@@ -44,7 +44,7 @@ import * as z from 'zod';
 
 import { sameGame } from '@/save/conflict';
 import { migrate } from '@/save/migrate';
-import type { SaveV1 } from '@/save/schema';
+import type { Save } from '@/save/schema';
 import { STORE_TIMEOUT_MS, rawKey, withTimeout, type SaveStore } from '@/save/store';
 import type { Wal } from '@/save/wal';
 
@@ -76,13 +76,13 @@ export type BootDecision = Decision | { kind: 'local-only'; reason: 'reader' | '
 
 export interface BootSync {
   decision: BootDecision;
-  cloud: SaveV1 | null;
+  cloud: Save | null;
   notice: string | null;
 }
 
 export type ResolveResult =
-  | { ok: true; save: SaveV1 }
-  | { ok: false; reason: 'offline' | 'reauth' | 'moved'; cloud?: SaveV1 };
+  | { ok: true; save: Save }
+  | { ok: false; reason: 'offline' | 'reauth' | 'moved'; cloud?: Save };
 
 export interface SyncClientDeps {
   readonly api: Api;
@@ -103,10 +103,10 @@ const NoSaveSchema = z.object({ error: z.literal('no-save') });
 
 type Me = z.infer<typeof MeSchema>;
 
-const head = (s: SaveV1): CloudHead => ({ saveId: s.saveId, revision: s.revision });
+const head = (s: Save): CloudHead => ({ saveId: s.saveId, revision: s.revision });
 
 /** The save inside a `{revision, save}` body, migrated; null when unreadable. */
-function cloudSave(body: unknown): { save: SaveV1; revision: number } | null {
+function cloudSave(body: unknown): { save: Save; revision: number } | null {
   const b = CloudBodySchema.safeParse(body);
   if (!b.success) return null;
   const m = migrate(b.data.save);
@@ -131,7 +131,7 @@ function without(s: SyncState, ...keys: ('inFlightPut' | 'pendingResolve' | 'pen
  * cyrb53, 53 bits as hex. Not cryptographic: it only tells this device's own
  * PUT from another body at the same saveId + revision.
  */
-export function saveFingerprint(save: SaveV1): string {
+export function saveFingerprint(save: Save): string {
   const key = rawKey(save) ?? '';
   let h1 = 0xdeadbeef;
   let h2 = 0x41c6ce57;
@@ -150,10 +150,22 @@ export function saveFingerprint(save: SaveV1): string {
  * game, a higher revision, or other content (WAL entries) at its revision.
  * A resolve result must then never overwrite it.
  */
-function advancedPast(local: SaveV1 | null, device: SaveV1, dirty: boolean): boolean {
+function advancedPast(local: Save | null, device: Save, dirty: boolean): boolean {
   if (local === null || local === device) return false;
   if (local.saveId !== device.saveId || local.revision > device.revision) return true;
-  return local.revision === device.revision && (dirty || rawKey(local) !== rawKey(device));
+  return local.revision === device.revision && (dirty || rawKey(local) !== rawKey(lifted(device)));
+}
+
+/**
+ * A pending resolve's device body is stored verbatim (R69) and may have been
+ * written by an older build in an older save format; `local` and the result
+ * have been through `migrate`. Content is compared on the lifted body — the
+ * body that is re-sent stays verbatim. A body `migrate` refuses is compared
+ * raw, as before (it then never matches a migrated save: counts as advanced).
+ */
+function lifted(device: Save): Save {
+  const m = migrate(device);
+  return m.ok ? m.save : device;
 }
 
 /** What the boot's replay of a pending resolve got (R69), when it answered within the budget. */
@@ -174,11 +186,11 @@ export class SyncClient {
   /** R38: after an offline boot, me() must confirm the bound account before any PUT. */
   private needsIdentity = false;
   /** The latest save the game stored (or the boot's local): what is pushed, and what resolve sends. */
-  private latest: SaveV1 | null = null;
+  private latest: Save | null = null;
   /** A save waiting to be pushed. */
-  private queued: SaveV1 | null = null;
+  private queued: Save | null = null;
   /** R68(a): a save whose PUT failed retryably — the server may hold it — resent before `queued`. */
-  private unacked: SaveV1 | null = null;
+  private unacked: Save | null = null;
   /** R36: a WAL-merged local at L's revision is not pushed; wait for a save above this revision. */
   private holdAtOrBelow: number | null = null;
   private inFlight = false;
@@ -190,7 +202,7 @@ export class SyncClient {
   /** The cloud head seen at boot (or in a 409): what resolve says it saw. */
   private cloudHead: CloudHead | null = null;
   /** R71: the cloud save behind cloudHead — shelved when the player keeps the device's save. */
-  private cloudSnapshot: SaveV1 | null = null;
+  private cloudSnapshot: Save | null = null;
   /**
    * R74/R78: the sync state lives in storage that works (it was read from it,
    * or a write succeeded). Only then does a pending resolve that cannot be
@@ -240,7 +252,7 @@ export class SyncClient {
   // ---------------------------------------------------------------------------
   // Boot
 
-  async boot(local: SaveV1 | null, opts: { localDirty?: boolean } = {}): Promise<BootSync> {
+  async boot(local: Save | null, opts: { localDirty?: boolean } = {}): Promise<BootSync> {
     this.latest = local;
     const localOnly = (reason: 'reader' | 'offline' | 'timeout' | 'unreadable'): BootSync => ({
       decision: { kind: 'local-only', reason },
@@ -351,7 +363,7 @@ export class SyncClient {
       return localOnly('offline');
     }
 
-    let cloud: SaveV1 | null = null;
+    let cloud: Save | null = null;
     if (!emptyCloud) {
       const c = cloudSave(saveRes.ok ? saveRes.body : null);
       if (!c) {
@@ -412,10 +424,10 @@ export class SyncClient {
    */
   private async applyReplay(
     replay: Replay,
-    local: SaveV1 | null,
+    local: Save | null,
     me: Me,
     dirty: boolean,
-  ): Promise<SaveV1 | 'kept' | 'unanswered' | 'take-cloud'> {
+  ): Promise<Save | 'kept' | 'unanswered' | 'take-cloud'> {
     const { body, res } = replay;
     if (!res.ok) {
       if (resolveRetryable(res.status)) return 'unanswered';
@@ -483,7 +495,7 @@ export class SyncClient {
    * PUT sent (saveId, revision AND content) — the server committed it, so it
    * is last-seen-cloud, not a conflict.
    */
-  private trustOwnPut(me: Me, cloud: SaveV1, revision: number): void {
+  private trustOwnPut(me: Me, cloud: Save, revision: number): void {
     const m = this.state.inFlightPut;
     if (!m || this.state.accountId !== me.id) return;
     if (m.saveId !== cloud.saveId || m.revision !== revision || m.fingerprint !== saveFingerprint(cloud)) return;
@@ -519,8 +531,8 @@ export class SyncClient {
 
   private async apply(
     decision: Decision,
-    local: SaveV1 | null,
-    cloud: SaveV1 | null,
+    local: Save | null,
+    cloud: Save | null,
     me: Me,
     dirty: boolean,
     shelveLocal = false,
@@ -618,7 +630,7 @@ export class SyncClient {
   }
 
   /** R35: shelve (each one given, in order), reset the WAL, replace the store's save. */
-  private async replaceLocal(shelve: ReadonlyArray<SaveV1 | null>, next: SaveV1 | null): Promise<void> {
+  private async replaceLocal(shelve: ReadonlyArray<Save | null>, next: Save | null): Promise<void> {
     for (const s of shelve) {
       if (s) await withTimeout(() => this.d.store.keepCorrupt(s, Date.now()), STORE_TIMEOUT_MS);
     }
@@ -636,7 +648,7 @@ export class SyncClient {
   // ---------------------------------------------------------------------------
   // Push
 
-  onStored(save: SaveV1): void {
+  onStored(save: Save): void {
     this.latest = save;
     if (!this.pushing) return;
     if (this.holdAtOrBelow !== null) {
@@ -646,7 +658,7 @@ export class SyncClient {
     this.enqueue(save);
   }
 
-  private enqueue(save: SaveV1): void {
+  private enqueue(save: Save): void {
     this.queued = save;
     if (!this.backingOff) this.st = 'pending';
     this.kick();
@@ -902,7 +914,7 @@ export class SyncClient {
         ? snap
         : null;
     try {
-      await this.replaceLocal([overruled, rawKey(save) === rawKey(device) ? null : device], save);
+      await this.replaceLocal([overruled, rawKey(save) === rawKey(lifted(device)) ? null : device], save);
     } catch {
       return { ok: false, reason: 'offline' };
     }

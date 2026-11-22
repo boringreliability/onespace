@@ -141,7 +141,7 @@ export interface UniverseOptions {
 
 type Vec3Tuple = readonly [number, number, number];
 
-/** [v4-save] Where the player is, as a save holds it (SaveV1.player plus the orbit clock). */
+/** [v4-save] Where the player is, as a save holds it (Save.player plus the orbit clock). */
 export interface UniverseRestore {
   readonly system: { readonly id: string; readonly seed: number; readonly name: string; readonly positionLy: Vec3Tuple };
   readonly orbitSeconds: number;

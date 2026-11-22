@@ -14,6 +14,7 @@ import { fyssBelt, fyssField } from '@/game/testing/beltFixture';
 
 import golden from './fixtures/v1-golden.json';
 import { ActionEntrySchema, CURRENT_FORMAT, MinedEntrySchema, SaveV1Schema, type SaveV1 } from './schema';
+import * as schemaModule from './schema';
 
 /** A fresh, mutable copy of the golden save for each test. */
 function goldenCopy(): SaveV1 {
@@ -22,7 +23,7 @@ function goldenCopy(): SaveV1 {
 
 describe('SaveV1Schema — the golden save', () => {
   it('Given the current format constant, Then it is 1', () => {
-    expect(CURRENT_FORMAT).toBe(1);
+    expect(CURRENT_FORMAT).toBe(2);
   });
 
   it('Given the golden v1 save, Then it parses and round-trips through JSON unchanged', () => {
@@ -372,5 +373,336 @@ describe('R25 I1 — asteroid ids are whitelisted (ast:<system>:<field>:<n>)', (
       }
     }
     expect(n).toBeGreaterThan(0);
+  });
+});
+
+// =============================================================================
+// v4 sub-plan 6, Task 1 (phase A) — save format 2.
+//
+// Assumed API (docs/v4/plan-6-resources.md, Task 1 Interfaces):
+//   CURRENT_FORMAT = 2; SaveV1Schema unchanged (format: z.literal(1));
+//   SaveV2Schema = format 1 plus `{ kind: 'jettison', resource, kg }` in the
+//   cargo actions and `ship.beamResource` (a Resource).
+// Choice (phase A): `ship.beamResource` is REQUIRED in format 2 (the upgrade
+// writes 'ice'); the exported `ActionEntrySchema` — what the WAL and the
+// journal check entries with — is the CURRENT (format 2) one.
+// SaveV2Schema is read through a cast so `tsc` stays green until it exists.
+// =============================================================================
+
+type Parser = { safeParse(x: unknown): { success: boolean; data?: unknown; error?: { issues: Array<{ path: PropertyKey[] }> } } };
+const v2Schema = (): Parser => {
+  const s = (schemaModule as unknown as Record<string, unknown>).SaveV2Schema as Parser | undefined;
+  expect(typeof s?.safeParse, 'schema.ts exports SaveV2Schema').toBe('function');
+  return s!;
+};
+
+const JETTISON_ENTRY = {
+  seq: 13,
+  source: 'cargo',
+  payload: {
+    action: { kind: 'jettison', resource: 'ice', kg: 250 },
+    result: { ok: true, kgIn: 0, kgOut: 250, fuelKg: 0, restoredFrac: 0 },
+  },
+  wallMs: 1762891300000,
+  orbitSeconds: 5500,
+};
+
+type Loose = Record<string, unknown> & { ship: Record<string, unknown>; actions: unknown[] };
+
+/** The golden save as format 2: a jettison after its log, the beam on `beam`. */
+function v2Save(beam: unknown = 'metal'): Loose {
+  const s = goldenCopy() as unknown as Loose;
+  s.format = 2;
+  s.ship = { ...s.ship, beamResource: beam };
+  s.actions = [...s.actions, structuredClone(JETTISON_ENTRY)];
+  return s;
+}
+
+describe('save format 2 — the schema (plan 6 task 1)', () => {
+  it('Given the format constant, Then it is 2', () => {
+    expect(CURRENT_FORMAT).toBe(2);
+  });
+
+  it('Given a format 2 save with a jettison entry and beamResource "metal", Then SaveV2Schema accepts it and keeps both', () => {
+    const r = v2Schema().safeParse(v2Save('metal'));
+    expect(r.success, JSON.stringify(r.error?.issues?.slice(0, 3))).toBe(true);
+    const out = r.data as Loose;
+    expect(out.format).toBe(2);
+    expect(out.ship.beamResource).toBe('metal');
+    expect(out.actions.at(-1)).toEqual(JETTISON_ENTRY);
+  });
+
+  it('Given each of the four resources as beamResource, Then each is accepted', () => {
+    for (const r of ['ice', 'metal', 'silicate', 'rare']) expect(v2Schema().safeParse(v2Save(r)).success, r).toBe(true);
+  });
+
+  it('Given beamResource outside the four resources ("gold", "", null, 3) or missing, Then SaveV2Schema rejects it at ship.beamResource', () => {
+    for (const bad of ['gold', '', null, 3, undefined]) {
+      const s = v2Save(bad);
+      if (bad === undefined) delete s.ship.beamResource;
+      const r = v2Schema().safeParse(s);
+      expect(r.success, String(bad)).toBe(false);
+      expect(r.error?.issues.some((i) => i.path.join('.') === 'ship.beamResource'), String(bad)).toBe(true);
+    }
+  });
+
+  it('Given the same jettison entry in a save that says format 1, Then SaveV1Schema rejects it (R4: the new action never stands in a format 1 save)', () => {
+    const s = goldenCopy() as unknown as Loose;
+    expect(s.format).toBe(1);
+    s.actions = [...s.actions, structuredClone(JETTISON_ENTRY)];
+    expect(SaveV1Schema.safeParse(s).success).toBe(false);
+  });
+
+  it('Given a format 1 save carrying ship.beamResource, Then SaveV1Schema rejects it (format 1 stays frozen)', () => {
+    const s = goldenCopy() as unknown as Loose;
+    s.ship = { ...s.ship, beamResource: 'ice' };
+    expect(SaveV1Schema.safeParse(s).success).toBe(false);
+  });
+
+  it('Given the golden format 1 save, Then SaveV1Schema still accepts it unchanged (format 1 is kept, not replaced)', () => {
+    expect(SaveV1Schema.parse(goldenCopy())).toEqual(golden);
+  });
+
+  it('Given a valid format 2 save but with format 1 or 3 written on it, Then SaveV2Schema rejects it', () => {
+    for (const f of [1, 3]) expect(v2Schema().safeParse({ ...v2Save(), format: f }).success, String(f)).toBe(false);
+  });
+
+  it('Given a format 2 save whose world is from another universe, Then SaveV2Schema rejects it (the format 1 refinement is kept)', () => {
+    const s = v2Save();
+    s.world = { ...(s.world as object), universeId: 'gx-2:v1' };
+    expect(v2Schema().safeParse(s).success).toBe(false);
+  });
+
+  const badJettisons: Array<{ what: string; action: Record<string, unknown> }> = [
+    { what: 'a negative kg', action: { kind: 'jettison', resource: 'ice', kg: -1 } },
+    { what: 'no kg', action: { kind: 'jettison', resource: 'ice' } },
+    { what: 'no resource', action: { kind: 'jettison', kg: 250 } },
+    { what: 'an unknown resource', action: { kind: 'jettison', resource: 'gold', kg: 250 } },
+    { what: 'an extra key', action: { kind: 'jettison', resource: 'ice', kg: 250, all: true } },
+  ];
+  for (const b of badJettisons) {
+    it(`Given a format 2 save whose jettison has ${b.what}, Then SaveV2Schema rejects it`, () => {
+      // Precondition: the same save with a good jettison is valid.
+      expect(v2Schema().safeParse(v2Save()).success).toBe(true);
+      const s = v2Save();
+      (s.actions.at(-1) as { payload: { action: unknown } }).payload.action = b.action;
+      expect(v2Schema().safeParse(s).success).toBe(false);
+    });
+  }
+
+  it('Given the exported ActionEntrySchema (the WAL and the journal check entries with it), Then it accepts a jettison entry', () => {
+    const r = ActionEntrySchema.safeParse(JETTISON_ENTRY);
+    expect(r.success).toBe(true);
+    if (r.success) expect(r.data).toEqual(JETTISON_ENTRY);
+  });
+
+  it('Given a jettison-all entry, Then it is still accepted beside the new action (the beacon keeps its own name)', () => {
+    const e = { ...JETTISON_ENTRY, payload: { ...JETTISON_ENTRY.payload, action: { kind: 'jettison-all' } } };
+    expect(ActionEntrySchema.safeParse(e).success).toBe(true);
+    const s = v2Save();
+    s.actions = [...s.actions.slice(0, -1), e];
+    expect(v2Schema().safeParse(s).success).toBe(true);
+  });
+});
+
+// =============================================================================
+// v4 sub-plan 6 — review fix for I-1 (task-2-review.md): the quaternion
+// transform is idempotent. What the schema ACCEPTS does not change: a (near)
+// zero quaternion is refused with the same message, every result is unit
+// length, a far-from-unit quaternion is normalised to its direction. What
+// changes: a quaternion already unit length within a few ulp (≤ 4 ε from 1)
+// comes back exactly as given — dividing it by its length again moved it in
+// the last bit, so a migrated save did not migrate to itself.
+// =============================================================================
+
+type Q4 = [number, number, number, number];
+
+/** mulberry32: a tiny deterministic PRNG (no Math.random in tests). */
+function prng(seed: number): () => number {
+  let a = seed | 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** 2 000 seeded orientations, components in [-1, 1) scaled by 10^[-6, 6). */
+function seededQuats(n = 2_000, seed = 0xc0ffee): Q4[] {
+  const rnd = prng(seed);
+  const out: Q4[] = [];
+  while (out.length < n) {
+    const scale = 10 ** (rnd() * 12 - 6);
+    const q: Q4 = [(rnd() * 2 - 1) * scale, (rnd() * 2 - 1) * scale, (rnd() * 2 - 1) * scale, (rnd() * 2 - 1) * scale];
+    if (Math.hypot(...q) > 1e-8) out.push(q);
+  }
+  return out;
+}
+
+/** What both save schemas' safeParse give, narrowed to what these tests read. */
+type QuatParse =
+  | { success: true; data: { player: { flight: { orientation: readonly number[] } } } }
+  | { success: false; error: { issues: ReadonlyArray<{ path: PropertyKey[]; message: string }> } };
+
+/** Both save schemas share the quaternion: format 1 (frozen) and format 2 (current). */
+const QUAT_SCHEMAS: Array<[string, (q: Q4) => QuatParse]> = [
+  [
+    'format 1',
+    (q) => {
+      const s = goldenCopy();
+      s.player.flight.orientation = [...q];
+      return SaveV1Schema.safeParse(s);
+    },
+  ],
+  [
+    'format 2',
+    (q) => {
+      const s = goldenCopy();
+      s.player.flight.orientation = [...q];
+      return schemaModule.SaveV2Schema.safeParse({ ...s, format: 2, ship: { ...s.ship, beamResource: 'ice' } });
+    },
+  ],
+];
+
+const orientationOf = (r: QuatParse): Q4 => {
+  if (!r.success) throw new Error(`refused: ${r.error.issues.map((i) => i.message).join('; ')}`);
+  return r.data.player.flight.orientation as Q4;
+};
+
+/** Normalised by hand ([1, 2, 3, 4] / √30): unit within half an ulp, yet dividing by its length moves it. */
+const N1234: Q4 = [0.18257418583505536, 0.3651483716701107, 0.5477225575051661, 0.7302967433402214];
+
+describe('Review fix I-1 (plan 6) — the quaternion: acceptance unchanged, an already-unit quaternion is kept exactly', () => {
+  describe.each(QUAT_SCHEMAS)('%s', (_fmt, parse) => {
+    it('Guard: Given 2 000 seeded orientations and the hand-picked ones, When parsed, Then every result is unit length within 1e-12', () => {
+      const off: Array<{ q: Q4; length: number }> = [];
+      for (const q of [...seededQuats(), [1, 2, 3, 4], [1e-8, 2e-8, 3e-8, 4e-8], [1.5e300, -2e300, 1e300, 3e300], N1234] as Q4[]) {
+        const length = Math.hypot(...orientationOf(parse(q)));
+        if (Math.abs(length - 1) > 1e-12) off.push({ q, length });
+      }
+      expect(off).toEqual([]);
+    });
+
+    it.each<[string, Q4]>([
+      ['all zero', [0, 0, 0, 0]],
+      ['length 1e-10', [1e-10, 0, 0, 0]],
+      ['length ≈ 7.1e-10', [5e-10, -5e-10, 0, 0]],
+      ['length exactly QUAT_MIN_LENGTH (1e-9)', [1e-9, 0, 0, 0]],
+    ])('Guard: Given a quaternion that is %s, When parsed, Then it is still refused at player.flight.orientation with "quaternion has (near) zero length"', (_what, q) => {
+      const r = parse(q);
+      expect(r.success).toBe(false);
+      if (r.success) return;
+      const issue = r.error.issues.find((i) => i.path.join('.') === 'player.flight.orientation');
+      expect(issue?.message).toBe('quaternion has (near) zero length');
+    });
+
+    it('Guard: Given a quaternion just above the floor (length 2e-9), When parsed, Then it is accepted and normalised to [1, 0, 0, 0]', () => {
+      expect(orientationOf(parse([2e-9, 0, 0, 0]))).toEqual([1, 0, 0, 0]);
+    });
+
+    it.each<[Q4, Q4]>([
+      [[0, 0, 0, 2], [0, 0, 0, 1]],
+      [[-3, 0, 4, 0], [-0.6, 0, 0.8, 0]],
+      [[0, 1e8, 0, 0], [0, 1, 0, 0]],
+    ])('Guard: Given the far-from-unit quaternion %j, When parsed, Then it is normalised to %j exactly', (q, want) => {
+      expect(orientationOf(parse(q))).toEqual(want);
+    });
+
+    it.each<[string, Q4]>([
+      ['[1, 2, 3, 4]', [1, 2, 3, 4]],
+      ['[0.1, 0.2, 0.3, 0.4]', [0.1, 0.2, 0.3, 0.4]],
+      ['[-1e8, 2e8, -3e8, 4e8]', [-1e8, 2e8, -3e8, 4e8]],
+      ['[1e-8, -2e-8, 3e-8, -4e-8]', [1e-8, -2e-8, 3e-8, -4e-8]],
+    ])('Guard: Given the far-from-unit quaternion %s, When parsed, Then it points the same way: each component is q/|q| within 1e-15, signs kept', (_what, q) => {
+      const l = Math.hypot(...q);
+      const got = orientationOf(parse(q));
+      got.forEach((c, i) => {
+        expect(Math.abs(c - q[i]! / l)).toBeLessThanOrEqual(1e-15);
+        expect(Math.sign(c)).toBe(Math.sign(q[i]!));
+      });
+    });
+
+    it.each<[string, Q4]>([
+      ['normalise([1, 2, 3, 4]) (length 1 − ε/2)', N1234],
+      ['−normalise([1, 2, 3, 4])', N1234.map((c) => -c) as Q4],
+      ['[1 + 2ε, 0, 0, 0] (length 1 + 2ε)', [1 + 2 * Number.EPSILON, 0, 0, 0]],
+      ['[1 − ε, 0, 0, 0] (length 1 − ε)', [1 - Number.EPSILON, 0, 0, 0]],
+      ['[0, 0, −(1 + 2ε), 0]', [0, 0, -(1 + 2 * Number.EPSILON), 0]],
+      ['[0.5, −0.5, 0.5, 0.5] (the fixture: exactly unit)', [0.5, -0.5, 0.5, 0.5]],
+    ])('Given a quaternion already unit length within 4 ulp, %s, When parsed, Then it comes back exactly as given', (_what, q) => {
+      expect(Math.abs(Math.hypot(...q) - 1), 'precondition: unit within 4 ε').toBeLessThanOrEqual(4 * Number.EPSILON);
+      const got = orientationOf(parse(q));
+      got.forEach((c, i) => expect(Object.is(c, q[i]), `component ${i}: ${c} vs ${q[i]}`).toBe(true));
+    });
+
+    it('Given 2 000 seeded orientations, When each is parsed and its result parsed again, Then the second result is exactly the first (the transform is idempotent)', () => {
+      const moved: Array<{ q: Q4; once: Q4; twice: Q4 }> = [];
+      for (const q of seededQuats()) {
+        const once = orientationOf(parse(q));
+        const twice = orientationOf(parse(once));
+        if (!twice.every((c, i) => Object.is(c, once[i]))) moved.push({ q, once, twice });
+      }
+      expect(moved.length, `${moved.length} of 2 000 move on the second pass; first: ${JSON.stringify(moved[0])}`).toBe(0);
+    });
+  });
+});
+
+// =============================================================================
+// v4 sub-plan 6 — open choice 4 (phase A, for the owner's approval; Task 3
+// review m-1): a quaternion whose components are finite but whose LENGTH is
+// not (Math.hypot overflows to Infinity) is refused on the first parse. Today
+// the refine lets it through (Infinity > 1e-9), the transform divides every
+// component by Infinity and the save comes back with orientation [0, 0, 0, 0]
+// — which the next parse refuses. Every quaternion with a finite length above
+// the floor stays valid; the refusal's message is left to the implementation.
+// =============================================================================
+
+describe('open choice 4 — a quaternion whose length overflows is refused the first time it is read', () => {
+  /** Finite components, infinite length. */
+  const OVERFLOWING: Array<[string, Q4]> = [
+    ['four components of 9e307', [9e307, 9e307, 9e307, 9e307]],
+    ['the review\'s sweep find [8.84e307, −9.36e307, 9.49e307, −9.38e307]', [8.84e307, -9.36e307, 9.49e307, -9.38e307]],
+    ['two components of 1.3e308', [1.3e308, 1.3e308, 0, 0]],
+    ['−MAX_VALUE and MAX_VALUE', [-Number.MAX_VALUE, Number.MAX_VALUE, 0, 0]],
+  ];
+  /** Huge components, finite length: valid today, and must stay so. */
+  const LARGE_FINITE: Array<[string, Q4]> = [
+    ['four components of 1e150', [1e150, 1e150, 1e150, 1e150]],
+    ['[−1e200, 2e200, −3e200, 4e200]', [-1e200, 2e200, -3e200, 4e200]],
+    ['two components of 1e308 (length ≈ 1.41e308)', [1e308, 1e308, 0, 0]],
+    ['[MAX_VALUE, 0, 0, 0]', [Number.MAX_VALUE, 0, 0, 0]],
+  ];
+
+  it('Given the examples, Then every component is finite, and the overflowing ones have an infinite length, the large ones a finite one (precondition)', () => {
+    for (const [what, q] of [...OVERFLOWING, ...LARGE_FINITE]) expect(q.every(Number.isFinite), what).toBe(true);
+    for (const [what, q] of OVERFLOWING) expect(Math.hypot(...q), what).toBe(Number.POSITIVE_INFINITY);
+    for (const [what, q] of LARGE_FINITE) expect(Number.isFinite(Math.hypot(...q)), what).toBe(true);
+  });
+
+  describe.each(QUAT_SCHEMAS)('%s', (_fmt, parse) => {
+    it.each(OVERFLOWING)('Given a quaternion with %s, When parsed the first time, Then it is refused at player.flight.orientation', (_what, q) => {
+      const r = parse(q);
+      expect(r.success).toBe(false);
+      if (r.success) return;
+      expect(r.error.issues.some((i) => i.path.join('.') === 'player.flight.orientation')).toBe(true);
+    });
+
+    it('Guard: Given four components of 1e150, When parsed, Then it is accepted and normalised to [0.5, 0.5, 0.5, 0.5] exactly', () => {
+      expect(orientationOf(parse([1e150, 1e150, 1e150, 1e150]))).toEqual([0.5, 0.5, 0.5, 0.5]);
+    });
+
+    it.each(LARGE_FINITE)('Guard: Given a quaternion with %s, When parsed, Then it is accepted, unit length within 1e-12, signs kept, and parsing the result again gives it back bit for bit', (_what, q) => {
+      const once = orientationOf(parse(q));
+      expect(Math.abs(Math.hypot(...once) - 1)).toBeLessThanOrEqual(1e-12);
+      once.forEach((c, i) => expect(Math.sign(c)).toBe(Math.sign(q[i]!)));
+      const twice = orientationOf(parse(once));
+      twice.forEach((c, i) => expect(Object.is(c, once[i]), `component ${i}`).toBe(true));
+    });
+
+    it('Guard: Given 2 000 seeded orientations (lengths finite, 1e-6 to 1e6 scale), When parsed, Then none is refused', () => {
+      const refused = seededQuats().filter((q) => !parse(q).success);
+      expect(refused).toEqual([]);
+    });
   });
 });

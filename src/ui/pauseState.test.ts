@@ -41,7 +41,7 @@ import {
 import { SYNC_CONFLICT_TEXT, SYNC_OFFLINE_TEXT, SYNC_REAUTH_TEXT, type SyncStatus } from '@/net/SyncClient';
 // v4 sub-plan 5, Task 8 (phase A): the sheet's key lines come from the key map.
 import * as pauseStateModule from './pauseState';
-import { EMERGENCY_KEYS, MINING_KEYS, actionForKey } from '@/core/Input';
+import { EMERGENCY_KEYS, MINING_KEYS, RESOURCES_KEY, actionForKey } from '@/core/Input';
 import { FORMATION_KEY } from '@/ship/formation';
 
 const flying: PauseContext = { overlayOpen: false, busy: false };
@@ -563,7 +563,7 @@ describe('plan 5 Task 8 — the pause sheet lists every key (§7.7)', () => {
     const at = before.map((b) => lines.findIndex((l) => l[0] === b[0] && l[1] === b[1]));
     expect(at.filter((i) => i < 0), JSON.stringify(before.filter((_, j) => at[j] < 0))).toEqual([]);
     expect([...at].sort((a, b) => a - b)).toEqual(at);
-    expect(lines.length).toBe(before.length + 5);
+    expect(lines.length).toBe(before.length + 6);
     expect(new Set(lines.map(([k]) => k)).size).toBe(lines.length);
   });
 
@@ -572,5 +572,154 @@ describe('plan 5 Task 8 — the pause sheet lists every key (§7.7)', () => {
     expect(src).toMatch(/pauseControls\(/);
     expect(src).not.toMatch(/const\s+CONTROLS\b/);
     expect(src).not.toMatch(/AUTOPILOT — LAND/);
+  });
+});
+
+// =============================================================================
+// v4 sub-plan 6 (resources), Task 5 — where the resources key is looked up
+// (DESIGN-6 §7.5). The sheet gets one line for I: `I` / `RESOURCES — HOLD,
+// BEAM, JETTISON`, read from RESOURCES_KEY (core/Input), not typed by hand.
+//
+// Assumed surface (src/ui/pauseState.ts):
+//   PauseKeyMap gains `readonly resources?: string` (RESOURCES_KEY). It is
+//   optional, so a map built before Task 5 (the Task 8 tests above pass one)
+//   still builds a sheet; a missing `resources` reads RESOURCES_KEY.
+//
+// End state: 24 lines (the Task 8 sheet's 23 + this one). The Task 8 test
+// above that counts `before.length + 5` (pauseState.test.ts:566) is the one
+// approved assertion that must change, to `+ 6`, once this is implemented.
+// =============================================================================
+
+interface PauseKeyMapV6 extends PauseKeyMapV5 {
+  readonly resources?: string;
+}
+const pauseV6 = pauseStateModule as unknown as {
+  pauseControls?: (keys?: PauseKeyMapV6) => ReadonlyArray<ControlLine>;
+};
+function controlsV6(keys?: PauseKeyMapV6): ReadonlyArray<ControlLine> {
+  expect(typeof pauseV6.pauseControls, 'pauseState exports pauseControls').toBe('function');
+  return pauseV6.pauseControls!(keys);
+}
+const RESOURCES_TEXT = 'RESOURCES — HOLD, BEAM, JETTISON';
+const GAME_MAP_V6: PauseKeyMapV6 = {
+  mining: MINING_KEYS,
+  emergency: EMERGENCY_KEYS,
+  formation: FORMATION_KEY,
+  resources: RESOURCES_KEY,
+};
+
+/** The sheet as Task 8 left it (23 lines), in its order. */
+const TASK8_SHEET: ReadonlyArray<ControlLine> = [
+  ['MOUSE · ARROWS', 'PITCH AND YAW'],
+  ['Q / E', 'ROLL'],
+  ['W / S · WHEEL', 'THROTTLE'],
+  ['X', 'THROTTLE ZERO'],
+  ['A D · R F', 'LATERAL · VERTICAL THRUST'],
+  ['SHIFT · SPACE', 'BOOST · BRAKE'],
+  ['Z', 'FLIGHT ASSIST'],
+  ['TAB', 'CYCLE TARGET'],
+  ['K', 'FORMATION HOLD'],
+  ['G', 'CRUISE'],
+  ['T', 'SCAN'],
+  ['M', 'CHART (WHEEL OUT FOR THE GALAXY)'],
+  ['J', 'JUMP TO THE CHARTED SYSTEM'],
+  ['C', 'CODEX'],
+  ['V', 'CAMERA'],
+  ['F2', 'SCREENSHOT'],
+  ['ESC', 'PAUSE'],
+  ['L', 'AUTOPILOT — LAND · TO ORBIT · APPROACH TARGET'],
+  [', / .', 'TIME COMPRESSION (GROUND · STABLE ORBIT)'],
+  ['B', 'MINE (AGAIN TO STOP)'],
+  ['U', 'REFINE ICE TO PROPELLANT'],
+  ['N', 'REPAIR THE TANK'],
+  ['H · 1 / 2 / 3', 'EMERGENCY EXIT (EMPTY TANK)'],
+];
+
+/**
+ * Every key code a player can press that the game might bind, with what the
+ * sheet prints for it. Letters and digits are built, not spelled out.
+ */
+const SHEET_LABEL: ReadonlyArray<readonly [code: string, label: string]> = [
+  ...Array.from({ length: 26 }, (_, i) => String.fromCharCode(65 + i)).map((c) => [`Key${c}`, c] as const),
+  ...Array.from({ length: 10 }, (_, i) => [`Digit${i}`, String(i)] as const),
+  ...Array.from({ length: 12 }, (_, i) => [`F${i + 1}`, `F${i + 1}`] as const),
+  ['ShiftLeft', 'SHIFT'],
+  ['ShiftRight', 'SHIFT'],
+  ['Space', 'SPACE'],
+  ['Tab', 'TAB'],
+  ['Escape', 'ESC'],
+  ['Comma', ','],
+  ['Period', '.'],
+  ['Enter', 'ENTER'],
+  ['Backspace', 'BACKSPACE'],
+  ['Minus', '-'],
+  ['Equal', '='],
+  ['Slash', '/'],
+  ['Semicolon', ';'],
+  ['Quote', "'"],
+  ['BracketLeft', '['],
+  ['BracketRight', ']'],
+  ['Backquote', '`'],
+  ['Backslash', '\\'],
+];
+/** The key column's tokens: 'H · 1 / 2 / 3' → H, 1, 2, 3; ', / .' → ',', '.'. */
+const keyTokens = (lines: ReadonlyArray<ControlLine>): Set<string> =>
+  new Set(lines.flatMap(([k]) => k.split(/\s+/).filter((t) => t !== '·' && t !== '/' && t !== '')));
+
+describe('plan 6 Task 5 — the pause sheet names the resources key (DESIGN-6 §7.5)', () => {
+  it("Given Input, Then the resources key is I and it is bound to 'resources' (so the sheet's line names the real key)", () => {
+    expect(keyLabel(RESOURCES_KEY)).toBe('I');
+    expect(actionForKey(RESOURCES_KEY)).toBe('resources');
+  });
+
+  it('Given the sheet, Then it has the line I — RESOURCES — HOLD, BEAM, JETTISON', () => {
+    expect(lineFor(controlsV6(), keyLabel(RESOURCES_KEY))).toEqual(['I', RESOURCES_TEXT]);
+  });
+
+  it('Given the sheet, Then the resources text appears on exactly one line', () => {
+    expect(controlsV6().filter(([, t]) => t === RESOURCES_TEXT)).toHaveLength(1);
+  });
+
+  it('Given a key map with the resources key moved, When the sheet is built from it, Then the line follows the map (read, not typed)', () => {
+    const lines = controlsV6({ ...GAME_MAP_V6, resources: 'KeyP' });
+    expect(lineFor(lines, 'P')).toEqual(['P', RESOURCES_TEXT]);
+    expect(lines.find(([k, t]) => k === 'I' && t === RESOURCES_TEXT)).toBeUndefined();
+    expect(lines.filter(([, t]) => t === RESOURCES_TEXT)).toHaveLength(1);
+  });
+
+  it('Given the game map with RESOURCES_KEY, Then the sheet equals the one built with no map', () => {
+    expect(controlsV6(GAME_MAP_V6)).toEqual(controlsV6());
+  });
+
+  it('Given a key map built before Task 5 (no resources field), Then the sheet still builds and reads RESOURCES_KEY', () => {
+    const old: PauseKeyMapV6 = { mining: MINING_KEYS, emergency: EMERGENCY_KEYS, formation: FORMATION_KEY };
+    expect(() => controlsV6(old)).not.toThrow();
+    expect(lineFor(controlsV6(old), 'I')).toEqual(['I', RESOURCES_TEXT]);
+  });
+
+  it('Given the sheet, Then it is the Task 8 sheet in the same order plus the I line: 24 lines, no key listed twice', () => {
+    const lines = controlsV6();
+    const at = TASK8_SHEET.map((b) => lines.findIndex((l) => l[0] === b[0] && l[1] === b[1]));
+    expect(at.filter((i) => i < 0), JSON.stringify(TASK8_SHEET.filter((_, j) => at[j] < 0))).toEqual([]);
+    expect([...at].sort((a, b) => a - b)).toEqual(at);
+    expect(lines).toHaveLength(TASK8_SHEET.length + 1);
+    expect(lines).toHaveLength(24);
+    const extra = lines.filter((_, i) => !at.includes(i));
+    expect(extra).toEqual([['I', RESOURCES_TEXT]]);
+    expect(new Set(lines.map(([k]) => k)).size).toBe(lines.length);
+  });
+
+  it('Given every key Input binds to an action, Then the sheet names that key somewhere in its key column', () => {
+    const tokens = keyTokens(controlsV6());
+    const bound = SHEET_LABEL.filter(([code]) => actionForKey(code) !== undefined);
+    // The list reaches every bound key we know of, so the rule is not vacuous.
+    expect(bound.map(([c]) => c)).toEqual(expect.arrayContaining([RESOURCES_KEY, MINING_KEYS.mine, EMERGENCY_KEYS.open, 'Escape', 'Comma']));
+    const missing = bound.filter(([, label]) => !tokens.has(label)).map(([code]) => code);
+    expect(missing).toEqual([]);
+  });
+
+  it('Given Pause.ts, Then it does not write the resources line itself (it renders pauseControls) — guard', () => {
+    const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'Pause.ts'), 'utf8');
+    expect(src).not.toMatch(/RESOURCES — HOLD/);
   });
 });

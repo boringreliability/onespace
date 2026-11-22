@@ -12,7 +12,7 @@
 import type { BootDecision, ResolveResult, SyncClient } from '@/net/SyncClient';
 import { SYNC_CONFLICT_TEXT, SYNC_OFFLINE_TEXT, SYNC_REAUTH_TEXT } from '@/net/SyncClient';
 import { cardSummary } from '@/save/conflict';
-import type { SaveV1 } from '@/save/schema';
+import type { Save } from '@/save/schema';
 import { PROBE_TANK_CAPACITY_KG } from '@/ship/propellant';
 
 export const CONFLICT_TITLE = 'TWO SAVES DIVERGED';
@@ -69,7 +69,7 @@ function safeName(fn: BodyNameFn | undefined): BodyNameFn | undefined {
 }
 
 /** One card: where the save is and what it carries — the tank as the HUD reads it. */
-export function conflictCard(s: SaveV1, label: string, o: CardOptions): ConflictCard {
+export function conflictCard(s: Save, label: string, o: CardOptions): ConflictCard {
   const capacityKg = PROBE_TANK_CAPACITY_KG * (1 - s.ship.propellant.capacityLossFrac);
   const c = cardSummary(s, capacityKg, safeName(o.bodyName));
   return {
@@ -88,7 +88,7 @@ export interface ConflictState {
   readonly cloud: ConflictCard;
 }
 
-export function initialConflict(local: SaveV1, cloud: SaveV1, o: CardOptions): ConflictState {
+export function initialConflict(local: Save, cloud: Save, o: CardOptions): ConflictState {
   return {
     choice: 'device',
     device: conflictCard(local, CONFLICT_DEVICE, o),
@@ -146,7 +146,7 @@ export function conflictKey(k: ConflictKeyInput): { event: ConflictEvent | null;
 // R49 — the boot orchestration
 
 export interface BootConflictDeps {
-  readonly boot: { readonly decision: BootDecision; readonly cloud: SaveV1 | null; readonly local: SaveV1 | null };
+  readonly boot: { readonly decision: BootDecision; readonly cloud: Save | null; readonly local: Save | null };
   readonly sync: Pick<SyncClient, 'resolve'>;
   /** Show the screen (again) and resolve with the player's choice. */
   readonly choose: (view: ConflictState) => Promise<ConflictChoice>;
@@ -156,7 +156,7 @@ export interface BootConflictDeps {
 
 export interface BootConflictOutcome {
   /** The save boot continues with (already in the store); null = continue the local save. */
-  readonly resolved: SaveV1 | null;
+  readonly resolved: Save | null;
   readonly notices: string[];
 }
 

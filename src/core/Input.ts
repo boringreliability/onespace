@@ -14,6 +14,7 @@ import {
   type StickSettings,
   type StickVector,
 } from './stick';
+import { FLIGHT_PAUSED, modes } from './Modes';
 
 export interface InputAxes {
   /** Nose up (+) / down (-). */
@@ -58,7 +59,9 @@ export type ActionName =
   // [v4-mining] mine, refine, repair (game/Mining.ts)
   | 'mine'
   | 'refine'
-  | 'repair';
+  | 'repair'
+  // [v4-resources] the resources screen (ui/Resources.ts)
+  | 'resources';
 
 /**
  * [v4-fuel] The emergency exit's keys: `open` offers the choice on an empty
@@ -78,6 +81,13 @@ export const EMERGENCY_KEYS = {
  * (Mining.test.ts scans the raw handlers).
  */
 export const MINING_KEYS = { mine: 'KeyB', refine: 'KeyU', repair: 'KeyN' } as const;
+
+/**
+ * [v4-resources] Opens and closes the resources screen (DESIGN-6 §7.1). I was
+ * free. In flight it is the 'resources' action (ui/Resources.ts opens the
+ * screen); on the screen its rules (ui/resourcesState.ts) read it raw to close.
+ */
+export const RESOURCES_KEY = 'KeyI';
 
 const KEY_ACTIONS: Record<string, ActionName> = {
   ShiftLeft: 'boost',
@@ -107,6 +117,8 @@ const KEY_ACTIONS: Record<string, ActionName> = {
   [MINING_KEYS.mine]: 'mine',
   [MINING_KEYS.refine]: 'refine',
   [MINING_KEYS.repair]: 'repair',
+  // [v4-resources]
+  [RESOURCES_KEY]: 'resources',
 };
 
 /** The action a key code is bound to, if any. */
@@ -231,6 +243,14 @@ export class Input {
     };
     const onKeyUp = (e: KeyboardEvent) => this.keys.delete(e.code);
     const onBlur = () => this.keys.clear();
+    // [v4-resources] plan 6 task 4 review fix (M-5): a key held as the resources
+    // screen opens is let go, as on a blur — the screen owns the keyboard and
+    // time stands still, so a held W must not creep the lever up behind it. A
+    // key still held after the screen closes acts again only when pressed again
+    // (its auto-repeat is ignored, below).
+    const offMode = modes.onChange((_from, to) => {
+      if (FLIGHT_PAUSED.includes(to)) this.keys.clear();
+    });
 
     const onPointerMove = (e: PointerEvent) => {
       if (!this.pointerLocked) return;
@@ -266,6 +286,7 @@ export class Input {
       () => window.removeEventListener('keydown', onKeyDown),
       () => window.removeEventListener('keyup', onKeyUp),
       () => window.removeEventListener('blur', onBlur),
+      offMode,
       () => window.removeEventListener('pointermove', onPointerMove),
       () => this.element.removeEventListener('wheel', onWheel),
       () => document.removeEventListener('pointerlockchange', onLockChange),

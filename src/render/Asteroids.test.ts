@@ -1418,3 +1418,42 @@ describe('Asteroids — with the real Belt and WorldState (plan 5 task 5)', () =
     expect(centroid(ps).distanceTo(now)).toBeLessThanOrEqual(tol);
   });
 });
+
+// v4 sub-plan 6, Task 4 review fix (phase A) — M-1 (R12). The resources screen
+// is flight paused (time stands still): the field stays in view behind the
+// sheet and does not pop back on close. Really leaving flight (the Yard) still
+// hides the rocks, as before.
+describe('Asteroids — the resources screen does not hide the field (plan 6 task 4, M-1)', () => {
+  function inView() {
+    const r = rig();
+    for (let i = 0; i < 3; i++) r.belt.add(`ast:test:0:${i}`, SHIP.clone().add(dir(i, 3).multiplyScalar(20 + i * 10)), 0.5, 300 + i);
+    r.frame();
+    expect(r.asteroids.root.visible).toBe(true);
+    expect(drawn(r.asteroids)).toHaveLength(3);
+    return r;
+  }
+
+  it('Given rocks in view, When the resources screen opens, Then they stay drawn (root visible, the same three instances)', () => {
+    const r = inView();
+    (r.asteroids as GameModule).onModeChange?.('flight', 'resources', r.ctx);
+    expect(r.asteroids.root.visible).toBe(true);
+    expect(drawn(r.asteroids)).toHaveLength(3);
+  });
+
+  it('Given rocks in view, When the screen opens and closes, Then they were drawn all along and are drawn on the first flight frame (no pop)', () => {
+    const r = inView();
+    (r.asteroids as GameModule).onModeChange?.('flight', 'resources', r.ctx);
+    expect(r.asteroids.root.visible).toBe(true);
+    (r.asteroids as GameModule).onModeChange?.('resources', 'flight', r.ctx);
+    expect(r.asteroids.root.visible).toBe(true);
+    r.frame();
+    expect(r.asteroids.root.visible).toBe(true);
+    expect(drawn(r.asteroids)).toHaveLength(3);
+  });
+
+  it('Given rocks in view, When flight is left for the Yard, Then the field is hidden, as before — guard', () => {
+    const r = inView();
+    (r.asteroids as GameModule).onModeChange?.('flight', 'yard', r.ctx);
+    expect(r.asteroids.root.visible).toBe(false);
+  });
+});

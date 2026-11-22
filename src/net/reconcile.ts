@@ -21,7 +21,7 @@
  */
 
 import { sameGame } from '@/save/conflict';
-import type { SaveV1 } from '@/save/schema';
+import type { Save } from '@/save/schema';
 
 import { displayName } from './displayName';
 import type { SyncState } from './syncState';
@@ -38,8 +38,8 @@ export type Decision =
   | { kind: 'switch-account' };
 
 export interface ReconcileInput {
-  local: SaveV1 | null;
-  cloud: SaveV1 | null;
+  local: Save | null;
+  cloud: Save | null;
   state: SyncState;
   me: { id: string; name: string } | null;
   /** R36: the boot load applied WAL critical entries on top of the stored snapshot. */
@@ -55,7 +55,7 @@ export function unsyncedProgressText(name: string): string {
 /** R72: a stored name is shown through displayName(); with none (or nothing left to show), the account id. */
 const boundName = (name: string | null, id: string): string => (name !== null && displayName(name)) || id;
 
-const conflict = (a: SaveV1, b: SaveV1): Decision => ({ kind: sameGame(a, b) ? 'conflict-same' : 'conflict-different' });
+const conflict = (a: Save, b: Save): Decision => ({ kind: sameGame(a, b) ? 'conflict-same' : 'conflict-different' });
 
 export function reconcile(input: ReconcileInput): Decision {
   const { local, cloud, state, me, localDirty, sameContent } = input;

@@ -158,6 +158,12 @@ sonder, biosfærer og multiplayer.
     genberegnes, så det ikke kan have mere brændstof, last eller kapacitet, end loggen tillader.
   - **Konsekvens:** to faner eller to enheder kan altså ikke bruges til at gøre en nødudgang gratis.
 - **Nødudgangen kan ikke omgås:** dens brug skrives til det lokale save, før effekten vises.
+- **Ændret i delplan 6 (format 2):** `CURRENT_FORMAT` er 2. Format 2 er format 1 plus
+  lasthandlingen `jettison` (én ressource, kg) og feltet `ship.beamResource` (strålens valg).
+  `UPGRADES[1]` løfter et format 1-save til format 2 med valget is og intet andet ændret. Et save
+  fra en nyere version lægges stadig på kopi-hylden, men med sin egen besked (`SAVE IS FROM A
+  NEWER VERSION — KEPT, NOT LOADED`). Server og klient deler skemaet og udrulles sammen. Se
+  DECISIONS D54 og [`DESIGN-6-resources.md`](DESIGN-6-resources.md).
 
 ### 5.3 Brændstof
 
@@ -230,6 +236,10 @@ Begge veje er spillerens bevidste valg via en tydelig prompt, aldrig automatiske
   - **Ændret i delplan 5:** udvinding er nu løbende: `B` starter og stopper, 150 kg/s, én
     ressource pr. udvinding, og en fuld last tager ~53 s. Se DECISIONS D53 og
     [`DESIGN-5-mining-feel.md`](DESIGN-5-mining-feel.md).
+  - **Ændret i delplan 6:** strålen tager kun den ressource, spilleren har valgt (is fra start);
+    valget træffes på ressourceskærmen (`I`), hvor last også kan smides ud (`O` 250 kg,
+    `Shift+O` alt af den valgte ressource). Se DECISIONS D54 og
+    [`DESIGN-6-resources.md`](DESIGN-6-resources.md).
   - Man får ressourcer i lasten, begrænset af kapaciteten.
   - Asteroiden tømmes gradvist (verdens-tilstand, P2).
 - **Ressourcer, første sæt [Claude]:**

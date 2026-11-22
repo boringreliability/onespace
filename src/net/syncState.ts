@@ -26,7 +26,7 @@
 
 import * as z from 'zod';
 
-import type { SaveV1 } from '@/save/schema';
+import type { Save } from '@/save/schema';
 
 import type { ResolveBody } from './api';
 
@@ -71,7 +71,7 @@ const InFlightPutSchema = z.strictObject({
 });
 
 /** The device save inside a pending resolve: kept verbatim (the server validates it when replayed). */
-const PendingDeviceSchema = z.custom<SaveV1>((v) => {
+const PendingDeviceSchema = z.custom<Save>((v) => {
   const o = v as { saveId?: unknown; revision?: unknown } | null;
   return typeof o === 'object' && o !== null && !Array.isArray(o) && typeof o.saveId === 'string' && typeof o.revision === 'number';
 });

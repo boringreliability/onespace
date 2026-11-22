@@ -4,17 +4,18 @@
  * When:
  *  - autosave after a landing (`planet:landed`), a completed mine (the tick
  *    after `cargo:action`, so `recordMined` has run and both halves of the mine
- *    are in the journal), a system entry, the emergency exit, every
+ *    are in the journal), a system entry, a jettison (`jettison`, from the resources
+ *    screen), the emergency exit, every
  *    AUTOSAVE_INTERVAL_S of piloting (counted from the last save), and a
  *    hidden tab;
- *  - a landing, mine or system entry inside AUTOSAVE_MIN_GAP_S of the last
+ *  - a landing, mine, jettison or system entry inside AUTOSAVE_MIN_GAP_S of the last
  *    save is DEFERRED (R13): it saves once the gap has passed;
  *  - manually from the pause sheet (`saveNow('manual')`, logs SAVED).
  *
  * How (the order is the point):
  *    capture (buildSave) → wal.writeSnapshot | wal.markCovered → store.save (IndexedDB) → wal.clear(revision)
  *  - R25 I4a: hidden, emergency, leave and SAVE write the whole snapshot;
- *    interval, landing, mine and system entry only tag WAL coverage. A failed
+ *    interval, landing, mine, jettison and system entry only tag WAL coverage. A failed
  *    tag-only save writes its snapshot after all (C2);
  *  - R25 I3: a store write gets STORE_TIMEOUT_MS, then it is SAVE FAILED;
  *  - R25 I2: with `storeAvailable: false` (the store failed at boot) every
@@ -54,7 +55,7 @@ import { modes } from '@/core/Modes';
 import { MAX_ACTIONS } from '@/save/actionJournal';
 import { STORE_UNAVAILABLE_TEXT } from '@/save/bootLoad';
 import { buildSave, type SaveWorld } from '@/save/capture';
-import type { SaveV1 } from '@/save/schema';
+import type { Save } from '@/save/schema';
 import { STORE_TIMEOUT_MS, withTimeout, type SaveStore } from '@/save/store';
 import type { Wal } from '@/save/wal';
 import type { WriterLock } from '@/save/writerLock';
@@ -93,11 +94,11 @@ export interface SaveGameOptions {
    * timed-out write, a WAL-only write or a reader tab. Must return at once
    * (the sync client only schedules); a throw here never breaks saving.
    */
-  readonly onStored?: (s: SaveV1) => void;
+  readonly onStored?: (s: Save) => void;
 }
 
 /** Triggers that wait for the gap, in the order they are tried. */
-const GAPPED: readonly SaveReason[] = ['emergency', 'landed', 'mined', 'system'];
+const GAPPED: readonly SaveReason[] = ['emergency', 'landed', 'mined', 'jettison', 'system'];
 
 /**
  * R25 I4a / C1: the saves that write the WHOLE snapshot to the WAL before the
@@ -117,10 +118,10 @@ export class SaveGame implements GameModule {
   private readonly lock: WriterLock;
   private readonly page: SavePage | null;
   private readonly storeAvailable: boolean;
-  private readonly onStored: ((s: SaveV1) => void) | null;
+  private readonly onStored: ((s: Save) => void) | null;
 
   /** The last save built — durable or not; the next one continues it. */
-  private prev: SaveV1 | null = null;
+  private prev: Save | null = null;
   /** NEW GAME (Task 6): a first save goes above this revision, so it outranks the old game. */
   private revisionFloor = 0;
   /** R16: the highest seq already copied to the WAL by `critical`. */
@@ -162,7 +163,7 @@ export class SaveGame implements GameModule {
    * Task 6: the save the game was loaded from (or null for a new game). The
    * next save continues it — same saveId, revision + 1, its log as prefix.
    */
-  continueFrom(save: SaveV1 | null): void {
+  continueFrom(save: Save | null): void {
     this.prev = save;
     this.revisionFloor = 0;
     if (!save) this.newSaveId = crypto.randomUUID();
@@ -198,6 +199,9 @@ export class SaveGame implements GameModule {
       bus.on('system:entered', () => this.wanted.add('system')),
       bus.on('cargo:action', (e) => {
         if (e.action.kind === 'mine' && e.result.ok) this.wanted.add('mined');
+        // [v4-resources] plan 6 task 4: the screen's jettison. SaveGame sleeps
+        // while the screen is open, so it is written on the first tick after.
+        if (e.action.kind === 'jettison' && e.result.ok) this.wanted.add('jettison');
       }),
     );
 
@@ -360,7 +364,7 @@ export class SaveGame implements GameModule {
   }
 
   /** Build the next save and keep it as prev (the journal was drained into it). */
-  private capture(leaving = false): SaveV1 | null {
+  private capture(leaving = false): Save | null {
     if (!this.mayWrite(leaving)) return null;
     // R14 M2: a tank swapped since the last tick starts the books now, not as thrust.
     this.syncBaseline(false);
