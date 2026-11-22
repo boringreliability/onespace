@@ -58,7 +58,9 @@ export type ActionName =
   // [v4-mining] mine, refine, repair (game/Mining.ts)
   | 'mine'
   | 'refine'
-  | 'repair';
+  | 'repair'
+  // [v4-resources] the resources screen (ui/Resources.ts)
+  | 'resources';
 
 /**
  * [v4-fuel] The emergency exit's keys: `open` offers the choice on an empty
@@ -81,8 +83,8 @@ export const MINING_KEYS = { mine: 'KeyB', refine: 'KeyU', repair: 'KeyN' } as c
 
 /**
  * [v4-resources] Opens and closes the resources screen (DESIGN-6 §7.1). I was
- * free. Plan 6 Task 3 reads it in the screen's rules (src/ui/resourcesState.ts);
- * binding it to a flight action is Task 4's.
+ * free. In flight it is the 'resources' action (ui/Resources.ts opens the
+ * screen); on the screen its rules (ui/resourcesState.ts) read it raw to close.
  */
 export const RESOURCES_KEY = 'KeyI';
 
@@ -114,6 +116,8 @@ const KEY_ACTIONS: Record<string, ActionName> = {
   [MINING_KEYS.mine]: 'mine',
   [MINING_KEYS.refine]: 'refine',
   [MINING_KEYS.repair]: 'repair',
+  // [v4-resources]
+  [RESOURCES_KEY]: 'resources',
 };
 
 /** The action a key code is bound to, if any. */

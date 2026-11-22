@@ -162,8 +162,10 @@ export function refusalText(reason: MiningRefusal, beam: Resource): string {
  * What a press refused for cruise or a jump logs, and what the action row
  * shows for those two states (DESIGN-5 §7.3): `BUSY` means only that another
  * action is running. Not refusals of the gate (`mayMine` says 'busy' for both).
+ * [v4-resources] `recovery`: the resources screen refused while the beacon's
+ * recovery runs (ui/Resources.ts); the action rows never show it.
  */
-export const OCCUPIED_TEXT = { cruise: 'IN CRUISE', jump: 'IN JUMP' } as const;
+export const OCCUPIED_TEXT = { cruise: 'IN CRUISE', jump: 'IN JUMP', recovery: 'IN RECOVERY' } as const;
 
 /** The next key for a refusal the player can act on. */
 export const ACTION_HINT: Readonly<Partial<Record<MiningRefusal, string>>> = {

@@ -12,7 +12,7 @@
  * Pure TypeScript — no three, no DOM — so it is tested in node.
  */
 
-export type Mode = 'boot' | 'title' | 'flight' | 'map' | 'yard' | 'photo' | 'review';
+export type Mode = 'boot' | 'title' | 'flight' | 'map' | 'yard' | 'photo' | 'review' | 'resources';
 export type BaseMode = Exclude<Mode, 'photo'>;
 export type Overlay = 'photo';
 
@@ -20,11 +20,15 @@ export type Overlay = 'photo';
 const TRANSITIONS: Readonly<Record<BaseMode, readonly BaseMode[]>> = {
   boot: ['title', 'flight', 'yard', 'review'],
   title: ['flight', 'yard', 'review'],
-  flight: ['map', 'yard', 'title', 'review'],
+  flight: ['map', 'yard', 'title', 'review', 'resources'],
   map: ['flight', 'review'],
   yard: ['flight', 'title', 'review'],
   // A review shot can be left for anywhere a player could be.
-  review: ['flight', 'yard', 'title', 'map'],
+  review: ['flight', 'yard', 'title', 'map', 'resources'],
+  // [v4-resources] The hold and the beam's choice (DESIGN-6 §7.1): opened from
+  // flight, closed back to it. Nothing sits on it (no photo), and the map, the
+  // Yard and the title are reached through flight.
+  resources: ['flight', 'review'],
 };
 
 /** Base modes a photo overlay may sit on. */

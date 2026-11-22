@@ -74,6 +74,10 @@ export const MODULE_MODES: Readonly<Record<string, readonly Mode[]>> = {
   // tank stays attached, R14), and leaving flight/map for the Yard or the title
   // flushes one ('leave'). SaveGame itself refuses the title and a hull without a tank.
   save: PILOTING,
+  // v4 sub-plan 6: the resources screen. It ticks in flight to hear I (the
+  // 'resources' action) and on its own screen; everything that moves the world
+  // sleeps there, so the world stands still while the hold is open.
+  resources: ['flight', 'resources'],
 };
 
 /**

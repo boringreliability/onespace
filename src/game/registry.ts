@@ -67,6 +67,7 @@ import { Emergency } from '@/game/Emergency'; // [v4-fuel]
 import { Mining } from '@/game/Mining'; // [v4-mining]
 import type { Resource } from '@/gen/belt'; // [v4-resources] plan 6 task 2: the beam's choice in the save
 import { ActionFeed } from '@/game/ActionFeed'; // [v4-mining] plan 5
+import { Resources, registerResourcesShots } from '@/ui/Resources'; // [v4-resources] plan 6 task 4
 import { MiningBeams, registerMiningBeamShots } from '@/render/MiningBeams'; // [v4-mining] plan 5 task 6
 // -- v4 sub-plan 3: the save -----------------------------------------------------
 import { SaveGame } from '@/game/SaveGame';
@@ -288,9 +289,11 @@ class ReviewGuard implements GameModule {
     // frozen with the rest of flight (gating.ts) and must not hang over it;
     // the title is not flight either (review-p1: its menu sat under the
     // pitch ladder). Title/boot are excluded by this whitelist.
-    const flightMode = modes.base === 'flight' || modes.base === 'map' || modes.base === 'review';
-    // [v4-mining] plan 5: the action block's shots are HUD shots too.
-    const hudShot = shot === 'hud-full' || (shot?.startsWith('hud-actions-') ?? false);
+    // [v4-resources] The resources screen is flight paused: the HUD (and its
+    // log, where JETTISONED is read) stays up, still, behind the sheet.
+    const flightMode = modes.base === 'flight' || modes.base === 'map' || modes.base === 'review' || modes.base === 'resources';
+    // [v4-mining] plan 5: the action block's shots are HUD shots too; [v4-resources] plan 6: and the beam's choice.
+    const hudShot = shot === 'hud-full' || shot === 'hud-beam-choice' || (shot?.startsWith('hud-actions-') ?? false);
     this.hud.setVisible((!owned || hudShot) && !this.mapOpen && flightMode);
     this.gallery.root.visible = shot !== null && GALLERY_SHOTS.has(shot);
 
@@ -559,6 +562,10 @@ export async function registerModules(engine: Engine, progress: ProgressFn, boot
   // Cruise and the emergency exit; its in-range flag drives the 'mine' hint.
   const mining = new Mining({ universe, belt, worldState, targeting, cruise, warp });
   await engine.add(mining);
+  // [v4-resources] plan 6 task 4: I opens the hold, O jettisons, Enter sets the
+  // beam. After Mining (opening ends its extraction), ahead of the feed.
+  const resources = new Resources({ universe, mining, cruise, warp, recovery });
+  await engine.add(resources);
   // [v4-mining] plan 5: the HUD's action block and VEL's mining tone, from this
   // frame's Mining (so after it; Instruments runs before Mining exists).
   await engine.add(new ActionFeed({ hud, mining, targeting }));
@@ -663,6 +670,7 @@ export async function registerModules(engine: Engine, progress: ProgressFn, boot
   registerPlanetShots();
   registerAsteroidShots(asteroids); // [v4-mining] plan 5 task 5: wear and break-up
   registerMiningBeamShots(miningBeams, asteroids, pilot.ship); // [v4-mining] plan 5 task 6: the beam
+  registerResourcesShots(resources); // [v4-resources] plan 6 task 4: the screen
   registerHudShots(hud);
   registerWarpShots(warp);
   registerCameraShots(pilot.rig);

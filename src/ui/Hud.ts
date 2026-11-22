@@ -27,7 +27,7 @@ import type { CruiseReadout } from '@/game/cruiseReadout';
 import { gReadout } from '@/ui/gReadout';
 import { effectiveThrottle, propellantTone, type PropellantTone } from '@/ui/propellantReadout';
 import { cargoLineText, cargoTotalText, createCargoReadout, type CargoReadout } from '@/ui/cargoReadout'; // [v4-mining]
-import { speedTone, type ActionRow } from '@/ui/actionRows'; // [v4-mining] plan 5
+import { actionRow, speedTone, type ActionRow } from '@/ui/actionRows'; // [v4-mining] plan 5; [v4-resources] actionRow: the beam-choice shot
 import { MINING_KEYS } from '@/core/Input';
 import type { Resource } from '@/gen/belt';
 import { createLadderFade, stepLadderFade } from '@/ui/ladderFade';
@@ -2218,6 +2218,24 @@ function registerActionShots(hud: Hud): void {
     description: 'Action block while refining: REFINE running with 5 S left and its bar near half; MINE and REPAIR blocked (BUSY).',
     apply(ctx) {
       stage(ctx, [2600, 900, 600, 0], refining, false);
+    },
+    teardown,
+  });
+
+  // [v4-resources] plan 6 task 4: the MINE row at rest names the beam's choice
+  // (DESIGN-6 §7.2), built by the HUD's own rule with the beam set to metal.
+  const ready = { kind: 'ready', progress: 0, shownKg: 0, leftS: 0, resource: null } as const;
+  const beamChoice: readonly [ActionRow, ActionRow, ActionRow] = [
+    actionRow('mine', ready, 'metal'),
+    row('REFINE', 'U', 'ready', '▸ READY'),
+    row('REPAIR', 'N', 'blocked', 'TANK UNDAMAGED'),
+  ];
+  registerShot({
+    name: 'hud-beam-choice',
+    description:
+      'Action block with the beam set to METAL on the resources screen: MINE at rest says ▸ READY · METAL (no wider than the longest row), REFINE ready, REPAIR blocked (TANK UNDAMAGED). A rock is targeted within the speed limit.',
+    apply(ctx) {
+      stage(ctx, [2600, 0, 600, 0], beamChoice, true);
     },
     teardown,
   });

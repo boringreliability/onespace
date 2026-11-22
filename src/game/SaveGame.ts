@@ -97,7 +97,7 @@ export interface SaveGameOptions {
 }
 
 /** Triggers that wait for the gap, in the order they are tried. */
-const GAPPED: readonly SaveReason[] = ['emergency', 'landed', 'mined', 'system'];
+const GAPPED: readonly SaveReason[] = ['emergency', 'landed', 'mined', 'jettison', 'system'];
 
 /**
  * R25 I4a / C1: the saves that write the WHOLE snapshot to the WAL before the
@@ -198,6 +198,9 @@ export class SaveGame implements GameModule {
       bus.on('system:entered', () => this.wanted.add('system')),
       bus.on('cargo:action', (e) => {
         if (e.action.kind === 'mine' && e.result.ok) this.wanted.add('mined');
+        // [v4-resources] plan 6 task 4: the screen's jettison. SaveGame sleeps
+        // while the screen is open, so it is written on the first tick after.
+        if (e.action.kind === 'jettison' && e.result.ok) this.wanted.add('jettison');
       }),
     );
 
