@@ -52,7 +52,7 @@ const FADE = 0.18;
 const STYLE_ID = 'os-resources-style';
 
 /** The log line for what really left the hold (R9: the result's kgOut). */
-export function jettisonedText(kgOut: number, r: Resource): string {
+function jettisonedText(kgOut: number, r: Resource): string {
   return `JETTISONED · ${formatKg(kgOut)} KG ${r.toUpperCase()}`;
 }
 
@@ -105,24 +105,33 @@ export class Resources implements GameModule {
   private lastAmount = -1;
   /** A review shot is showing a fixed view: update() leaves the sheet alone. */
   private shot = false;
+  /** Whether the sheet catches clicks, as last painted. */
+  private lastLive = false;
+  /**
+   * Task 4 review fix (M-5): the keys down now (keydown seen in any mode, until
+   * their keyup or a blur), and those that were already down when the screen
+   * opened. A held key's auto-repeat from flight (an arrow pitching the ship)
+   * must not run the cursor; a fresh press on the sheet does (Task 3).
+   */
+  private readonly down = new Set<string>();
+  private stale = new Set<string>();
 
   constructor(opts: ResourcesOptions) {
     this.opts = opts;
-  }
-
-  /** True while the screen is the mode. */
-  get isOpen(): boolean {
-    return modes.base === 'resources';
   }
 
   init(_ctx: EngineContext): void {
     this.injectStyle();
     this.build();
     window.addEventListener('keydown', this.onKeyDown, true);
+    window.addEventListener('keyup', this.onKeyUp, true);
+    window.addEventListener('blur', this.onBlur);
   }
 
   dispose(): void {
     window.removeEventListener('keydown', this.onKeyDown, true);
+    window.removeEventListener('keyup', this.onKeyUp, true);
+    window.removeEventListener('blur', this.onBlur);
     this.root?.remove();
     this.root = null;
     this.holdRows = [];
@@ -137,6 +146,7 @@ export class Resources implements GameModule {
   onModeChange(from: Mode, to: Mode): void {
     if (to === 'resources') {
       this.shot = false;
+      this.stale = new Set(this.down);
       this.render();
     }
     // Back to flight it fades (update ticks there); into a review shot, which
@@ -152,7 +162,15 @@ export class Resources implements GameModule {
    * while the screen is open; then no key reaches the flight.
    */
   onKeyDown = (e: KeyboardEvent): void => {
+    if (!e.repeat) this.down.add(e.code);
     if (modes.base !== 'resources' || modes.overlay !== null) return;
+    if (e.repeat && this.stale.has(e.code)) {
+      // Held since before the screen opened: neither the sheet's nor the flight's.
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    this.stale.delete(e.code);
     const r = resourcesKey(
       { code: e.code, shift: e.shiftKey, repeat: e.repeat, ctrl: e.ctrlKey, meta: e.metaKey, alt: e.altKey },
       { selected: this.selected, cargo: this.hold() },
@@ -161,6 +179,16 @@ export class Resources implements GameModule {
     // Always, whatever the default: a key on the screen never flies the ship.
     e.stopPropagation();
     if (r.event) this.apply(r.event);
+  };
+
+  private readonly onKeyUp = (e: KeyboardEvent): void => {
+    this.down.delete(e.code);
+    this.stale.delete(e.code);
+  };
+
+  private readonly onBlur = (): void => {
+    this.down.clear();
+    this.stale.clear();
   };
 
   // ---------------------------------------------------------------- rules
@@ -249,11 +277,19 @@ export class Resources implements GameModule {
   }
 
   private paint(): void {
-    if (!this.root || this.amount === this.lastAmount) return;
+    if (!this.root) return;
+    // Task 4 review fix (M-4): the sheet catches clicks from the frame it opens,
+    // not once the fade-in is half done — a click in that window would reach
+    // the canvas and lock the pointer under the open sheet. Closed, it lets
+    // them through at once (one click on the canvas takes the controls again).
+    // A review shot shows it at full strength.
+    const live = this.shot ? this.amount > 0.5 : modes.base === 'resources';
+    if (this.amount === this.lastAmount && live === this.lastLive) return;
     this.lastAmount = this.amount;
+    this.lastLive = live;
     this.root.style.setProperty('--os-res-t', this.amount.toFixed(3));
     this.root.style.display = this.amount > 0 ? 'block' : 'none';
-    this.root.classList.toggle('is-live', this.amount > 0.5);
+    this.root.classList.toggle('is-live', live);
   }
 
   private render(fixed: { view: ResourcesView; held: Readonly<Record<Resource, number>> } | null = null): void {
@@ -396,27 +432,7 @@ export class Resources implements GameModule {
 
 const IDLE = { progress: 0, shownKg: 0, leftS: 0, resource: null } as const;
 const blocked = (reason: Extract<ActionState, { kind: 'blocked' }>['reason']): ActionState => ({ ...IDLE, kind: 'blocked', reason });
-
-/** The longest status a REFINE or REPAIR row can show, so the shot is the worst case. */
-function longestBlocked(kind: 'refine' | 'repair'): ActionState {
-  // The reasons Mining.status can give that kind (refineRefusal / repairRefusal and the gate).
-  const reasons: Array<Extract<ActionState, { kind: 'blocked' }>['reason']> =
-    kind === 'refine'
-      ? ['no-tank', 'busy', 'cruise', 'jump', 'nothing-to-refine', 'tank-full']
-      : ['no-tank', 'busy', 'cruise', 'jump', 'insufficient', 'nothing-to-repair'];
-  let best = blocked('busy');
-  let bestLen = -1;
-  for (const r of reasons) {
-    const s = blocked(r);
-    const v = resourcesView({ cargo: EMPTY_HOLD, capacityKg: CARGO_CAPACITY_KG, selected: 'ice', beam: 'ice', refine: s, repair: s });
-    const len = v.uses[kind === 'refine' ? 0 : 1]!.status.length;
-    if (len > bestLen) {
-      best = s;
-      bestLen = len;
-    }
-  }
-  return best;
-}
+const READY: ActionState = { ...IDLE, kind: 'ready' };
 
 export function registerResourcesShots(screen: Resources): void {
   const teardown = (): void => screen.hideShot();
@@ -441,15 +457,19 @@ export function registerResourcesShots(screen: Resources): void {
     name: 'resources-full',
     live: true,
     description:
-      'The resources screen on a full hold (8 000 / 8 000 KG): ▸ on METAL, the beam ◉ on RARE, and the longest status a REFINE and a REPAIR row can show. Nothing may wrap into the next column or clip at 1280×700.',
+      'The resources screen on a full hold (8 000 / 8 000 KG): ▸ on METAL, the beam ◉ on RARE; beside the HUD’s own tank (part full, undamaged) REFINE says ▸ READY and REPAIR TANK UNDAMAGED — what a player really sees with this hold. Nothing may wrap into the next column or clip at 1280×700.',
     apply() {
       screen.showShot({
         cargo: { ice: 5_000, rare: 250, metal: 1_000, silicate: 1_750 },
         capacityKg: CARGO_CAPACITY_KG,
         selected: 'metal',
         beam: 'rare',
-        refine: longestBlocked('refine'),
-        repair: longestBlocked('repair'),
+        // What Mining.status says for this hold beside a part-full, undamaged
+        // tank (refineRefusal / repairRefusal) — the tank the HUD behind the
+        // shot shows. Never IN CRUISE / IN JUMP / BUSY: the screen cannot open
+        // in cruise or a jump, and opening ends an action.
+        refine: READY,
+        repair: blocked('nothing-to-repair'),
       });
     },
     teardown,
@@ -495,7 +515,10 @@ const CSS = /* css */ `
 .os-rs-total { color: #a7b0b5; font-size: 11px; letter-spacing: 0.12em; white-space: nowrap; }
 .os-rs-grid {
   display: grid;
-  grid-template-columns: 1.6em max-content max-content 4.5em max-content max-content 1fr;
+  /* The kg column has a fixed floor wide enough for 8 000 KG (letter-spacing
+     included), so BEAM and USES do not jump sideways when the widest number
+     changes (a jettison); the names are fixed words. */
+  grid-template-columns: 1.6em max-content minmax(calc(8ch + 0.64em), max-content) 4.5em max-content max-content 1fr;
   column-gap: 14px; row-gap: 6px;
   font-size: 11px; letter-spacing: 0.08em;
   align-items: baseline;

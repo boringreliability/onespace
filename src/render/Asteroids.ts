@@ -76,7 +76,7 @@ import {
 
 import type { EngineContext, GameModule } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
-import type { Mode } from '@/core/Modes';
+import { FLIGHT_PAUSED, type Mode } from '@/core/Modes';
 import type { AsteroidSpec, Resource } from '@/gen/belt';
 import { AU, type StarSystemSpec } from '@/gen/types';
 import { registerShot, shotOwnsScene } from '@/game/Shots';
@@ -514,7 +514,9 @@ export class Asteroids implements GameModule {
   }
 
   onModeChange(_from: Mode, to: Mode): void {
-    if (!ACTIVE.includes(to)) this.root.visible = false;
+    // [v4-resources] Not on the resources screen: flight paused, the field stays
+    // in view behind the sheet (it sleeps there) and does not pop back on close.
+    if (!ACTIVE.includes(to) && !FLIGHT_PAUSED.includes(to)) this.root.visible = false;
   }
 
   /** Which rocks, and which slot each one takes. */

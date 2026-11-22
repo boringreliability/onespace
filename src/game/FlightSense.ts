@@ -18,7 +18,7 @@ import { Vector3 } from 'three';
 
 import type { EngineContext, GameModule } from '@/core/Engine';
 import { bus } from '@/core/EventBus';
-import type { Mode } from '@/core/Modes';
+import { FLIGHT_PAUSED, type Mode } from '@/core/Modes';
 import type { Audio } from '@/audio/Audio';
 import type { Belt } from '@/game/Belt';
 import type { Cruise } from '@/game/Cruise';
@@ -109,7 +109,9 @@ export class FlightSense implements GameModule {
     // review-v3b: the window listener hears K in every mode; a press latched
     // while the Yard or the title was up must not fire on the next flight frame.
     this.wantToggle = false;
-    if (ACTIVE.includes(to)) return;
+    // [v4-resources] The resources screen is flight paused, not left: the
+    // formation hold and the FA reference survive it, nothing is logged.
+    if (ACTIVE.includes(to) || FLIGHT_PAUSED.includes(to)) return;
     // Leaving flight (the Yard, the title): nothing of this may linger.
     this.release(null);
     this.clearReference();

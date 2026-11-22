@@ -68,6 +68,7 @@ import { Mining } from '@/game/Mining'; // [v4-mining]
 import type { Resource } from '@/gen/belt'; // [v4-resources] plan 6 task 2: the beam's choice in the save
 import { ActionFeed } from '@/game/ActionFeed'; // [v4-mining] plan 5
 import { Resources, registerResourcesShots } from '@/ui/Resources'; // [v4-resources] plan 6 task 4
+import { hudBlocks } from '@/ui/hudBlocks'; // [v4-resources] plan 6 task 4 review fix (I-1)
 import { MiningBeams, registerMiningBeamShots } from '@/render/MiningBeams'; // [v4-mining] plan 5 task 6
 // -- v4 sub-plan 3: the save -----------------------------------------------------
 import { SaveGame } from '@/game/SaveGame';
@@ -295,6 +296,10 @@ class ReviewGuard implements GameModule {
     // [v4-mining] plan 5: the action block's shots are HUD shots too; [v4-resources] plan 6: and the beam's choice.
     const hudShot = shot === 'hud-full' || shot === 'hud-beam-choice' || (shot?.startsWith('hud-actions-') ?? false);
     this.hud.setVisible((!owned || hudShot) && !this.mapOpen && flightMode);
+    // [v4-resources] Behind the resources sheet the HUD sleeps, so its CARGO
+    // block and action rows would stand still and contradict the sheet after a
+    // jettison: those two hide there, the log stays (ui/hudBlocks.ts).
+    this.hud.setBlocks(hudBlocks(modes.base));
     this.gallery.root.visible = shot !== null && GALLERY_SHOTS.has(shot);
 
     // Planet shots build a fixture and only clear it for each other. Leaving

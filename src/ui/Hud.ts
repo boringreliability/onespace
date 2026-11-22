@@ -28,6 +28,7 @@ import { gReadout } from '@/ui/gReadout';
 import { effectiveThrottle, propellantTone, type PropellantTone } from '@/ui/propellantReadout';
 import { cargoLineText, cargoTotalText, createCargoReadout, type CargoReadout } from '@/ui/cargoReadout'; // [v4-mining]
 import { actionRow, speedTone, type ActionRow } from '@/ui/actionRows'; // [v4-mining] plan 5; [v4-resources] actionRow: the beam-choice shot
+import type { HudBlocks } from '@/ui/hudBlocks'; // [v4-resources] plan 6 task 4 review fix (I-1)
 import { MINING_KEYS } from '@/core/Input';
 import type { Resource } from '@/gen/belt';
 import { createLadderFade, stepLadderFade } from '@/ui/ladderFade';
@@ -643,6 +644,13 @@ export class Hud implements GameModule {
   private readonly actFill: CssVar[] = [];
   private readonly actTone: string[] = [];
   private readonly actBar: boolean[] = [];
+  // [v4-resources] plan 6 task 4 review fix (I-1): the boxes hudBlocks() hides
+  // behind the resources sheet (setBlocks), and what is on the glass now.
+  private elActs!: HTMLElement;
+  private elLog!: HTMLElement;
+  private blockCargo = true;
+  private blockActions = true;
+  private blockLog = true;
   // VEL's tone (setSpeedOk): ok while a targeted rock's speed allows mining.
   private elVel: HTMLElement | null = null;
   private velTone = '';
@@ -982,6 +990,28 @@ export class Hud implements GameModule {
   setVisible(b: boolean): void {
     this.visible = b;
     this.root?.classList.toggle('os-hidden', !b);
+  }
+
+  /**
+   * [v4-resources] plan 6 task 4 review fix (I-1): which blocks show
+   * (ui/hudBlocks.ts). A hidden block keeps its place (visibility, not display),
+   * so nothing below it moves while the resources sheet is open. Written only
+   * when a block changes.
+   */
+  setBlocks(b: HudBlocks): void {
+    if (!this.root) return;
+    if (b.cargo !== this.blockCargo) {
+      this.blockCargo = b.cargo;
+      this.elCargo.classList.toggle('os-behind', !b.cargo);
+    }
+    if (b.actions !== this.blockActions) {
+      this.blockActions = b.actions;
+      this.elActs.classList.toggle('os-behind', !b.actions);
+    }
+    if (b.log !== this.blockLog) {
+      this.blockLog = b.log;
+      this.elLog.classList.toggle('os-behind', !b.log);
+    }
   }
 
   /**
@@ -1611,6 +1641,7 @@ export class Hud implements GameModule {
     // [v4-mining] plan 5: the action block — its own box, so it stays when the
     // hold is empty and CARGO hides. Label, key cap, bar (running only), text.
     const acts = el('div', 'os-thr-acts', p);
+    this.elActs = acts;
     for (const kind of ['mine', 'refine', 'repair'] as const) {
       const row = el('div', 'os-act', acts);
       row.dataset.tone = 'blocked';
@@ -1878,6 +1909,7 @@ export class Hud implements GameModule {
 
   private buildLog(root: HTMLElement): void {
     const p = this.panel('os-log', root, 520);
+    this.elLog = p;
     for (let i = 0; i < LOG_SLOTS; i++) {
       const line = el('div', 'os-log-line', p);
       line.dataset.tone = 'normal';
@@ -2233,7 +2265,7 @@ function registerActionShots(hud: Hud): void {
   registerShot({
     name: 'hud-beam-choice',
     description:
-      'Action block with the beam set to METAL on the resources screen: MINE at rest says ▸ READY · METAL (no wider than the longest row), REFINE ready, REPAIR blocked (TANK UNDAMAGED). A rock is targeted within the speed limit.',
+      'The flight HUD’s action block with the beam set to METAL (chosen on the resources screen): MINE at rest says ▸ READY · METAL (no wider than the longest row), REFINE ready, REPAIR blocked (TANK UNDAMAGED). A rock is targeted within the speed limit.',
     apply(ctx) {
       stage(ctx, [2600, 0, 600, 0], beamChoice, true);
     },
@@ -2515,6 +2547,9 @@ const CSS = /* css */ `
 .os-hud .os-thr-cargo { margin-top: 8px; font-size: 9px; letter-spacing: 0.12em; color: var(--os-amber); text-shadow: var(--os-shadow); opacity: 0.8; white-space: nowrap; }
 .os-hud .os-thr-cargo.os-void, .os-hud .os-cargo-line.os-void { display: none; }
 .os-hud .os-cargo-line { margin-top: 2px; opacity: 0.85; }
+/* [v4-resources] plan 6 task 4 review fix (I-1): a block hudBlocks() hides
+   behind the resources sheet. Its place is kept, so nothing below it moves. */
+.os-hud .os-behind { visibility: hidden; }
 .os-hud .os-thr-prop[data-tone='warning'] { color: var(--os-warn); text-shadow: var(--os-shadow), 0 0 8px rgba(255, 95, 86, 0.4); }
 /* [v4-mining] plan 5: the action block. Amber (the ship's systems), never cyan.
    Compact rows: three lines that never hide, under CARGO, clear of the log at

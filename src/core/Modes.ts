@@ -31,6 +31,14 @@ const TRANSITIONS: Readonly<Record<BaseMode, readonly BaseMode[]>> = {
   resources: ['flight', 'review'],
 };
 
+/**
+ * [v4-resources] Modes that are flight stood still, not flight left: on the
+ * resources screen time stands still (DESIGN-6 §7.1, §8), so opening and
+ * closing it must not change the flight. A module that clears or hides itself
+ * on leaving its own `activeIn` keeps its state over these — it only sleeps.
+ */
+export const FLIGHT_PAUSED: readonly Mode[] = ['resources'];
+
 /** Base modes a photo overlay may sit on. */
 const OVERLAY_HOSTS: readonly BaseMode[] = ['flight', 'yard'];
 

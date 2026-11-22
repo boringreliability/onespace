@@ -14,6 +14,7 @@ import {
   type StickSettings,
   type StickVector,
 } from './stick';
+import { FLIGHT_PAUSED, modes } from './Modes';
 
 export interface InputAxes {
   /** Nose up (+) / down (-). */
@@ -242,6 +243,14 @@ export class Input {
     };
     const onKeyUp = (e: KeyboardEvent) => this.keys.delete(e.code);
     const onBlur = () => this.keys.clear();
+    // [v4-resources] plan 6 task 4 review fix (M-5): a key held as the resources
+    // screen opens is let go, as on a blur — the screen owns the keyboard and
+    // time stands still, so a held W must not creep the lever up behind it. A
+    // key still held after the screen closes acts again only when pressed again
+    // (its auto-repeat is ignored, below).
+    const offMode = modes.onChange((_from, to) => {
+      if (FLIGHT_PAUSED.includes(to)) this.keys.clear();
+    });
 
     const onPointerMove = (e: PointerEvent) => {
       if (!this.pointerLocked) return;
@@ -277,6 +286,7 @@ export class Input {
       () => window.removeEventListener('keydown', onKeyDown),
       () => window.removeEventListener('keyup', onKeyUp),
       () => window.removeEventListener('blur', onBlur),
+      offMode,
       () => window.removeEventListener('pointermove', onPointerMove),
       () => this.element.removeEventListener('wheel', onWheel),
       () => document.removeEventListener('pointerlockchange', onLockChange),
