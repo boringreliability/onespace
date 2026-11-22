@@ -1713,3 +1713,161 @@ describe('Task 5 — the synchronous part of an autosave with a real SyncClient.
     expect(fastest, `autosave sync + onStored ms: ${times.map((t) => t.toFixed(2)).join(' ')}`).toBeLessThan(2);
   });
 });
+
+// =============================================================================
+// v4 sub-plan 6, Task 4 (phase A) — a jettison asks for a save (DESIGN-6 §7.3).
+//
+//  - A successful `cargo:action` jettison asks for a save with the reason
+//    'jettison', which waits for AUTOSAVE_MIN_GAP_S as 'mined' does.
+//  - The save module sleeps while the resources screen is open (gating: save is
+//    flight + map), so a jettison made on the screen is saved once the screen is
+//    closed (resources → flight) and the gap allows it.
+//  - Choosing the beam asks for nothing: the choice rides along with the next
+//    save (`ship.beamResource`).
+//  - Review Focus 3: the tab closed right after a jettison — the reload has the
+//    hold without what was thrown out, once.
+// 'resources' is not a mode yet: spelled through a cast.
+// =============================================================================
+
+const RESOURCES_MODE = 'resources' as string as BaseMode;
+
+const isJettison = (e: ActionEntry): boolean =>
+  e.source === 'cargo' && (e.payload as { action: { kind: string } }).action.kind === 'jettison';
+
+/** Throw out up to `kg` of one resource as the resources screen does (one cargo:action). */
+function jettison(g: Live, resource: 'ice' | 'metal' | 'silicate' | 'rare', kg: number): number {
+  const r = applyCargoAction(g.u.cargo, g.u.flight.propellant, { kind: 'jettison', resource, kg });
+  return r.ok ? r.kgOut : 0;
+}
+
+/** A game with 1 000 kg ice aboard, saved (the mine's save), and the gap long past. */
+async function heldAndSaved(o: Parameters<typeof rig>[0] = {}): Promise<Rig> {
+  const r = rig(o);
+  mine(r.g, ASTEROID(), 'ice', 1_000);
+  r.tick();
+  await flush();
+  expect(r.s.saved).toHaveLength(1); // precondition: the mine's save
+  r.play(10);
+  await flush();
+  expect(r.s.saved).toHaveLength(1); // precondition: nothing since
+  return r;
+}
+
+describe("plan 6 task 4 — a jettison asks for a save ('jettison', gapped like 'mined')", () => {
+  it('Given 1 000 kg ice saved, When 250 kg ice is jettisoned and SaveGame ticks, Then a save is written holding the jettison and 750 kg ice', async () => {
+    const r = await heldAndSaved();
+    expect(jettison(r.g, 'ice', 250)).toBe(250);
+    r.tick();
+    await flush();
+    expect(r.s.saved).toHaveLength(2);
+    const s = r.s.saved[1]!;
+    expect(s.actions.filter(isJettison)).toHaveLength(1);
+    expect((s.actions.filter(isJettison)[0]!.payload as { action: unknown }).action).toEqual({ kind: 'jettison', resource: 'ice', kg: 250 });
+    expect(s.ship.cargo.ice).toBe(750);
+  });
+
+  it('Given a save 2 s ago, When a jettison follows, Then it waits for the gap, and is saved once when the 5 s have passed', async () => {
+    const r = rig();
+    mine(r.g, ASTEROID(), 'ice', 1_000);
+    r.tick();
+    await flush();
+    expect(r.s.saved).toHaveLength(1);
+    r.play(2);
+    jettison(r.g, 'ice', 250);
+    r.tick();
+    await flush();
+    expect(r.s.saved).toHaveLength(1);
+    r.play(3);
+    await flush();
+    expect(r.s.saved).toHaveLength(2);
+    expect(r.s.saved[1]!.actions.filter(isJettison)).toHaveLength(1);
+    r.play(10);
+    await flush();
+    expect(r.s.saved).toHaveLength(2);
+  });
+
+  it('Given an empty hold, When a jettison is refused (empty), Then no save is asked for — guard', async () => {
+    const r = rig();
+    expect(jettison(r.g, 'rare', 250)).toBe(0);
+    r.play(10);
+    await flush();
+    expect(r.s.saved).toHaveLength(0);
+  });
+
+  it('Given the beam\'s choice changed alone, Then nothing is saved for it; When a jettison follows, Then that save carries ship.beamResource metal', async () => {
+    const g = live();
+    const beam: { value: 'ice' | 'metal' | 'silicate' | 'rare' } = { value: 'ice' };
+    (g.w as unknown as Record<string, unknown>).beamResource = () => beam.value;
+    const r = await heldAndSaved({ g });
+    beam.value = 'metal';
+    r.play(10);
+    await flush();
+    expect(r.s.saved).toHaveLength(1); // the choice asks for no save of its own
+    jettison(r.g, 'ice', 250);
+    r.tick();
+    await flush();
+    expect(r.s.saved).toHaveLength(2);
+    expect(r.s.saved[1]!.ship.beamResource).toBe('metal');
+  });
+});
+
+describe('plan 6 task 4 — the screen closed after a jettison is saved', () => {
+  it('Given the resources screen open (SaveGame asleep), When 250 kg is jettisoned and the screen closes, Then the next tick saves it', async () => {
+    const r = await heldAndSaved();
+    toMode(RESOURCES_MODE);
+    jettison(r.g, 'ice', 250);
+    await flush();
+    expect(r.s.saved).toHaveLength(1); // nothing ticks the save on the screen
+    toMode('flight');
+    r.tick();
+    await flush();
+    expect(r.s.saved).toHaveLength(2);
+    expect(r.s.saved[1]!.actions.filter(isJettison)).toHaveLength(1);
+    expect(r.s.saved[1]!.ship.cargo.ice).toBe(750);
+  });
+
+  it('Given the resources screen opened and closed with nothing thrown out, Then no save is written for it', async () => {
+    const r = await heldAndSaved();
+    toMode(RESOURCES_MODE);
+    toMode('flight');
+    r.play(10);
+    await flush();
+    expect(r.s.saved).toHaveLength(1);
+  });
+});
+
+describe('plan 6 task 4 — Review Focus 3: the tab closed right after a jettison', () => {
+  it('Given 1 000 kg ice saved, When 250 kg is jettisoned and the tab is hidden at once, Then the next boot has 750 kg ice and one jettison — guard', async () => {
+    const r = await heldAndSaved();
+    jettison(r.g, 'ice', 250);
+    r.hide();
+    await flush();
+    const boot = await loadForBoot(r.s.store, createWal(storage as unknown as Storage));
+    expect(boot.save).not.toBeNull();
+    expect(boot.save!.ship.cargo.ice).toBe(750);
+    expect(boot.save!.actions.filter(isJettison)).toHaveLength(1);
+  });
+
+  it('Given 1 000 kg ice saved, When 250 kg is jettisoned and the tab closes (pagehide, the WAL snapshot only), Then the next boot has 750 kg ice and one jettison — guard', async () => {
+    const r = await heldAndSaved();
+    jettison(r.g, 'ice', 250);
+    r.pagehide();
+    const boot = await loadForBoot(r.s.store, createWal(storage as unknown as Storage));
+    expect(boot.save).not.toBeNull();
+    expect(boot.save!.ship.cargo.ice).toBe(750);
+    expect(boot.save!.actions.filter(isJettison)).toHaveLength(1);
+  });
+
+  it('Given a jettison saved and then the tab closed, When the game boots twice, Then the hold is 750 kg both times (not jettisoned again by replay) — guard', async () => {
+    const r = await heldAndSaved();
+    jettison(r.g, 'ice', 250);
+    r.tick();
+    await flush();
+    r.pagehide();
+    const wal = createWal(storage as unknown as Storage);
+    const a = await loadForBoot(r.s.store, wal);
+    const b = await loadForBoot(r.s.store, wal);
+    expect(a.save!.ship.cargo.ice).toBe(750);
+    expect(b.save!.ship.cargo.ice).toBe(750);
+  });
+});

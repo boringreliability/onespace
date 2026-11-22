@@ -6,7 +6,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { ModeMachine, type Mode } from './Modes';
+import { ModeMachine, type BaseMode, type Mode } from './Modes';
 
 describe('ModeMachine', () => {
   it('Given a fresh machine, Then it starts in boot with no overlay', () => {
@@ -98,5 +98,74 @@ describe('ModeMachine', () => {
       const m = new ModeMachine(start);
       expect(m.can('flight')).toBe(true);
     }
+  });
+});
+
+// v4 sub-plan 6, Task 4 (phase A) — the resources screen is a base mode
+// (DESIGN-6 §7.1; plan 6 Task 4): flight ↔ resources only, plus review (a
+// review shot can be taken from it, and clearing the shot hands it back). Time
+// stands still in it like the Yard; no overlay sits on it. `'resources'` is
+// not in `Mode` yet: it is spelled through a cast so the type check stays clean.
+describe('ModeMachine — the resources screen (plan 6 task 4)', () => {
+  const RES = 'resources' as string as Mode;
+  const RES_BASE = 'resources' as string as BaseMode;
+
+  it('Given flight, When go(resources) and then go(flight), Then both are legal and listeners hear both', () => {
+    const m = new ModeMachine('flight');
+    const heard: Array<[Mode, Mode]> = [];
+    m.onChange((from, to) => heard.push([from, to]));
+    expect(m.can(RES)).toBe(true);
+    m.go(RES);
+    expect(m.base).toBe(RES);
+    expect(m.can('flight')).toBe(true);
+    m.go('flight');
+    expect(heard).toEqual([
+      ['flight', RES],
+      [RES, 'flight'],
+    ]);
+  });
+
+  it('Given resources, When go(review), Then it is legal; and review can hand resources back', () => {
+    const m = new ModeMachine(RES_BASE);
+    expect(m.can('review')).toBe(true);
+    m.go('review');
+    expect(m.can(RES)).toBe(true);
+    m.go(RES);
+    expect(m.base).toBe(RES);
+  });
+
+  for (const from of ['map', 'yard', 'title', 'boot'] as const) {
+    it(`Given ${from}, When go(resources), Then it throws and stays in ${from} (the screen opens from flight only)`, () => {
+      const m = new ModeMachine(from);
+      expect(m.can(RES)).toBe(false);
+      expect(() => m.go(RES)).toThrow();
+      expect(m.base).toBe(from);
+    });
+  }
+
+  for (const to of ['map', 'yard', 'title', 'boot'] as const) {
+    it(`Given resources, When go(${to}), Then it throws (back to flight first)`, () => {
+      const m = new ModeMachine(RES_BASE);
+      expect(m.can(to)).toBe(false);
+      expect(() => m.go(to)).toThrow();
+      expect(m.base).toBe(RES);
+    });
+  }
+
+  it('Given resources, When push(photo), Then it throws: no overlay on the screen', () => {
+    const m = new ModeMachine(RES_BASE);
+    expect(() => m.push('photo')).toThrow();
+    expect(m.overlay).toBe(null);
+  });
+
+  it('Given a photo overlay on flight, When go(resources), Then it throws (pop first)', () => {
+    const m = new ModeMachine('flight');
+    m.push('photo');
+    expect(m.can(RES)).toBe(false);
+    expect(() => m.go(RES)).toThrow();
+  });
+
+  it('Given resources, Then it can reach flight (no soft-lock)', () => {
+    expect(new ModeMachine(RES_BASE).can('flight')).toBe(true);
   });
 });

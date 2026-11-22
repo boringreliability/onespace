@@ -65,3 +65,20 @@ describe('Shots and modes', () => {
     expect(modes.base).toBe('flight');
   });
 });
+
+// v4 sub-plan 6, Task 4 (phase A): a review shot can be taken with the
+// resources screen open (resources-empty / resources-full), and clearing it
+// hands the screen back — not review, which nothing would ever leave.
+describe('Shots and the resources screen (plan 6 task 4)', () => {
+  const RES = 'resources' as string as Parameters<typeof modes.go>[0];
+
+  it('Given the resources screen, When a shot is set and cleared, Then the mode is review and then resources again', async () => {
+    modes.go(RES);
+    await setShot('owned', ctx);
+    expect(modes.base).toBe('review');
+    clearShot(ctx);
+    expect(modes.base).toBe(RES);
+    modes.go('flight');
+    expect(modes.base).toBe('flight');
+  });
+});

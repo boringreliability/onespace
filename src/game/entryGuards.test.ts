@@ -83,3 +83,23 @@ describe('yardOwnsInput', () => {
     expect(yardOwnsInput({ base: 'flight', overlay: null })).toBe(false);
   });
 });
+
+// v4 sub-plan 6, Task 4 (phase A): the resources screen owns the keyboard. Its
+// capture listener's stopPropagation does not stop photo's and the Yard's
+// listeners on the same target, so P and Y must ask for themselves — they
+// already whitelist their bases. 'resources' is not a mode yet: a cast.
+describe('the resources screen open: P and Y do nothing (plan 6 task 4, Review Focus 5)', () => {
+  const resources: EntryContext = { ...flight, base: 'resources' as string as EntryContext['base'] };
+
+  it('Given the resources screen, When P is pressed, Then photo does not open over it — guard', () => {
+    expect(mayEnterPhoto(resources)).toBe(false);
+  });
+
+  it('Given the resources screen, When Y is pressed, Then the Yard does not open — guard', () => {
+    expect(mayEnterYard(resources)).toBe(false);
+  });
+
+  it('Given the resources screen, Then the Yard\'s controls do not answer — guard', () => {
+    expect(yardOwnsInput(resources)).toBe(false);
+  });
+});
